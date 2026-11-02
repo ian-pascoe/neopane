@@ -11,9 +11,10 @@
 //! Every file of a daemon is in its own directory (`private_dir`), which the
 //! launcher makes and passes as DIR.
 
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
@@ -91,7 +92,7 @@ fn private_dir_in(parent: &str) -> Result<String> {
     if path(&template, LONGEST_NAME).len() > MAX_PATH {
         return Err(Error::NameTooLong.into());
     }
-    let mut template = std::ffi::CString::new(template)?.into_bytes_with_nul();
+    let mut template = CString::new(template)?.into_bytes_with_nul();
     // SAFETY: `template` is a writable, NUL-terminated buffer that mkdtemp
     // fills in; it makes the directory with mode 0700.
     if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
@@ -104,7 +105,6 @@ fn private_dir_in(parent: &str) -> Result<String> {
 /// Makes the log at `path`, for the daemon's stderr: a new file only this user
 /// can read, never one that's there already or a link.
 pub fn create_log(path: &str) -> std::io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -113,9 +113,9 @@ pub fn create_log(path: &str) -> std::io::Result<fs::File> {
         .open(path)
 }
 
-/// Makes the socket at `path` this user's alone: mode 0600.
-fn only_mine(path: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+/// Makes the socket at `path` this user's alone: mode 0600. Until then, its
+/// directory, 0700, keeps others out.
+fn owner_only(path: &str) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
@@ -257,10 +257,10 @@ pub fn serve<S: AsRef<OsStr>>(dir: &str, nvim_args: &[S], mut config: Config<'_>
             return Err(Error::AlreadyRunning.into());
         }
     }
-    let _ = fs::remove_file(&sock);
-    // open until we exit: every new pane's helper connects here
+    // open until we exit: every new pane's helper connects here. Never over a
+    // file that's there: the directory is new
     let server = UnixListener::bind(&sock)?;
-    only_mine(&sock)?;
+    owner_only(&sock)?;
     // the socket's file, then, last of all, after Neovim has had its chance to
     // remove its own: a Neovim that was stuck or killed leaves it behind
     let _files = RemoveFiles {
@@ -305,11 +305,12 @@ pub fn serve<S: AsRef<OsStr>>(dir: &str, nvim_args: &[S], mut config: Config<'_>
         Err(err) => return Err(startup.give_up(StartStep::StartNvim, Box::new(err), None)),
     };
 
-    let nvim = match (config.connect)(&nvim_sock).and_then(|nvim| {
-        // Neovim makes it under its umask, which its files need
-        only_mine(&nvim_sock)?;
+    // Neovim makes its socket under its umask, which its files need
+    let connected = (config.connect)(&nvim_sock).and_then(|nvim| {
+        owner_only(&nvim_sock)?;
         Ok(nvim)
-    }) {
+    });
+    let nvim = match connected {
         Ok(nvim) => nvim,
         Err(err) => {
             return Err(startup.give_up(
@@ -555,7 +556,6 @@ mod tests {
     }
 
     fn mode(file: &str) -> u32 {
-        use std::os::unix::fs::PermissionsExt;
         fs::symlink_metadata(file).unwrap().permissions().mode() & 0o7777
     }
 
@@ -785,9 +785,9 @@ mod tests {
 
     #[test]
     fn a_daemons_sockets_are_only_its_users() {
-        if crate::nvim::nvim::spawn_for_test().is_none() {
+        let Some(_nvim) = crate::nvim::nvim::spawn_for_test() else {
             return;
-        }
+        };
         let dir = private_dir().unwrap();
         let sock = path(&dir, "sock");
         let nvim_sock = path(&dir, "nvim.sock");

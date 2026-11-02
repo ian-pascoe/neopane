@@ -38,11 +38,10 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
         return Err(Error::NotInRex.into());
     }
 
+    let exe = std::env::current_exe()?.canonicalize()?;
     let dir = serve::private_dir()?;
     let sock = serve::path(&dir, "sock");
     let log_path = serve::path(&dir, "log");
-
-    let exe = std::env::current_exe()?.canonicalize()?;
     let log = serve::create_log(&log_path)?;
     // (the log is closed here once the command, which holds it, is dropped)
     let mut daemon = Command::new(&exe)
