@@ -56,8 +56,8 @@ pub struct FocusGate {
     /// What waits for the switch in flight, in the order it came. Never
     /// nonempty without `pending`.
     pub queue: Vec<Item>,
-    /// The pane and arrival time of the last held read let through: an ESC
-    /// that ended it is the Escape key if the next read of the pane came a
+    /// The pane and arrival time of the last read that went to its forwarder
+    /// held, or direct and leaving an ESC waiting: an ESC that ended it is the Escape key if the next read of the pane came a
     /// timeout later. Cleared when the queue is through.
     last_held: Option<(u32, Instant)>,
 }
@@ -137,6 +137,11 @@ impl FocusGate {
                 return Ok(());
             };
             fwd.feed(nvim, bytes)?;
+            // An ESC left waiting starts the clock for a read held behind a
+            // switch begun before the escape timer fires.
+            if fwd.escape_pending() {
+                self.last_held = Some((pane, at));
+            }
             return Ok(());
         }
         // one item per read, with its time: an ESC ending a read is the Escape

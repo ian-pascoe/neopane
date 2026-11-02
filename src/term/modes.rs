@@ -1,6 +1,6 @@
 //! Terminal modes for running an editor, and how to undo them.
 
-use super::input::{kitty_pop_literal, kitty_push_literal};
+use super::input::{kitty_pop_literal, kitty_push_literal, kitty_query_literal};
 
 /// Alternate screen, bracketed paste, focus reports, mouse (1002 drags, 1006
 /// SGR encoding), then the kitty keyboard flags, then a query for them: the
@@ -8,7 +8,7 @@ use super::input::{kitty_pop_literal, kitty_push_literal};
 pub const EDITOR_ON: &str = concat!(
     "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h",
     kitty_push_literal!(),
-    "\x1b[?u"
+    kitty_query_literal!()
 );
 
 /// Undoes `EDITOR_ON` in reverse, and resets colors and the cursor's shape

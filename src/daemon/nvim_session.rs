@@ -715,6 +715,20 @@ mod tests {
     }
 
     #[test]
+    fn an_esc_fed_before_a_switch_times_out_against_the_read_held_behind_it() {
+        let Some(mut r) = Rig::start() else { return };
+        r.make_current(0, r.wins[0]);
+        r.settle();
+        let t0 = std::time::Instant::now();
+        // direct: nothing is in flight; the ESC ends the read
+        r.type_into_at(0, b"Ax\x1b", t0, 0);
+        r.make_current(0, r.wins[0]);
+        r.type_into_at(0, b"Az", t0, 100);
+        r.expect_texts("onexz|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
     fn a_held_esc_a_timeout_before_the_next_read_is_the_escape_key() {
         let Some(mut r) = Rig::start() else { return };
         r.make_current(0, r.wins[0]);

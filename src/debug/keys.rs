@@ -11,13 +11,13 @@ use crate::term::terminal::Terminal;
 /// Terminal modes `debug-keys` turns on, and the sequences that turn them
 /// off again.
 const MODES_ON: &str = concat!(
-    "\x1b[?1049h",                // alternate screen: keep the shell's scrollback clean
-    "\x1b[?2004h",                // bracketed paste: pastes arrive wrapped in ESC[200~ ... ESC[201~
-    "\x1b[?1004h",                // focus reporting: ESC[I and ESC[O
-    "\x1b[?1002h",                // mouse: presses, releases and drags
-    "\x1b[?1006h",                // mouse: SGR encoding (ESC[<b;x;yM), no limit on size
+    "\x1b[?1049h",                 // alternate screen: keep the shell's scrollback clean
+    "\x1b[?2004h", // bracketed paste: pastes arrive wrapped in ESC[200~ ... ESC[201~
+    "\x1b[?1004h", // focus reporting: ESC[I and ESC[O
+    "\x1b[?1002h", // mouse: presses, releases and drags
+    "\x1b[?1006h", // mouse: SGR encoding (ESC[<b;x;yM), no limit on size
     input::kitty_push_literal!(), // kitty keyboard protocol, after the screen switch
-    "\x1b[?u",                    // ask for its flags: the parser reads the answer
+    input::kitty_query_literal!(), // ask for its flags: the parser reads the answer
 );
 // Undone in reverse: pop kitty's flags while still on the alternate screen.
 const MODES_OFF: &str = concat!(
@@ -69,13 +69,13 @@ fn show_keys(term: &mut Terminal, signals: &mut Signals) -> Result<()> {
                 revents: 0,
             },
         ];
-        // SAFETY: `fds` is a valid array of two pollfds.
         // an ESC that ended a read waits for the rest of its sequence, a while
         let wait = if parser.flush_due() {
             input::ESCAPE_TIMEOUT_MS as libc::c_int
         } else {
             -1
         };
+        // SAFETY: `fds` is a valid array of two pollfds.
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
         if ready < 0 {
             // a signal interrupted poll; its byte is waiting in the pipe

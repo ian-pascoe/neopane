@@ -67,8 +67,15 @@ macro_rules! kitty_pop_literal {
         "\x1b[<u"
     };
 }
+/// `KITTY_QUERY` as a literal, so `concat!` can use it.
+macro_rules! kitty_query_literal {
+    () => {
+        "\x1b[?u"
+    };
+}
 pub(crate) use kitty_pop_literal;
 pub(crate) use kitty_push_literal;
+pub(crate) use kitty_query_literal;
 
 /// Turns the kitty keyboard protocol on, with flags 1 (disambiguate: use CSI u
 /// for keys the legacy encoding garbles) and 4 (report the shifted key, so
@@ -82,7 +89,7 @@ pub const KITTY_POP: &str = kitty_pop_literal!();
 /// answers `ESC [ ? flags u`, which makes the parser set `kitty` itself; one
 /// that hasn't says nothing, and a bare ESC keeps timing out. Write it after
 /// `KITTY_PUSH`.
-pub const KITTY_QUERY: &str = "\x1b[?u";
+pub const KITTY_QUERY: &str = kitty_query_literal!();
 
 /// How long, in milliseconds, an ESC that ends a read waits for the rest of
 /// its sequence before it is the Escape key, without kitty flags on. Matches
@@ -848,9 +855,13 @@ impl Parser {
         if self.marker == b'<' && (final_ == b'M' || final_ == b'm') {
             return self.mouse(final_ == b'm');
         }
-        // The answer to `KITTY_QUERY`: the terminal has the protocol.
+        // The answer to `KITTY_QUERY`. Bit 1 of its flags is "disambiguate",
+        // which makes Escape a CSI sequence. A reply without it (`0`) is from
+        // something that knows the query but didn't take the push, such as tmux.
         if self.marker == b'?' && final_ == b'u' {
-            self.kitty = true;
+            if self.param(0, 0) & 1 != 0 {
+                self.kitty = true;
+            }
             return None;
         }
         if self.marker != 0 {
@@ -1360,7 +1371,7 @@ mod tests {
     #[test]
     fn the_answer_to_the_kitty_query_turns_kitty_on_and_is_not_an_event() {
         let mut parser = Parser::default();
-        parser.feed(b"\x1b[?0u");
+        parser.feed(b"\x1b[?1u");
         assert!(parser.next().is_none());
         parser.feed(b"\x1b");
         assert!(parser.next().is_none());
@@ -1374,6 +1385,17 @@ mod tests {
         parser.feed(b"1u\x1b");
         assert!(parser.next().is_none());
         assert!(!parser.flush_due());
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[?5u\x1b");
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
+        // flags without disambiguate, or none: the push wasn't taken
+        for reply in [&b"\x1b[?0u\x1b"[..], b"\x1b[?u\x1b", b"\x1b[?4u\x1b"] {
+            let mut parser = Parser::default();
+            parser.feed(reply);
+            assert!(parser.next().is_none());
+            assert!(parser.flush_due());
+        }
         // no answer, no kitty
         let mut parser = Parser::default();
         parser.feed(b"\x1b");
