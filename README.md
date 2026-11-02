@@ -80,7 +80,13 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
   controls instead.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
-  placement they expect.
+  placement they expect. A window such a plugin moves back into Neovim's own
+  layout goes back to its pane. edgy.nvim works without turning it off:
+  neorex tells it to leave the windows in panes alone (`vim.w.edgy_disable`),
+  so its edges don't dock anything. A plugin that moves a window back every
+  time neorex puts it in its pane wins after 5 tries within 2 seconds: that
+  window stays in Neovim's layout, its pane stays blank, and you still type
+  into it. Turn such a plugin off with `cond = vim.g.neorex == nil`.
 - Neovim tab pages aren't Rex tabs. A tab page opened after startup, as
   `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane, its
   windows split inside it, and closes with its last window.
