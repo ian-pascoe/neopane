@@ -27,6 +27,12 @@
 //! Plain typing, arrows and F-keys keep their legacy forms, so the parser
 //! handles both. Spec: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 //!
+//! A read can end anywhere, even right after an ESC. That ESC stays pending
+//! into the next read. Inside a paste it always does; with the kitty flags on
+//! (`Parser::set_kitty`) it does too, as the Escape key is never a bare ESC
+//! then. Without them it waits for a timeout the caller owns: `flush_due` says
+//! when to start one, and `flush_pending` turns the ESC into the Escape key.
+//!
 //! The parser is a small state machine fed one byte at a time, in the style of
 //! Ghostty's VT parser (which follows vt100.net/emu/dec_ansi_parser). Its state
 //! survives between reads, so a sequence split across two reads just carries
@@ -480,6 +486,9 @@ pub struct Parser {
     alt: bool,
     /// Inside a bracketed paste.
     in_paste: bool,
+    /// The kitty keyboard flags are on: the Escape key is `CSI 27 u`, so a
+    /// bare ESC at the end of a read is never the Escape key.
+    kitty: bool,
 }
 
 impl Default for Parser {
@@ -501,6 +510,7 @@ impl Default for Parser {
             utf8_left: 0,
             alt: false,
             in_paste: false,
+            kitty: false,
         }
     }
 }
@@ -523,7 +533,7 @@ impl Parser {
     /// can feed them again later. Call between events. If the event ended at
     /// an ESC that starts the next one, that ESC is given back too.
     pub fn take_rest(&mut self) -> Vec<u8> {
-        if self.state == State::Escape {
+        if self.state == State::Escape && self.pos > 0 && self.input[self.pos - 1] == 0x1b {
             self.state = State::Ground;
             self.pos -= 1;
         }
@@ -531,6 +541,33 @@ impl Parser {
         self.input.clear();
         self.pos = 0;
         rest
+    }
+
+    /// Tells the parser whether the kitty keyboard flags are on. With them on,
+    /// an ESC that ends a read always waits for the next one.
+    pub fn set_kitty(&mut self, on: bool) {
+        self.kitty = on;
+    }
+
+    /// Whether a read ended right after an ESC that is waiting for the next
+    /// read, and `flush_pending` would turn it into the Escape key: the caller
+    /// should start a short timer and call `flush_pending` when it fires, if
+    /// no input came first. False inside a paste and with kitty flags on,
+    /// where the ESC waits for more input however long it takes.
+    pub fn flush_due(&self) -> bool {
+        self.state == State::Escape && !self.in_paste && !self.kitty
+    }
+
+    /// The timeout for a pending ESC: no more input came, so it was the Escape
+    /// key. Call once `next` has returned `None`. Does nothing, and returns
+    /// `None`, when `flush_due` is false.
+    pub fn flush_pending(&mut self) -> Option<Event<'_>> {
+        if !self.flush_due() {
+            return None;
+        }
+        self.state = State::Ground;
+        let raw = self.key_event(Key::Named(Named::Escape), Mods::default());
+        Some(self.resolve(raw))
     }
 
     /// Whether the parser is between inputs: not partway through an escape
@@ -583,15 +620,9 @@ impl Parser {
                 return Some(event);
             }
         }
-        // The read ended right after an ESC. Escape sequences arrive in one
-        // read, so this was the Escape key itself.
-        if self.state == State::Escape {
-            self.state = State::Ground;
-            if self.in_paste {
-                return Some(Raw::Event(Event::Paste(b"\x1b")));
-            }
-            return Some(self.key_event(Key::Named(Named::Escape), Mods::default()));
-        }
+        // A read that ends right after an ESC leaves it pending: the rest of
+        // the sequence may be in the next read. If nothing comes, the caller
+        // times out with `flush_pending`.
         None
     }
 
@@ -800,7 +831,7 @@ impl Parser {
         }
 
         if self.marker == b'<' && (final_ == b'M' || final_ == b'm') {
-            return Some(self.mouse(final_ == b'm'));
+            return self.mouse(final_ == b'm');
         }
         if self.marker != 0 {
             return Some(Raw::UnknownSequence);
@@ -903,8 +934,13 @@ impl Parser {
 
     /// SGR mouse report: `ESC [ < button ; col ; row M` (press) or `m`
     /// (release). Columns and rows count from 1.
-    fn mouse(&self, release: bool) -> Raw {
+    /// None for buttons 8 to 11 (back and forward, bit 128): Neovim has no
+    /// use for them here, and they mustn't pass for left, middle or right.
+    fn mouse(&self, release: bool) -> Option<Raw> {
         let cb = self.param(0, 0);
+        if cb & 128 != 0 {
+            return None;
+        }
         let col = (self.param(1, 1) - 1).min(u32::from(u16::MAX)) as u16;
         let row = (self.param(2, 1) - 1).min(u32::from(u16::MAX)) as u16;
         // Bits 4, 8 and 16 of the button number are the modifiers.
@@ -923,13 +959,13 @@ impl Parser {
                 MouseButton::WheelLeft,
                 MouseButton::WheelRight,
             ];
-            return Raw::Event(Event::Mouse(Mouse {
+            return Some(Raw::Event(Event::Mouse(Mouse {
                 button: wheels[low],
                 action: MouseAction::Press,
                 mods,
                 row,
                 col,
-            }));
+            })));
         }
         let buttons = [
             MouseButton::Left,
@@ -950,13 +986,13 @@ impl Parser {
         } else {
             MouseAction::Press
         };
-        Raw::Event(Event::Mouse(Mouse {
+        Some(Raw::Event(Event::Mouse(Mouse {
             button,
             action,
             mods,
             row,
             col,
-        }))
+        })))
     }
 
     fn end_osc(&mut self) -> Raw {
@@ -1175,9 +1211,152 @@ mod tests {
         expect_events(&[b"\x1c"], &[test_key('\\', CTRL)]);
     }
 
+    /// Like `expect_events`, then the timeout for a pending ESC runs.
+    fn expect_events_after_timeout(feeds: &[&[u8]], want: &[Event]) {
+        let mut parser = Parser::default();
+        let mut i = 0;
+        for bytes in feeds {
+            parser.feed(bytes);
+            while let Some(event) = parser.next() {
+                assert!(i < want.len(), "unexpected extra event: {event}");
+                assert_eq!(want[i], event);
+                i += 1;
+            }
+        }
+        if let Some(event) = parser.flush_pending() {
+            assert!(i < want.len(), "unexpected extra event: {event}");
+            assert_eq!(want[i], event);
+            i += 1;
+        }
+        assert_eq!(want.len(), i);
+    }
+
+    #[test]
+    fn a_paste_end_marker_split_after_its_esc_ends_the_paste() {
+        let want = [
+            Event::PasteStart,
+            Event::Paste(b"hello"),
+            Event::PasteEnd,
+            test_key('x', NONE),
+        ];
+        expect_events(&[b"\x1b[200~hello\x1b", b"[201~", b"x"], &want);
+        // split at every other point of the marker too
+        expect_events(&[b"\x1b[200~hello\x1b[", b"201~x"], &want);
+        expect_events(&[b"\x1b[200~hello\x1b[20", b"1~x"], &want);
+        expect_events(&[b"\x1b[200~hello", b"\x1b", b"[201~x"], &want);
+        // the start marker split after its ESC
+        expect_events(&[b"\x1b", b"[200~hello\x1b[201~", b"x"], &want);
+    }
+
+    #[test]
+    fn an_esc_pending_in_a_paste_is_never_flushed() {
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[200~a\x1b");
+        assert!(matches!(parser.next(), Some(Event::PasteStart)));
+        assert!(matches!(parser.next(), Some(Event::Paste(b"a"))));
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
+        assert!(parser.flush_pending().is_none());
+        parser.feed(b"[201~");
+        assert!(matches!(parser.next(), Some(Event::PasteEnd)));
+    }
+
+    #[test]
+    fn an_esc_inside_a_paste_that_starts_no_marker_is_pasted() {
+        expect_events(
+            &[b"\x1b[200~a\x1b", b"b\x1b[201~"],
+            &[
+                Event::PasteStart,
+                Event::Paste(b"a"),
+                Event::Paste(b"\x1b"),
+                Event::Paste(b"b"),
+                Event::PasteEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_csi_key_split_after_its_esc_is_that_key() {
+        expect_events(&[b"\x1b", b"[A"], &[test_named(Named::Up, NONE)]);
+        expect_events(&[b"\x1b[", b"1;5C"], &[test_named(Named::Right, CTRL)]);
+        expect_events(&[b"\x1b", b"OP"], &[test_named(Named::F1, NONE)]);
+        expect_events(&[b"\x1b", b"[27u"], &[test_named(Named::Escape, NONE)]);
+        expect_events(&[b"\x1b", b"x"], &[test_key('x', ALT)]);
+    }
+
+    #[test]
+    fn a_lone_esc_waits_for_the_timeout() {
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
+        assert!(parser.flush_due());
+        assert_eq!(
+            Some(test_named(Named::Escape, NONE)),
+            parser.flush_pending()
+        );
+        assert!(!parser.flush_due());
+        assert!(parser.flush_pending().is_none());
+        // the next key isn't Alt
+        parser.feed(b"x");
+        assert_eq!(Some(test_key('x', NONE)), parser.next());
+        expect_events_after_timeout(&[b"\x1b"], &[test_named(Named::Escape, NONE)]);
+        expect_events_after_timeout(
+            &[b"a\x1b"],
+            &[test_key('a', NONE), test_named(Named::Escape, NONE)],
+        );
+        // two ESCs: the first is Escape at once, the second waits
+        expect_events_after_timeout(
+            &[b"\x1b\x1b"],
+            &[
+                test_named(Named::Escape, NONE),
+                test_named(Named::Escape, NONE),
+            ],
+        );
+        // a timeout between two reads
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
+        assert_eq!(
+            Some(test_named(Named::Escape, NONE)),
+            parser.flush_pending()
+        );
+        parser.feed(b"[A");
+        assert_eq!(Some(test_key('[', NONE)), parser.next()); // plain keys now
+    }
+
+    #[test]
+    fn with_kitty_flags_on_a_trailing_esc_is_never_the_escape_key() {
+        let mut parser = Parser::default();
+        parser.set_kitty(true);
+        parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
+        assert!(parser.flush_pending().is_none());
+        parser.feed(b"[A");
+        assert_eq!(Some(test_named(Named::Up, NONE)), parser.next());
+    }
+
+    #[test]
+    fn mouse_buttons_with_bit_128_are_ignored() {
+        expect_events(&[b"\x1b[<128;5;5M"], &[]);
+        expect_events(&[b"\x1b[<128;5;5m"], &[]);
+        expect_events(&[b"\x1b[<131;5;5M"], &[]);
+        // the mouse report split across reads, and a click after it
+        expect_events(
+            &[b"\x1b", b"[<129;5;5M\x1b[<0;1;1M"],
+            &[Event::Mouse(Mouse {
+                button: MouseButton::Left,
+                action: MouseAction::Press,
+                mods: NONE,
+                row: 0,
+                col: 0,
+            })],
+        );
+    }
+
     #[test]
     fn escape_and_alt() {
-        expect_events(&[b"\x1b"], &[test_named(Named::Escape, NONE)]);
+        expect_events_after_timeout(&[b"\x1b"], &[test_named(Named::Escape, NONE)]);
         expect_events(&[b"\x1bx"], &[test_key('x', ALT)]);
         expect_events(&["\x1bé".as_bytes()], &[test_key('é', ALT)]);
         expect_events(
@@ -1191,18 +1370,15 @@ mod tests {
                 },
             )],
         );
-        expect_events(
+        expect_events_after_timeout(
             &[b"\x1b\x1b"],
             &[
                 test_named(Named::Escape, NONE),
                 test_named(Named::Escape, NONE),
             ],
         );
-        // A lone ESC at the end of one read, then a key in the next: two keys.
-        expect_events(
-            &[b"\x1b", b"x"],
-            &[test_named(Named::Escape, NONE), test_key('x', NONE)],
-        );
+        // A lone ESC at the end of one read waits for the next: Alt+x.
+        expect_events(&[b"\x1b", b"x"], &[test_key('x', ALT)]);
     }
 
     #[test]
@@ -1291,17 +1467,17 @@ mod tests {
             })
         ));
         assert_eq!(b"\x1b".to_vec(), parser.take_rest());
-        // read again from ground: a lone ESC at the end of a read is Escape, so
-        // the next key isn't Alt
+        // read again from ground: the ESC waits, and the timeout makes it the
+        // Escape key, so the next key isn't Alt
         parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
         assert!(matches!(
-            parser.next().unwrap(),
+            parser.flush_pending().unwrap(),
             Event::Key(KeyEvent {
                 key: Key::Named(Named::Escape),
                 ..
             })
         ));
-        assert!(parser.next().is_none());
         parser.feed(b"x");
         let Event::Key(k) = parser.next().unwrap() else {
             panic!("expected a key")

@@ -232,7 +232,28 @@ impl Forwarder {
                 | Event::Unknown(_) => return true,
             }
         }
-        false
+        // an ESC left waiting may be the Escape key
+        parser.flush_due()
+    }
+
+    /// Whether an ESC that ended a read waits for a timeout: start one, and
+    /// call `flush_pending` when it fires without more input. (See
+    /// `Parser::flush_due`.)
+    pub fn escape_pending(&self) -> bool {
+        self.parser.flush_due()
+    }
+
+    /// The timeout for a pending ESC: nothing followed it, so it is the Escape
+    /// key. Sends it. Does nothing if no ESC is waiting.
+    pub fn flush_pending(&mut self, nvim: &mut Nvim) -> Result<()> {
+        let Some(Event::Key(k)) = self.parser.flush_pending() else {
+            return Ok(());
+        };
+        let mut keys = Vec::new();
+        input::write_nvim(k, &mut keys);
+        send_keys(nvim, &mut keys)?;
+        nvim.flush()?;
+        Ok(())
     }
 
     /// Whether the parser is between inputs, not partway through an escape

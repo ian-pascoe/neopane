@@ -104,6 +104,7 @@ pub enum Token {
     FocusTimer,
     LayoutTimer,
     SwitchTimer,
+    EscapeTimer,
 }
 
 impl Token {
@@ -117,6 +118,7 @@ impl Token {
             4 => Token::FocusTimer,
             5 => Token::LayoutTimer,
             6 => Token::SwitchTimer,
+            7 => Token::EscapeTimer,
             _ => return None,
         })
     }
@@ -130,7 +132,7 @@ pub struct PaneEvent {
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::SwitchTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::EscapeTimer as usize) < pane::TOKEN_BASE);
 
 /// The id `Pane::startup` gives the pane neorex was run in.
 const STARTUP_PANE_ID: u32 = 0;
@@ -143,6 +145,9 @@ const FOCUS_OUT_DELAY_MS: u32 = 80;
 /// How often a window switch still unanswered is checked for waiting behind
 /// a command that needs a key.
 const SWITCH_RECHECK_MS: u32 = 100;
+/// How long an ESC that ends a read waits for the rest of its sequence before
+/// it is the Escape key.
+const ESCAPE_TIMEOUT_MS: u32 = 50;
 
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const LAYOUT_WAIT_MS: u32 = 1000;
@@ -300,6 +305,7 @@ impl Daemon {
             Some(Token::FocusTimer) => self.send_focus(true)?,
             Some(Token::LayoutTimer) => self.layout_wait_over()?,
             Some(Token::SwitchTimer) => self.recheck_switch()?,
+            Some(Token::EscapeTimer) => self.flush_pending_escapes()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e.token)?,
         }
@@ -313,6 +319,45 @@ impl Daemon {
         self.stop_watching_closed_rex()?;
         if self.nvim.watch_switch() {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
+        }
+        Ok(())
+    }
+
+    /// Starts the escape timer if some pane's parser has an ESC waiting.
+    fn arm_escape_timer(&mut self) -> Result<()> {
+        let waiting = self.panes.list.iter().any(|p| {
+            p.terminal_surface
+                .as_ref()
+                .is_some_and(|s| s.forwarder.escape_pending())
+        });
+        if waiting {
+            self.add_timer(Token::EscapeTimer, ESCAPE_TIMEOUT_MS)?;
+        }
+        Ok(())
+    }
+
+    /// The escape timer fired: an ESC still pending in a pane's parser is the
+    /// Escape key. Tries again later for one held up by a window switch.
+    fn flush_pending_escapes(&mut self) -> Result<()> {
+        let ids: Vec<u32> = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| {
+                p.terminal_surface
+                    .as_ref()
+                    .is_some_and(|s| s.forwarder.escape_pending())
+            })
+            .map(|p| p.id)
+            .collect();
+        for id in ids {
+            let mut fwds = PaneForwarders {
+                panes: &mut self.panes,
+                grids: &self.grids,
+            };
+            if !self.nvim.flush_pending(&mut fwds, id)? {
+                return self.add_timer(Token::EscapeTimer, ESCAPE_TIMEOUT_MS);
+            }
         }
         Ok(())
     }
@@ -486,7 +531,7 @@ impl Daemon {
             grids: &self.grids,
         };
         self.nvim.type_into(&mut fwds, id, bytes)?;
-        Ok(())
+        self.arm_escape_timer()
     }
 
     /// Pane `id`'s surface, which a pane that gets fd events has.
@@ -699,6 +744,8 @@ impl Daemon {
             grids: &self.grids,
         };
         self.nvim.answered(&mut fwds, id, err, result)?;
+        // held input may have gone through and left an ESC waiting
+        self.arm_escape_timer()?;
         let mut show_now = false;
         for p in self.panes.list.iter_mut() {
             if let Some(l) = &mut p.layer

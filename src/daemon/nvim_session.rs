@@ -129,6 +129,24 @@ impl NvimSession {
         self.gate.send(&mut self.client, panes, pane, bytes)
     }
 
+    /// The timeout for an ESC pane `pane` read last: sends it as the Escape
+    /// key (see `Forwarder::flush_pending`). False, doing nothing, while a
+    /// window switch is in flight: the ESC may still begin a sequence that is
+    /// held behind it, so try again later.
+    pub fn flush_pending(
+        &mut self,
+        panes: &mut impl AimForwarder,
+        pane: u32,
+    ) -> forwarder::Result<bool> {
+        if self.gate.in_flight().is_some() {
+            return Ok(false);
+        }
+        if let Some(fwd) = panes.aim_forwarder(pane) {
+            fwd.flush_pending(&mut self.client)?;
+        }
+        Ok(true)
+    }
+
     /// Neovim answered request `id`, with error `err` or else `result`: ours
     /// may let held input go on. (See
     /// `FocusGate::answered`.)
@@ -653,6 +671,8 @@ mod tests {
         r.make_current(0, r.wins[0]);
         // two Escapes in one read; the first ends the `f`
         r.type_into(0, b"\x1b\x1b");
+        // the second waits for the escape timeout
+        assert!(r.session.flush_pending(&mut r.fwds, 0).unwrap());
         r.type_into(0, b"x");
         r.tick();
         r.probe_answered();
