@@ -178,6 +178,9 @@ impl FocusGate {
                         fwd.discard(nvim, rest)?;
                     } else {
                         fwd.feed(nvim, rest)?;
+                        if next_is_input_of(&self.queue, 0, pane) {
+                            fwd.flush_pending(nvim)?;
+                        }
                     }
                 }
             }
@@ -229,8 +232,14 @@ impl FocusGate {
             };
             let fed = fwd.feed_key(nvim, &bytes[*read..])?;
             *read += fed.read;
+            let pane = *pane;
             if *read >= bytes.len() {
                 self.queue.remove(i);
+                if next_is_input_of(&self.queue, i, pane)
+                    && let Some(fwd) = panes.aim_forwarder(pane)
+                {
+                    fwd.flush_pending(nvim)?;
+                }
             }
             if fed.sent_key {
                 self.probe = None;
@@ -241,6 +250,13 @@ impl FocusGate {
         }
         Ok(())
     }
+}
+
+/// Whether `queue[i]` is input of `pane`. An ESC ending a read held in the
+/// queue, with more input of its pane behind it, is the Escape key: the timer
+/// that would say so can't run while the input is held.
+fn next_is_input_of(queue: &[Item], i: usize, pane: u32) -> bool {
+    matches!(queue.get(i), Some(Item::Input { pane: p, .. }) if *p == pane)
 }
 
 /// Whether the `nvim_get_mode` result at `result` says Neovim is waiting for a key.

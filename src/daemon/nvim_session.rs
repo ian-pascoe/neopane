@@ -671,8 +671,6 @@ mod tests {
         r.make_current(0, r.wins[0]);
         // two Escapes in one read; the first ends the `f`
         r.type_into(0, b"\x1b\x1b");
-        // the second waits for the escape timeout
-        assert!(r.session.flush_pending(&mut r.fwds, 0).unwrap());
         r.type_into(0, b"x");
         r.tick();
         r.probe_answered();
