@@ -30,6 +30,8 @@ drawn_tabline: u32 = 0,
 /// The tabline column the row shown there started at.
 drawn_tabline_col: u32 = 0,
 drawn_cursor: ?render.Cursor = null,
+/// The cursor's shape and blink as last drawn, with the cursor.
+drawn_cursor_mode: ?Style.CursorMode = null,
 /// The floats drawn last frame.
 drawn_floats: [Grids.max_floats]Rect = undefined,
 drawn_floats_len: u8 = 0,
@@ -132,7 +134,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     const grid_changed = floats_changed or if (g) |gr| gr.dirty.count() > 0 or gr.scrolls_len > 0 else false;
     const msg_changed = if (msg) |m| m.dirty.count() > 0 or msg_n != self.drawn_msg else msg_n != self.drawn_msg;
     var tabline_changed = top > 0 and (self.full or opts.tabline_dirty or opts.tabline_col != self.drawn_tabline_col);
-    if (!self.full and !grid_changed and !msg_changed and !tabline_changed and std.meta.eql(cur, self.drawn_cursor)) return false;
+    if (!self.full and !grid_changed and !msg_changed and !tabline_changed and self.cursorUnchanged(cur, style)) return false;
 
     try render.begin(w);
     var current: ?u32 = null;
@@ -200,9 +202,17 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     self.drawn_tabline = top;
     self.drawn_tabline_col = opts.tabline_col;
     self.drawn_cursor = cur;
+    self.drawn_cursor_mode = style.cursorMode();
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
     return true;
+}
+
+/// The cursor is where, and looks as, it was drawn. A pane without one
+/// draws no shape.
+fn cursorUnchanged(self: *const PaneView, cur: ?render.Cursor, style: *const Style) bool {
+    if (!std.meta.eql(cur, self.drawn_cursor)) return false;
+    return cur == null or std.meta.eql(style.cursorMode(), self.drawn_cursor_mode);
 }
 
 fn screenRows(grids: *const Grids) u32 {
@@ -324,7 +334,7 @@ pub fn frameFloats(self: *PaneView, grids: *Grids, placed: []const Grids.Placed,
         }
     }
     const cur = floatCursor(grids, rects, rows, self.cols);
-    if (!self.full and dirty.count() == 0 and std.meta.eql(cur, self.drawn_cursor)) return false;
+    if (!self.full and dirty.count() == 0 and self.cursorUnchanged(cur, &grids.style)) return false;
 
     try render.begin(w);
     var current: ?u32 = null;
@@ -349,6 +359,7 @@ pub fn frameFloats(self: *PaneView, grids: *Grids, placed: []const Grids.Placed,
     self.drawn_grid = 0;
     self.drawn_size = .{ 0, 0 };
     self.drawn_cursor = cur;
+    self.drawn_cursor_mode = grids.style.cursorMode();
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
     return true;
@@ -618,4 +629,122 @@ test "the tabline is drawn again when the column it starts at moves" {
     // panes to its left changed: it shows another part, with nothing else dirty
     try testing.expect(try view.frame(&gs, 2, .{ .tabline = &second, .tabline_col = 2 }, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "CD") != null);
+}
+
+/// Terminal row `row` (1 based) was drawn from its first column, starting
+/// with `text`, after any colours.
+fn drewRow(written: []const u8, row: u8, text: []const u8) bool {
+    var seq: [16]u8 = undefined;
+    const at = std.fmt.bufPrint(&seq, "\x1b[{d};1H", .{row}) catch unreachable;
+    var rest = written;
+    while (std.mem.indexOf(u8, rest, at)) |i| {
+        rest = rest[i + at.len ..];
+        var s = rest;
+        while (std.mem.startsWith(u8, s, "\x1b[")) {
+            const end = std.mem.indexOfNone(u8, s[2..], "0123456789;") orelse break;
+            if (s[2 + end] != 'm') break;
+            s = s[end + 3 ..];
+        }
+        if (std.mem.startsWith(u8, s, text)) return true;
+    }
+    return false;
+}
+
+test "with no row reserved for messages, they draw over the window's bottom rows and leave them again" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    // a screen of 4 rows, 'cmdheight' 0: the window fills the pane
+    try gs.grids.put(testing.allocator, 1, .{});
+    try gs.grids.getPtr(1).?.resize(testing.allocator, 6, 4);
+    try gs.grids.put(testing.allocator, 2, .{});
+    const win = gs.grids.getPtr(2).?;
+    try win.resize(testing.allocator, 6, 4);
+    for (0..4) |r| win.cells[r * 6] = .init(&.{@as(u8, 'a') + @as(u8, @intCast(r))}, 0);
+    win.cursor_row = 3;
+    win.cursor_col = 1;
+    gs.cursor_grid = 2;
+    var view: PaneView = .init(6, 4);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    // no messages: every row of the window shows, the last too
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 4, "d"));
+    try testing.expectEqual(render.Cursor{ .row = 3, .col = 1 }, view.drawn_cursor.?);
+
+    // one message row, typing on it: it covers the window's last row, and the cursor is on it
+    try gs.grids.put(testing.allocator, 5, .{});
+    const msg = gs.grids.getPtr(5).?;
+    try msg.resize(testing.allocator, 6, 1);
+    msg.cells[0] = .init(":", 0);
+    msg.cursor_col = 1;
+    gs.msg_grid = 5;
+    gs.msg_row = 3;
+    gs.cursor_grid = 5;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 4, ":"));
+    try testing.expect(!drewRow(out.written(), 4, "d"));
+    try testing.expectEqual(render.Cursor{ .row = 3, .col = 1 }, view.drawn_cursor.?);
+
+    // a longer message scrolled up: two rows of the window are covered
+    try msg.resize(testing.allocator, 6, 2);
+    msg.cells[0] = .init("x", 0);
+    msg.cells[6] = .init("y", 0);
+    msg.dirty.setAll();
+    gs.msg_row = 2;
+    gs.cursor_grid = 2;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 3, "x"));
+    try testing.expect(drewRow(out.written(), 4, "y"));
+    // the cursor is on the window, under the messages: hidden
+    try testing.expectEqual(@as(?render.Cursor, null), view.drawn_cursor);
+
+    // a message row shorter: the row it left shows the window again
+    try msg.resize(testing.allocator, 6, 1);
+    msg.cells[0] = .init("y", 0);
+    msg.dirty.setAll();
+    gs.msg_row = 3;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 3, "c"));
+    try testing.expect(drewRow(out.written(), 4, "y"));
+
+    // the messages are gone: the last row is the window's again, and the cursor is back
+    gs.msg_grid = null;
+    gs.cursor_grid = 2;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 4, "d"));
+    try testing.expectEqual(render.Cursor{ .row = 3, .col = 1 }, view.drawn_cursor.?);
+}
+
+test "a cursor that only changes shape is drawn again" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 2, .{});
+    try gs.grids.getPtr(2).?.resize(testing.allocator, 6, 3);
+    gs.cursor_grid = 2;
+    gs.style.cursor_style_enabled = true;
+    try gs.style.cursor_modes.append(testing.allocator, .{});
+    try gs.style.cursor_modes.append(testing.allocator, .{ .shape = .vertical });
+    var view: PaneView = .init(6, 3);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[2 q") != null);
+
+    // insert mode on an empty line: no cell, and not the cursor's place, changes
+    try testing.expect(!try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    gs.style.mode_idx = 1;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[6 q") != null);
+
+    // a pane with no cursor has no shape to draw
+    gs.cursor_grid = 1;
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    gs.style.mode_idx = 0;
+    try testing.expect(!try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
 }

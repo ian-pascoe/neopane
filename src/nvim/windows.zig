@@ -86,6 +86,9 @@ pub const Note = union(enum) {
     entered: i64,
     /// The tabline's rows at the top of the screen.
     tabline: i64,
+    /// Neovim's 'cmdheight' in the current tab page: the rows at the bottom of
+    /// the screen it keeps for messages and the command line. Never negative.
+    cmdheight: i64,
     /// `<C-w>h/j/k/l` was typed: Rex knows where the panes sit, not Neovim.
     direction: Move,
     /// Where the windows of a tab page made after setup sit in it.
@@ -202,6 +205,8 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered
     else if (std.mem.eql(u8, method, "neorex_tabline"))
         .tabline
+    else if (std.mem.eql(u8, method, "neorex_cmdheight"))
+        .cmdheight
     else if (std.mem.eql(u8, method, "neorex_layout"))
         .layout
     else
@@ -220,6 +225,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .tabline => .{ .tabline = win },
+        .cmdheight => if (win < 0) error.BadMessage else .{ .cmdheight = win },
         .direction => unreachable, // read above
         .layout => blk: {
             var layout: Layout = .{ .tab = win };
@@ -1072,6 +1078,58 @@ test "the tabline is reported and drawn on grid 1" {
     }.f));
 }
 
+/// The 'cmdheight' last reported, or -1.
+fn lastCmdheight(h: *const Harness) i64 {
+    var i = h.notes.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (h.notes.items[i] == .cmdheight) return h.notes.items[i].cmdheight;
+    }
+    return -1;
+}
+
+test "'cmdheight' is reported at setup and when it changes, from an autocommand too" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.start(&buf);
+    defer h.deinit();
+    // the default, said at setup
+    try testing.expectEqual(@as(i64, 1), lastCmdheight(&h));
+
+    try h.input(":set cmdheight=0<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 0;
+        }
+    }.f));
+
+    // set in an autocommand, as plugins do, where OptionSet doesn't fire
+    try h.lua(
+        \\vim.api.nvim_create_autocmd('User', { pattern = 'Bump', callback = function() vim.o.cmdheight = 2 end })
+        \\vim.api.nvim_exec_autocmds('User', { pattern = 'Bump' })
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 2;
+        }
+    }.f));
+
+    // each tab page has its own: going back reports the first's
+    try h.input(":tabnew<CR>");
+    try h.input(":set cmdheight=1<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 1;
+        }
+    }.f));
+    try h.input(":tabprevious<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return lastCmdheight(x) == 2;
+        }
+    }.f));
+}
+
 /// Grid row `r` of window `win` starts with `want`.
 fn rowStarts(h: *const Harness, win: i64, r: u32, want: []const u8) bool {
     const g = h.grids.get(h.grids.gridOf(win) orelse return false) orelse return false;
@@ -1438,6 +1496,28 @@ test "a tab page built as Diffview does reports its layout, final order and size
     try h.nvim.flush();
     h.want = 4242;
     try testing.expect(try h.until(Harness.isCurrent));
+}
+
+test "a cmdheight note is read, and one with no rows or a negative count is an error" {
+    var buf: [16]u8 = undefined;
+    for ([_]i64{ 0, 1, 2 }) |rows| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try msgpack.writeArrayHeader(&w, 1);
+        try msgpack.writeInt(&w, rows);
+        var d: msgpack.Decoder = .{};
+        d.feed(w.buffered());
+        try testing.expectEqual(rows, (try parseNote("neorex_cmdheight", &d)).?.cmdheight);
+    }
+
+    var none: msgpack.Decoder = .{};
+    none.feed("\x90");
+    try testing.expectError(error.BadMessage, parseNote("neorex_cmdheight", &none));
+    var w: std.Io.Writer = .fixed(&buf);
+    try msgpack.writeArrayHeader(&w, 1);
+    try msgpack.writeInt(&w, -1);
+    var negative: msgpack.Decoder = .{};
+    negative.feed(w.buffered());
+    try testing.expectError(error.BadMessage, parseNote("neorex_cmdheight", &negative));
 }
 
 /// Parses a `neorex_layout` note of tab page 7 with `flat` numbers.

@@ -653,6 +653,21 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
   callback = function() vim.schedule(report_tabline) end,
 })
 
+-- 'cmdheight' as last reported: the rows at the bottom of the screen the
+-- daemon keeps clear of every pane's window, for messages and the command
+-- line. Each tab page has its own.
+local cmdheight
+local function report_cmdheight()
+  local n = vim.o.cmdheight
+  if n == cmdheight then return end
+  cmdheight = n
+  vim.rpcnotify(chan, 'neorex_cmdheight', n)
+end
+-- whenever Neovim waits for input, since autocommands that set it fire no
+-- OptionSet, and a tab page change brings its own. Not scheduled: SafeState
+-- fires again after every scheduled callback.
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_cmdheight })
+
 -- A floating tab page's windows may have been resized or moved, with nothing
 -- to say so but this. Looked at here, not scheduled: SafeState fires again
 -- after every scheduled callback.
@@ -817,4 +832,5 @@ local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)
 schedule_report()
 report_tabline()
+report_cmdheight()
 return { first, anchor_of(api.nvim_get_current_tabpage()) }

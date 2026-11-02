@@ -43,6 +43,10 @@ changes: WindowChanges = .{},
 /// Rows the screen's tabline takes, as Neovim last said. Drawn over the
 /// panes along the top of the Rex window, as it would be over the screen.
 tabline_rows: u32 = 0,
+/// Rows at the bottom of every pane kept for Neovim's messages and command
+/// line: its 'cmdheight', as last said. One until it says. Messages that
+/// show beyond them are drawn over the window, in the focused pane.
+msg_rows: u32 = 1,
 /// Where Neovim has the windows of each tab page made after setup, as it
 /// last said, and what was done to place their panes to match.
 tab_layouts: std.AutoArrayHashMapUnmanaged(i64, TabPlacement.Tab) = .empty,
@@ -387,6 +391,7 @@ fn onNvim(self: *Daemon) !void {
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
                 .tabline => |rows| try self.onTabline(@intCast(std.math.clamp(rows, 0, 1))),
+                .cmdheight => |rows| try self.onCmdheight(@intCast(@min(rows, max_msg_rows))),
                 .direction => |move| try self.onDirection(move),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .reopened => |r| self.onReopened(r.old, r.new),
@@ -1020,7 +1025,7 @@ fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
 /// No terminal yet: the smallest window, as Neovim allows.
 fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
     const s = p.terminal_surface orelse return .{ 1, 1 };
-    const size = s.windowSize();
+    const size = s.windowSize(self.msg_rows);
     return .{ size[0], @max(size[1] -| self.tablineRowsOf(p), 1) };
 }
 
@@ -1083,6 +1088,19 @@ fn prepareTabline(self: *const Daemon, p: *const Pane, screen: ?*const Grid, buf
 fn onTabline(self: *Daemon, rows: u32) !void {
     if (rows == self.tabline_rows) return;
     self.tabline_rows = rows;
+    for (self.panes.list.items) |*p| try self.sizeWindow(p);
+    try self.nvim.client.flush();
+    try self.draw();
+}
+
+/// More rows than any terminal has: a 'cmdheight' past it is as good.
+const max_msg_rows = 1000;
+
+/// 'cmdheight' changed: every window fits its pane again, now that the rows
+/// kept for messages are others.
+fn onCmdheight(self: *Daemon, rows: u32) !void {
+    if (rows == self.msg_rows) return;
+    self.msg_rows = rows;
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.nvim.client.flush();
     try self.draw();
@@ -1355,4 +1373,21 @@ fn blockId(n: u32) [42]u8 {
     var id: [42]u8 = undefined;
     _ = std.fmt.bufPrint(&id, "block:00000000-0000-0000-0000-{d:0>12}", .{n}) catch unreachable;
     return id;
+}
+
+test "the window leaves 'cmdheight' rows for messages, then the tabline's" {
+    const t = std.testing;
+    var fx: TablineFixture = .{ .d = undefined };
+    try fx.init();
+    defer fx.deinit();
+    const p = try fx.add(0, 60, null);
+
+    // before Neovim says, one row, as the default 'cmdheight'
+    try t.expectEqual([2]u32{ 60, 18 }, fx.d.windowSize(p));
+    fx.d.msg_rows = 0;
+    try t.expectEqual([2]u32{ 60, 19 }, fx.d.windowSize(p));
+    fx.d.msg_rows = 2;
+    try t.expectEqual([2]u32{ 60, 17 }, fx.d.windowSize(p));
+    fx.d.tabline_rows = 0;
+    try t.expectEqual([2]u32{ 60, 18 }, fx.d.windowSize(p));
 }
