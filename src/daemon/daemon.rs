@@ -2845,63 +2845,103 @@ mod tests {
         });
     }
 
+    /// Everything a daemon wrote to Rex and to Neovim.
+    struct Sent {
+        rex: Vec<String>,
+        nvim: String,
+    }
+
+    impl Sent {
+        fn rex_methods(&self) -> Vec<&str> {
+            methods_of(&self.rex)
+        }
+
+        /// How many windows it asked Neovim to close.
+        fn neorex_closes(&self) -> usize {
+            self.nvim.matches("neorex.close").count()
+        }
+
+        /// The payload of the `n`th request to Rex.
+        fn payload(&self, n: usize) -> Value {
+            json_of(&self.rex[n])["payload"].clone()
+        }
+    }
+
+    /// Drops the daemon, ending what it sent, and reads that.
+    fn sent_by(fx: Fixture) -> Sent {
+        let Fixture {
+            d,
+            mut rex_end,
+            mut nvim_end,
+        } = fx;
+        drop(d);
+        let (mut rex, mut nvim) = (Vec::new(), Vec::new());
+        rex_end.read_to_end(&mut rex).unwrap();
+        nvim_end.read_to_end(&mut nvim).unwrap();
+        Sent {
+            rex: client_frames(&rex),
+            nvim: String::from_utf8_lossy(&nvim).into_owned(),
+        }
+    }
+
+    fn pane_ids(d: &Daemon) -> Vec<u32> {
+        d.panes.list.iter().map(|p| p.id).collect()
+    }
+
     #[test]
     fn a_new_window_splits_beside_the_window_it_came_from() {
         for (side_by_side, before, direction, side) in [
             (true, false, "horizontal", "after"),
             (false, true, "vertical", "before"),
         ] {
-            let Fixture {
-                mut d, mut rex_end, ..
-            } = fixture();
-            // the focused pane is the other one: only `from` can be the anchor
-            pane_in_block(&mut d, 1, 0, 1);
-            let from = pane_in_block(&mut d, 2, 0, 2);
-            d.panes.list[0].closing = None;
-            note_split_from(&mut d, 3, 2, side_by_side, before);
-            d.new_pane(3).unwrap();
+            let mut fx = fixture();
+            // without `from`, the fallback would anchor on block 1, the first
+            // pane in the list; the expected anchor is block 2
+            let first = pane_in_block(&mut fx.d, 1, 0, 1);
+            let from = pane_in_block(&mut fx.d, 2, 0, 2);
+            note_split_from(&mut fx.d, 3, 2, side_by_side, before);
+            fx.d.new_pane(3).unwrap();
 
-            let new = d.panes.by_win(3).unwrap();
-            assert_ne!(from, new.id);
+            let new = fx.d.panes.by_win(3).unwrap();
             assert_eq!(0, new.tab);
             assert!(new.awaiting_layout);
-            assert_eq!(3, d.panes.list.len());
-            drop(d);
-            let mut all = Vec::new();
-            rex_end.read_to_end(&mut all).unwrap();
-            let frames = client_frames(&all);
-            assert_eq!(vec!["session.new_split"], methods_of(&frames));
-            let req = &json_of(&frames[0])["payload"];
+            let new = new.id;
+            assert_eq!(vec![first, from, new], pane_ids(&fx.d));
+            let sent = sent_by(fx);
+            assert_eq!(vec!["session.new_split"], sent.rex_methods());
+            let req = sent.payload(0);
             assert_eq!(block_id(2), req["anchor_id"]);
             assert_eq!(direction, req["direction"]);
             assert_eq!(side, req["side"]);
             assert_eq!("session:s", req["session_id"]);
+            assert_eq!(0, sent.neorex_closes());
         }
     }
 
     #[test]
     fn a_new_window_without_a_known_source_splits_beside_any_pane_rex_has_placed() {
-        let frames = fake_rex_requests(|d| {
-            pane_in_block(d, 1, 0, 1);
-            note_split_from(d, 3, 99, true, false);
-            d.new_pane(3).unwrap();
-            assert!(d.panes.by_win(3).is_some());
-        });
-        assert_eq!(vec!["session.new_split"], methods_of(&frames));
-        assert_eq!(block_id(1), json_of(&frames[0])["payload"]["anchor_id"]);
+        let mut fx = fixture();
+        let placed = pane_in_block(&mut fx.d, 1, 0, 1);
+        note_split_from(&mut fx.d, 3, 99, true, false);
+        fx.d.new_pane(3).unwrap();
+        let new = fx.d.panes.by_win(3).unwrap().id;
+        assert_eq!(vec![placed, new], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        assert_eq!(vec!["session.new_split"], sent.rex_methods());
+        assert_eq!(block_id(1), sent.payload(0)["anchor_id"]);
     }
 
     #[test]
     fn a_new_window_with_no_placed_pane_makes_none_until_the_next_flush() {
-        let frames = fake_rex_requests(|d| {
-            // a pane Rex hasn't answered has no block to split
-            d.panes.add_for_window(1);
-            note_split_from(d, 3, 1, true, false);
-            d.new_pane(3).unwrap();
-            assert!(d.panes.by_win(3).is_none());
-            assert_eq!(1, d.panes.list.len());
-        });
-        assert!(frames.is_empty());
+        let mut fx = fixture();
+        // a pane Rex hasn't answered has no block to split
+        let unplaced = fx.d.panes.add_for_window(1).id;
+        note_split_from(&mut fx.d, 3, 1, true, false);
+        fx.d.new_pane(3).unwrap();
+        assert_eq!(vec![unplaced], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        assert!(sent.rex.is_empty());
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
@@ -2911,14 +2951,12 @@ mod tests {
         let p = fx.d.panes.by_win(1).unwrap();
         assert_eq!(2, p.tab);
         assert!(p.layer.is_none());
-        assert_eq!(1, fx.d.panes.list.len());
-        let Fixture { d, mut rex_end, .. } = fx;
-        drop(d);
-        let mut all = Vec::new();
-        rex_end.read_to_end(&mut all).unwrap();
-        let frames = client_frames(&all);
-        assert_eq!(vec!["session.new_layer"], methods_of(&frames));
-        let req = &json_of(&frames[0])["payload"];
+        let first = p.id;
+        // the second window waits for the floating pane
+        assert_eq!(vec![first], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        assert_eq!(vec!["session.new_layer"], sent.rex_methods());
+        let req = sent.payload(0);
         assert_eq!(json!(TAB_LAYER_BOUNDS), req["bounds"]);
         assert_eq!("neorex", req["layout"]["block"]["label"]);
     }
@@ -2931,18 +2969,16 @@ mod tests {
         // Rex answers the floating pane's request
         set_block(&mut fx.d, first, 4);
         fx.d.new_pane(2).unwrap();
-        assert_eq!(2, fx.d.panes.by_win(2).unwrap().tab);
-        assert_eq!(2, fx.d.panes.list.len());
-        let Fixture { d, mut rex_end, .. } = fx;
-        drop(d);
-        let mut all = Vec::new();
-        rex_end.read_to_end(&mut all).unwrap();
-        let frames = client_frames(&all);
+        let second = fx.d.panes.by_win(2).unwrap();
+        assert_eq!(2, second.tab);
+        let second = second.id;
+        assert_eq!(vec![first, second], pane_ids(&fx.d));
+        let sent = sent_by(fx);
         assert_eq!(
             vec!["session.new_layer", "session.new_split"],
-            methods_of(&frames)
+            sent.rex_methods()
         );
-        assert_eq!(block_id(4), json_of(&frames[1])["payload"]["anchor_id"]);
+        assert_eq!(block_id(4), sent.payload(1)["anchor_id"]);
     }
 
     #[test]
@@ -2953,22 +2989,26 @@ mod tests {
         note_split_from(&mut fx.d, 5, 0, true, false);
         fx.d.new_pane(5).unwrap();
         assert!(fx.d.panes.list.is_empty());
-        assert!(sent_methods(fx).is_empty());
+        let sent = sent_by(fx);
+        assert!(sent.rex.is_empty());
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
     fn closing_the_last_non_floating_pane_stops_the_daemon_and_closes_no_window() {
-        let Fixture {
-            mut d, nvim_end, ..
-        } = fixture();
-        let id = pane_in_block(&mut d, 1, 0, 1);
-        d.pane_gone(id).unwrap();
-        assert_eq!(Some(StopReason::PaneGone), d.stopped);
-        drop(d);
+        let mut fx = fixture();
+        let id = pane_in_block(&mut fx.d, 1, 0, 1);
+        fx.d.pane_gone(id).unwrap();
+        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        // it stays for the shutdown
+        assert_eq!(vec![id], pane_ids(&fx.d));
         assert_eq!(
-            0,
-            requests_to_nvim(nvim_end).matches("neorex.close").count()
+            Some(Close::RexPaneClosed),
+            fx.d.panes.by_id(id).unwrap().closing
         );
+        let sent = sent_by(fx);
+        assert!(sent.rex.is_empty());
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
@@ -2979,72 +3019,70 @@ mod tests {
         let id = pane_in_block(&mut fx.d, 2, 0, 2);
         fx.d.pane_gone(id).unwrap();
         assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        assert_eq!(vec![failed, id], pane_ids(&fx.d));
+        assert_eq!(
+            Some(Close::RexPaneClosed),
+            fx.d.panes.by_id(id).unwrap().closing
+        );
+        let sent = sent_by(fx);
+        assert!(sent.rex.is_empty());
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
     fn a_floating_pane_doesnt_count_as_another_pane_either() {
         let mut fx = fixture();
-        made_picker_pane(&mut fx.d, 10, 5);
+        let floating = made_picker_pane(&mut fx.d, 10, 5);
         let id = pane_in_block(&mut fx.d, 1, 0, 1);
         fx.d.pane_gone(id).unwrap();
         assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        assert_eq!(vec![floating, id], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        // only the floating pane's own request, from the setup
+        assert_eq!(vec!["session.new_layer"], sent.rex_methods());
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
     fn a_closed_pane_with_others_left_closes_its_neovim_window() {
-        let Fixture {
-            mut d, nvim_end, ..
-        } = fixture();
-        let gone = pane_in_block(&mut d, 1, 0, 1);
-        let kept = pane_in_block(&mut d, 2, 0, 2);
-        d.pane_gone(gone).unwrap();
-        assert_eq!(None, d.stopped);
-        assert!(d.panes.by_id(gone).is_none());
-        assert!(d.panes.by_id(kept).is_some());
-        assert_eq!(1, d.panes.list.len());
+        let mut fx = fixture();
+        let gone = pane_in_block(&mut fx.d, 1, 0, 1);
+        let kept = pane_in_block(&mut fx.d, 2, 0, 2);
+        fx.d.pane_gone(gone).unwrap();
+        assert_eq!(None, fx.d.stopped);
+        assert_eq!(vec![kept], pane_ids(&fx.d));
         // so the next flush doesn't make it a pane again
-        assert!(d.changes.is_closing(1));
-        assert!(!d.changes.is_closing(2));
-        drop(d);
-        let sent = requests_to_nvim(nvim_end);
-        assert_eq!(1, sent.matches("neorex.close").count());
+        assert!(fx.d.changes.is_closing(1));
+        assert!(!fx.d.changes.is_closing(2));
+        let sent = sent_by(fx);
+        // Rex closed the pane itself
+        assert!(sent.rex.is_empty());
+        assert_eq!(1, sent.neorex_closes());
     }
 
     #[test]
     fn a_closed_floating_pane_closes_its_floats_and_keeps_the_others() {
-        let Fixture {
-            mut d, nvim_end, ..
-        } = fixture();
-        let id = made_picker_pane(&mut d, 10, 5);
-        let kept = pane_in_block(&mut d, 5, 0, 1);
-        d.pane_gone(id).unwrap();
-        assert_eq!(None, d.stopped);
-        assert!(d.panes.by_id(id).is_none());
-        assert_eq!(
-            vec![kept],
-            d.panes.list.iter().map(|p| p.id).collect::<Vec<_>>()
-        );
-        drop(d);
-        assert_eq!(
-            1,
-            requests_to_nvim(nvim_end).matches("neorex.close").count()
-        );
-    }
-
-    /// What the daemon wrote to Neovim.
-    fn requests_to_nvim(mut end: UnixStream) -> String {
-        let mut all = Vec::new();
-        end.read_to_end(&mut all).unwrap();
-        String::from_utf8_lossy(&all).into_owned()
+        let mut fx = fixture();
+        let id = made_picker_pane(&mut fx.d, 10, 5);
+        let kept = pane_in_block(&mut fx.d, 5, 0, 1);
+        fx.d.pane_gone(id).unwrap();
+        assert_eq!(None, fx.d.stopped);
+        assert_eq!(vec![kept], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        // only the floating pane's own request, from the setup: Rex closed it
+        assert_eq!(vec!["session.new_layer"], sent.rex_methods());
+        assert_eq!(1, sent.neorex_closes());
     }
 
     /// A ready daemon with panes in blocks for windows 1 and 2, only window 2
-    /// still drawn.
-    fn window_1_gone_from_two_panes() -> Fixture {
+    /// still drawn. Their pane ids.
+    fn window_1_gone_from_two_panes() -> (Fixture, [u32; 2]) {
         let mut fx = fixture();
         fx.d.nvim.ready = true;
-        pane_in_block(&mut fx.d, 1, 0, 1);
-        pane_in_block(&mut fx.d, 2, 0, 2);
+        let ids = [
+            pane_in_block(&mut fx.d, 1, 0, 1),
+            pane_in_block(&mut fx.d, 2, 0, 2),
+        ];
         fx.d.grids.wins.insert(
             12,
             Win {
@@ -3053,30 +3091,26 @@ mod tests {
                 float: Float::default(),
             },
         );
-        fx
+        (fx, ids)
     }
 
     #[test]
     fn after_a_flush_a_pane_whose_window_is_gone_is_removed_and_its_rex_pane_closed() {
-        let mut fx = window_1_gone_from_two_panes();
+        let (mut fx, [_, kept]) = window_1_gone_from_two_panes();
         fx.d.reconcile().unwrap();
         assert_eq!(None, fx.d.stopped);
-        assert!(fx.d.panes.by_win(1).is_none());
-        assert!(fx.d.panes.by_win(2).is_some());
-        assert_eq!(1, fx.d.panes.list.len());
-        let Fixture { d, mut rex_end, .. } = fx;
-        drop(d);
-        let mut all = Vec::new();
-        rex_end.read_to_end(&mut all).unwrap();
-        let frames = client_frames(&all);
-        assert_eq!(vec!["block.close"], methods_of(&frames));
-        assert_eq!(block_id(1), json_of(&frames[0])["payload"]["block_id"]);
+        assert_eq!(vec![kept], pane_ids(&fx.d));
+        let sent = sent_by(fx);
+        assert_eq!(vec!["block.close"], sent.rex_methods());
+        assert_eq!(block_id(1), sent.payload(0)["block_id"]);
+        // the window is already gone
+        assert_eq!(0, sent.neorex_closes());
     }
 
     #[test]
     fn after_a_flush_a_pane_whose_window_waits_to_reopen_stays() {
         for reopened in [false, true] {
-            let mut fx = window_1_gone_from_two_panes();
+            let (mut fx, ids) = window_1_gone_from_two_panes();
             fx.d.changes.mark_reopening(1);
             if reopened {
                 // window 7 took its pane and isn't drawn yet
@@ -3084,10 +3118,16 @@ mod tests {
             }
             fx.d.reconcile().unwrap();
             let waiting = if reopened { 7 } else { 1 };
-            assert!(fx.d.panes.by_win(waiting).is_some(), "reopened={reopened}");
-            assert_eq!(2, fx.d.panes.list.len());
+            assert_eq!(
+                Some(ids[0]),
+                fx.d.panes.by_win(waiting).map(|p| p.id),
+                "reopened={reopened}"
+            );
+            assert_eq!(ids.to_vec(), pane_ids(&fx.d));
             assert_eq!(None, fx.d.stopped);
-            assert!(sent_methods(fx).is_empty());
+            let sent = sent_by(fx);
+            assert!(sent.rex.is_empty(), "reopened={reopened}");
+            assert_eq!(0, sent.neorex_closes());
         }
     }
 
@@ -3099,5 +3139,8 @@ mod tests {
         fx.d.reconcile().unwrap();
         assert!(fx.d.panes.list.is_empty());
         assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        let sent = sent_by(fx);
+        assert_eq!(vec!["block.close"], sent.rex_methods());
+        assert_eq!(0, sent.neorex_closes());
     }
 }
