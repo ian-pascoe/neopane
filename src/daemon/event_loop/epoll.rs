@@ -17,6 +17,9 @@ use super::{Error, Event, Kind, Result};
 /// One more than the highest signal number.
 const SIGNALS: usize = 65;
 
+/// The epoll flags that say the other end is gone.
+const EOF: u32 = (libc::EPOLLRDHUP | libc::EPOLLHUP | libc::EPOLLERR) as u32;
+
 /// What an fd on the epoll stands for.
 #[derive(Clone, Copy)]
 struct Watch {
@@ -118,8 +121,8 @@ impl Backend {
         }
 
         match signals.fd {
-            // SAFETY: updates the mask of the signalfd made below.
             Some(fd) => {
+                // SAFETY: updates the mask of `fd`, the signalfd made earlier.
                 if unsafe { libc::signalfd(fd, &signals.mask, 0) } < 0 {
                     return Err(Error::WatchFailed);
                 }
@@ -129,21 +132,11 @@ impl Backend {
                 let fd = unsafe {
                     libc::signalfd(-1, &signals.mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK)
                 };
-                if fd < 0 {
-                    return Err(Error::WatchFailed);
-                }
-                if let Err(e) = self.watch(
-                    fd,
-                    Watch {
-                        kind: Kind::Signal,
-                        token: 0,
-                    },
-                ) {
-                    // SAFETY: `fd` was made above and nothing else has it.
-                    unsafe { libc::close(fd) };
-                    return Err(e);
-                }
-                signals.fd = Some(fd);
+                let watch = Watch {
+                    kind: Kind::Signal,
+                    token: 0,
+                };
+                signals.fd = Some(self.adopt(fd, watch)?);
             }
         }
         signals.tokens[n] = Some(token);
@@ -184,26 +177,18 @@ impl Backend {
                         libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
                     )
                 };
-                if fd < 0 {
-                    return Err(Error::WatchFailed);
-                }
-                if let Err(e) = self.watch(
-                    fd,
-                    Watch {
-                        kind: Kind::Timer,
-                        token,
-                    },
-                ) {
-                    // SAFETY: `fd` was made above and nothing else has it.
-                    unsafe { libc::close(fd) };
-                    return Err(e);
-                }
+                let watch = Watch {
+                    kind: Kind::Timer,
+                    token,
+                };
+                let fd = self.adopt(fd, watch)?;
                 self.timers.borrow_mut().insert(id, fd);
                 fd
             }
         };
 
         // a zero value would disarm the timer, so ask for a nanosecond
+        // SAFETY: an all-zero itimerspec is a valid value.
         let mut at: libc::itimerspec = unsafe { std::mem::zeroed() };
         at.it_value.tv_sec = (ms / 1000) as _;
         at.it_value.tv_nsec = ((ms % 1000) as libc::c_long) * 1_000_000;
@@ -293,28 +278,42 @@ impl Backend {
         })
     }
 
+    /// Puts the new signalfd or timerfd `fd` on the epoll, or closes it if it
+    /// can't be: `fd` is negative if making it failed.
+    fn adopt(&self, fd: RawFd, watch: Watch) -> Result<RawFd> {
+        if fd < 0 {
+            return Err(Error::CreateFailed);
+        }
+        if let Err(e) = self.watch(fd, watch) {
+            // SAFETY: `fd` was just made and nothing else has it.
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+        Ok(fd)
+    }
+
     /// Adds `fd` to the epoll for reading, or updates it if it's there.
     fn watch(&self, fd: RawFd, watch: Watch) -> Result<()> {
+        if self.watches.borrow().contains_key(&fd) {
+            // Already added, so the same file again or, if the fd was closed
+            // without `remove`, a stale watch under this number. Only the
+            // first is something this can undo: a watch on a closed fd that
+            // lives on in another copy is out of reach.
+            // SAFETY: the event is ignored for a delete; it may fail.
+            unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut()) };
+        }
         let mut event = libc::epoll_event {
             events: (libc::EPOLLIN | libc::EPOLLRDHUP) as u32,
             u64: fd as u64,
         };
         // SAFETY: `event` is valid.
-        let mut rc = unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_ADD, fd, &mut event) };
-        if rc < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
-            // SAFETY: as above.
-            rc = unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_MOD, fd, &mut event) };
-        }
-        if rc < 0 {
+        if unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_ADD, fd, &mut event) } < 0 {
             return Err(Error::WatchFailed);
         }
         self.watches.borrow_mut().insert(fd, watch);
         Ok(())
     }
 }
-
-/// The epoll flags that say the other end is gone.
-const EOF: u32 = (libc::EPOLLRDHUP | libc::EPOLLHUP | libc::EPOLLERR) as u32;
 
 /// Reads the timerfd's count, so it stops being readable. False if it had
 /// none: the timer was restarted since.

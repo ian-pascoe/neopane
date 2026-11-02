@@ -103,7 +103,10 @@ impl Loop {
         self.backend.add_read(fd, token)
     }
 
-    /// Stops watching `fd`. Not needed before closing it.
+    /// Stops watching `fd`. Call it before closing `fd`: kqueue drops a watch
+    /// when its fd closes, but epoll only when every copy of the open file
+    /// closes, and a watch left behind reports under the old token, or the
+    /// token of whatever gets the fd number next.
     pub fn remove(&self, fd: RawFd) -> Result<()> {
         self.backend.remove(fd)
     }
@@ -186,10 +189,12 @@ mod tests {
     /// process is dropped while it's ignored and the main thread, which
     /// isn't this one, doesn't block it.
     fn raise_for_loop(sig: libc::c_int) {
+        // SAFETY: raising a signal the caller has ignored and watches.
         #[cfg(target_os = "linux")]
         unsafe {
             libc::raise(sig)
         };
+        // SAFETY: as above, for the whole process.
         #[cfg(not(target_os = "linux"))]
         unsafe {
             libc::kill(libc::getpid(), sig)
@@ -365,12 +370,51 @@ mod tests {
         // SIGUSR2's old action ends the process: it must not arrive now
         loop_.deinit();
 
+        // SAFETY: a null new action only reads the current one.
         let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
         unsafe { libc::sigaction(libc::SIGUSR2, std::ptr::null(), &mut now) };
         assert_ne!(libc::SIG_IGN, now.sa_sigaction);
         // and the signal isn't left blocked on this thread
+        // SAFETY: a null set only reads this thread's mask.
         let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
         unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut blocked) };
+        // SAFETY: `blocked` was filled in above.
         assert_eq!(0, unsafe { libc::sigismember(&blocked, libc::SIGUSR2) });
+    }
+
+    // What a pane's terminal fd is: the helper and the shell hold copies, so
+    // the file outlives the daemon's close. A watch left on it would report
+    // under the fd number's next owner.
+    #[test]
+    fn a_removed_fd_stays_quiet_when_its_number_goes_to_another_file() {
+        let loop_ = Loop::init().unwrap();
+        let old = pipe().unwrap();
+        // SAFETY: duplicating an open fd, which keeps the file alive.
+        let other_copy = unsafe { libc::dup(old[0]) };
+        loop_.add_read(old[0], 1).unwrap();
+        loop_.remove(old[0]).unwrap();
+
+        // the new pipe's read end takes over the old number, closing it
+        let new = pipe().unwrap();
+        // SAFETY: both fds are open and ours.
+        assert_eq!(old[0], unsafe { libc::dup2(new[0], old[0]) });
+        close(new[0]);
+        loop_.add_read(old[0], 2).unwrap();
+
+        // into the old file, readable through `other_copy`; the timer ends the wait
+        write_x(old[1]);
+        loop_.add_timer(1, 100, 3).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert_eq!(
+            &[Event {
+                token: 3,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        for fd in [old[0], old[1], new[1], other_copy] {
+            close(fd);
+        }
     }
 }

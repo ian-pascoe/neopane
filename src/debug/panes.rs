@@ -46,7 +46,7 @@ fn serve(event_loop: &mut Loop, server: &UnixListener, socket_path: &Path) -> Re
                     return Ok(());
                 }
                 TOKEN_SERVER => pending_accept = true,
-                token => host.handle(token)?,
+                token => host.handle(event_loop, token)?,
             }
         }
         if pending_accept {
