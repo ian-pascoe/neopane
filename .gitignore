@@ -1,8 +1,5 @@
-# build output
-.zig-cache/
-zig-out/
-# dependencies Zig fetched (Ghostty's, for the golden tests)
-zig-pkg/
+# build output, and the Ghostty source scripts/golden.sh fetches
+/target/
 
 # editors and macOS
 .DS_Store
@@ -10,6 +7,4 @@ zig-pkg/
 *.swo
 *~
 
-# Rust build output
-/target/
 .worktrees/

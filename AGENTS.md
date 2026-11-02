@@ -1,18 +1,18 @@
 # neorex
 
-`neorex` in a Rex pane starts a background daemon (`src/daemon/serve.zig`) that runs one Neovim with external windows and shows each window in its own Rex pane. The layers:
+`neorex` in a Rex pane starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows and shows each window in its own Rex pane. The layers:
 
-- `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `neorex_*` notes. `src/nvim/windows.zig` parses those notes, and tests it against a real Neovim.
-- `src/daemon/` holds the daemon. After each Neovim flush, `Daemon.reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows, in its Rex floating pane, as the `neorex_layout` notes say (`TabPlacement`).
+- `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `neorex_*` notes. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
+- `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows, in its Rex floating pane, as the `neorex_layout` notes say (`TabPlacement`).
 - `src/screen/` draws grids into panes. `src/rex/` is the Rex WebSocket client. `src/term/` handles key input and the terminal.
 
-A new note is a change on both sides: `vim.rpcnotify` in `windows.lua`, and the parser in `windows.zig`.
+A new note is a change on both sides: `vim.rpcnotify` in `windows.lua`, and the parser in `windows.rs`.
 
 ## Verify
 
 - Run `just test` after every change. Tests that need Neovim skip when `nvim` isn't installed, so a pass without `nvim` proves less.
-- Run `just golden` after changing what gets drawn (`src/screen/`, `PaneView`). It checks every frame through Ghostty's emulator.
-- Run `just fmt` on Zig sources. `windows.lua` has no formatter config: keep its two-space hand formatting. If your edit tool reformats Lua, write the file from a shell command instead.
+- Run `just golden` after changing what gets drawn (`src/screen/`, `PaneView`). It checks every frame through Ghostty's emulator, which it builds with Zig 0.17.
+- Run `just fmt` and `just lint` on Rust sources. `windows.lua` has no formatter config: keep its two-space hand formatting. If your edit tool reformats Lua, write the file from a shell command instead.
 
 ## Running it live
 

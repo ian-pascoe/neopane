@@ -189,7 +189,7 @@ local function request_refit()
 end
 
 -- Most nodes a layout can have for the daemon to read, a row, a column or a
--- window each. The same as `Layout.max_nodes` in windows.zig.
+-- window each. The same as `Layout::MAX_NODES` in windows.rs.
 local MAX_LAYOUT_NODES = 63
 
 -- A floating tab page's `layout`: nested windows { win, w, h } and rows and

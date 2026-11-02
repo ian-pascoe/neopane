@@ -1,6 +1,6 @@
 # neorex
 
-A Rex-Native Neovim frontend built in Zig.
+A Rex-Native Neovim frontend built in Rust.
 
 One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
@@ -23,7 +23,8 @@ AI has been used heavily in building neorex due to limits on my available time. 
 - macOS (it uses kqueue)
 - [Rex](https://www.superlogical.com/rex)
 - A recent Neovim, 0.12 or later.
-- Zig 0.17 to build
+- Rust (stable, 2024 edition) to build
+- Zig 0.17, only for the golden tests: they build Ghostty
 
 ## Build and run
 
@@ -32,37 +33,37 @@ With [just](https://github.com/casey/just) (`just` lists the recipes):
 ```sh
 just build
 just test
-just golden   # also the golden tests; downloads Ghostty once
+just golden   # also the golden tests; downloads and builds Ghostty once
 ```
 
-or with Zig alone:
+or with Cargo alone:
 
 ```sh
-zig build
-zig build test
-zig build test -Dgolden
+cargo build
+cargo test
+scripts/golden.sh --test golden
 ```
 
 The golden tests check every frame neorex draws against
 [Ghostty](https://github.com/ghostty-org/ghostty)'s terminal emulator, pinned
-to one commit.
+to one commit. They're behind the `golden` feature, so a plain build never
+builds Ghostty.
 
 To install it, optimized, as `~/.local/bin/neorex`, with `nrex` linked to
 it as a shorthand:
 
 ```sh
 just install
-just prefix=/usr/local optimize=ReleaseFast install
+just prefix=/usr/local install
 ```
 
 It replaces the binary rather than writing over it, which on macOS gets a
-new build killed at launch. `zig build -Doptimize=ReleaseSafe --prefix ~/.local`
-does the same.
+new build killed at launch.
 
 Run it in a Rex pane, with any Neovim arguments:
 
 ```sh
-zig-out/bin/neorex some/file.txt
+target/debug/neorex some/file.txt
 ```
 
 Neovim starts with `g:neorex` set, before your config loads, so the config
@@ -128,8 +129,7 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 ## Plans
 
-Much of neorex will be split out into standalone Zig modules, and later into
-their own packages:
+Much of neorex will be split out into standalone crates:
 
 - a Neovim RPC client (msgpack, message framing, requests)
 - a Rex API client (WebSocket and the control protocol)

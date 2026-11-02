@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs the golden tests: the renderer's output through Ghostty's emulator.
-# Fetches Ghostty at the commit build.zig.zon pins into target/ghostty-<sha>/
-# once; building it needs Zig 0.17 (mise provides it). Extra arguments go to
+# Fetches Ghostty, pinned to one commit, into target/ghostty-<sha>/ once.
+# Building it needs Zig 0.17, on PATH or in $ZIG. Extra arguments go to
 # `cargo test`.
 set -e
 SHA=bf14ea1fbda2d069112003b80ec3b9186b7688f6

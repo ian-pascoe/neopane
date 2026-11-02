@@ -13,8 +13,8 @@ sha1_smol = "1"
 base64 = "0.22"
 indexmap = "2"
 # Ghostty's terminal emulator, for the golden tests only. Its build needs Zig
-# 0.17 and the Ghostty source at the commit build.zig.zon pins: run them with
-# scripts/golden.sh, which fetches it and sets GHOSTTY_SOURCE_DIR.
+# 0.17 and the Ghostty source at the commit scripts/golden.sh pins: run them
+# with that script, which fetches it and sets GHOSTTY_SOURCE_DIR.
 ghostty-vt = { version = "=0.8.0", optional = true, default-features = false }
 
 [features]
@@ -25,5 +25,5 @@ name = "golden"
 required-features = ["golden"]
 
 [profile.release]
-# like Zig's ReleaseSafe: integer overflow is caught
+# integer overflow panics in release builds too
 overflow-checks = true

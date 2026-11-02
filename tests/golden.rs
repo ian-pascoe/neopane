@@ -37,14 +37,14 @@ mod vt {
         BlockHollow,
     }
 
-    /// One cell, as `screen.pages.getCell` and its page give it.
+    /// One cell of the emulator's screen.
     #[derive(Debug, Clone)]
     pub struct CellInfo {
         /// The first codepoint, then the rest of the grapheme cluster. Empty
         /// for a cell with no text.
         pub text: Vec<char>,
         pub spacer_tail: bool,
-        /// Its look, or the error `termLook` returns (`PaletteColor`).
+        /// Its look, or `PaletteColor` for a palette colour, which the renderer never sends.
         pub look: std::result::Result<Look, &'static str>,
     }
 
