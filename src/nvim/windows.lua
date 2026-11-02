@@ -56,23 +56,51 @@ local making_anchor = false
 local sizes = {}
 -- statusline formats we've set, to tell them from ones the user set
 local ours = {}
+-- laststatus=3 was set, and is 2 while neorex runs: every pane shows the one
+-- statusline a global one would, the current window's
+local global = false
+-- windows whose statusline is that copy, not their own
+local mirrored = {}
+-- setting laststatus ourselves
+local rewriting = false
 
 local function local_stl(win)
   return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
 end
 
+local function has_statusline(win)
+  return vim.go.laststatus ~= 0 and local_stl(win) ~= ''
+end
+
+-- What a global statusline shows in `win`: the current window's own, which
+-- lualine's globalstatus keeps up to date. Nil if that's `win` itself, or the
+-- current window isn't a pane (a float, say), whose statusline we keep.
+local function global_line(win)
+  local cur = api.nvim_get_current_win()
+  if cur == win or not shown(cur) then return end
+  local stl = local_stl(cur)
+  if stl ~= '' then return stl end
+end
+
 -- external windows only show a local statusline: copy the global one
 local function give_statusline(win)
   local cur = local_stl(win)
-  if cur ~= '' and not ours[cur] then return end
-  local want = vim.o.laststatus == 0 and '' or vim.go.statusline
+  local line = global and global_line(win)
+  if line then
+    if cur ~= line then api.nvim_set_option_value('statusline', line, { win = win, scope = 'local' }) end
+    mirrored[win] = true
+    return
+  end
+  if cur ~= '' and not ours[cur] and not (global and mirrored[win]) then return end
+  local want = vim.go.laststatus == 0 and '' or vim.go.statusline
   if want ~= '' then ours[want] = true end
   if cur ~= want then api.nvim_set_option_value('statusline', want, { win = win, scope = 'local' }) end
 end
 
--- the text's height: what's left of the pane after the statusline
+-- the text's height: what's left of the pane after the statusline, if it has
+-- one
 local function text_height(win, h)
-  return math.max(h - (local_stl(win) ~= '' and 1 or 0), 1)
+  return math.max(h - (has_statusline(win) and 1 or 0), 1)
 end
 
 --- Sizes external `win` to fill `w` x `h`, statusline included.
@@ -257,11 +285,57 @@ api.nvim_create_autocmd({ 'SafeState', 'TabNew', 'TabClosed' }, {
   callback = function() vim.schedule(report_tabline) end,
 })
 
+-- Neovim draws no statusline in an external window when laststatus=3, but each
+-- pane is its own screen: show one in every pane with laststatus=2 instead.
+-- Returns whether it changed laststatus. Run from SafeState, as OptionSet
+-- doesn't fire for an option set in an autocommand, as LazyVim loads lualine.
+local function no_global_statusline()
+  if vim.go.laststatus ~= 3 then return false end
+  rewriting = true
+  vim.go.laststatus = 2
+  rewriting = false
+  global = true
+  return true
+end
+no_global_statusline()
+
 -- a statusline came, went or changed: fit the windows to their panes again
 api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = { 'statusline', 'laststatus' },
   callback = function() vim.schedule(refit) end,
+})
+
+-- laststatus set to something else: each pane's statusline is its own again
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'laststatus',
+  callback = function()
+    if rewriting or not global or vim.v.option_new == '3' then return end
+    global = false
+    for win in pairs(mirrored) do
+      if api.nvim_win_is_valid(win) then api.nvim_set_option_value('statusline', '', { win = win, scope = 'local' }) end
+    end
+    mirrored = {}
+  end,
+})
+
+-- the current window and its statusline, last time we looked
+local seen_line
+-- whenever Neovim waits for input: the statusline lualine writes for the
+-- current window in an autocommand fires no OptionSet either
+api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function()
+    local changed = no_global_statusline()
+    if global then
+      local cur = api.nvim_get_current_win()
+      local line = cur .. local_stl(cur)
+      changed = changed or line ~= seen_line
+      seen_line = line
+    end
+    if changed then vim.schedule(refit) end
+  end,
 })
 
 -- :q in the last window quits Neovim: make it the tab's only ordinary window

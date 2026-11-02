@@ -617,3 +617,109 @@ test "each window shows a statusline inside its pane" {
         }
     }.f));
 }
+
+/// Splits the current window of `h`, which is already set up, and adopts the new one as a
+/// 20 x 9 pane. Returns it.
+fn splitAndAdopt(h: *Harness) !i64 {
+    h.notes.clearRetainingCapacity();
+    try h.input(":vsplit<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const split = h.lastCurrent();
+    try adopt(&h.nvim, split, 20, 9);
+    try h.nvim.flush();
+    h.want = split;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external and gridHeight(x, x.want) == 9;
+        }
+    }.f));
+    return split;
+}
+
+test "laststatus=3 shows the statusline in every window's pane" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n", "--cmd", "set laststatus=3 statusline=GLOBAL" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+
+    // set before neorex started: Neovim alone would draw no statusline here
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "GLOBAL");
+        }
+    }.f));
+    const split = try splitAndAdopt(&h);
+    h.want = split;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.want, 8, "GLOBAL");
+        }
+    }.f));
+
+    // set after it started: the value changes from 2, so OptionSet fires
+    try h.input(":set laststatus=3 statusline=LATER<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "LATER") and rowStarts(x, x.want, 8, "LATER");
+        }
+    }.f));
+
+    // set in an autocommand, as LazyVim does for lualine: no OptionSet
+    try h.input(":set laststatus=2<CR>:autocmd User Later ++once set laststatus=3 statusline=INAUTO<CR>:doautocmd User Later<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "INAUTO") and rowStarts(x, x.want, 8, "INAUTO");
+        }
+    }.f));
+
+    // a global statusline plugin keeps only the current window's 'statusline'
+    // up to date: the other panes show that line too
+    try h.input(":setlocal statusline=CURRENT<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "CURRENT") and rowStarts(x, x.want, 8, "CURRENT");
+        }
+    }.f));
+    // and when another window is current, that one's
+    var cmd: [128]u8 = undefined;
+    try h.input(try std.fmt.bufPrint(&cmd, ":lua vim.api.nvim_set_current_win({d}); vim.wo.statusline = 'OTHER'<CR>", .{split}));
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.wins[0], 8, "OTHER") and rowStarts(x, x.want, 8, "OTHER");
+        }
+    }.f));
+}
+
+test "a window's own statusline leaves no blank row with laststatus=0" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and gridHeight(x, x.wins[0]) == 9;
+        }
+    }.f));
+
+    try h.input(":setlocal statusline=MINE | set laststatus=0<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "~");
+        }
+    }.f));
+}

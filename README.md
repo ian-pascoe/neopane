@@ -22,8 +22,7 @@ AI has been used heavily in building neorex due to limits on my available time. 
 
 - macOS (it uses kqueue)
 - [Rex](https://www.superlogical.com/rex)
-- A recent Neovim. It's developed against 0.13-dev; older versions may show
-  no statuslines.
+- A recent Neovim, 0.12 or later.
 - Zig 0.17 to build
 
 ## Build and run
@@ -90,8 +89,12 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   where a pane's window is.
 - No external command line or messages: long messages still show
   "Press ENTER".
-- No global statusline: with `laststatus=3`, each pane still shows its own
-  statusline.
+- No global statusline: neorex treats `laststatus=3` as `2`, so each pane
+  shows a statusline, the current window's: with lualine's
+  `globalstatus = true`, the same line in every pane. Set `globalstatus`
+  explicitly: lualine skips neorex's windows without it, and its default,
+  `vim.go.laststatus == 3`, is false once neorex has turned `laststatus=3`
+  into `2`.
 
 ## Plans
 
