@@ -441,6 +441,8 @@ enum Raw {
     UnknownSequence,
 }
 
+// Clone: `Forwarder::takes_focus` reads from a copy (the Zig copies the struct).
+#[derive(Clone)]
 pub struct Parser {
     state: State,
 
@@ -527,6 +529,12 @@ impl Parser {
         self.input.clear();
         self.pos = 0;
         rest
+    }
+
+    /// Whether the parser is between inputs: not partway through an escape
+    /// sequence or character (the Zig reads `parser.state == .ground`).
+    pub fn at_ground(&self) -> bool {
+        self.state == State::Ground
     }
 
     /// The next event from the fed bytes, or `None` when they are used up.
