@@ -2247,7 +2247,11 @@ mod tests {
         fx.rex_end.write_all(&server_frame(refusal)).unwrap();
         fx.d.on_rex().unwrap();
 
-        assert!(fx.d.panes.by_win(2).is_some());
+        let (first, second) = (
+            fx.d.panes.by_win(1).unwrap().id,
+            fx.d.panes.by_win(2).unwrap().id,
+        );
+        assert_eq!(vec![first, second], pane_ids(&fx.d));
         assert_eq!(
             vec!["session.new_layer", "session.new_layer"],
             sent_methods(fx)
@@ -2259,7 +2263,8 @@ mod tests {
         let mut fx = two_windows_of_a_tab_page();
         fx.d.new_pane(1).unwrap();
         fx.d.reconcile().unwrap();
-        assert!(fx.d.panes.by_win(2).is_none());
+        let first = fx.d.panes.by_win(1).unwrap().id;
+        assert_eq!(vec![first], pane_ids(&fx.d));
         assert_eq!(vec!["session.new_layer"], sent_methods(fx));
     }
 
@@ -2952,7 +2957,6 @@ mod tests {
         assert_eq!(2, p.tab);
         assert!(p.layer.is_none());
         let first = p.id;
-        // the second window waits for the floating pane
         assert_eq!(vec![first], pane_ids(&fx.d));
         let sent = sent_by(fx);
         assert_eq!(vec!["session.new_layer"], sent.rex_methods());
