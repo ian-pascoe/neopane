@@ -79,9 +79,19 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
   controls instead.
-- `<C-w>h/j/k/l`, and mappings built on them, move to the neighbouring pane
-  in Rex, and stay put at an edge. `:wincmd h` and `vim.cmd.wincmd` from a
-  plugin don't: they step through the panes like `<C-w>w`.
+- `<C-w>h/j/k/l` (also `<C-w><C-h>`, `<C-w><BS>` and `<C-w><Left>` and the like,
+  in Normal and Visual mode) move to the neighbouring pane in Rex, and stay
+  put at an edge. A count repeats the move, up to 20 times. Mappings that
+  remap them work, such as LazyVim's `<C-h>`; a `noremap` mapping to `<C-w>h`
+  (kickstart.nvim's) skips them, and so do `:wincmd h` and `vim.cmd.wincmd`
+  from a plugin: those step through the panes like `<C-w>w`. The move happens
+  after the keys typed with it: `<C-w>lZZ` in a mapping or macro runs `ZZ` in
+  the old window.
+  - Rex servers whose `session.focus_direction` has no `wrap` option wrap
+    around at an edge. Ones without the method do nothing for these keys,
+    and log the refusal.
+  - Rex looks at every pane in its window, so a move can enter an open
+    floating pane, such as a tab page's, and leave it.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
   placement they expect. A window such a plugin moves back into Neovim's own
   layout goes back to its pane. edgy.nvim works without turning it off:

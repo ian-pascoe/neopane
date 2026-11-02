@@ -424,20 +424,28 @@ api.nvim_create_autocmd('WinEnter', {
 
 -- <C-w>h/j/k/l: Neovim can't tell where the panes sit, so it lands on the
 -- hidden anchor, and we'd move on as if cycling. Rex knows: say which way and
--- let it move focus (nowhere at an edge); Neovim's current window follows. This
--- catches the keys and mappings built on them, not `:wincmd`. Not from a float,
--- which Neovim moves out of itself.
-for _, key in ipairs({ 'h', 'j', 'k', 'l' }) do
+-- let it move focus (nowhere at an edge); Neovim's current window follows. The
+-- maps catch the keys typed and mappings that remap them, in Normal and Visual
+-- mode; not a `noremap` mapping to <C-w>h, which skips them, nor `:wincmd`.
+-- Not from a float, which Neovim moves out of itself.
+local directions = {
+  h = { '<C-h>', '<BS>', '<Left>' },
+  j = { '<C-j>', '<Down>' },
+  k = { '<C-k>', '<Up>' },
+  l = { '<C-l>', '<Right>' },
+}
+for key, synonyms in pairs(directions) do
   local function move()
     local count = vim.v.count1
     if shown(api.nvim_get_current_win()) then
-      vim.rpcnotify(chan, 'neorex_direction', key, math.min(count, 20))
+      vim.rpcnotify(chan, 'neorex_direction', key, count)
     else
       vim.cmd(count .. 'wincmd ' .. key)
     end
   end
-  vim.keymap.set('n', '<C-w>' .. key, move, { desc = 'Go to the pane in that direction' })
-  vim.keymap.set('n', '<C-w><C-' .. key .. '>', move, { desc = 'Go to the pane in that direction' })
+  for _, k in ipairs({ key, unpack(synonyms) }) do
+    vim.keymap.set({ 'n', 'x' }, '<C-w>' .. k, move, { desc = 'Go to the pane in that direction' })
+  end
 end
 
 -- The tabline's rows on the screen, as last reported. The daemon draws them

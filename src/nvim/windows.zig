@@ -90,10 +90,10 @@ pub const Note = union(enum) {
     direction: Move,
 };
 
-/// Which way focus goes, as Rex names the directions.
+/// Which way a window command goes: `h`, `j`, `k` or `l`.
 pub const Direction = enum { left, down, up, right };
 
-/// A directional window command, `count` times.
+/// A directional window command, `count` times as typed.
 pub const Move = struct { dir: Direction, count: u32 };
 
 /// Where a new window sits in Neovim's layout.
@@ -207,6 +207,17 @@ const Harness = struct {
     gone: i64 = 0,
     /// Made-up reports so far, to know Neovim got that far.
     pings: i64 = 0,
+
+    /// Spawns a clean Neovim and boots it (`boot`). Skips the test without
+    /// `nvim`. `buf` is the Neovim connection's buffer.
+    fn start(h: *Harness, buf: []u8) !void {
+        h.* = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, buf) catch |err| switch (err) {
+            error.FileNotFound => return error.SkipZigTest,
+            else => return err,
+        } };
+        errdefer h.deinit();
+        try h.boot();
+    }
 
     fn deinit(h: *Harness) void {
         h.grids.deinit(testing.allocator);
@@ -670,25 +681,19 @@ fn expectNotes(h: *const Harness, want: []const Note) !void {
 
 test "<C-w>h/j/k/l send a direction and leave the current window, <C-w>w still cycles" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = undefined;
+    try h.start(&buf);
     defer h.deinit();
-    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
-    h.chan_id = try askChannel(&h.nvim);
-    try h.nvim.flush();
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
-        }
-    }.f));
     const first = h.wins[0];
     const split = try splitAndAdopt(&h);
 
     // Neovim can't tell where the panes sit: it only says which way
     h.notes.clearRetainingCapacity();
     try h.input("<C-w>l<C-w><C-k>3<C-w>j");
+    // the other spellings: <C-h> arrives as <BS> from a terminal
+    try h.input("<C-w><BS><C-w><Left><C-w><Down><C-w><Up><C-w><Right>");
+    // from Visual mode too
+    try h.input("v<C-w>h<Esc>");
     // a mapping built on them, as LazyVim's
     try h.input(":nmap <lt>C-h> <lt>C-w>h<CR><C-h>");
     try barrier(&h);
@@ -696,6 +701,12 @@ test "<C-w>h/j/k/l send a direction and leave the current window, <C-w>w still c
         .{ .direction = .{ .dir = .right, .count = 1 } },
         .{ .direction = .{ .dir = .up, .count = 1 } },
         .{ .direction = .{ .dir = .down, .count = 3 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+        .{ .direction = .{ .dir = .down, .count = 1 } },
+        .{ .direction = .{ .dir = .up, .count = 1 } },
+        .{ .direction = .{ .dir = .right, .count = 1 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
         .{ .direction = .{ .dir = .left, .count = 1 } },
     });
 
@@ -797,19 +808,9 @@ test "a new tab page's window is marked, and closing it closes the tab page" {
 
 test "<C-w>l sends a direction from a tab page's window too, but not from a float" {
     var buf: [1024]u8 = undefined;
-    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    } };
+    var h: Harness = undefined;
+    try h.start(&buf);
     defer h.deinit();
-    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
-    h.chan_id = try askChannel(&h.nvim);
-    try h.nvim.flush();
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
-        }
-    }.f));
 
     // a tab page's window shows in a Rex floating pane
     try h.input(":tabnew<CR>");
