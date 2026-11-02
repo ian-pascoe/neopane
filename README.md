@@ -79,6 +79,9 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
   controls instead.
+- `<C-w>h/j/k/l`, and mappings built on them, move to the neighbouring pane
+  in Rex, and stay put at an edge. `:wincmd h` and `vim.cmd.wincmd` from a
+  plugin don't: they step through the panes like `<C-w>w`.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
   placement they expect. A window such a plugin moves back into Neovim's own
   layout goes back to its pane. edgy.nvim works without turning it off:

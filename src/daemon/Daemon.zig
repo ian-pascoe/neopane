@@ -373,6 +373,7 @@ fn onNvim(self: *Daemon) !void {
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
                 .tabline => |rows| try self.onTabline(@intCast(std.math.clamp(rows, 0, 1))),
+                .direction => |move| try self.onDirection(move),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .reopened => |r| self.onReopened(r.old, r.new),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
@@ -420,6 +421,18 @@ fn onCurrent(self: *Daemon, win: i64) !void {
     try self.nvim.fitUiTo(p);
     try self.draw();
     try self.rex.focus(p.rex_block);
+}
+
+/// `<C-w>h/j/k/l`: Rex moves focus to the pane that way, if any. Its view
+/// brings the new focus back, and Neovim's current window follows.
+fn onDirection(self: *Daemon, move: windows.Move) !void {
+    const dir: RexSession.Direction = switch (move.dir) {
+        .left => .left,
+        .down => .down,
+        .up => .up,
+        .right => .right,
+    };
+    for (0..move.count) |_| try self.rex.focusDirection(dir);
 }
 
 /// A float became current: if it's in a floating pane, focus that.

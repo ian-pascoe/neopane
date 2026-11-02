@@ -422,6 +422,24 @@ api.nvim_create_autocmd('WinEnter', {
   end,
 })
 
+-- <C-w>h/j/k/l: Neovim can't tell where the panes sit, so it lands on the
+-- hidden anchor, and we'd move on as if cycling. Rex knows: say which way and
+-- let it move focus (nowhere at an edge); Neovim's current window follows. This
+-- catches the keys and mappings built on them, not `:wincmd`. Not from a float,
+-- which Neovim moves out of itself.
+for _, key in ipairs({ 'h', 'j', 'k', 'l' }) do
+  local function move()
+    local count = vim.v.count1
+    if shown(api.nvim_get_current_win()) then
+      vim.rpcnotify(chan, 'neorex_direction', key, math.min(count, 20))
+    else
+      vim.cmd(count .. 'wincmd ' .. key)
+    end
+  end
+  vim.keymap.set('n', '<C-w>' .. key, move, { desc = 'Go to the pane in that direction' })
+  vim.keymap.set('n', '<C-w><C-' .. key .. '>', move, { desc = 'Go to the pane in that direction' })
+end
+
 -- The tabline's rows on the screen, as last reported. The daemon draws them
 -- over the panes along the top of the Rex window.
 local tabline_rows

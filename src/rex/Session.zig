@@ -15,6 +15,7 @@ const Request = union(enum) {
     new_split: u32, // pane
     new_layer: u32, // pane
     focus_block,
+    focus_direction,
     view,
     disown_block,
     close_block,
@@ -123,6 +124,21 @@ pub fn focus(self: *Session, maybe_block: ?ids.Block) !void {
     }
 }
 
+/// Which way `focusDirection` moves; Rex's names.
+pub const Direction = enum { left, right, up, down };
+
+/// What `session.focus_direction` takes. Rex wraps around by default on some
+/// versions: an edge must leave focus where it is.
+fn focusDirectionPayload(session_id: []const u8, dir: Direction) struct { session_id: []const u8, direction: []const u8, wrap: bool } {
+    return .{ .session_id = session_id, .direction = @tagName(dir), .wrap = false };
+}
+
+/// Asks Rex to focus the nearest block `dir` of the focused one. At an edge
+/// nothing moves. The new focus comes back in the view, as the user's does.
+pub fn focusDirection(self: *Session, dir: Direction) !void {
+    try self.request(.focus_direction, "session.focus_direction", focusDirectionPayload(self.session_id, dir));
+}
+
 /// Rex has focused `maybe_block`, or will once our request lands.
 pub fn hasFocused(self: *const Session, maybe_block: ?ids.Block) bool {
     const focused_block = self.currentFocus() orelse return false;
@@ -175,7 +191,7 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .view => return try self.onViewResult(res.result),
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
-        .disown_block, .close_block, .close_layer => {},
+        .focus_direction, .disown_block, .close_block, .close_layer => {},
     }
     return null;
 }
@@ -375,4 +391,13 @@ pub fn logRequestError(req: Request, e: Client.Error) void {
 /// Rex said yes, in a shape we can't read.
 fn logUnexpectedResponse(req: Request, what: []const u8) void {
     std.debug.print("neorex daemon: Rex {s} answer has no {s}\n", .{ @tagName(req), what });
+}
+
+test "focus_direction asks not to wrap, in Rex's words" {
+    const gpa = std.testing.allocator;
+    const json = try std.json.Stringify.valueAlloc(gpa, focusDirectionPayload("session:s", .up), .{});
+    defer gpa.free(json);
+    try std.testing.expectEqualStrings(
+        \\{"session_id":"session:s","direction":"up","wrap":false}
+    , json);
 }
