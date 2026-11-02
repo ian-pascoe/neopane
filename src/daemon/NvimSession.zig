@@ -67,14 +67,14 @@ pub fn switchToFloat(self: *NvimSession, gpa: std.mem.Allocator, pane: u32, win:
 }
 
 /// Sends `bytes`, typed into pane `pane`, to Neovim after the window
-/// switches before it. `panes.forwarderToFeed(pane)` finds the pane's `Forwarder`.
+/// switches before it. `panes.aimForwarder(pane)` finds the pane's `Forwarder`.
 pub fn typeInto(self: *NvimSession, gpa: std.mem.Allocator, panes: anytype, pane: u32, bytes: []const u8) !void {
-    try self.gate.send(gpa, self.client, pane, panes, bytes);
+    try self.gate.send(gpa, self.client, panes, pane, bytes);
 }
 
 /// Neovim answered a request: ours may let held input go on.
 pub fn answered(self: *NvimSession, gpa: std.mem.Allocator, panes: anytype, res: rpc.Message.Response) !void {
-    try self.gate.answered(gpa, self.client, res, panes);
+    try self.gate.answered(gpa, self.client, panes, res);
 }
 
 /// The window switch Neovim hasn't answered yet, if any. Until it does,
@@ -166,7 +166,7 @@ const Rig = struct {
 
     const gpa = testing.allocator;
 
-    pub fn forwarderToFeed(r: *Rig, id: u32) ?*Forwarder {
+    pub fn aimForwarder(r: *Rig, id: u32) ?*Forwarder {
         return if (id < r.fwds.len) &r.fwds[id] else null;
     }
 
@@ -205,31 +205,45 @@ const Rig = struct {
         blocking: bool = false,
     };
 
-    /// Reads until `id` is answered, giving every answer to the session.
+    /// Reads what Neovim has sent, giving every answer to the session.
+    /// Returns the reply to `id`, if it's among them.
+    fn step(r: *Rig, id: ?u32) !?Reply {
+        var fds = [_]std.c.pollfd{.{ .fd = r.nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
+        if (std.c.poll(&fds, 1, 3000) <= 0) return error.TestTimedOut;
+        if (!try r.nvim.read(gpa)) return error.NvimExited;
+        var reply: ?Reply = null;
+        while (try r.nvim.next()) |msg| switch (msg) {
+            .response => |res| {
+                try r.session.answered(gpa, r, res);
+                if (res.id != id) continue;
+                var str = res.result;
+                var map = res.result;
+                reply = .{
+                    .text = if (rpc.expectStr(&str)) |s| try gpa.dupe(u8, s) else |_| null,
+                    .blocking = FocusGate.isBlocking(&map) catch false,
+                };
+            },
+            .request => |req| try r.nvim.respondError(req.id, "test"),
+            .notification => {},
+        };
+        return reply;
+    }
+
+    /// Reads until `id` is answered.
     fn wait(r: *Rig, id: u32) !Reply {
-        for (0..200) |_| {
-            var fds = [_]std.c.pollfd{.{ .fd = r.nvim.readFd(), .events = std.c.POLL.IN, .revents = 0 }};
-            if (std.c.poll(&fds, 1, 3000) <= 0) return error.TestTimedOut;
-            if (!try r.nvim.read(gpa)) return error.NvimExited;
-            var reply: ?Reply = null;
-            while (try r.nvim.next()) |msg| switch (msg) {
-                .response => |res| {
-                    // a failed switch is the point of a test, any other failure isn't
-                    try r.session.answered(gpa, r, res);
-                    if (res.id != id) continue;
-                    var str = res.result;
-                    var map = res.result;
-                    reply = .{
-                        .text = if (rpc.expectStr(&str)) |s| try gpa.dupe(u8, s) else |_| null,
-                        .blocking = FocusGate.isBlocking(&map) catch false,
-                    };
-                },
-                .request => |req| try r.nvim.respondError(req.id, "test"),
-                .notification => {},
-            };
-            if (reply) |found| return found;
-        }
+        for (0..200) |_| if (try r.step(id)) |reply| return reply;
         return error.TestTimedOut;
+    }
+
+    /// The timer, as the Daemon has it, firing for the switch in flight.
+    fn tick(r: *Rig) !void {
+        _ = r.session.watchSwitch();
+        _ = try r.session.recheckSwitch();
+    }
+
+    /// Reads until the probe asked, if any, is answered.
+    fn probeAnswered(r: *Rig) !void {
+        if (r.session.gate.probe) |id| _ = try r.wait(id);
     }
 
     /// Runs Lua and returns the string it returns.
@@ -250,6 +264,20 @@ const Rig = struct {
         const id = try r.nvim.request("nvim_get_mode", 0);
         try r.nvim.flush();
         return (try r.wait(id)).blocking;
+    }
+
+    /// A tick's worth of time, for Neovim to read what it was sent.
+    fn pause(_: *Rig) !void {
+        try std.Io.sleep(testing.io, .fromMilliseconds(100), .awake);
+    }
+
+    /// Reads until Neovim is waiting for a key.
+    fn untilBlocking(r: *Rig) !void {
+        for (0..500) |_| {
+            if (try r.blocking()) return;
+            std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
+        }
+        return error.NeverBlocked;
     }
 
     /// The text of the windows' buffers, as `first|second`, after all that was typed.
@@ -339,10 +367,14 @@ test "a command waiting for a key gets one, then the switch happens" {
     defer r.deinit();
     // `f` waits for a character, and Neovim answers no switch until it has one
     try r.session.typeInto(Rig.gpa, &r, 1, "f");
-    while (!try r.blocking()) {}
+    try r.untilBlocking();
     try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
     try r.session.typeInto(Rig.gpa, &r, 0, "x");
     try r.session.typeInto(Rig.gpa, &r, 0, "x");
+    // nothing asks the moment the switch is sent, which a key sent just before may not have been read for
+    try testing.expectEqual(@as(?u32, null), r.session.gate.probe);
+    try r.tick();
+    try r.probeAnswered();
     try r.expectTexts("ne|two");
     // the first `x` finished the `f` in the window it was in; the second
     // went to the window switched to
@@ -355,12 +387,14 @@ test "a key typed after a later switch can finish the command that stops it" {
     try r.start();
     defer r.deinit();
     try r.session.typeInto(Rig.gpa, &r, 1, "f");
-    while (!try r.blocking()) {}
+    try r.untilBlocking();
     // two switches, and the only key typed is after the second
     try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
     try r.session.makeCurrent(Rig.gpa, 1, r.wins[1]);
     try r.session.typeInto(Rig.gpa, &r, 1, "x");
     try r.session.typeInto(Rig.gpa, &r, 1, "x");
+    try r.tick();
+    try r.probeAnswered();
     try r.expectTexts("one|wo");
     try r.expectNothingHeld();
     try testing.expectEqual(r.wins[1], try r.currentWin());
@@ -374,36 +408,56 @@ test "a busy Neovim keeps the keys held, however often it's checked" {
     try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
     try r.session.typeInto(Rig.gpa, &r, 0, "x");
     // the timer fires, twice, before Neovim answers anything
-    try testing.expect(r.session.watchSwitch());
+    try r.tick();
+    const probe = r.session.gate.probe.?;
     try testing.expect(try r.session.recheckSwitch());
-    try testing.expect(try r.session.recheckSwitch());
+    try testing.expectEqual(@as(?u32, probe), r.session.gate.probe);
     try testing.expectEqual(@as(usize, 1), r.session.gate.queue.items.len);
     try r.expectTexts("ne|two");
 }
 
-test "a command that needs two keys gets them, one probe at a time" {
+test "a command that needs two keys gets them, one tick apart" {
     var r: Rig = undefined;
     try r.start();
     defer r.deinit();
-    // Ctrl-W g waits for another character, after the one it waits for first
+    // Ctrl-W waits for a character, and then `g` for another
     try r.session.typeInto(Rig.gpa, &r, 1, "\x17");
-    while (!try r.blocking()) {}
+    try r.untilBlocking();
     try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
     try r.session.typeInto(Rig.gpa, &r, 0, "g");
     try r.session.typeInto(Rig.gpa, &r, 0, "z");
     try r.session.typeInto(Rig.gpa, &r, 0, "x");
-    // the first probe finds it waiting, and `g` goes; the key after it
-    // waits until the timer has the next probe ask
-    _ = try r.wait(r.session.gate.probe.?);
-    try testing.expect(r.session.watchSwitch());
-    for (0..100) |_| {
-        if (r.session.switchInFlight() == null) break;
-        try testing.expect(try r.session.recheckSwitch());
-        if (r.session.gate.probe) |id| _ = try r.wait(id) else _ = try r.blocking();
-    }
+    try r.tick();
+    try r.probeAnswered();
+    // `g` went. A key just went through: Neovim may not have read it when
+    // it's asked, so the next tick doesn't ask, and the one after does
+    try r.pause();
+    try testing.expect(try r.session.recheckSwitch());
+    try testing.expectEqual(@as(?u32, null), r.session.gate.probe);
+    try testing.expect(try r.session.recheckSwitch());
+    try testing.expect(r.session.gate.probe != null);
+    try r.probeAnswered();
+    // `z` finished it, and `x` waited for the switch
     try r.expectTexts("ne|two");
     try r.expectNothingHeld();
     try testing.expectEqual(r.wins[0], try r.currentWin());
+}
+
+test "an Escape after the key that's let through isn't lost, nor joined to the next key" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try r.session.typeInto(Rig.gpa, &r, 1, "f");
+    try r.untilBlocking();
+    try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
+    // two Escapes in one read; the first ends the `f`
+    try r.session.typeInto(Rig.gpa, &r, 0, "\x1b\x1b");
+    try r.session.typeInto(Rig.gpa, &r, 0, "x");
+    try r.tick();
+    try r.probeAnswered();
+    // the second Escape went with the rest, so `x` isn't Alt-x
+    try r.expectTexts("ne|two");
+    try r.expectNothingHeld();
 }
 
 test "the timer watches each switch once, and does nothing for one that's done" {
@@ -453,7 +507,30 @@ test "a switch that fails drops its pane's keys, not another pane's, and focus i
     try testing.expectEqual(@as(?bool, true), r.fwds[0].focused);
 }
 
-test "focus reports don't wait for a switch" {
+test "dropping input that ends a paste ends it in Neovim" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    const set = try r.lua(
+        \\_G.phases = {}
+        \\vim.paste = function(_, phase)
+        \\  table.insert(_G.phases, phase)
+        \\  return true
+        \\end
+        \\return 'ok'
+    );
+    Rig.gpa.free(set);
+    // a paste begun, then a switch that fails, and the paste's end behind it
+    try r.session.typeInto(Rig.gpa, &r, 0, "\x1b[200~ab");
+    try r.session.makeCurrent(Rig.gpa, 0, 9999);
+    try r.session.typeInto(Rig.gpa, &r, 0, "\x1b[201~");
+    try r.settle();
+    const phases = try r.lua("return table.concat(_G.phases, ',')");
+    defer Rig.gpa.free(phases);
+    try testing.expectEqualStrings("1,3", phases);
+}
+
+test "focus reports don't wait for a switch, unless the parser is partway through one" {
     var r: Rig = undefined;
     try r.start();
     defer r.deinit();
@@ -461,5 +538,13 @@ test "focus reports don't wait for a switch" {
     try r.session.typeInto(Rig.gpa, &r, 1, "\x1b[O");
     try testing.expectEqual(@as(?bool, false), r.fwds[1].focused);
     try testing.expectEqual(@as(usize, 0), r.session.gate.queue.items.len);
+
+    // partway through a sequence, a report would be read as part of it
+    r.fwds[0].parser.state = .csi;
+    try r.session.typeInto(Rig.gpa, &r, 0, "\x1b[I");
+    try testing.expectEqual(@as(usize, 1), r.session.gate.queue.items.len);
+    try testing.expectEqual(@as(?bool, null), r.fwds[0].focused);
+    r.fwds[0].parser.state = .ground;
     try r.settle();
+    try testing.expectEqual(@as(?bool, true), r.fwds[0].focused);
 }

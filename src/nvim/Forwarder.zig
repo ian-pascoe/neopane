@@ -70,38 +70,46 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
     return (try self.read(nvim, bytes, false)).more;
 }
 
-/// What `feedKey` read of its bytes.
-pub const KeyFed = struct {
-    /// How many bytes, up to the end of the key it sent if it did.
-    read: usize,
-    sent_key: bool,
-};
-
 /// Like `feed`, but stops after the first key: what follows it is left for
 /// a later `feed`. Doesn't quit.
-pub fn feedKey(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !KeyFed {
-    const fed = try self.read(nvim, bytes, true);
-    return .{ .read = fed.read, .sent_key = fed.sent_key };
+pub fn feedKey(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !Fed {
+    return self.read(nvim, bytes, true);
 }
 
 /// Reads `bytes` as `feed` does, but sends nothing: for input whose window
-/// is gone. Keeps what the forwarder remembers of the input, such as focus.
-pub fn discard(self: *Forwarder, bytes: []const u8) void {
+/// is gone. Keeps what the forwarder remembers of the input, such as focus,
+/// and closes a paste that was begun.
+pub fn discard(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !void {
     self.parser.feed(bytes);
     while (self.parser.next()) |event| switch (event) {
         .focus => |focused| self.focused = focused,
         .paste_start => self.paste_phase = 1,
+        .paste_end => if (self.paste_phase == 2) try paste(nvim, "", 3),
         else => {},
     };
+    try nvim.flush();
 }
 
-const Read = struct { more: bool, read: usize, sent_key: bool };
+/// Whether the parser is between inputs, not partway through an escape
+/// sequence or character.
+pub fn atBoundary(self: *const Forwarder) bool {
+    return self.parser.state == .ground;
+}
 
-fn read(self: *Forwarder, nvim: *Nvim, bytes: []const u8, one_key: bool) !Read {
+/// What `feed` and `feedKey` did.
+pub const Fed = struct {
+    /// False if the user quit.
+    more: bool,
+    /// How many bytes were read: all, unless `feedKey` stopped after a key.
+    read: usize,
+    sent_key: bool,
+};
+
+fn read(self: *Forwarder, nvim: *Nvim, bytes: []const u8, one_key: bool) !Fed {
     // keys from one read go in one nvim_input
     var keys_buf: [4096]u8 = undefined;
     var keys: Writer = .fixed(&keys_buf);
-    var result: Read = .{ .more = true, .read = bytes.len, .sent_key = false };
+    var result: Fed = .{ .more = true, .read = bytes.len, .sent_key = false };
     self.parser.feed(bytes);
     events: while (self.parser.next()) |event| switch (event) {
         .key => |k| {

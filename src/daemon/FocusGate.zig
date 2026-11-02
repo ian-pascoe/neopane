@@ -8,10 +8,16 @@
 //!
 //! - Focus reports never wait: they only tell us what the terminal has.
 //! - Neovim can't make a switch while it waits for a key to finish a
-//!   command, such as after `f`, or in `getchar()`; holding every key would
-//!   wait for a key that never comes. So when a probe finds Neovim waiting,
-//!   the first key held goes through, wherever it was typed, to finish the
-//!   command. The rest stay held, and the switch follows.
+//!   command, such as after `f`; holding every key would wait for a key
+//!   that never comes. `probeAgain`, called on a timer, asks
+//!   whether Neovim waits; if it does, the first key held goes through,
+//!   wherever it was typed, to finish the command. The rest stay held, and
+//!   the switch follows.
+//!
+//! An answer to that ask is only good if no key went to Neovim since it was
+//! asked, and Neovim may not have read a key that went just before: so no
+//! ask is made on the tick after a key went through, and a key going through
+//! voids the ask outstanding. A busy Neovim answers none, and no key leaves.
 //!
 //! A switch that fails, such as for a window that closed first, drops the
 //! input typed into its pane behind it.
@@ -28,17 +34,21 @@ const windows = @import("../nvim/windows.zig");
 
 const FocusGate = @This();
 
-/// The switch in flight: asked for, not yet answered, and its pane.
-pending: ?u32 = null,
-pending_pane: u32 = 0,
-/// Our `nvim_get_mode` asked beside it, which Neovim answers when it's
-/// waiting for a key, but not when it's busy.
+/// The switch in flight: asked for, not yet answered.
+pending: ?Switch = null,
+/// Our `nvim_get_mode` asked for it, which Neovim answers when it's waiting
+/// for a key, but not when it's busy.
 probe: ?u32 = null,
 /// The last probe found Neovim waiting for a key, and no key has gone since.
 blocked: bool = false,
+/// A key went through since the last tick, so a probe now may not see it read.
+settling: bool = false,
 /// What waits for the switch in flight, in the order it came. Never
 /// nonempty without `pending`.
 queue: std.ArrayList(Item) = .empty,
+
+/// A request, and the pane whose window it makes current.
+const Switch = struct { req: u32, pane: u32 };
 
 const Item = union(enum) {
     switch_to: struct { win: i64, pane: u32 },
@@ -52,9 +62,9 @@ pub fn deinit(self: *FocusGate, gpa: Allocator) void {
     self.* = undefined;
 }
 
-/// The switch in flight, if any.
+/// The request of the switch in flight, if any.
 pub fn inFlight(self: *const FocusGate) ?u32 {
-    return self.pending;
+    return if (self.pending) |p| p.req else null;
 }
 
 /// Asks Neovim to make `win`, the window of `pane`, current once the
@@ -65,11 +75,18 @@ pub fn switchTo(self: *FocusGate, gpa: Allocator, nvim: *Nvim, win: i64, pane: u
 }
 
 /// Sends `bytes`, typed into `pane`, through the forwarder
-/// `panes.forwarderToFeed(pane)` finds, once the switches asked for so far
+/// `panes.aimForwarder(pane)` finds, once the switches asked for so far
 /// are made. Dropped if it finds none.
-pub fn send(self: *FocusGate, gpa: Allocator, nvim: *Nvim, pane: u32, panes: anytype, bytes: []const u8) !void {
-    if (self.pending == null or input.onlyFocusReports(bytes)) {
-        const fwd = panes.forwarderToFeed(pane) orelse return;
+pub fn send(self: *FocusGate, gpa: Allocator, nvim: *Nvim, panes: anytype, pane: u32, bytes: []const u8) !void {
+    if (self.pending != null and input.onlyFocusReports(bytes)) {
+        // no wait, unless the parser is partway through something
+        const fwd = panes.aimForwarder(pane) orelse return;
+        if (fwd.atBoundary()) {
+            _ = try fwd.feed(nvim, bytes);
+            return;
+        }
+    } else if (self.pending == null) {
+        const fwd = panes.aimForwarder(pane) orelse return;
         _ = try fwd.feed(nvim, bytes);
         return;
     }
@@ -83,7 +100,7 @@ pub fn send(self: *FocusGate, gpa: Allocator, nvim: *Nvim, pane: u32, panes: any
 
 /// Neovim answered a request: if it was ours, goes on with what waited for
 /// it. `panes` is as for `send`.
-pub fn answered(self: *FocusGate, gpa: Allocator, nvim: *Nvim, res: rpc.Message.Response, panes: anytype) !void {
+pub fn answered(self: *FocusGate, gpa: Allocator, nvim: *Nvim, panes: anytype, res: rpc.Message.Response) !void {
     if (self.probe == res.id) {
         self.probe = null;
         var result = res.result;
@@ -93,39 +110,46 @@ pub fn answered(self: *FocusGate, gpa: Allocator, nvim: *Nvim, res: rpc.Message.
         }
         return;
     }
-    if (self.pending != res.id) return;
+    const switching = self.pending orelse return;
+    if (switching.req != res.id) return;
     const failed = res.err != null;
-    const pane = self.pending_pane;
     self.probe = null;
     self.blocked = false;
+    self.settling = false;
     // `pending` stays until the queue is through, so a failed write leaves
     // input held, never ahead of what's queued
     while (self.queue.items.len > 0) switch (self.queue.orderedRemove(0)) {
         .switch_to => |s| return self.start(nvim, s.win, s.pane),
         .input => |in| {
             defer gpa.free(in.bytes);
-            const fwd = panes.forwarderToFeed(in.pane) orelse continue;
+            const fwd = panes.aimForwarder(in.pane) orelse continue;
             const rest = in.bytes[in.read..];
-            if (failed and in.pane == pane) fwd.discard(rest) else _ = try fwd.feed(nvim, rest);
+            if (failed and in.pane == switching.pane) try fwd.discard(nvim, rest) else _ = try fwd.feed(nvim, rest);
         },
     };
     self.pending = null;
 }
 
-/// Asks again whether Neovim is waiting for a key, if the switch in flight
-/// is unanswered and no ask is: a busy Neovim answers none until it's done.
+/// For the timer: asks whether Neovim is waiting for a key, if the switch
+/// in flight is unanswered and no ask is out. Not right after a key went
+/// through, see above.
 pub fn probeAgain(self: *FocusGate, nvim: *Nvim) !void {
     if (self.pending == null or self.probe != null or self.blocked) return;
+    if (self.settling) {
+        self.settling = false;
+        return;
+    }
     self.probe = try nvim.request("nvim_get_mode", 0);
     try nvim.flush();
 }
 
-/// Asks for `win` as the switch in flight.
+/// Asks for `win` as the switch in flight. No ask yet whether Neovim waits:
+/// a key sent just before may not be read, which would show as waiting.
 fn start(self: *FocusGate, nvim: *Nvim, win: i64, pane: u32) !void {
-    self.pending = try windows.setCurrent(nvim, win);
-    self.pending_pane = pane;
-    self.probe = try nvim.request("nvim_get_mode", 0);
+    self.pending = .{ .req = try windows.setCurrent(nvim, win), .pane = pane };
+    self.probe = null;
     self.blocked = false;
+    self.settling = false;
     try nvim.flush();
 }
 
@@ -139,7 +163,7 @@ fn release(self: *FocusGate, gpa: Allocator, nvim: *Nvim, panes: anytype) !void 
             continue;
         }
         const in = &self.queue.items[i].input;
-        const fwd = panes.forwarderToFeed(in.pane) orelse {
+        const fwd = panes.aimForwarder(in.pane) orelse {
             gpa.free(in.bytes);
             _ = self.queue.orderedRemove(i);
             continue;
@@ -151,7 +175,9 @@ fn release(self: *FocusGate, gpa: Allocator, nvim: *Nvim, panes: anytype) !void 
             _ = self.queue.orderedRemove(i);
         }
         if (fed.sent_key) {
+            self.probe = null;
             self.blocked = false;
+            self.settling = true;
             return;
         }
     }

@@ -67,7 +67,7 @@ const focus_out_delay_ms = 80;
 
 /// How often a window switch still unanswered is checked for waiting behind
 /// a command that needs a key.
-const switch_recheck_ms = 250;
+const switch_recheck_ms = 100;
 
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
@@ -274,9 +274,9 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     try self.nvim.typeInto(self.gpa, self, pane.id, bytes);
 }
 
-/// Pane `id`'s forwarder, aimed at the grid of its window, for input to
-/// feed; null once it's gone. Is `NvimSession.typeInto`'s `panes`.
-pub fn forwarderToFeed(self: *Daemon, id: u32) ?*Forwarder {
+/// Pane `id`'s forwarder, aimed at the grid of its window; null once the
+/// pane is gone. Is `NvimSession.typeInto`'s `panes`.
+pub fn aimForwarder(self: *Daemon, id: u32) ?*Forwarder {
     const pane = self.panes.byId(id) orelse return null;
     const surface = pane.terminal_surface orelse return null;
     // a floating pane's default grid is set as it draws
