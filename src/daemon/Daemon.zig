@@ -809,9 +809,8 @@ fn draw(self: *Daemon) !void {
         const p = &self.panes.list.items[i];
         const s = p.terminal_surface orelse continue;
         var tabline_buf: [256]Grid.Cell = undefined;
-        const tabline = if (self.tablineRowsOf(p) > 0) if (screen) |g| tablineSlice(g, self.paneOrigin(p)[1], s.view.cols, &tabline_buf) else null else null;
-        s.forwarder.tabline_rows = if (tabline != null) 1 else 0;
-        s.forwarder.tabline_col = @intCast(std.math.clamp(self.paneOrigin(p)[1], 0, std.math.maxInt(u16)));
+        // a pane that closes in this loop leaves the panes drawn before it, to its right, on their old columns for this frame: the next draw finds their start moved and redraws the row
+        const tabline = self.prepareTabline(p, screen, &tabline_buf);
         // a floating pane waiting on its refit shows nothing yet
         if (p.layer != null and !p.layerShown()) continue;
         const drawn = if (p.layer) |*l| blk: {
@@ -823,7 +822,8 @@ fn draw(self: *Daemon) !void {
             .focused = p == focused,
             .origin = self.paneOrigin(p),
             .skip = skip_buf[0..skip_n],
-            .tabline = tabline,
+            .tabline = tabline.cells,
+            .tabline_col = tabline.col,
             .tabline_dirty = tabline_dirty,
         }, &s.terminal.writer) catch false;
         setTargets(&s.forwarder, s.view.drawnFloats());
@@ -847,9 +847,9 @@ fn draw(self: *Daemon) !void {
 
 /// Grid 1's top row from column `col`, `cols` wide, in `buf`. A wide
 /// character cut at the left edge leaves a blank.
-fn tablineSlice(screen: *const Grid, col: i32, cols: u32, buf: []Grid.Cell) []const Grid.Cell {
+fn tablineSlice(screen: *const Grid, col: u32, cols: u32, buf: []Grid.Cell) []const Grid.Cell {
     const row = screen.row(0);
-    const from: usize = @intCast(std.math.clamp(col, 0, @as(i32, @intCast(row.len))));
+    const from = @min(col, row.len);
     const n = @min(row.len - from, cols, buf.len);
     @memcpy(buf[0..n], row[from..][0..n]);
     if (n > 0 and buf[0].len == 0) buf[0] = .{ .hl = buf[0].hl };
@@ -915,9 +915,57 @@ fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
 
 /// The tabline's rows over pane `p`: those of a window's pane along the top
 /// of the Rex window, which shows its share of the screen's tabline.
+/// A pane Rex hasn't placed yet counts only while none has been: it would
+/// otherwise take the top left from the panes already there, until the
+/// layout arrives. Without Rex's layout at all, the one pane is the window.
 fn tablineRowsOf(self: *const Daemon, p: *const Pane) u32 {
     if (self.tabline_rows == 0 or p.layer != null or p.tab != 0) return 0;
+    if (p.rect == null) for (self.panes.list.items) |q| if (q.rect != null) return 0;
     return if (self.paneOrigin(p)[0] == 0) self.tabline_rows else 0;
+}
+
+/// Whether pane `p` draws part of the screen's tabline. It needs its
+/// terminal: its width is what the panes right of it start after, and
+/// without one it draws nothing.
+fn showsTabline(self: *const Daemon, p: *const Pane) bool {
+    return p.terminal_surface != null and self.tablineRowsOf(p) > 0;
+}
+
+/// The column of the screen's tabline pane `p` starts at, if it shows any.
+/// The panes along the top that show it lay it out left to right from
+/// column 0, whatever else is in the Rex window, so each tab shows in
+/// exactly one of them. Panes at the same column go in list order.
+/// A pane closing in the middle of `draw` leaves the panes drawn before it
+/// on their old columns for that frame; the next draw sees their start
+/// move and `PaneView` redraws the row.
+fn tablineStart(self: *const Daemon, p: *const Pane) ?u32 {
+    if (!self.showsTabline(p)) return null;
+    const mine = self.paneOrigin(p)[1];
+    var col: u32 = 0;
+    var listed_before = true;
+    for (self.panes.list.items) |*q| {
+        if (q == p) {
+            listed_before = false;
+            continue;
+        }
+        if (!self.showsTabline(q)) continue;
+        const theirs = self.paneOrigin(q)[1];
+        if (theirs < mine or (theirs == mine and listed_before)) col += q.terminal_surface.?.view.cols;
+    }
+    return col;
+}
+
+/// What pane `p` draws of the screen's tabline: its slice of `screen`'s top
+/// row, in `buf`, and the column it starts at. Also points the pane's
+/// mouse events on that row at the same cells.
+fn prepareTabline(self: *const Daemon, p: *const Pane, screen: ?*const Grid, buf: []Grid.Cell) struct { cells: ?[]const Grid.Cell, col: u32 } {
+    const s = p.terminal_surface orelse return .{ .cells = null, .col = 0 };
+    const found = self.tablineStart(p);
+    const col = found orelse 0;
+    const cells = if (found != null) if (screen) |g| tablineSlice(g, col, s.view.cols, buf) else null else null;
+    s.forwarder.tabline_rows = if (cells != null) 1 else 0;
+    s.forwarder.tabline_col = @intCast(@min(col, std.math.maxInt(u16)));
+    return .{ .cells = cells, .col = col };
 }
 
 /// The tabline came or went: the panes under it fit their windows again.
@@ -927,4 +975,112 @@ fn onTabline(self: *Daemon, rows: u32) !void {
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.nvim.client.flush();
     try self.draw();
+}
+
+/// A daemon with a 200 x 50 screen and the tabline on, and panes to place.
+/// Only its panes and grids are set up: the rest of it is undefined.
+const TablineFixture = struct {
+    d: Daemon,
+    surfaces: [4]Surface = undefined,
+
+    fn init(self: *TablineFixture) !void {
+        self.d = .{ .gpa = std.testing.allocator, .io = undefined, .loop = undefined, .exe = "", .sock = "", .rex = undefined, .nvim = undefined, .tabline_rows = 1 };
+        try self.d.grids.grids.put(std.testing.allocator, 1, .{});
+        try self.d.grids.get(1).?.resize(std.testing.allocator, 200, 50);
+    }
+
+    fn deinit(self: *TablineFixture) void {
+        self.d.panes.list.deinit(std.testing.allocator);
+        self.d.grids.deinit(std.testing.allocator);
+    }
+
+    /// A window's pane in surface `slot` of `cols` columns, at `rect` in the
+    /// Rex window; null for one Rex hasn't placed yet.
+    fn add(self: *TablineFixture, slot: usize, cols: u32, rect: ?[4]f64) !*Pane {
+        self.surfaces[slot] = .{ .helper_socket = undefined, .terminal = undefined, .view = .init(cols, 20) };
+        const p = try self.d.panes.add(std.testing.allocator, Pane.fromNeovimWindow(@intCast(slot + 1), @intCast(1000 + slot)));
+        p.terminal_surface = &self.surfaces[slot];
+        p.rect = rect;
+        return p;
+    }
+};
+
+test "with a shell to the left, the first Neovim pane starts the tabline and the next continues it" {
+    const t = std.testing;
+    var fx: TablineFixture = undefined;
+    try fx.init();
+    defer fx.deinit();
+    // a shell holds x = 0 to 0.4; the Neovim panes sit right of it
+    _ = try fx.add(0, 60, .{ 0.4, 0, 0.3, 1 });
+    _ = try fx.add(1, 60, .{ 0.7, 0, 0.3, 1 });
+    const left = &fx.d.panes.list.items[0];
+    const right = &fx.d.panes.list.items[1];
+    try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(left));
+    try t.expectEqual(@as(?u32, 60), fx.d.tablineStart(right));
+
+    // every tab shows once: the slices, joined, are the tabline's cells
+    const screen = fx.d.grids.get(1).?;
+    for (screen.cells[0..200], 0..) |*c, i| c.* = .init(&.{@intCast('a' + i % 26)}, 0);
+    var lbuf: [256]Grid.Cell = undefined;
+    var rbuf: [256]Grid.Cell = undefined;
+    const ls = tablineSlice(screen, fx.d.tablineStart(left).?, 60, &lbuf);
+    const rs = tablineSlice(screen, fx.d.tablineStart(right).?, 60, &rbuf);
+    try t.expectEqual(@as(usize, 60), ls.len);
+    try t.expectEqual(@as(usize, 60), rs.len);
+    for (ls, screen.row(0)[0..60]) |a, b| try t.expectEqualStrings(b.str(), a.str());
+    for (rs, screen.row(0)[60..120]) |a, b| try t.expectEqualStrings(b.str(), a.str());
+
+    // what draw sets up: the slice, and the forwarder's column for clicks
+    var fbuf: [256]Grid.Cell = undefined;
+    const prepared = fx.d.prepareTabline(right, screen, &fbuf);
+    try t.expectEqual(@as(u32, 60), prepared.col);
+    try t.expectEqualStrings(screen.row(0)[60].str(), prepared.cells.?[0].str());
+    try t.expectEqual(@as(u16, 60), right.terminal_surface.?.forwarder.tabline_col);
+    try t.expectEqual(@as(u16, 1), right.terminal_surface.?.forwarder.tabline_rows);
+    const first = fx.d.prepareTabline(left, screen, &fbuf);
+    try t.expectEqual(@as(u32, 0), first.col);
+    try t.expectEqual(@as(u16, 0), left.terminal_surface.?.forwarder.tabline_col);
+
+    // the panes swapped places in the list, not in the window
+    std.mem.swap(Pane, &fx.d.panes.list.items[0], &fx.d.panes.list.items[1]);
+    try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(&fx.d.panes.list.items[1]));
+    try t.expectEqual(@as(?u32, 60), fx.d.tablineStart(&fx.d.panes.list.items[0]));
+}
+
+test "a pane that closes moves the ones to its right left, and only top panes show the tabline" {
+    const t = std.testing;
+    var fx: TablineFixture = undefined;
+    try fx.init();
+    defer fx.deinit();
+    _ = try fx.add(0, 50, .{ 0, 0, 0.25, 0.5 });
+    _ = try fx.add(1, 70, .{ 0.25, 0, 0.35, 0.5 });
+    _ = try fx.add(2, 80, .{ 0.6, 0, 0.4, 0.5 });
+    // under them, and on another tab page: neither shows it, or takes room
+    const under = try fx.add(3, 90, .{ 0, 0.5, 1, 0.5 });
+    try t.expectEqual(@as(?u32, null), fx.d.tablineStart(under));
+    try t.expectEqual(@as(?u32, 120), fx.d.tablineStart(&fx.d.panes.list.items[2]));
+    fx.d.panes.list.items[1].tab = 2;
+    try t.expectEqual(@as(?u32, null), fx.d.tablineStart(&fx.d.panes.list.items[1]));
+    try t.expectEqual(@as(?u32, 50), fx.d.tablineStart(&fx.d.panes.list.items[2]));
+    // the first closes, as in the middle of `draw`
+    _ = fx.d.panes.list.orderedRemove(0);
+    try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(&fx.d.panes.list.items[1]));
+    // no tabline: no pane shows any
+    fx.d.tabline_rows = 0;
+    try t.expectEqual(@as(?u32, null), fx.d.tablineStart(&fx.d.panes.list.items[1]));
+}
+
+test "a pane Rex hasn't placed yet doesn't take the top left, unless none is placed" {
+    const t = std.testing;
+    var fx: TablineFixture = undefined;
+    try fx.init();
+    defer fx.deinit();
+    // a new split, before the layout names its place
+    _ = try fx.add(0, 40, null);
+    // no layout yet at all: it's the window
+    try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(&fx.d.panes.list.items[0]));
+    _ = try fx.add(1, 60, .{ 0.4, 0, 0.6, 1 });
+    try t.expectEqual(@as(?u32, null), fx.d.tablineStart(&fx.d.panes.list.items[0]));
+    // and the placed pane starts the tabline, not after it
+    try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(&fx.d.panes.list.items[1]));
 }
