@@ -46,8 +46,13 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Longest path a Unix socket takes on macOS, less one for the terminator.
-pub const MAX_PATH: usize = 103;
+/// Longest path a Unix socket takes, less one for the terminator: 103 on macOS,
+/// 107 on Linux.
+pub const MAX_PATH: usize = {
+    // SAFETY: an all-zero sockaddr_un is valid, and only its size is read.
+    let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    std::mem::size_of_val(&addr.sun_path) - 1
+};
 
 /// `$TMPDIR/neorex-PID`, which every daemon file is named from.
 pub fn base_path() -> Result<String> {
@@ -459,6 +464,24 @@ mod tests {
         drop(child);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(-1, unsafe { libc::kill(pid, 0) });
+    }
+
+    #[test]
+    fn the_longest_socket_path_is_what_the_platform_binds() {
+        // the sizes from the platforms' headers: 104 bytes of path on the BSDs,
+        // 108 on Linux, each less the terminator
+        let expected = if cfg!(target_os = "linux") { 107 } else { 103 };
+        assert_eq!(expected, MAX_PATH);
+
+        let padded = |len: usize| {
+            let stem = format!("/tmp/neorex-maxpath-{}-", std::process::id());
+            format!("{stem}{}", "x".repeat(len - stem.len()))
+        };
+        let longest = padded(MAX_PATH);
+        let listener = UnixListener::bind(&longest).unwrap();
+        drop(listener);
+        fs::remove_file(&longest).unwrap();
+        assert!(UnixListener::bind(padded(MAX_PATH + 1)).is_err());
     }
 
     #[test]
