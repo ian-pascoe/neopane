@@ -86,7 +86,7 @@ signatures. In short:
   expect_handle/expect_bytes/skip(d: &mut Decoder<'a>)` returning
   `Result<_, rpc::Error>` (`rpc::Error::BadMessage`, ...).
 - `Nvim`: `spawn(argv)`, `connect(path)`, `connect_retry(path)`,
-  `request(method, param_count) -> u32` (write the params into `nvim.w()`,
+  `request(method, param_count) -> u32` (write the params into `nvim.writer()`,
   a `&mut Vec<u8>`), `flush()`, `respond_error`, `ui_attach`,
   `ui_try_resize`, `ui_try_resize_grid`, `exec_lua`, `read_fd()`, `read()`.
   **`next()` returns an owned `Frame`** (one whole message's bytes), not a
@@ -97,8 +97,13 @@ signatures. In short:
       match frame.message()? { rpc::Message::Notification { method, mut params } => .., .. }
   }
   ```
-  `nvim::spawn_for_test()` (test-only) returns `Option<Nvim>`, `None` when
-  Neovim isn't installed.
+  Errors: `nvim::Error` (`Io`, `Framer`, `Rpc`, `Timeout`); most methods
+  return `io::Result`. `Drop` does what Zig's `deinit` did.
+- Test-only helpers in `nvim::nvim`: `spawn_for_test()` (`nvim --clean
+  --embed`) and `spawn_for_test_with(&argv)` return `Option<Nvim>`, `None`
+  (after printing a note) when Neovim isn't installed — use them for Zig's
+  `Nvim.spawn(...) catch error.SkipZigTest`; `wait_response(&mut nvim, id)`
+  returns the response's `Frame`.
 
 ## Verify
 

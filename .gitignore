@@ -12,3 +12,4 @@ zig-pkg/
 
 # Rust build output
 /target/
+.worktrees/
