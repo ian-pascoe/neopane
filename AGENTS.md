@@ -18,7 +18,7 @@ A new note is a change on both sides: `vim.rpcnotify` in `windows.lua`, and the 
 
 The daemon focuses Rex blocks and switches tabs, so a test instance in the user's own Rex session steals their focus. Test live in a session of your own (`rex new`), or in a PTY with `REX_SESSION` pointing at it.
 
-The daemon logs to `$TMPDIR/neorex-<pid>.log`.
+Each daemon keeps its files in a private directory, `neorex-<launcher pid>.XXXXXX` in `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`. It logs to `log` there.
 
 Install with `just install`. On macOS, a binary overwritten in place is killed at launch because the kernel keeps the old file's code signature. A running daemon keeps the binary it started with, so restart neorex to pick up a new build.
 
