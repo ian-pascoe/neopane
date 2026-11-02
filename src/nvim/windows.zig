@@ -157,6 +157,11 @@ pub fn parseChannel(result: *msgpack.Decoder) !i64 {
 }
 
 const testing = std.testing;
+
+/// Made-up reports the tests wait for: a real window handle is never this big.
+const ping_base: i64 = 4000;
+const fight_at_1s: i64 = 6000;
+const fight_at_end: i64 = 7000;
 const Grids = @import("../screen/Grids.zig");
 const Grid = @import("../screen/Grid.zig");
 
@@ -263,7 +268,7 @@ const Harness = struct {
     /// run. An error in it fails the test.
     fn sync(h: *Harness, comptime fmt: []const u8, args: anytype) !void {
         h.pings += 1;
-        const ping = 4000 + h.pings;
+        const ping = ping_base + h.pings;
         var buf: [2048]u8 = undefined;
         const code = try std.fmt.bufPrint(&buf, fmt ++ "\nvim.rpcnotify(0, 'neorex_win', {d})", args ++ .{ping});
         try h.lua(code);
@@ -281,8 +286,8 @@ const Harness = struct {
     fn typed(h: *Harness) !void {
         h.pings += 1;
         var buf: [96]u8 = undefined;
-        try h.input(try std.fmt.bufPrint(&buf, ":lua vim.rpcnotify(0, 'neorex_win', {d})<CR>", .{4000 + h.pings}));
-        h.want = 4000 + h.pings;
+        try h.input(try std.fmt.bufPrint(&buf, ":lua vim.rpcnotify(0, 'neorex_win', {d})<CR>", .{ping_base + h.pings}));
+        h.want = ping_base + h.pings;
         try testing.expect(try h.until(Harness.isCurrent));
     }
 
@@ -461,7 +466,9 @@ test "a window a plugin moved back into the layout is external again, and keeps 
     try testing.expect(try h.untilExternal(split));
 }
 
-test "pull-backs between user actions aren't a fight" {
+/// Typed, or a pane resized, between pull-backs more often than a fight's
+/// limit: each is something the user did.
+fn pullBacksBetween(comptime between: enum { typing, resizing }) !void {
     var buf: [1024]u8 = undefined;
     var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -472,21 +479,33 @@ test "pull-backs between user actions aren't a fight" {
     const anchor = h.wins[1];
     const split = try h.adoptSplit();
 
-    // more often than a fight's limit, but each after something the user did:
-    // typing, or dragging a pane's border
     for (0..12) |i| {
         try h.sync("vim.api.nvim_win_set_config({d}, {{ split = 'left', win = {d} }})", .{ split, anchor });
         try h.expectExternal(split);
-        if (i % 2 == 0) {
-            try h.typed();
-        } else {
-            try size(&h.nvim, split, 20 + @as(u32, @intCast(i)), 9);
-            try h.nvim.flush();
+        switch (between) {
+            .typing => try h.typed(),
+            .resizing => {
+                try size(&h.nvim, split, 20 + @as(u32, @intCast(i)), 9);
+                try h.nvim.flush();
+            },
         }
     }
 }
 
-test "a plugin that always moves a window back doesn't start a fight without end" {
+test "typing between pull-backs isn't a fight" {
+    try pullBacksBetween(.typing);
+}
+
+test "resizing a pane between pull-backs isn't a fight" {
+    try pullBacksBetween(.resizing);
+}
+
+/// A plugin that puts the window back in the layout every 10 ms for 1.5 s,
+/// running `pull_extra` as well, and the daemon, which asks for it external
+/// and sized to its pane every 50 ms as it does for a window it sees
+/// ordinary. The plugin says how often it did, at 1 s and at 1.5 s, as
+/// `fight_at_1s` + n and `fight_at_end` + n.
+fn fightEndsSoon(comptime pull_extra: []const u8) !void {
     var buf: [1024]u8 = undefined;
     var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -497,12 +516,8 @@ test "a plugin that always moves a window back doesn't start a fight without end
     const anchor = h.wins[1];
     const split = try h.adoptSplit();
 
-    // a plugin that puts the window back in the layout every 10 ms for 1.5 s,
-    // and the daemon, which asks for it external and sized to its pane every
-    // 50 ms as it does for a window it sees ordinary. It says how often the
-    // plugin did, at 1 s and at 1.5 s, as 6000 + n and 7000 + n.
     try size(&h.nvim, split, 17, 9);
-    var code: [1024]u8 = undefined;
+    var code: [1536]u8 = undefined;
     try h.lua(try std.fmt.bufPrint(&code,
         \\local win, anchor, pulls = {d}, {d}, 0
         \\local timer, daemon = vim.uv.new_timer(), vim.uv.new_timer()
@@ -510,32 +525,33 @@ test "a plugin that always moves a window back doesn't start a fight without end
         \\  if vim.api.nvim_win_get_config(win).external then
         \\    pulls = pulls + 1
         \\    vim.api.nvim_win_set_config(win, {{ split = 'left', win = anchor }})
+        \\    {s}
         \\  end
         \\end))
         \\daemon:start(50, 50, vim.schedule_wrap(function()
         \\  neorex.adopt(win, 17, 9)
         \\  neorex.size(win, 17, 9)
         \\end))
-        \\vim.defer_fn(function() vim.rpcnotify(0, 'neorex_win', 6000 + pulls) end, 1000)
+        \\vim.defer_fn(function() vim.rpcnotify(0, 'neorex_win', {d} + pulls) end, 1000)
         \\vim.defer_fn(function()
         \\  timer:stop()
         \\  daemon:stop()
-        \\  vim.rpcnotify(0, 'neorex_win', 7000 + pulls)
+        \\  vim.rpcnotify(0, 'neorex_win', {d} + pulls)
         \\end, 1500)
-    , .{ split, anchor }));
+    , .{ split, anchor, pull_extra, fight_at_1s, fight_at_end }));
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
-            return x.lastCurrent() >= 7000;
+            return x.lastCurrent() >= fight_at_end;
         }
     }.f));
-    var at_1s: i64 = 0;
-    for (h.notes.items) |n| if (n == .current and n.current >= 6000 and n.current < 7000) {
-        at_1s = n.current - 6000;
+    var pulls_at_1s: i64 = 0;
+    for (h.notes.items) |n| if (n == .current and n.current >= fight_at_1s and n.current < fight_at_end) {
+        pulls_at_1s = n.current - fight_at_1s;
     };
-    const at_end = h.lastCurrent() - 7000;
+    const pulls = h.lastCurrent() - fight_at_end;
     // it gave up, as the plugin left it no other way, and didn't go on
-    try testing.expect(at_end >= 1 and at_end <= 10);
-    try testing.expectEqual(at_1s, at_end);
+    try testing.expect(pulls >= 1 and pulls <= 10);
+    try testing.expectEqual(pulls_at_1s, pulls);
     // and sizing it to its pane would resize the window in Neovim's layout
     try h.sync(
         \\local win = {d}
@@ -543,8 +559,72 @@ test "a plugin that always moves a window back doesn't start a fight without end
         \\assert(vim.api.nvim_win_get_width(win) ~= 17, 'sized as if in its pane')
     , .{split});
 
+    // a pane resized while it waits: the window fits it once it's back
+    try size(&h.nvim, split, 25, 9);
     // once the plugin stops and the wait is over, it goes back in its pane
     try h.expectExternal(split);
+    try h.sync("assert(vim.api.nvim_win_get_width({d}) == 25, 'not the pane the user left it')", .{split});
+}
+
+test "a plugin that always moves a window back doesn't start a fight without end" {
+    try fightEndsSoon("");
+}
+
+test "a plugin that runs :normal and feedkeys to move a window back doesn't either" {
+    // none of that is the user typing
+    try fightEndsSoon("vim.cmd.normal({ 'lh', bang = true }); vim.api.nvim_feedkeys('l', 'n', false)");
+}
+
+test "a fight that goes on is left alone twice as long each time" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.boot();
+    const anchor = h.wins[1];
+    const split = try h.adoptSplit();
+
+    // A plugin that puts the window back whenever it can, noting when each
+    // fight starts, until the third has gone on a second, and a heartbeat so
+    // the wait doesn't look like a hang.
+    var code: [1536]u8 = undefined;
+    try h.lua(try std.fmt.bufPrint(&code,
+        \\local win, anchor = {d}, {d}
+        \\local function now() return vim.uv.hrtime() / 1e6 end
+        \\local began = now()
+        \\local last = 0
+        \\bursts = {{}}
+        \\local timer, beat = vim.uv.new_timer(), vim.uv.new_timer()
+        \\timer:start(10, 10, vim.schedule_wrap(function()
+        \\  if not vim.api.nvim_win_get_config(win).external then return end
+        \\  local t = now()
+        \\  if t - last > 500 then table.insert(bursts, t) end
+        \\  last = t
+        \\  vim.api.nvim_win_set_config(win, {{ split = 'left', win = anchor }})
+        \\end))
+        \\beat:start(500, 500, vim.schedule_wrap(function()
+        \\  vim.rpcnotify(0, 'neorex_tabline', 0)
+        \\  if (#bursts >= 3 and now() - bursts[3] > 1000) or now() - began > 40000 then
+        \\    timer:stop()
+        \\    beat:stop()
+        \\    vim.rpcnotify(0, 'neorex_win', {d})
+        \\  end
+        \\end))
+    , .{ split, anchor, fight_at_end }));
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.lastCurrent() >= fight_at_end;
+        }
+    }.f));
+    // each wait at least as long as it should be, 2 s then 4 s, and the
+    // window goes back after each
+    try h.sync(
+        \\assert(#bursts >= 3, 'did not fight three times')
+        \\assert(bursts[2] - bursts[1] >= 1900, 'first wait too short')
+        \\assert(bursts[3] - bursts[2] >= 3900, 'second wait too short')
+    , .{});
 }
 
 test "a new tab page's window is marked, and closing it closes the tab page" {
