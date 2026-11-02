@@ -172,7 +172,11 @@ fn block_json(block: &ids::Block) -> Value {
 fn json_f64(v: f64) -> Value {
     if !v.is_finite() {
         // the Zig wrote these as strings
-        return Value::String(format!("{v}"));
+        return Value::String(if v.is_nan() {
+            "nan".into()
+        } else {
+            format!("{v}")
+        });
     }
     if v.fract() == 0.0 && v.abs() < (1u64 << 53) as f64 && !(v == 0.0 && v.is_sign_negative()) {
         return Value::from(v as i64);

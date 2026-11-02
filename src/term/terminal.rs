@@ -16,23 +16,33 @@ pub struct Terminal {
     pub writer: Vec<u8>,
 }
 
+/// Calls `f` until it isn't interrupted by a signal, as Zig's
+/// `std.posix.tcgetattr`/`tcsetattr` do.
+fn retry(mut f: impl FnMut() -> libc::c_int) -> io::Result<()> {
+    loop {
+        if f() == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 impl Terminal {
     /// Switches `fd` to raw mode. Fails if it isn't a terminal.
     pub fn init(fd: RawFd) -> io::Result<Terminal> {
         // SAFETY: an all-zero termios is a valid out-parameter for tcgetattr.
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: `original` is a valid termios.
-        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        retry(|| unsafe { libc::tcgetattr(fd, &mut original) })?;
 
         let mut raw = original;
         // SAFETY: `raw` is a valid termios.
         unsafe { libc::cfmakeraw(&mut raw) };
         // SAFETY: `raw` is a valid termios.
-        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        retry(|| unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) })?;
 
         Ok(Terminal {
             fd,
@@ -45,7 +55,7 @@ impl Terminal {
     pub fn deinit(&mut self) {
         let _ = self.flush();
         // SAFETY: `original` is the termios `init` read.
-        unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) };
+        let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) });
     }
 
     /// Current size in cells.
