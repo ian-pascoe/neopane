@@ -95,6 +95,8 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   explicitly: lualine skips neorex's windows without it, and its default,
   `vim.go.laststatus == 3`, is false once neorex has turned `laststatus=3`
   into `2`.
+  A pane's own `setlocal statusline` is replaced by that line meanwhile, and
+  not restored.
 
 ## Plans
 

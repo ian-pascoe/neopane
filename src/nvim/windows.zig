@@ -168,6 +168,7 @@ const Harness = struct {
     setup_id: u32 = 0,
     chan_id: u32 = 0,
     wins: [2]i64 = .{ 0, 0 },
+    text: []const u8 = "",
     /// The windows a check waits for.
     want: i64 = 0,
     gone: i64 = 0,
@@ -641,6 +642,18 @@ fn splitAndAdopt(h: *Harness) !i64 {
     return split;
 }
 
+/// Waits until both panes `a` and `b` show `want` in their last row.
+fn bothShow(h: *Harness, a: i64, b: i64, want: []const u8) !void {
+    h.want = b;
+    h.gone = a;
+    h.text = want;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return rowStarts(x, x.gone, 8, x.text) and rowStarts(x, x.want, 8, x.text);
+        }
+    }.f));
+}
+
 test "laststatus=3 shows the statusline in every window's pane" {
     var buf: [1024]u8 = undefined;
     var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n", "--cmd", "set laststatus=3 statusline=GLOBAL" }, &buf) catch |err| switch (err) {
@@ -658,46 +671,45 @@ test "laststatus=3 shows the statusline in every window's pane" {
             return x.wins[0] != 0 and gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "GLOBAL");
         }
     }.f));
+    const first = h.wins[0];
     const split = try splitAndAdopt(&h);
-    h.want = split;
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return rowStarts(x, x.want, 8, "GLOBAL");
-        }
-    }.f));
+    try bothShow(&h, first, split, "GLOBAL");
 
     // set after it started: the value changes from 2, so OptionSet fires
     try h.input(":set laststatus=3 statusline=LATER<CR>");
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return rowStarts(x, x.wins[0], 8, "LATER") and rowStarts(x, x.want, 8, "LATER");
-        }
-    }.f));
+    try bothShow(&h, first, split, "LATER");
 
     // set in an autocommand, as LazyVim does for lualine: no OptionSet
     try h.input(":set laststatus=2<CR>:autocmd User Later ++once set laststatus=3 statusline=INAUTO<CR>:doautocmd User Later<CR>");
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return rowStarts(x, x.wins[0], 8, "INAUTO") and rowStarts(x, x.want, 8, "INAUTO");
-        }
-    }.f));
+    try bothShow(&h, first, split, "INAUTO");
 
-    // a global statusline plugin keeps only the current window's 'statusline'
-    // up to date: the other panes show that line too
-    try h.input(":setlocal statusline=CURRENT<CR>");
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return rowStarts(x, x.wins[0], 8, "CURRENT") and rowStarts(x, x.want, 8, "CURRENT");
-        }
-    }.f));
-    // and when another window is current, that one's
+    // From here no pane's statusline may go blank. A global statusline plugin
+    // keeps only the current window's 'statusline' up to date: the other
+    // panes show that line, whichever window is current.
+    try h.input(":lua vim.api.nvim_create_autocmd('OptionSet', { pattern = 'statusline', callback = function() if vim.v.option_new == '' then vim.g.blanked = 1 end end })<CR>");
     var cmd: [128]u8 = undefined;
-    try h.input(try std.fmt.bufPrint(&cmd, ":lua vim.api.nvim_set_current_win({d}); vim.wo.statusline = 'OTHER'<CR>", .{split}));
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return rowStarts(x, x.wins[0], 8, "OTHER") and rowStarts(x, x.want, 8, "OTHER");
-        }
-    }.f));
+    try h.input(":setlocal statusline=CURRENT<CR>");
+    try bothShow(&h, first, split, "CURRENT");
+    // the other window current: its own line, set for that window only
+    try h.input(try std.fmt.bufPrint(&cmd, ":lua vim.api.nvim_set_current_win({d}); vim.wo[0][0].statusline = 'OTHER'<CR>", .{first}));
+    try bothShow(&h, first, split, "OTHER");
+    // and back: the pane that showed a copy keeps it
+    try h.input(try std.fmt.bufPrint(&cmd, ":call nvim_set_current_win({d})<CR>", .{split}));
+    try bothShow(&h, first, split, "OTHER");
+    try h.input(":setlocal statusline=BACK<CR>");
+    try bothShow(&h, first, split, "BACK");
+
+    // a focused float: the panes keep their line
+    try h.input(":lua vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, { relative = 'editor', row = 1, col = 1, width = 8, height = 2 })<CR>");
+    try h.input(":set laststatus=3<CR>");
+    try h.input(":close<CR>:setlocal statusline=AFTER<CR>");
+    try bothShow(&h, first, split, "AFTER");
+
+    _ = try h.nvim.request("nvim_command", 1);
+    try msgpack.writeStr(h.nvim.writer(), "if get(g:, 'blanked') | throw 'a pane lost its statusline' | endif | call rpcnotify(0, 'neorex_win', 4242)");
+    try h.nvim.flush();
+    h.want = 4242;
+    try testing.expect(try h.until(Harness.isCurrent));
 }
 
 test "a window's own statusline leaves no blank row with laststatus=0" {
