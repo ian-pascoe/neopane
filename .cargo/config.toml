@@ -1,0 +1,4 @@
+[env]
+# Several tests touch process-wide state (signals, the terminal, child
+# processes), so they run one at a time, as Zig's did.
+RUST_TEST_THREADS = "1"

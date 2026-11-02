@@ -9,3 +9,6 @@ zig-pkg/
 *.swp
 *.swo
 *~
+
+# Rust build output
+/target/

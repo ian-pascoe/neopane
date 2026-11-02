@@ -1,0 +1,18 @@
+[package]
+name = "neorex"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "A Rex-native Neovim frontend"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1_smol = "1"
+base64 = "0.22"
+indexmap = "2"
+
+[profile.release]
+# like Zig's ReleaseSafe: integer overflow is caught
+overflow-checks = true
