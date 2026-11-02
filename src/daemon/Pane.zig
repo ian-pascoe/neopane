@@ -133,8 +133,14 @@ pub fn decodeToken(t: usize) struct { id: u32, source_fd: PaneFd } {
 /// Hanging up makes the helper exit, and Rex closes the pane.
 pub fn deinit(self: *Pane, gpa: std.mem.Allocator, io: std.Io) void {
     if (self.terminal_surface) |surface| {
-        surface.destroy(gpa, io, self.closing != .rex_pane_closed);
+        surface.destroy(gpa, io, self.closing != .rex_pane_closed, null);
     }
+    self.* = undefined;
+}
+
+/// `deinit`, leaving `message` on the restored terminal.
+pub fn deinitWithMessage(self: *Pane, gpa: std.mem.Allocator, io: std.Io, message: []const u8) void {
+    if (self.terminal_surface) |surface| surface.destroy(gpa, io, true, message);
     self.* = undefined;
 }
 

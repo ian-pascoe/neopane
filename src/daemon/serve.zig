@@ -35,8 +35,8 @@ pub fn path(buf: []u8, base: []const u8, suffix: []const u8) ![]const u8 {
 pub const Config = struct {
     rex_url: []const u8,
     session_id: []const u8,
-    /// Starts Neovim.
-    nvim_exe: []const u8 = "nvim",
+    /// Starts Neovim: its arguments follow.
+    nvim_command: []const []const u8 = &.{"nvim"},
     /// Connects to Neovim's socket, waiting for it to appear.
     connect: *const fn (io: std.Io, path: []const u8, buffer: []u8) anyerror!Nvim = connectNvim,
     /// Called once the helpers' socket listens: the launcher may connect.
@@ -74,8 +74,6 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []
     const sock = try path(&sock_buf, base, ".sock");
     const nvim_sock = try path(&nvim_sock_buf, base, ".nvim.sock");
     const log = try path(&log_buf, base, ".log");
-    const rex_url = config.rex_url;
-    const session_id = config.session_id;
     var exe_buf: [1024]u8 = undefined;
     const exe = exe_buf[0..try std.process.executablePath(io, &exe_buf)];
 
@@ -95,31 +93,37 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []
         std.debug.print("neorex daemon: REX_BLOCK isn't a block id: {s}\n", .{b});
         break :blk null;
     } else null;
-    var launch = Pane.startup(rex_block, try takePane(gpa, io, &server));
-    var launch_owned = true;
-    defer if (launch_owned) launch.deinit(gpa, io);
+    var startup: Startup = .{
+        .gpa = gpa,
+        .io = io,
+        .log = log,
+        .launch = Pane.startup(rex_block, try takePane(gpa, io, &server)),
+    };
+    defer startup.deinit();
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     // before the user's config, so it can tell it runs under neorex
-    try argv.appendSlice(gpa, &.{ config.nvim_exe, "--headless", "--listen", nvim_sock, "--cmd", "let g:neorex = 1" });
+    try argv.appendSlice(gpa, config.nvim_command);
+    try argv.appendSlice(gpa, &.{ "--headless", "--listen", nvim_sock, "--cmd", "let g:neorex = 1" });
     try argv.appendSlice(gpa, nvim_args);
     // its stderr is ours: the log
     var child = std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore }) catch |err|
-        return giveUp(gpa, io, &launch, &launch_owned, log, .start_nvim, err);
+        return startup.giveUp(.start_nvim, err);
+    startup.nvim_child = &child;
     // after the terminals are restored: SIGHUP makes Neovim save swap files and exit
-    defer {
-        _ = std.c.kill(child.id.?, .HUP);
+    defer if (child.id) |id| {
+        _ = std.c.kill(id, .HUP);
         _ = child.wait(io) catch {};
-    }
+    };
 
     var nvim_buf: [16 * 1024]u8 = undefined;
     var nvim = config.connect(io, nvim_sock, &nvim_buf) catch |err|
-        return giveUp(gpa, io, &launch, &launch_owned, log, .connect_nvim, err);
+        return startup.giveUp(.connect_nvim, err);
     defer nvim.deinit(gpa);
     var rex_buf: [16 * 1024]u8 = undefined;
-    var rex: Client = Client.connect(gpa, io, rex_url, &rex_buf) catch |err|
-        return giveUp(gpa, io, &launch, &launch_owned, log, .connect_rex, err);
+    var rex: Client = Client.connect(gpa, io, config.rex_url, &rex_buf) catch |err|
+        return startup.giveUp(.connect_rex, err);
     defer rex.deinit(gpa);
 
     var loop: Loop = try .init();
@@ -134,14 +138,13 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []
         .io = io,
         .loop = &loop,
         .nvim = .{ .client = &nvim },
-        .rex = .{ .gpa = gpa, .client = &rex, .session_id = session_id },
+        .rex = .{ .gpa = gpa, .client = &rex, .session_id = config.session_id },
         .exe = exe,
         .sock = sock,
     };
     // first: terminals restored and panes hung up before anything else ends
     defer d.deinit();
-    launch_owned = false;
-    try d.start(launch);
+    try d.start(startup.release());
 
     const stop_reason = try d.run(&server);
     std.debug.print("neorex daemon: {t}\n", .{stop_reason});
@@ -150,42 +153,74 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []
 }
 
 /// What the daemon was doing when it gave up before showing any window.
-const Step = enum { start_nvim, connect_nvim, connect_rex };
+const StartStep = enum { start_nvim, connect_nvim, connect_rex };
 
-/// Restores the launcher's pane and tells it why we're stopping, then returns
-/// `err`, which `main` prints to the log with its trace. `launch` is no
-/// longer owned.
-fn giveUp(
+/// How Neovim ended.
+const NvimExit = union(enum) { status: u8, signal: u32 };
+
+/// The launcher's pane, owned until the daemon takes it over, and what's
+/// needed to tell its user why a start failed.
+const Startup = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    launch: *Pane,
-    launch_owned: *bool,
     log: []const u8,
-    step: Step,
-    err: anyerror,
-) anyerror {
-    var buf: [256 + max_path]u8 = undefined;
-    const message = failureMessage(&buf, step, err, log);
-    launch_owned.* = false;
-    launch.terminal_surface.?.destroyWithMessage(gpa, io, message);
-    return err;
-}
+    launch: Pane,
+    owned: bool = true,
+    /// Set once Neovim is started.
+    nvim_child: ?*std.process.Child = null,
+
+    fn deinit(self: *Startup) void {
+        if (self.owned) self.launch.deinit(self.gpa, self.io);
+    }
+
+    /// The pane, for the daemon to own.
+    fn release(self: *Startup) Pane {
+        self.owned = false;
+        return self.launch;
+    }
+
+    /// Restores the pane and tells it why we're stopping, then returns
+    /// `err`, which `main` prints to the log with its trace.
+    fn giveUp(self: *Startup, step: StartStep, err: anyerror) anyerror {
+        var buf: [256 + max_path]u8 = undefined;
+        const message = failureMessage(&buf, step, err, self.nvimExit(), self.log);
+        var launch = self.release();
+        launch.deinitWithMessage(self.gpa, self.io, message);
+        return err;
+    }
+
+    /// How Neovim ended, if it has: a Neovim that exited never made its
+    /// socket. Doesn't wait. A Neovim found ended is reaped.
+    fn nvimExit(self: *Startup) ?NvimExit {
+        const child = self.nvim_child orelse return null;
+        const id = child.id orelse return null;
+        var status: c_int = 0;
+        if (std.c.waitpid(id, &status, std.c.W.NOHANG) != id) return null;
+        child.id = null;
+        const code: u32 = @intCast(status);
+        if (std.c.W.IFEXITED(code)) return .{ .status = std.c.W.EXITSTATUS(code) };
+        return .{ .signal = @backingInt(std.c.W.TERMSIG(code)) };
+    }
+};
 
 /// A line for the user: what failed, and where the log is.
-fn failureMessage(buf: []u8, step: Step, err: anyerror, log: []const u8) []const u8 {
+fn failureMessage(buf: []u8, step: StartStep, err: anyerror, nvim_exit: ?NvimExit, log: []const u8) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    printFailure(&w, step, err, log) catch {};
+    printFailure(&w, step, err, nvim_exit, log) catch {};
     return w.buffered();
 }
 
-fn printFailure(w: *std.Io.Writer, step: Step, err: anyerror, log: []const u8) !void {
+fn printFailure(w: *std.Io.Writer, step: StartStep, err: anyerror, nvim_exit: ?NvimExit, log: []const u8) !void {
     try w.writeAll("neorex: ");
     switch (step) {
         .start_nvim => if (err == error.FileNotFound)
             try w.writeAll("nvim not found")
         else
             try w.print("couldn't start nvim: {t}", .{err}),
-        .connect_nvim => if (err == error.Timeout)
+        .connect_nvim => if (nvim_exit) |exit| switch (exit) {
+            .status => |n| try w.print("Neovim exited (status {d}) before it was ready", .{n}),
+            .signal => |n| try w.print("Neovim was killed (signal {d}) before it was ready", .{n}),
+        } else if (err == error.Timeout)
             try w.writeAll("Neovim didn't start in time")
         else
             try w.print("couldn't connect to Neovim: {t}", .{err}),
@@ -258,8 +293,10 @@ const Screen = struct {
     }
 };
 
-/// Neovim that never answers, leaving its socket file behind.
+/// Neovim that never answers, leaving its socket file behind. Takes a moment,
+/// as the real one does: enough for a Neovim that is quitting to quit.
 fn connectNever(io: std.Io, nvim_sock: []const u8, _: []u8) anyerror!Nvim {
+    try io.sleep(.fromMilliseconds(300), .awake);
     const stale = try std.Io.Dir.cwd().createFile(io, nvim_sock, .{});
     stale.close(io);
     return error.Timeout;
@@ -270,7 +307,9 @@ fn exists(io: std.Io, file: []const u8) bool {
     return true;
 }
 
-test "a start that can't connect to Neovim leaves no sockets and says why in the pane" {
+/// Runs a start whose Neovim connect fails, with `nvim_command` standing in
+/// for Neovim, and checks no sockets remain and the pane shows `reason`.
+fn expectFailedStart(nvim_command: []const []const u8, reason: []const u8) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var base_buf: [256]u8 = undefined;
@@ -293,7 +332,7 @@ test "a start that can't connect to Neovim leaves no sockets and says why in the
     try std.testing.expectError(error.Timeout, serve(gpa, io, base, &.{}, .{
         .rex_url = "ws://unused",
         .session_id = "unused",
-        .nvim_exe = "true",
+        .nvim_command = nvim_command,
         .connect = connectNever,
         .ready = FakeLauncher.ready,
         .ctx = &launcher,
@@ -303,7 +342,15 @@ test "a start that can't connect to Neovim leaves no sockets and says why in the
 
     // the pane shows the reason; the launcher's helper was hung up on
     reader.join();
-    try std.testing.expect(std.mem.indexOf(u8, screen.shown(), "Neovim didn't start in time") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen.shown(), reason) != null);
     var hangup: [1]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 0), std.c.read(launcher.stream.?.socket.handle, &hangup, 1));
+}
+
+test "a start whose Neovim is still running says it didn't start in time" {
+    try expectFailedStart(&.{ "sh", "-c", "exec sleep 30", "--" }, "Neovim didn't start in time");
+}
+
+test "a start whose Neovim exited says so, with its status" {
+    try expectFailedStart(&.{ "sh", "-c", "exit 3", "--" }, "Neovim exited (status 3) before it was ready");
 }

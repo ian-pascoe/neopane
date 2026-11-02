@@ -37,24 +37,18 @@ pub fn create(gpa: std.mem.Allocator, helper_socket: net.Stream, tty: std.posix.
     return self;
 }
 
-/// `restore` is false when the terminal is already gone.
-pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool) void {
+/// `restore` is false when the terminal is already gone. A `message` is
+/// left on the restored terminal: how a daemon that gives up tells the pane's
+/// user why.
+pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool, message: ?[]const u8) void {
     if (restore) {
         self.terminal.writer.writeAll(modes.editor_off) catch {};
         self.terminal.deinit();
+        if (message) |m| _ = std.c.write(self.terminal.fd, m.ptr, m.len);
     }
     _ = std.c.close(self.terminal.fd);
     self.helper_socket.close(io);
     gpa.destroy(self);
-}
-
-/// Restores the terminal, then leaves `message` on it: how a daemon that
-/// gives up tells the pane's user why.
-pub fn destroyWithMessage(self: *Surface, gpa: std.mem.Allocator, io: std.Io, message: []const u8) void {
-    self.terminal.writer.writeAll(modes.editor_off) catch {};
-    self.terminal.deinit();
-    _ = std.c.write(self.terminal.fd, message.ptr, message.len);
-    self.destroy(gpa, io, false);
 }
 
 pub fn windowSize(self: *const Surface) [2]u32 {
