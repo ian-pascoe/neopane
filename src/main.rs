@@ -18,11 +18,12 @@ commands:
   help                       show this help
 
 neorex runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
-to find its pane. The debug commands that talk to Rex need the same.
+to find its pane. Only debug-rex reads them, of the debug commands.
 
 The daemon logs to `log` in its private directory, neorex-<launcher pid>.XXXXXX in
 $XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
-When Neovim exits, even by crashing, the daemon exits cleanly and removes the log.
+On a clean exit (Neovim quits or crashes, the last pane closes, or a signal) the
+daemon removes the log.
 When the daemon itself fails, the log and directory stay, and if it failed to start,
 neorex prints the log's path.
 ";

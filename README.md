@@ -98,15 +98,18 @@ a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
 The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
 private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
 `$TMPDIR`, else `/tmp`; each is used only when it is an absolute path. It logs
-to the file `log` there. When Neovim exits, even by crashing, the daemon exits
-cleanly and removes the log and the directory. When the daemon itself fails,
-they stay, and if it failed to start, neorex prints the log's path. `neorex
-help` says the same.
+to the file `log` there. On a clean exit (Neovim quits or crashes, the last
+pane closes, or a signal) the daemon removes the log and the directory. When
+the daemon itself fails, they stay, and if it failed to start, neorex prints
+the log's path. `neorex help` says the same.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
 there, or in a terminal started with `REX_SESSION` set to that session's id
-(`REX_SERVER` stays as Rex set it).
+(`REX_SERVER` stays as Rex set it). A terminal started from one of your own
+panes inherits that pane's `REX_BLOCK`, which the daemon would use as the first
+window's pane, in your session: unset `REX_BLOCK`, or set it to a block in the
+new session.
 
 ## Troubleshooting
 
