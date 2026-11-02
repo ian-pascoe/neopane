@@ -537,6 +537,13 @@ impl Parser {
         self.state == State::Ground
     }
 
+    /// Puts the parser partway through a CSI sequence, or back between keys:
+    /// the Zig tests set `parser.state` directly, which is private here.
+    #[cfg(test)]
+    pub fn set_partway_for_test(&mut self, partway: bool) {
+        self.state = if partway { State::Csi } else { State::Ground };
+    }
+
     /// The next event from the fed bytes, or `None` when they are used up.
     // Not an `Iterator`: the events borrow from the parser.
     #[allow(clippy::should_implement_trait)]
