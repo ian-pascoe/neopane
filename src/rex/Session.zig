@@ -15,6 +15,7 @@ const Request = union(enum) {
     new_split: u32, // pane
     new_layer: u32, // pane
     focus_block,
+    focus_direction,
     view,
     disown_block,
     close_block,
@@ -123,6 +124,20 @@ pub fn focus(self: *Session, maybe_block: ?ids.Block) !void {
     }
 }
 
+/// Which way `focusDirection` moves; Rex's names.
+pub const Direction = enum { left, right, up, down };
+
+/// Asks Rex to focus the nearest block `dir` of the focused one. At an edge
+/// nothing moves. The new focus comes back in the view, as the user's does.
+pub fn focusDirection(self: *Session, dir: Direction) !void {
+    // no wrap: Rex wraps by default on some versions, and an edge must stay put
+    try self.request(.focus_direction, "session.focus_direction", .{
+        .session_id = self.session_id,
+        .direction = @tagName(dir),
+        .wrap = false,
+    });
+}
+
 /// Rex has focused `maybe_block`, or will once our request lands.
 pub fn hasFocused(self: *const Session, maybe_block: ?ids.Block) bool {
     const focused_block = self.currentFocus() orelse return false;
@@ -175,7 +190,7 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .view => return try self.onViewResult(res.result),
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
-        .disown_block, .close_block, .close_layer => {},
+        .focus_direction, .disown_block, .close_block, .close_layer => {},
     }
     return null;
 }

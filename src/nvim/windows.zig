@@ -86,7 +86,15 @@ pub const Note = union(enum) {
     entered: i64,
     /// The tabline's rows at the top of the screen.
     tabline: i64,
+    /// `<C-w>h/j/k/l` was typed: Rex knows where the panes sit, not Neovim.
+    direction: Move,
 };
+
+/// Which way a window command goes: `h`, `j`, `k` or `l`.
+pub const Direction = enum { left, down, up, right };
+
+/// A directional window command, `count` times as typed.
+pub const Move = struct { dir: Direction, count: u32 };
 
 /// Where a new window sits in Neovim's layout.
 pub const Split = struct {
@@ -104,6 +112,7 @@ pub const Split = struct {
 
 /// A notification from the Lua, or null for any other.
 pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
+    if (std.mem.eql(u8, method, "neorex_direction")) return try parseDirection(params);
     const tag: std.meta.Tag(Note) = if (std.mem.eql(u8, method, "neorex_win"))
         .current
     else if (std.mem.eql(u8, method, "neorex_reopen"))
@@ -134,6 +143,7 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .float => .{ .float = win },
         .entered => .{ .entered = win },
         .tabline => .{ .tabline = win },
+        .direction => unreachable, // read above
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
@@ -142,6 +152,22 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
             .tab = try rpc.expectHandle(params),
         } },
     };
+}
+
+/// `[key, count]`: the `wincmd` key, one of `hjkl`, and how many times.
+fn parseDirection(params: *msgpack.Decoder) !Note {
+    if (try rpc.expectArray(params) < 2) return error.BadMessage;
+    const key = try rpc.expectStr(params);
+    const count = try rpc.expectInt(params);
+    if (key.len != 1 or count < 1) return error.BadMessage;
+    const dir: Direction = switch (key[0]) {
+        'h' => .left,
+        'j' => .down,
+        'k' => .up,
+        'l' => .right,
+        else => return error.BadMessage,
+    };
+    return .{ .direction = .{ .dir = dir, .count = @intCast(@min(count, std.math.maxInt(u32))) } };
 }
 
 /// `[first, anchor]` from `setup`'s response.
@@ -181,6 +207,17 @@ const Harness = struct {
     gone: i64 = 0,
     /// Made-up reports so far, to know Neovim got that far.
     pings: i64 = 0,
+
+    /// Spawns a clean Neovim and boots it (`boot`). Skips the test without
+    /// `nvim`. `buf` is the Neovim connection's buffer.
+    fn start(h: *Harness, buf: []u8) !void {
+        h.* = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, buf) catch |err| switch (err) {
+            error.FileNotFound => return error.SkipZigTest,
+            else => return err,
+        } };
+        errdefer h.deinit();
+        try h.boot();
+    }
 
     fn deinit(h: *Harness) void {
         h.grids.deinit(testing.allocator);
@@ -627,6 +664,63 @@ test "a fight that goes on is left alone twice as long each time" {
     , .{});
 }
 
+/// Waits until Neovim runs a command that says `neorex_win` 4242, after
+/// everything typed before it.
+fn barrier(h: *Harness) !void {
+    try h.input(":call rpcnotify(0, 'neorex_win', 4242)<CR>");
+    h.want = 4242;
+    try testing.expect(try h.until(Harness.isCurrent));
+}
+
+/// `want` is what the notes since the last clear say, in order, then the barrier's.
+fn expectNotes(h: *const Harness, want: []const Note) !void {
+    try testing.expectEqual(want.len + 1, h.notes.items.len);
+    for (want, h.notes.items[0..want.len]) |w, got| try testing.expectEqual(w, got);
+    try testing.expectEqual(Note{ .current = 4242 }, h.notes.items[want.len]);
+}
+
+test "<C-w>h/j/k/l send a direction and leave the current window, <C-w>w still cycles" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.start(&buf);
+    defer h.deinit();
+    const first = h.wins[0];
+    const split = try splitAndAdopt(&h);
+
+    // Neovim can't tell where the panes sit: it only says which way
+    h.notes.clearRetainingCapacity();
+    try h.input("<C-w>l<C-w><C-k>3<C-w>j");
+    // the other spellings: <C-h> arrives as <BS> from a terminal
+    try h.input("<C-w><BS><C-w><Left><C-w><Down><C-w><Up><C-w><Right>");
+    // from Visual mode too
+    try h.input("v<C-w>h<Esc>");
+    // a mapping built on them, as LazyVim's
+    try h.input(":nmap <lt>C-h> <lt>C-w>h<CR><C-h>");
+    try barrier(&h);
+    try expectNotes(&h, &.{
+        .{ .direction = .{ .dir = .right, .count = 1 } },
+        .{ .direction = .{ .dir = .up, .count = 1 } },
+        .{ .direction = .{ .dir = .down, .count = 3 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+        .{ .direction = .{ .dir = .down, .count = 1 } },
+        .{ .direction = .{ .dir = .up, .count = 1 } },
+        .{ .direction = .{ .dir = .right, .count = 1 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+        .{ .direction = .{ .dir = .left, .count = 1 } },
+    });
+
+    // <C-w>w and <C-w>W cycle as before: through the anchor to the first window
+    h.notes.clearRetainingCapacity();
+    try h.input("<C-w>w");
+    h.want = first;
+    try testing.expect(try h.until(Harness.isCurrent));
+    h.notes.clearRetainingCapacity();
+    try h.input("<C-w>W");
+    h.want = split;
+    try testing.expect(try h.until(Harness.isCurrent));
+}
+
 test "a new tab page's window is marked, and closing it closes the tab page" {
     var buf: [1024]u8 = undefined;
     var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
@@ -710,6 +804,44 @@ test "a new tab page's window is marked, and closing it closes the tab page" {
     try h.nvim.flush();
     h.want = 4242;
     try testing.expect(try h.until(Harness.isCurrent));
+}
+
+test "<C-w>l sends a direction from a tab page's window too, but not from a float" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.start(&buf);
+    defer h.deinit();
+
+    // a tab page's window shows in a Rex floating pane
+    try h.input(":tabnew<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const tab = h.lastCurrent();
+    try testing.expect(h.splitNote(tab).?.split.tab != 0);
+    try adopt(&h.nvim, tab, 30, 8);
+    try h.nvim.flush();
+    h.want = tab;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external;
+        }
+    }.f));
+
+    h.notes.clearRetainingCapacity();
+    try h.input("<C-w>h");
+    try barrier(&h);
+    try expectNotes(&h, &.{.{ .direction = .{ .dir = .left, .count = 1 } }});
+
+    // a float isn't a pane: Neovim moves out of it itself
+    try h.input(":lua vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, { relative = 'editor', row = 1, col = 1, width = 8, height = 2 })<CR>");
+    h.notes.clearRetainingCapacity();
+    try h.input("<C-w>l");
+    try barrier(&h);
+    for (h.notes.items) |n| try testing.expect(n != .direction);
 }
 
 test ":tabclose from a tab page's window reopens the windows that followed it in" {

@@ -373,6 +373,7 @@ fn onNvim(self: *Daemon) !void {
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
                 .tabline => |rows| try self.onTabline(@intCast(std.math.clamp(rows, 0, 1))),
+                .direction => |move| try self.onDirection(move),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .reopened => |r| self.onReopened(r.old, r.new),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
@@ -420,6 +421,23 @@ fn onCurrent(self: *Daemon, win: i64) !void {
     try self.nvim.fitUiTo(p);
     try self.draw();
     try self.rex.focus(p.rex_block);
+}
+
+/// A count on a directional window command repeats the move this many times
+/// at most: a window has few panes to cross, and a stray `9999<C-w>l` must not
+/// send Rex thousands of requests.
+const max_direction_count = 20;
+
+/// `<C-w>h/j/k/l`: Rex moves focus to the pane that way, if any. Its view
+/// brings the new focus back, and Neovim's current window follows.
+fn onDirection(self: *Daemon, move: windows.Move) !void {
+    const dir: RexSession.Direction = switch (move.dir) {
+        .left => .left,
+        .down => .down,
+        .up => .up,
+        .right => .right,
+    };
+    for (0..@min(move.count, max_direction_count)) |_| try self.rex.focusDirection(dir);
 }
 
 /// A float became current: if it's in a floating pane, focus that.
@@ -1083,4 +1101,84 @@ test "a pane Rex hasn't placed yet doesn't take the top left, unless none is pla
     try t.expectEqual(@as(?u32, null), fx.d.tablineStart(&fx.d.panes.list.items[0]));
     // and the placed pane starts the tabline, not after it
     try t.expectEqual(@as(?u32, 0), fx.d.tablineStart(&fx.d.panes.list.items[1]));
+}
+
+/// The JSON of each client frame in `bytes`, as a Client wrote them: masked
+/// text frames with 7-bit or 16-bit lengths.
+fn clientFrames(gpa: Allocator, bytes: []const u8) !std.ArrayList([]const u8) {
+    var frames: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        var len: usize = bytes[i + 1] & 0x7f;
+        i += 2;
+        if (len == 126) {
+            len = std.mem.readInt(u16, bytes[i..][0..2], .big);
+            i += 2;
+        }
+        const mask = bytes[i..][0..4];
+        const text = try gpa.dupe(u8, bytes[i + 4 ..][0..len]);
+        for (text, 0..) |*b, k| b.* ^= mask[k % 4];
+        try frames.append(gpa, text);
+        i += 4 + len;
+    }
+    return frames;
+}
+
+/// What `onDirection` asks Rex for with `move`: the requests Rex reads.
+fn directionRequests(gpa: Allocator, move: windows.Move) !std.ArrayList([]const u8) {
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
+    const ours: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    const rex_end: std.Io.net.Stream = .{ .socket = .{ .handle = fds[1], .address = undefined } };
+    defer rex_end.close(std.testing.io);
+    var wbuf: [512]u8 = undefined;
+    var client: Client = .{ .io = std.testing.io, .stream = ours, .writer = ours.writer(std.testing.io, &wbuf), .open = true };
+    defer client.out.deinit(gpa);
+    var d: Daemon = .{ .gpa = gpa, .io = std.testing.io, .loop = undefined, .exe = "", .sock = "", .rex = .{ .gpa = gpa, .client = &client, .session_id = "session:s", .conn = .attached }, .nvim = undefined };
+    defer d.rex.deinit();
+    try d.onDirection(move);
+    ours.close(std.testing.io); // the end of what it sent
+
+    var all: std.ArrayList(u8) = .empty;
+    defer all.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(rex_end.socket.handle, &buf, buf.len);
+        if (n <= 0) break;
+        try all.appendSlice(gpa, buf[0..@intCast(n)]);
+    }
+    return clientFrames(gpa, all.items);
+}
+
+fn freeFrames(gpa: Allocator, frames: *std.ArrayList([]const u8)) void {
+    for (frames.items) |f| gpa.free(f);
+    frames.deinit(gpa);
+}
+
+test "a directional move asks Rex to focus that way without wrapping, once per count" {
+    const gpa = std.testing.allocator;
+    var down = try directionRequests(gpa, .{ .dir = .down, .count = 3 });
+    defer freeFrames(gpa, &down);
+    try std.testing.expectEqual(@as(usize, 3), down.items.len);
+    try std.testing.expectEqualStrings(
+        \\{"type":"request","id":"1","method":"session.focus_direction","payload":{"session_id":"session:s","direction":"down","wrap":false}}
+    , down.items[0]);
+    try std.testing.expectEqualStrings(
+        \\{"type":"request","id":"3","method":"session.focus_direction","payload":{"session_id":"session:s","direction":"down","wrap":false}}
+    , down.items[2]);
+
+    // Neovim's hjkl are Rex's left, down, up and right
+    for ([_]struct { windows.Direction, []const u8 }{ .{ .left, "left" }, .{ .up, "up" }, .{ .right, "right" } }) |c| {
+        var one = try directionRequests(gpa, .{ .dir = c[0], .count = 1 });
+        defer freeFrames(gpa, &one);
+        try std.testing.expectEqual(@as(usize, 1), one.items.len);
+        const want = try std.fmt.allocPrint(gpa, "\"direction\":\"{s}\"", .{c[1]});
+        defer gpa.free(want);
+        try std.testing.expect(std.mem.indexOf(u8, one.items[0], want) != null);
+    }
+
+    // a stray huge count doesn't flood Rex
+    var many = try directionRequests(gpa, .{ .dir = .left, .count = 9999 });
+    defer freeFrames(gpa, &many);
+    try std.testing.expectEqual(@as(usize, 20), many.items.len);
 }
