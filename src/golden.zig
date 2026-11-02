@@ -356,6 +356,10 @@ const Multi = struct {
     anchor: i64 = 0,
     chan_req: u32 = 0,
     setup_req: u32 = 0,
+    /// Rows kept at the bottom of each pane for messages: 'cmdheight'.
+    msg_rows: u32 = 1,
+    /// The 'cmdheight' last reported, or null.
+    reported_cmdheight: ?i64 = null,
     stats: struct { frames: usize = 0, msg_rows: usize = 0, scrolls: usize = 0, cursors: [2]usize = .{ 0, 0 }, floats: usize = 0, float_cursor: usize = 0 } = .{},
 
     fn deinit(m: *Multi) void {
@@ -367,6 +371,17 @@ const Multi = struct {
     fn input(m: *Multi, keys: []const u8) !void {
         _ = try m.nvim.request("nvim_input", 1);
         try msgpack.writeStr(m.nvim.writer(), keys);
+        try m.nvim.flush();
+    }
+
+    /// The daemon's part when 'cmdheight' changes: every window fits its
+    /// pane again, less the rows that are now kept for messages.
+    fn refit(m: *Multi, cmdheight: i64) !void {
+        m.reported_cmdheight = cmdheight;
+        m.msg_rows = @intCast(cmdheight);
+        for (m.panes) |p| if (p.win != 0) {
+            try windows.size(&m.nvim, p.win, p.view.cols, p.view.rows - m.msg_rows);
+        };
         try m.nvim.flush();
     }
 
@@ -383,7 +398,8 @@ const Multi = struct {
                         if (try m.gs.applyRedraw(gpa, &params)) try m.flushed();
                     } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                         .current => |w| m.current = w,
-                        .reopen, .reopened, .split, .float, .entered, .tabline => {},
+                        .cmdheight => |rows| try m.refit(rows),
+                        .reopen, .reopened, .split, .float, .entered, .tabline, .direction, .layout => {},
                     };
                 },
                 .response => |r| {
@@ -394,7 +410,7 @@ const Multi = struct {
                     var result = r.result;
                     if (r.id == m.chan_req) {
                         const v = m.panes[0].view;
-                        m.setup_req = try windows.setup(&m.nvim, try windows.parseChannel(&result), v.cols, v.rows - 1);
+                        m.setup_req = try windows.setup(&m.nvim, try windows.parseChannel(&result), v.cols, v.rows - m.msg_rows);
                         try m.nvim.flush();
                     } else if (r.id == m.setup_req) {
                         const wins = try windows.parseSetup(&result);
@@ -413,7 +429,7 @@ const Multi = struct {
         if (m.anchor == 0) return;
         for (m.gs.wins.values()) |w| if (w.kind == .ordinary and w.win != m.anchor and m.panes[1].win == 0) {
             const v = m.panes[1].view;
-            try windows.adopt(&m.nvim, w.win, v.cols, v.rows - 1);
+            try windows.adopt(&m.nvim, w.win, v.cols, v.rows - m.msg_rows);
             try m.nvim.flush();
             m.panes[1].win = w.win;
         };
@@ -455,8 +471,9 @@ const Multi = struct {
         if (msg_n > 0) {
             try expectRows(&p.t, m.gs.get(m.gs.msg_grid.?).?, style, msg_total - msg_n, msg_top, msg_n, v.cols);
             m.stats.msg_rows += msg_n;
-        } else {
-            // the message line of a pane without focus stays blank
+        } else if (grid_rows < v.rows) {
+            // the message line of a pane without focus stays blank, unless its
+            // window still fills the pane, as before it is fitted to a new 'cmdheight'
             try expectBlank(&p.t, v.rows - 1, v.cols);
         }
 
@@ -537,7 +554,7 @@ const multi_steps = [_][]const u8{
     // floats: over a window, over the screen, then the popup menu
     ":lua B=vim.api.nvim_create_buf(false,true) vim.api.nvim_buf_set_lines(B,0,-1,false,{'float one','x'})<CR>",
     ":lua F1=vim.api.nvim_open_win(B,false,{relative='win',row=1,col=3,width=12,height=2,border='single'})<CR>",
-    ":lua F2=vim.api.nvim_open_win(B,false,{relative='editor',anchor='SE',row=6,col=28,width=9,height=1,zindex=60})<CR>",
+    ":lua F2=vim.api.nvim_open_win(B,false,{relative='editor',anchor='SE',row=6,col=23,width=9,height=1,zindex=60})<CR>",
     "<C-e>",
     "<C-y>",
     "oapple apricot<CR>ap<C-n>",
@@ -550,9 +567,19 @@ const multi_steps = [_][]const u8{
 };
 
 test "live neovim with a pane per window" {
+    try panePerWindow(1);
+}
+
+test "live neovim with a pane per window, and no row reserved for messages" {
+    try panePerWindow(0);
+}
+
+fn panePerWindow(cmdheight: u32) !void {
     var buf: [1024]u8 = undefined;
+    var set: [32]u8 = undefined;
     var m: Multi = .{
-        .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        .msg_rows = cmdheight,
+        .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n", "--cmd", try std.fmt.bufPrint(&set, "set cmdheight={d}", .{cmdheight}) }, &buf) catch |err| switch (err) {
             error.FileNotFound => return error.SkipZigTest,
             else => return err,
         },
@@ -574,6 +601,7 @@ test "live neovim with a pane per window" {
         };
     }
     try testing.expect(m.panes[1].win != 0);
+    try testing.expectEqual(@as(?i64, cmdheight), m.reported_cmdheight);
     try testing.expect(m.stats.frames > multi_steps.len);
     // three message rows, so the scrolled-up message was drawn
     try testing.expect(m.stats.msg_rows > 3);
@@ -584,4 +612,13 @@ test "live neovim with a pane per window" {
     // all closed
     var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
     for (m.panes) |p| try testing.expectEqual(0, m.gs.floatsOver(m.gs.gridOf(p.win).?, true, &.{}, &placed_buf).len);
+
+    // a new 'cmdheight' is reported, and the windows fit their panes again
+    for ([_]u32{ 2, 0, 1 }) |rows| {
+        var keys: [32]u8 = undefined;
+        try m.input(try std.fmt.bufPrint(&keys, ":set cmdheight={d}<CR>", .{rows}));
+        try m.settle();
+        try testing.expectEqual(@as(?i64, rows), m.reported_cmdheight);
+        for (m.panes) |p| try testing.expectEqual(p.view.rows - rows, m.gs.get(m.gs.gridOf(p.win).?).?.height);
+    }
 }
