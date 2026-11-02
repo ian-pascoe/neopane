@@ -90,6 +90,27 @@ pub fn discard(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !void {
     try nvim.flush();
 }
 
+/// Whether `bytes`, read as `feed` reads them, are typed or clicked into
+/// the pane, as opposed to what only reports or looks: focus reports, and
+/// mouse events other than a button going down, such as the wheel and a
+/// pointer moving. Changes nothing: the parser is read from a copy.
+pub fn takesFocus(self: *const Forwarder, bytes: []const u8) bool {
+    var parser = self.parser;
+    parser.feed(bytes);
+    while (parser.next()) |event| switch (event) {
+        .focus => {},
+        .mouse => |m| switch (m.action) {
+            .press => switch (m.button) {
+                .wheel_up, .wheel_down, .wheel_left, .wheel_right => {},
+                else => return true,
+            },
+            .release, .drag, .motion => {},
+        },
+        .key, .paste_start, .paste, .paste_end, .unknown => return true,
+    };
+    return false;
+}
+
 /// Whether the parser is between inputs, not partway through an escape
 /// sequence or character.
 pub fn atBoundary(self: *const Forwarder) bool {
@@ -299,4 +320,41 @@ test "tabline clicks in panes that continue the tabline select its next columns"
     try t.expectEqual(@as(u32, 1), b.grid);
     try t.expectEqual(@as(u16, 59), a.col);
     try t.expectEqual(@as(u16, 60), b.col);
+}
+
+test "only keys, pastes, and button presses take focus" {
+    const t = std.testing;
+    const f: Forwarder = .{};
+    try t.expect(f.takesFocus("x"));
+    try t.expect(f.takesFocus("\x1b[A"));
+    try t.expect(f.takesFocus("\x1b"));
+    try t.expect(f.takesFocus("\x1b[200~hi\x1b[201~"));
+    try t.expect(f.takesFocus("\x1b[<0;5;5M"));
+    try t.expect(f.takesFocus("\x1b[<2;5;5M"));
+    // a click among reports and scrolling
+    try t.expect(f.takesFocus("\x1b[I\x1b[<65;5;5M\x1b[<0;5;5M"));
+    try t.expect(f.takesFocus("\x1b[<65;5;5Mx"));
+
+    try t.expect(!f.takesFocus(""));
+    try t.expect(!f.takesFocus("\x1b[I"));
+    try t.expect(!f.takesFocus("\x1b[O\x1b[I"));
+    try t.expect(!f.takesFocus("\x1b[<64;5;5M"));
+    try t.expect(!f.takesFocus("\x1b[<65;5;5M\x1b[<65;5;5M"));
+    try t.expect(!f.takesFocus("\x1b[<66;5;5M\x1b[<67;5;5M"));
+    // the pointer moving, a button released or dragged
+    try t.expect(!f.takesFocus("\x1b[<35;5;5M"));
+    try t.expect(!f.takesFocus("\x1b[<0;5;5m"));
+    try t.expect(!f.takesFocus("\x1b[<32;5;5M"));
+}
+
+test "asking whether input takes focus reads from where the parser is, and leaves it there" {
+    const t = std.testing;
+    var f: Forwarder = .{};
+    // a wheel report cut in two reads
+    f.parser.feed("\x1b[<");
+    while (f.parser.next()) |_| {}
+    try t.expect(!f.atBoundary());
+    try t.expect(!f.takesFocus("65;5;5M"));
+    try t.expect(f.takesFocus("0;5;5M"));
+    try t.expect(!f.atBoundary());
 }
