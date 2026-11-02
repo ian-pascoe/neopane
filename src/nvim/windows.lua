@@ -52,8 +52,13 @@ end
 
 local making_anchor = false
 
--- window -> its pane's rows and columns, statusline included
-local sizes = {}
+-- window -> its pane: `w` x `h`, the rows and columns, statusline included.
+-- Layout plugins move windows back into Neovim's layout (see `restore`), so
+-- it also has `fight`: `restored`, when we put it back (ms), `off_until`,
+-- until when we leave it alone, and `off_for`, how long that was the last time.
+local panes = {}
+-- when the user last typed, or a pane was resized (ms)
+local last_activity = 0
 -- statusline formats we've set, to tell them from ones the user set
 local ours = {}
 -- laststatus=3 was set, and is 2 while neorex runs: every pane shows the one
@@ -62,6 +67,28 @@ local mirroring = false
 -- window -> { text = the current window's statusline we last gave it, own = what
 -- it showed before }
 local copied = {}
+
+local function now_ms()
+  return vim.uv.hrtime() / 1e6
+end
+
+-- the window's pane, made if need be
+local function pane_of(win)
+  panes[win] = panes[win] or { fight = { restored = {}, off_until = 0, off_for = 0 } }
+  return panes[win]
+end
+
+-- we've stopped putting `win` back in its pane for a while
+local function waiting(win)
+  local p = panes[win]
+  return p ~= nil and now_ms() < p.fight.off_until
+end
+
+-- edgy.nvim lays windows out again on every resize, and its animation never
+-- settles with external windows. It leaves ones marked like this alone.
+local function keep_edgy_out(win)
+  vim.w[win].edgy_disable = true
+end
 
 local function local_stl(win)
   return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
@@ -128,7 +155,12 @@ end
 --- Sizes external `win` to fill `w` x `h`, statusline included.
 function M.size(win, w, h)
   if not shown(win) then return end
-  sizes[win] = { w, h }
+  local p = pane_of(win)
+  -- a pane the user resized is no fight
+  if p.w ~= w or p.h ~= h then last_activity = now_ms() end
+  -- remembered while we wait, for when the window goes back in its pane
+  p.w, p.h = w, h
+  if waiting(win) then return end
   give_statusline(win)
   local th = text_height(win, h)
   -- every resize redraws the window
@@ -137,8 +169,8 @@ function M.size(win, w, h)
 end
 
 local function refit()
-  for win, s in pairs(sizes) do
-    if api.nvim_win_is_valid(win) then M.size(win, s[1], s[2]) else sizes[win] = nil end
+  for win, p in pairs(panes) do
+    if api.nvim_win_is_valid(win) then M.size(win, p.w, p.h) else panes[win] = nil end
   end
 end
 
@@ -157,7 +189,8 @@ end
 
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
-  if not shown(win) or api.nvim_win_get_config(win).external then return end
+  if not shown(win) or waiting(win) or api.nvim_win_get_config(win).external then return end
+  keep_edgy_out(win)
   local tab = api.nvim_win_get_tabpage(win)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
@@ -168,8 +201,94 @@ function M.adopt(win, w, h)
   end
   give_statusline(win)
   api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
-  sizes[win] = { w, h }
+  local p = pane_of(win)
+  p.w, p.h = w, h
 end
+
+-- Layout plugins such as edgy.nvim move windows back into Neovim's own
+-- layout, as `wincmd J` does, on every resize. A window with a pane that has
+-- been moved back is made external again.
+--
+-- A plugin that moves it back every time we put it in its pane would fight
+-- us forever. That's `max_restores` restores within `fight_ms`, with nothing
+-- typed and no pane resized since the first: then we leave the window alone
+-- for a while, twice as long each time, and try again after. An error while
+-- restoring waits `retry_ms`.
+-- The README gives these numbers: 5 times in 2 seconds, then 2 s, 4 s, up to a minute.
+local max_restores = 5
+local fight_ms = 2000
+local retry_ms = 500
+local min_off_ms = 2000
+local max_off_ms = 60000
+
+local check_lost
+
+-- `win` has a pane and isn't in it, and we aren't waiting to try again
+local function is_lost(win)
+  return shown(win) and not waiting(win) and not api.nvim_win_get_config(win).external
+end
+
+-- Looks again for lost windows once `p` has waited `delay` ms.
+local function wait_for(p, delay)
+  p.fight.off_until = now_ms() + delay
+  local function again()
+    -- the timer's clock can be a little behind ours
+    local left = p.fight.off_until - now_ms()
+    if left > 0 then return vim.defer_fn(again, math.ceil(left) + 1) end
+    check_lost()
+  end
+  vim.defer_fn(again, delay + 10)
+end
+
+local function restore_one(win, p)
+  local f = p.fight
+  local now = now_ms()
+  -- a fight is restores since the user last did anything
+  local recent = vim.tbl_filter(function(t) return t > last_activity and now - t < fight_ms end, f.restored)
+  local last = f.restored[#f.restored]
+  if last and now - last > max_off_ms then f.off_for = 0 end
+  if #recent >= max_restores then
+    f.restored = {}
+    f.off_for = math.min(math.max(f.off_for * 2, min_off_ms), max_off_ms)
+    return wait_for(p, f.off_for)
+  end
+  table.insert(recent, now)
+  f.restored = recent
+  M.adopt(win, p.w, p.h)
+end
+
+local function restore()
+  for win, p in pairs(panes) do
+    if not api.nvim_win_is_valid(win) then
+      panes[win] = nil
+    elseif is_lost(win) and not pcall(restore_one, win, p) then
+      wait_for(p, retry_ms)
+    end
+  end
+end
+
+local restore_queued = false
+-- whenever Neovim waits for input: plugins move windows inside their own
+-- autocommands, and often with 'eventignore' set. Schedules only when a
+-- window is lost: SafeState fires again after every scheduled callback.
+function check_lost()
+  if restore_queued then return end
+  for win in pairs(panes) do
+    if is_lost(win) then
+      restore_queued = true
+      vim.schedule(function()
+        restore_queued = false
+        restore()
+      end)
+      return
+    end
+  end
+end
+api.nvim_create_autocmd({ 'SafeState', 'WinResized' }, { group = group, callback = check_lost })
+-- keys the user typed, not ones a plugin runs with :normal or feedkeys
+vim.on_key(function(_, typed)
+  if typed ~= '' then last_activity = now_ms() end
+end, api.nvim_create_namespace('neorex'))
 
 --- Closes `win`, whose pane went away. Unsaved changes stay in its buffer.
 function M.close(win)
@@ -375,7 +494,8 @@ api.nvim_create_autocmd('SafeState', {
 })
 
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
--- first. If Neovim then refuses (unsaved changes), the daemon adopts it again.
+-- first. If Neovim then refuses (unsaved changes), `restore` or the daemon
+-- adopts it again.
 api.nvim_create_autocmd('QuitPre', {
   group = group,
   callback = function()
@@ -418,6 +538,7 @@ local function reopen(win, from, enter)
     if not api.nvim_buf_is_valid(buf) then buf = api.nvim_create_buf(true, false) end
     local new = api.nvim_open_win(buf, enter, { external = true, width = c.width, height = c.height })
     api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
+    keep_edgy_out(new)
     home[new] = from
     if last == win then last = new end
     for _, t in pairs(floating) do
@@ -438,7 +559,7 @@ api.nvim_create_autocmd('WinClosed', {
   callback = function(ev)
     local win = tonumber(ev.match)
     local from = home[win]
-    home[win] = nil
+    home[win], panes[win] = nil, nil
     if vim.v.exiting ~= vim.NIL then return end
     if from and floating[from] then
       -- after the command, which may open more windows in it
