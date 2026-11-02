@@ -59,10 +59,9 @@ local ours = {}
 -- laststatus=3 was set, and is 2 while neorex runs: every pane shows the one
 -- statusline a global one would, the current window's
 local mirroring = false
--- window -> the text of the current window's statusline we last gave it
+-- window -> { text = the current window's statusline we last gave it, own = what
+-- it showed before }
 local copied = {}
--- setting laststatus ourselves
-local rewriting = false
 
 local function local_stl(win)
   return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
@@ -87,14 +86,23 @@ local function global_line(win)
   if stl ~= '' then return stl end
 end
 
--- external windows only show a local statusline: copy the global one
+-- Gives external `win` a local statusline, as they only show those: the global
+-- one, or the current window's while mirroring.
 local function give_statusline(win)
   local cur = local_stl(win)
   local line = mirroring and global_line(win)
   if line then
     if cur ~= line then set_local_stl(win, line) end
-    copied[win] = line
+    local c = copied[win]
+    copied[win] = { text = line, own = (c and c.text == cur) and c.own or cur }
     return
+  end
+  local c = copied[win]
+  if c and c.text == cur and win == api.nvim_get_current_win() then
+    -- the copy of another window's statusline isn't the current window's
+    cur = c.own
+    set_local_stl(win, cur)
+    copied[win] = nil
   end
   if cur ~= '' and (mirroring or not ours[cur]) then return end
   local want = vim.go.laststatus == 0 and '' or vim.go.statusline
@@ -102,12 +110,11 @@ local function give_statusline(win)
   if cur ~= want then set_local_stl(win, want) end
 end
 
--- Each pane's statusline is its own again. A copy goes, so the pane gets the
--- global statusline; a pane's own statusline from before the copy is lost.
+-- Each pane's statusline is its own again: what it showed before a copy.
 local function stop_mirroring()
   mirroring = false
-  for win, text in pairs(copied) do
-    if api.nvim_win_is_valid(win) and local_stl(win) == text then set_local_stl(win, '') end
+  for win, c in pairs(copied) do
+    if api.nvim_win_is_valid(win) and local_stl(win) == c.text then set_local_stl(win, c.own) end
   end
   copied = {}
 end
@@ -142,8 +149,9 @@ local function request_refit()
   if refit_pending then return end
   refit_pending = true
   vim.schedule(function()
-    refit()
+    local ok, err = pcall(refit)
     refit_pending = false
+    if not ok then error(err, 0) end
   end)
 end
 
@@ -315,12 +323,12 @@ api.nvim_create_autocmd({ 'SafeState', 'TabNew', 'TabClosed' }, {
 -- Neovim draws no statusline in an external window when laststatus=3, but each
 -- pane is its own screen: show one in every pane with laststatus=2 instead.
 -- Returns whether it changed laststatus. Run from SafeState, as OptionSet
--- doesn't fire for an option set in an autocommand, as LazyVim loads lualine.
+-- doesn't fire for an option set in an autocommand, as LazyVim loads lualine
+-- (nor for ours here, which is in one). The same goes for a laststatus=2 set in
+-- an autocommand: it can't end the mirroring, as it looks like ours.
 local function rewrite_laststatus_3()
   if vim.go.laststatus ~= 3 then return false end
-  rewriting = true
   vim.go.laststatus = 2
-  rewriting = false
   mirroring = true
   return true
 end
@@ -332,7 +340,7 @@ api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = { 'statusline', 'laststatus' },
   callback = function(ev)
-    if ev.match == 'laststatus' and mirroring and not rewriting and tonumber(vim.v.option_new) ~= 3 then
+    if ev.match == 'laststatus' and mirroring and tonumber(vim.v.option_new) ~= 3 then
       stop_mirroring()
     end
     request_refit()

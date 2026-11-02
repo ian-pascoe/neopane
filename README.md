@@ -96,7 +96,8 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   `vim.go.laststatus == 3`, is false once neorex has turned `laststatus=3`
   into `2`.
   A pane's own `setlocal statusline` is replaced by that line meanwhile, and
-  not restored.
+  comes back when the pane takes focus, or when `laststatus` is set to
+  another value.
 
 ## Plans
 
