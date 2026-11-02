@@ -21,6 +21,7 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::event_loop::{Event, Loop};
+use super::floating_panes::{self, FloatingPanes, LAYER_FRAME};
 use super::focus_gate::AimForwarder;
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
@@ -35,7 +36,7 @@ use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
 use crate::rex::session::{self as rex_session, Conn, Request, Session as RexSession};
-use crate::screen::float_groups::{self, Group};
+use crate::screen::float_groups;
 use crate::screen::grid::{Cell, Grid};
 use crate::screen::grids::{Grids, WinKind};
 use crate::screen::pane_view::{Opts, Rect};
@@ -148,10 +149,6 @@ const LAYOUT_WAIT_MS: u32 = 1000;
 
 /// A new Rex terminal's size, cols x rows, until the app lays it out.
 const REX_DEFAULT_SIZE: [u32; 2] = [80, 24];
-
-/// About how many cells a Rex floating pane's frame takes, across and down.
-/// Only a first guess: once made, its floats fit whatever size it is.
-const LAYER_FRAME: [i32; 2] = [3, 2];
 
 /// Where a new tab page's floating pane sits, as fractions of the window: x, y, w, h.
 const TAB_LAYER_BOUNDS: [f64; 4] = [0.05, 0.05, 0.9, 0.9];
@@ -382,7 +379,7 @@ impl Daemon {
         }
         self.size_window(id);
         if self.panes.by_id(id).unwrap().layer.is_some()
-            && let Some(req) = self.follow_layer(id)
+            && let Some(req) = self.floating().follow_layer(id)
             && let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer
         {
             l.fit = Fit::Asked(req);
@@ -452,7 +449,7 @@ impl Daemon {
             .view
             .resize(u32::from(window_size.ws_col), u32::from(window_size.ws_row));
         self.size_window(id);
-        let _ = self.follow_layer(id);
+        let _ = self.floating().follow_layer(id);
         if self.focused_pane_id() == Some(id) {
             self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         }
@@ -780,7 +777,7 @@ impl Daemon {
     /// A float became current: if it's in a floating pane, focus that.
     fn on_current_float(&mut self, win: i64) -> Result<()> {
         self.nvim.current_float = win;
-        let Some(p) = self.layer_of_win(win) else {
+        let Some(p) = floating_panes::layer_of_win(&self.grids, &self.panes, win) else {
             return Ok(());
         };
         let block = p.rex_block;
@@ -792,11 +789,13 @@ impl Daemon {
     /// its group a floating pane; if it's already showing in a pane, now.
     fn on_entered_float(&mut self, win: i64) -> Result<()> {
         self.nvim.note_entered(win);
-        if !self.nvim.ready || self.grids.grid_of(win).is_none() || self.layer_of_win(win).is_some()
+        if !self.nvim.ready
+            || self.grids.grid_of(win).is_none()
+            || floating_panes::layer_of_win(&self.grids, &self.panes, win).is_some()
         {
             return Ok(());
         }
-        self.reconcile_layers()?;
+        self.floating().reconcile_layers()?;
         self.nvim.client.flush()?;
         self.draw()
     }
@@ -869,7 +868,7 @@ impl Daemon {
             }
         }
         self.size_windows();
-        self.reconcile_layers()?;
+        self.floating().reconcile_layers()?;
         self.place_tabs()?;
         self.nvim.client.flush()?;
         Ok(())
@@ -1114,7 +1113,9 @@ impl Daemon {
             l.id = pane::rex_layer(id.as_bytes()).ok();
         }
         if self.nvim.current_float != 0
-            && self.layer_of_win(self.nvim.current_float).map(|p| p.id) == Some(pane_id)
+            && floating_panes::layer_of_win(&self.grids, &self.panes, self.nvim.current_float)
+                .map(|p| p.id)
+                == Some(pane_id)
         {
             self.rex.focus(rex_block)?;
         }
@@ -1130,11 +1131,13 @@ impl Daemon {
         if let Some(l) = &p.layer {
             // clicked into a floating pane: into one of its floats, if not there
             if self.nvim.current_float != 0
-                && self.layer_of_win(self.nvim.current_float).map(|q| q.id) == Some(id)
+                && floating_panes::layer_of_win(&self.grids, &self.panes, self.nvim.current_float)
+                    .map(|q| q.id)
+                    == Some(id)
             {
                 return Ok(());
             }
-            let Some(win) = self.focusable_in(&l.group) else {
+            let Some(win) = floating_panes::focusable_in(&self.grids, &l.group) else {
                 return Ok(());
             };
             self.nvim.current_float = win;
@@ -1200,200 +1203,22 @@ impl Daemon {
             }
         }
         for l in &snapshot.layer_bounds {
-            changed |= self.follow_moved_layer(l);
+            changed |= self.floating().follow_moved_layer(l);
         }
         changed
     }
 
-    /// A floating layer of ours somewhere else: the user moved it, so its
-    /// floats follow.
-    fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
-        let Some(p) = self.panes.by_block(moved.block.as_bytes()) else {
-            return false;
-        };
-        let Some(l) = p.layer else {
-            return false;
-        };
-        if self.same_bounds(moved.bounds, l.bounds) {
-            return false;
+    /// The borrows of the floating panes' lifecycle (see `floating_panes`).
+    fn floating(&mut self) -> FloatingPanes<'_> {
+        FloatingPanes {
+            exe: &self.exe,
+            sock: &self.sock,
+            grids: &self.grids,
+            panes: &mut self.panes,
+            event_loop: &self.event_loop,
+            rex: &mut self.rex,
+            nvim: &mut self.nvim,
         }
-        let id = p.id;
-        if let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer {
-            l.bounds = moved.bounds;
-        }
-        let _ = self.follow_layer(id);
-        true
-    }
-
-    // floating panes
-
-    /// Matches floating panes to groups of floats: new groups get one, and
-    /// those whose group closed hang up. A floating pane's size is Rex's: it's
-    /// never moved to follow its floats, they follow it.
-    fn reconcile_layers(&mut self) -> Result<()> {
-        let groups = if self.rex.conn != Conn::Closed {
-            float_groups::find(&self.grids, self.nvim.entered_floats())
-        } else {
-            Vec::new()
-        };
-        let mut i = self.panes.list.len();
-        while i > 0 {
-            i -= 1;
-            let p = &mut self.panes.list[i];
-            let Some(l) = &mut p.layer else {
-                continue;
-            };
-            if let Some(g) = groups.iter().find(|g| g.key == l.group.key) {
-                l.group = *g;
-                continue;
-            }
-            // without an id Rex hasn't answered yet: the answer closes it
-            if let Some(id) = l.id {
-                self.rex.close_layer(&block_str(&id))?;
-            }
-            if p.closing.is_none() {
-                p.closing = Some(Close::WindowClosed);
-            }
-            self.panes.remove(i, &self.event_loop);
-        }
-        for g in groups {
-            if self.panes.by_layer_key(g.key).is_none() {
-                self.new_layer(g)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Bounds for a floating pane around `g`, as fractions of the window,
-    /// leaving room for the frame Rex draws around it.
-    fn layer_bounds(&self, g: &Group) -> Option<[f64; 4]> {
-        let screen = self.grids.get(1)?;
-        if screen.width == 0 || screen.height == 0 {
-            return None;
-        }
-        let sw = f64::from(screen.width);
-        let sh = f64::from(screen.height);
-        let fw = LAYER_FRAME[0];
-        let fh = LAYER_FRAME[1];
-        let w = ((i64::from(g.width) + i64::from(fw)) as f64 / sw).min(1.0);
-        let h = ((i64::from(g.height) + i64::from(fh)) as f64 / sh).min(1.0);
-        let x = (f64::from(g.col - fw.div_euclid(2)) / sw).clamp(0.0, 1.0 - w);
-        let y = (f64::from(g.row - fh.div_euclid(2)) / sh).clamp(0.0, 1.0 - h);
-        Some([x, y, w, h])
-    }
-
-    fn new_layer(&mut self, g: Group) -> Result<()> {
-        let Some(bounds) = self.layer_bounds(&g) else {
-            return Ok(());
-        };
-        let pane = self.panes.add_for_group(g);
-        pane.layer.as_mut().unwrap().bounds = bounds;
-        let pane_id = pane.id;
-
-        let id = pane_id.to_string();
-        self.rex.new_layer(
-            pane_id,
-            bounds,
-            json!({ "block": {
-                "flavor": "com.superlogical.terminal.shell",
-                "label": "neorex",
-                "options": { "shell": "none", "command": [self.exe, "pane", self.sock, id] },
-            } }),
-        )?;
-        Ok(())
-    }
-
-    /// Within half a cell of each other on grid 1.
-    fn same_bounds(&self, a: [f64; 4], b: [f64; 4]) -> bool {
-        let Some(screen) = self.grids.get(1) else {
-            return true;
-        };
-        let half = [
-            0.5 / f64::from(screen.width.max(1)),
-            0.5 / f64::from(screen.height.max(1)),
-        ];
-        for i in 0..4 {
-            if (a[i] - b[i]).abs() >= half[i % 2] {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Fits a floating pane's floats to where it is and the size Rex gave it.
-    /// Returns the request's id, if it sent one.
-    fn follow_layer(&mut self, id: u32) -> Option<u32> {
-        let p = self.panes.by_id(id)?;
-        let l = p.layer.as_ref()?;
-        let s = p.terminal_surface.as_ref()?;
-        let screen = self.grids.get(1)?;
-        let row =
-            (l.bounds[1] * f64::from(screen.height)).round() as i32 + LAYER_FRAME[1].div_euclid(2);
-        let col =
-            (l.bounds[0] * f64::from(screen.width)).round() as i32 + LAYER_FRAME[0].div_euclid(2);
-        let g = l.group;
-        let (cols, rows) = (s.view.cols, s.view.rows);
-        if row == g.row && col == g.col && cols == g.width && rows == g.height {
-            return None;
-        }
-        let mut wins: Vec<i64> = Vec::with_capacity(16);
-        for &top in g.top_grids() {
-            if let Some(w) = self.grids.win_on(top) {
-                wins.push(w.win);
-            }
-        }
-        if wins.is_empty() {
-            return None;
-        }
-        Some(windows::place_group(
-            &mut self.nvim.client,
-            &wins,
-            row,
-            col,
-            cols,
-            rows,
-            [
-                i64::from(g.row),
-                i64::from(g.col),
-                i64::from(g.width),
-                i64::from(g.height),
-            ],
-        ))
-    }
-
-    /// The floating pane showing float `win`, if one does.
-    fn layer_of_win(&self, win: i64) -> Option<&Pane> {
-        let grid = self.grids.grid_of(win)?;
-        let top = self.grids.place(grid)?.top;
-        if top == 0 {
-            return None;
-        }
-        self.panes
-            .list
-            .iter()
-            .find(|p| p.layer.is_some_and(|l| l.group.has_top(top)))
-    }
-
-    /// A float in group `g` that takes focus: the input of a picker, which
-    /// stacks above its box.
-    fn focusable_in(&self, g: &Group) -> Option<i64> {
-        let mut best: Option<(i64, u32)> = None;
-        for (&id, w) in &self.grids.wins {
-            if w.kind != WinKind::Float || !w.float.focusable {
-                continue;
-            }
-            let Some(place) = self.grids.place(id) else {
-                continue;
-            };
-            let top = place.top;
-            if top == 0 || !g.has_top(top) {
-                continue;
-            }
-            if best.is_none_or(|(_, z)| w.float.zindex > z) {
-                best = Some((w.win, w.float.zindex));
-            }
-        }
-        best.map(|(win, _)| win)
     }
 
     // shared
@@ -1769,7 +1594,7 @@ fn parse_block(block: &str) -> Option<RexBlock> {
 }
 
 /// A Rex id as the string Rex knows it by.
-fn block_str(id: &[u8]) -> Cow<'_, str> {
+pub(super) fn block_str(id: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(id)
 }
 
@@ -1825,6 +1650,7 @@ mod tests {
     use crate::nvim::nvim::for_test_on;
     use crate::nvim::windows::{Kind, Node};
     use crate::rex::client::Client;
+    use crate::screen::float_groups::Group;
     use crate::screen::grids::{Float, Win};
     use serde_json::json;
     use std::io::{Read, Write};
@@ -2401,34 +2227,43 @@ mod tests {
         // 3 x 2 cells of frame: half of each around the group
         approx(
             [0.045, 0.06, 0.315, 0.44],
-            d.layer_bounds(&picker_group()).unwrap(),
+            floating_panes::layer_bounds(&d.grids, &picker_group()).unwrap(),
         );
 
         // too big for the screen: it fills it
         let mut big = picker_group();
         big.width = 300;
         big.height = 80;
-        approx([0.0, 0.0, 1.0, 1.0], d.layer_bounds(&big).unwrap());
+        approx(
+            [0.0, 0.0, 1.0, 1.0],
+            floating_panes::layer_bounds(&d.grids, &big).unwrap(),
+        );
 
         // at the right and bottom edges: pulled back in, so it's whole
         let mut edge = picker_group();
         edge.col = 190;
         edge.row = 45;
-        let b = d.layer_bounds(&edge).unwrap();
+        let b = floating_panes::layer_bounds(&d.grids, &edge).unwrap();
         approx([1.0 - b[2], 1.0 - b[3], 63.0 / 200.0, 22.0 / 50.0], b);
 
         // off the top left: pulled in to it
         let mut off = picker_group();
         off.col = 0;
         off.row = 0;
-        let b = d.layer_bounds(&off).unwrap();
+        let b = floating_panes::layer_bounds(&d.grids, &off).unwrap();
         assert_eq!([0.0, 0.0], [b[0], b[1]]);
 
         // no screen to measure by, or an empty one
         d.grids.get_mut(1).unwrap().resize(0, 0);
-        assert_eq!(None, d.layer_bounds(&picker_group()));
+        assert_eq!(
+            None,
+            floating_panes::layer_bounds(&d.grids, &picker_group())
+        );
         d.grids.grids.swap_remove(&1);
-        assert_eq!(None, d.layer_bounds(&picker_group()));
+        assert_eq!(
+            None,
+            floating_panes::layer_bounds(&d.grids, &picker_group())
+        );
     }
 
     #[test]
@@ -2437,15 +2272,39 @@ mod tests {
         let d = fx.d();
         let a = [0.1, 0.2, 0.3, 0.4];
         // a cell is 1/200 wide and 1/50 high
-        assert!(d.same_bounds(a, a));
-        assert!(d.same_bounds(a, [0.1 + 0.0024, 0.2 + 0.009, 0.3 - 0.0024, 0.4 - 0.009]));
-        assert!(!d.same_bounds(a, [0.1 + 0.0026, 0.2, 0.3, 0.4]));
-        assert!(!d.same_bounds(a, [0.1, 0.2 + 0.0101, 0.3, 0.4]));
-        assert!(!d.same_bounds(a, [0.1, 0.2, 0.3 + 0.0026, 0.4]));
-        assert!(!d.same_bounds(a, [0.1, 0.2, 0.3, 0.4 + 0.0101]));
+        assert!(floating_panes::same_bounds(&d.grids, a, a));
+        assert!(floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.1 + 0.0024, 0.2 + 0.009, 0.3 - 0.0024, 0.4 - 0.009]
+        ));
+        assert!(!floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.1 + 0.0026, 0.2, 0.3, 0.4]
+        ));
+        assert!(!floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.1, 0.2 + 0.0101, 0.3, 0.4]
+        ));
+        assert!(!floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.1, 0.2, 0.3 + 0.0026, 0.4]
+        ));
+        assert!(!floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.1, 0.2, 0.3, 0.4 + 0.0101]
+        ));
         // no screen: nothing to tell them apart by
         d.grids.grids.swap_remove(&1);
-        assert!(d.same_bounds(a, [0.9, 0.9, 0.9, 0.9]));
+        assert!(floating_panes::same_bounds(
+            &d.grids,
+            a,
+            [0.9, 0.9, 0.9, 0.9]
+        ));
     }
 
     #[test]
@@ -2537,9 +2396,9 @@ mod tests {
             nvim_end: _,
         } = fixture();
         show_picker(&mut d);
-        d.reconcile_layers().unwrap();
+        d.floating().reconcile_layers().unwrap();
         // already has one
-        d.reconcile_layers().unwrap();
+        d.floating().reconcile_layers().unwrap();
         assert_eq!(1, d.panes.list.len());
         let id = d.panes.list[0].id;
         approx(
@@ -2551,7 +2410,7 @@ mod tests {
             Some(pane::rex_layer(block_id(5).replace("block:", "layer:").as_bytes()).unwrap());
         // the float closes
         d.grids.wins.swap_remove(&3);
-        d.reconcile_layers().unwrap();
+        d.floating().reconcile_layers().unwrap();
         assert!(d.panes.list.is_empty());
         drop(d);
         let mut all = Vec::new();
@@ -2582,9 +2441,9 @@ mod tests {
     fn a_float_group_that_closes_before_rex_answers_sends_no_close() {
         let frames = fake_rex_requests(|d| {
             show_picker(d);
-            d.reconcile_layers().unwrap();
+            d.floating().reconcile_layers().unwrap();
             d.grids.wins.swap_remove(&3);
-            d.reconcile_layers().unwrap();
+            d.floating().reconcile_layers().unwrap();
             assert!(d.panes.list.is_empty());
         });
         assert_eq!(vec!["session.new_layer"], methods_of(&frames));
@@ -2595,11 +2454,11 @@ mod tests {
         let frames = fake_rex_requests(|d| {
             show_picker(d);
             d.nvim = NvimSession::new(for_test_on(UnixStream::pair().unwrap().0));
-            d.reconcile_layers().unwrap();
+            d.floating().reconcile_layers().unwrap();
             assert!(d.panes.list.is_empty());
             d.nvim.note_entered(1002);
             d.rex.conn = Conn::Closed;
-            d.reconcile_layers().unwrap();
+            d.floating().reconcile_layers().unwrap();
             assert!(d.panes.list.is_empty());
         });
         assert!(frames.is_empty());
@@ -2609,7 +2468,7 @@ mod tests {
     /// that Rex has answered, in `d`. Its id and block.
     fn made_picker_pane(d: &mut Daemon, cols: u32, rows: u32) -> u32 {
         show_picker(d);
-        d.reconcile_layers().unwrap();
+        d.floating().reconcile_layers().unwrap();
         let p = &mut d.panes.list[0];
         p.terminal_surface = Some(Surface::for_test(cols, rows));
         let id = p.id;
@@ -2661,7 +2520,7 @@ mod tests {
         assert_eq!(moved, layer_bounds_of(&d, id));
         // Neovim has put them there: the next flush's group, and Rex's view again
         d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 30]);
-        d.reconcile_layers().unwrap();
+        d.floating().reconcile_layers().unwrap();
         assert_eq!(30, d.panes.list[0].layer.as_ref().unwrap().group.col);
         read_and_flush(&mut d, floating_layer_view(moved));
         read_and_flush(&mut d, floating_layer_view(moved));
