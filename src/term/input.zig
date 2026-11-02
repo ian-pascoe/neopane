@@ -322,6 +322,20 @@ pub const Parser = struct {
         self.pos = 0;
     }
 
+    /// Gives up the fed bytes not read yet and returns them, so the caller
+    /// can feed them again later. Call between events. If the event ended at
+    /// an ESC that starts the next one, that ESC is given back too.
+    pub fn takeRest(self: *Parser) []const u8 {
+        if (self.state == .escape) {
+            self.state = .ground;
+            self.pos -= 1;
+        }
+        const rest = self.input[self.pos..];
+        self.input = "";
+        self.pos = 0;
+        return rest;
+    }
+
     /// The next event from the fed bytes, or null when they are used up.
     pub fn next(self: *Parser) ?Event {
         while (self.pos < self.input.len) {
@@ -837,6 +851,24 @@ test "sequences split across reads" {
     try expectEvents(&.{ "\x1b[1;", "5C" }, &.{testNamed(.right, .{ .ctrl = true })});
     try expectEvents(&.{ "\x1b[", "A" }, &.{testNamed(.up, .{})});
     try expectEvents(&.{ "\xc3", "\xa9" }, &.{testKey('é', .{})});
+}
+
+test "taking the rest after a key gives back an ESC that starts the next" {
+    var parser: Parser = .{};
+    parser.feed("\x1b\x1b");
+    try std.testing.expect(parser.next().?.key.key.named == .escape);
+    try std.testing.expectEqualStrings("\x1b", parser.takeRest());
+    // read again from ground: a lone ESC at the end of a read is Escape, so
+    // the next key isn't Alt
+    parser.feed("\x1b");
+    try std.testing.expect(parser.next().?.key.key.named == .escape);
+    try std.testing.expect(parser.next() == null);
+    parser.feed("x");
+    try std.testing.expectEqual(Mods{}, parser.next().?.key.mods);
+
+    parser.feed("ab");
+    _ = parser.next();
+    try std.testing.expectEqualStrings("b", parser.takeRest());
 }
 
 test "unknown and broken input" {

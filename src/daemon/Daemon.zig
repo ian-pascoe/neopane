@@ -49,7 +49,7 @@ stopped: ?StopReason = null,
 pub const StopReason = enum { nvim_exited, pane_gone, signal };
 
 /// What a loop event's token names; pane tokens fall in `_`.
-pub const Token = enum(usize) { signal, nvim_socket, helper_listener, rex_socket, focus_timer, layout_timer, _ };
+pub const Token = enum(usize) { signal, nvim_socket, helper_listener, rex_socket, focus_timer, layout_timer, switch_timer, _ };
 pub const PaneEvent = struct { pane: *Pane, fd: Pane.PaneFd };
 
 comptime {
@@ -65,6 +65,10 @@ const startup_pane_id = 0;
 /// out then an in, and shouldn't fire FocusLost and FocusGained.
 const focus_out_delay_ms = 80;
 
+/// How often a window switch still unanswered is checked for waiting behind
+/// a command that needs a key.
+const switch_recheck_ms = 100;
+
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const layout_wait_ms = 1000;
 
@@ -79,6 +83,7 @@ const layer_frame = [2]i32{ 3, 2 };
 const tab_layer_bounds = [4]f64{ 0.05, 0.05, 0.9, 0.9 };
 
 pub fn deinit(self: *Daemon) void {
+    self.nvim.deinit(self.gpa);
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
@@ -143,6 +148,7 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
         .rex_socket => try self.onRex(),
         .focus_timer => try self.sendFocus(true),
         .layout_timer => try self.layoutWaitOver(),
+        .switch_timer => try self.recheckSwitch(),
         .helper_listener => {},
         _ => try self.onPane(e.token),
     }
@@ -152,6 +158,11 @@ fn handle(self: *Daemon, e: Loop.Event) !void {
 /// Losing it waits a moment, in case another pane gains it.
 fn afterBatch(self: *Daemon) !void {
     try self.sendFocus(false);
+    if (self.nvim.watchSwitch()) try self.addTimer(.switch_timer, switch_recheck_ms);
+}
+
+fn recheckSwitch(self: *Daemon) !void {
+    if (try self.nvim.recheckSwitch()) try self.addTimer(.switch_timer, switch_recheck_ms);
 }
 
 fn sendFocus(self: *Daemon, waited: bool) !void {
@@ -259,10 +270,18 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
         try self.makeCurrent(pane);
         try self.rex.focus(pane.rex_block);
     }
+    // behind the switch above, if any: sent straight, the keys would reach the old window
+    try self.nvim.typeInto(self.gpa, self, pane.id, bytes);
+}
 
+/// Pane `id`'s forwarder, aimed at the grid of its window; null once the
+/// pane is gone. Is `NvimSession.typeInto`'s `panes`.
+pub fn aimForwarder(self: *Daemon, id: u32) ?*Forwarder {
+    const pane = self.panes.byId(id) orelse return null;
+    const surface = pane.terminal_surface orelse return null;
     // a floating pane's default grid is set as it draws
     if (pane.layer == null) surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
-    _ = try surface.forwarder.feed(self.nvim.client, bytes);
+    return &surface.forwarder;
 }
 
 /// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
@@ -382,7 +401,7 @@ fn onNvim(self: *Daemon) !void {
         .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
         .response => |r| {
             var result = r.result;
-            if (r.id == self.nvim.current_win_req) self.nvim.current_win_req = null;
+            try self.nvim.answered(self.gpa, self, r);
             var show_now = false;
             for (self.panes.list.items) |*p| if (p.layer) |*l| if (l.fit == .asked and l.fit.asked == r.id) {
                 // nothing moved, so no redraw is coming: show it now
@@ -414,7 +433,7 @@ fn onNvim(self: *Daemon) !void {
 /// Neovim's current window changed: focus its pane in Rex.
 fn onCurrent(self: *Daemon, win: i64) !void {
     // sent before our own change ran; the report after it is coming
-    if (self.nvim.current_win_req != null) return;
+    if (self.nvim.switchInFlight() != null) return;
     self.nvim.current_float = 0;
     self.nvim.current_win = win;
     const p = self.panes.byWin(win) orelse return;
@@ -604,8 +623,7 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
         if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) return;
         const win = self.focusableIn(&l.group) orelse return;
         self.nvim.current_float = win;
-        _ = try windows.setCurrent(self.nvim.client, win);
-        try self.nvim.client.flush();
+        try self.nvim.switchToFloat(self.gpa, p.id, win);
         return;
     }
     const win = p.neovim_window_handle orelse return;
@@ -907,8 +925,7 @@ fn sizeWindow(self: *Daemon, p: *Pane) !void {
 /// Makes the pane's window Neovim's current one, sized to the pane.
 fn makeCurrent(self: *Daemon, pane: *Pane) !void {
     const win = pane.neovim_window_handle.?;
-    self.nvim.current_win = win;
-    self.nvim.current_win_req = try windows.setCurrent(self.nvim.client, win);
+    try self.nvim.makeCurrent(self.gpa, pane.id, win);
     try self.nvim.fitUiTo(pane);
 }
 
