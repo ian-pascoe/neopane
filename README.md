@@ -137,6 +137,13 @@ Much of neorex will be split out into standalone crates:
 
 neorex should then be easier to extend to other editors that provide similar processes for running external windows.
 
+## Credits
+
+neorex was created by [Alex Locke](https://github.com/alexrlocke), in Zig, at
+[alexrlocke/neorex](https://github.com/alexrlocke/neorex). This repository
+started as a fork of it and continues it independently, rewritten in Rust.
+The commit history from the original is kept.
+
 ## License
 
-MIT
+MIT, as the original. See [LICENSE](LICENSE).

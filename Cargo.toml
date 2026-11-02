@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT"
 description = "A Rex-native Neovim frontend"
+repository = "https://github.com/ian-pascoe/neorex"
 publish = false
 
 [dependencies]
