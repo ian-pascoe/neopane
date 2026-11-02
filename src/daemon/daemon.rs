@@ -204,6 +204,7 @@ impl AimForwarder for PaneForwarders<'_> {
 /// fields drop.
 impl Drop for Daemon {
     fn drop(&mut self) {
+        self.panes.unregister_all(&self.event_loop);
         self.panes.deinit();
     }
 }
@@ -360,6 +361,8 @@ impl Daemon {
         // itself)
         let surface = Surface::create(hello.stream, hello.tty)?;
         let pane = self.panes.by_id_mut(id).unwrap();
+        // a pane that already has a surface drops it below: off the loop first
+        pane.unregister_from(&self.event_loop);
         pane.terminal_surface = Some(surface);
         pane.register_with(&self.event_loop)?;
         if pane.awaiting_layout {
@@ -593,7 +596,7 @@ impl Daemon {
         p.closing = Some(Close::RexPaneClosed);
         if let Some(l) = p.layer {
             // closed in Rex: close its floats, which the plugin notices
-            self.panes.remove(i);
+            self.panes.remove(i, &self.event_loop);
             for &top in l.group.top_grids() {
                 if let Some(w) = self.grids.win_on(top) {
                     windows::close(&mut self.nvim.client, w.win);
@@ -611,7 +614,7 @@ impl Daemon {
             return Ok(());
         }
         let maybe_win = self.panes.list[i].neovim_window_handle;
-        self.panes.remove(i);
+        self.panes.remove(i, &self.event_loop);
         let Some(win) = maybe_win else {
             return Ok(());
         };
@@ -821,7 +824,7 @@ impl Daemon {
             {
                 self.rex.close_block(&block_str(&b))?;
             }
-            self.panes.remove(i);
+            self.panes.remove(i, &self.event_loop);
         }
         if self.panes.list.is_empty() {
             self.stop(StopReason::PaneGone);
@@ -1253,7 +1256,7 @@ impl Daemon {
             if p.closing.is_none() {
                 p.closing = Some(Close::WindowClosed);
             }
-            self.panes.remove(i);
+            self.panes.remove(i, &self.event_loop);
         }
         for g in groups {
             if self.panes.by_layer_key(g.key).is_none() {

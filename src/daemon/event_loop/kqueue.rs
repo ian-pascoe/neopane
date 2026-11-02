@@ -35,6 +35,10 @@ impl Backend {
         self.change(sig as usize, libc::EVFILT_SIGNAL, libc::EV_ADD, token)
     }
 
+    /// Called as the loop ends, before the old signal actions come back.
+    /// Nothing to release: kqueue watches signals without blocking them.
+    pub fn release_signals(&self) {}
+
     pub fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
         self.change_data(
             id,

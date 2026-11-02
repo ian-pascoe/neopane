@@ -3,8 +3,9 @@
 //! events.
 //!
 //! The platform-neutral part lives here. A backend (`kqueue` for macOS and
-//! FreeBSD) supplies `Backend`, which this file drives; to add a platform,
-//! write a module with the same `Backend` methods and select it below.
+//! FreeBSD, `epoll` for Linux) supplies `Backend`, which this file drives; to
+//! add a platform, write a module with the same `Backend` methods and select
+//! it below.
 
 use std::fmt;
 use std::os::unix::io::RawFd;
@@ -14,7 +15,12 @@ mod kqueue;
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 use kqueue::Backend;
 
-#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+#[cfg(target_os = "linux")]
+mod epoll;
+#[cfg(target_os = "linux")]
+use epoll::Backend;
+
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "linux")))]
 compile_error!("no event-loop backend for this platform yet");
 
 /// What went wrong with the event loop's backend.
@@ -88,8 +94,8 @@ impl Loop {
         })
     }
 
-    /// Restores the old signal actions, then closes the backend.
-    /// (Dropping the loop does the same; this just makes it explicit.)
+    /// Releases the signals, restores their old actions, then closes the
+    /// backend. (Dropping the loop does the same; this just makes it explicit.)
     pub fn deinit(self) {}
 
     /// Watches `fd` for reading. Adding it again replaces the token.
@@ -97,12 +103,20 @@ impl Loop {
         self.backend.add_read(fd, token)
     }
 
-    /// Stops watching `fd`. Not needed before closing it.
+    /// Stops watching `fd`. Call it before closing `fd`: kqueue drops a watch
+    /// when its fd closes, but epoll only when every copy of the open file
+    /// closes, and a watch left behind reports under the old token, or the
+    /// token of whatever gets the fd number next.
     pub fn remove(&self, fd: RawFd) -> Result<()> {
         self.backend.remove(fd)
     }
 
     /// Watches `sig`, and ignores it so its default action never runs.
+    ///
+    /// Some backends (epoll) block the signal on the calling thread, so any
+    /// thread that already exists keeps it unblocked and may swallow it. Add
+    /// signals before starting other threads, and drop the loop on the thread
+    /// that added them.
     pub fn add_signal(&mut self, sig: libc::c_int, token: usize) -> Result<()> {
         let n = sig as usize;
         // only the first time, so a second call can't save our own SIG_IGN
@@ -132,9 +146,13 @@ impl Loop {
 }
 
 impl Drop for Loop {
-    /// Restores the old signal actions; the backend closes itself after.
+    /// Releases the signals and restores their old actions; the backend
+    /// closes itself after.
     fn drop(&mut self) {
-        // restore first, so no signal is ignored once nothing watches it
+        // while they're still ignored: a signal the backend held back is
+        // discarded, not delivered to the old action
+        self.backend.release_signals();
+        // restore next, so no signal is ignored once nothing watches it
         for (n, maybe_old_action) in self.old.iter().enumerate() {
             if let Some(old_action) = maybe_old_action {
                 // SAFETY: restores an action `sigaction` itself returned.
@@ -163,6 +181,24 @@ mod tests {
 
     fn write_x(fd: RawFd) {
         unsafe { libc::write(fd, b"x".as_ptr().cast(), 1) };
+    }
+
+    /// Raises `sig` where the backend sees it. kqueue watches the whole
+    /// process and misses a signal raised for one thread; epoll's signalfd
+    /// has the signal blocked on this thread only, and a signal for the
+    /// process is dropped while it's ignored and the main thread, which
+    /// isn't this one, doesn't block it.
+    fn raise_for_loop(sig: libc::c_int) {
+        // SAFETY: raising a signal the caller has ignored and watches.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::raise(sig)
+        };
+        // SAFETY: as above, for the whole process.
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::kill(libc::getpid(), sig)
+        };
     }
 
     #[test]
@@ -223,8 +259,7 @@ mod tests {
     fn signals_arrive_as_events_and_the_old_action_comes_back() {
         let mut loop_ = Loop::init().unwrap();
         loop_.add_signal(libc::SIGUSR1, 9).unwrap();
-        // the whole process: raise only signals this thread, which kqueue misses
-        unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) };
+        raise_for_loop(libc::SIGUSR1);
         let mut buf = [Event::default(); 4];
         assert_eq!(
             &[Event {
@@ -242,9 +277,80 @@ mod tests {
     }
 
     #[test]
-    fn a_timer_fires_once() {
+    fn adding_an_fd_again_replaces_its_token() {
         let loop_ = Loop::init().unwrap();
-        loop_.add_timer(1, 5, 11).unwrap();
+        let p = pipe().unwrap();
+        loop_.add_read(p[0], 1).unwrap();
+        loop_.add_read(p[0], 2).unwrap();
+
+        write_x(p[1]);
+        let mut buf = [Event::default(); 4];
+        assert_eq!(
+            &[Event {
+                token: 2,
+                kind: Kind::Read,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        for fd in p {
+            close(fd);
+        }
+    }
+
+    #[test]
+    fn a_timer_fires_once_and_not_before_its_time() {
+        let loop_ = Loop::init().unwrap();
+        loop_.add_timer(1, 100, 11).unwrap();
+        let started = std::time::Instant::now();
+        let mut buf = [Event::default(); 4];
+        let got = loop_.wait(&mut buf).unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(90));
+        assert_eq!(
+            &[Event {
+                token: 11,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            got
+        );
+
+        // it's spent: the next thing to fire is a later timer, not this again
+        loop_.add_timer(2, 20, 12).unwrap();
+        assert_eq!(
+            &[Event {
+                token: 12,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+    }
+
+    #[test]
+    fn adding_a_timer_again_restarts_it() {
+        let loop_ = Loop::init().unwrap();
+        loop_.add_timer(1, 300, 11).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        loop_.add_timer(1, 300, 12).unwrap();
+        let restarted = std::time::Instant::now();
+        let mut buf = [Event::default(); 4];
+        // fires once, with the new token, a full period after the restart
+        assert_eq!(
+            &[Event {
+                token: 12,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        assert!(restarted.elapsed() >= std::time::Duration::from_millis(280));
+    }
+
+    #[test]
+    fn a_timer_of_zero_milliseconds_fires() {
+        let loop_ = Loop::init().unwrap();
+        loop_.add_timer(1, 0, 11).unwrap();
         let mut buf = [Event::default(); 4];
         assert_eq!(
             &[Event {
@@ -254,5 +360,61 @@ mod tests {
             }][..],
             loop_.wait(&mut buf).unwrap()
         );
+    }
+
+    #[test]
+    fn a_signal_nobody_waited_for_is_discarded_when_the_loop_ends() {
+        let mut loop_ = Loop::init().unwrap();
+        loop_.add_signal(libc::SIGUSR2, 9).unwrap();
+        raise_for_loop(libc::SIGUSR2);
+        // SIGUSR2's old action ends the process: it must not arrive now
+        loop_.deinit();
+
+        // SAFETY: a null new action only reads the current one.
+        let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigaction(libc::SIGUSR2, std::ptr::null(), &mut now) };
+        assert_ne!(libc::SIG_IGN, now.sa_sigaction);
+        // and the signal isn't left blocked on this thread
+        // SAFETY: a null set only reads this thread's mask.
+        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut blocked) };
+        // SAFETY: `blocked` was filled in above.
+        assert_eq!(0, unsafe { libc::sigismember(&blocked, libc::SIGUSR2) });
+    }
+
+    // What a pane's terminal fd is: the helper and the shell hold copies, so
+    // the file outlives the daemon's close. A watch left on it would report
+    // under the fd number's next owner.
+    #[test]
+    fn a_removed_fd_stays_quiet_when_its_number_goes_to_another_file() {
+        let loop_ = Loop::init().unwrap();
+        let old = pipe().unwrap();
+        // SAFETY: duplicating an open fd, which keeps the file alive.
+        let other_copy = unsafe { libc::dup(old[0]) };
+        loop_.add_read(old[0], 1).unwrap();
+        loop_.remove(old[0]).unwrap();
+
+        // the new pipe's read end takes over the old number, closing it
+        let new = pipe().unwrap();
+        // SAFETY: both fds are open and ours.
+        assert_eq!(old[0], unsafe { libc::dup2(new[0], old[0]) });
+        close(new[0]);
+        loop_.add_read(old[0], 2).unwrap();
+
+        // into the old file, readable through `other_copy`; the timer ends the wait
+        write_x(old[1]);
+        loop_.add_timer(1, 100, 3).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert_eq!(
+            &[Event {
+                token: 3,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        for fd in [old[0], old[1], new[1], other_copy] {
+            close(fd);
+        }
     }
 }

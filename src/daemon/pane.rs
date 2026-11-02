@@ -281,10 +281,22 @@ impl Pane {
         let terminal_fd: RawFd = surface.terminal.fd;
         event_loop.add_read(terminal_fd, self.token(PaneFd::Terminal))
     }
+
+    /// Takes the helper and terminal fds off the loop. Call it before the pane
+    /// is hung up: closing the terminal's fd doesn't take it off the loop on
+    /// Linux, as the helper and Rex's shell hold copies of it. A pane that was
+    /// never registered is fine.
+    pub fn unregister_from(&self, event_loop: &Loop) {
+        if let Some(surface) = &self.terminal_surface {
+            let _ = event_loop.remove(surface.helper_fd());
+            let _ = event_loop.remove(surface.terminal.fd);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::event_loop::Kind;
     use super::*;
 
     const TEST_ID: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
@@ -410,7 +422,7 @@ mod tests {
     // The pane's fds go to the loop under its tokens.
     #[test]
     fn register_with_watches_both_fds_under_the_panes_tokens() {
-        use super::super::event_loop::{Event, Kind};
+        use super::super::event_loop::Event;
         use super::super::surface::open_pty;
         use std::io::Write;
         use std::os::unix::net::UnixStream;
@@ -428,12 +440,53 @@ mod tests {
         assert_eq!(pane.token(PaneFd::HelperSocket), got[0].token);
         assert_eq!(Kind::Read, got[0].kind);
 
+        // take the helper's byte, so only the terminal is left to report
+        let helper_fd = pane.terminal_surface.as_ref().unwrap().helper_fd();
+        let mut byte = [0u8; 1];
+        // SAFETY: `byte` is valid for one byte.
+        assert_eq!(1, unsafe {
+            libc::read(helper_fd, byte.as_mut_ptr().cast(), 1)
+        });
+
         // SAFETY: writing to the pty's master, so the terminal has input.
         assert_eq!(1, unsafe { libc::write(master, b"x".as_ptr().cast(), 1) });
+        let got = event_loop.wait(&mut events).unwrap();
+        assert_eq!(1, got.len());
+        assert_eq!(pane.token(PaneFd::Terminal), got[0].token);
+        assert_eq!(Kind::Read, got[0].kind);
+
+        // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
+        unsafe { libc::close(master) };
+        pane.deinit();
+    }
+
+    // Closing the terminal's fd doesn't end its watch on Linux, so a pane's
+    // fds come off the loop first.
+    #[test]
+    fn unregister_from_stops_both_fds_reporting() {
+        use super::super::event_loop::Event;
+        use super::super::surface::open_pty;
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (master, slave) = open_pty(80, 24);
+        let (socket, mut helper) = UnixStream::pair().unwrap();
+        let pane = Pane::startup(None, Surface::create(socket, slave).unwrap());
+        let event_loop = Loop::init().unwrap();
+        pane.register_with(&event_loop).unwrap();
+        pane.unregister_from(&event_loop);
+
+        helper.write_all(b"w").unwrap();
+        // SAFETY: writing to the pty's master, so the terminal has input.
+        assert_eq!(1, unsafe { libc::write(master, b"x".as_ptr().cast(), 1) });
+        event_loop.add_timer(1, 100, 1).unwrap();
         let mut events = [Event::default(); 4];
         let got = event_loop.wait(&mut events).unwrap();
-        assert!(got.iter().any(|e| e.token == pane.token(PaneFd::Terminal)));
+        assert_eq!(1, got.len());
+        assert_eq!(Kind::Timer, got[0].kind);
 
+        // a pane that was never registered is fine
+        pane.unregister_from(&event_loop);
         // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
         unsafe { libc::close(master) };
         pane.deinit();

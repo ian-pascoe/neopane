@@ -70,7 +70,7 @@ impl PaneHost {
     /// the host does the same.)
     pub fn deinit(&mut self) {
         for slot in &mut self.panes {
-            close(slot);
+            close(slot, None);
         }
     }
 
@@ -80,7 +80,7 @@ impl PaneHost {
     }
 
     /// Handles an event for one of this host's tokens.
-    pub fn handle(&mut self, token: usize) -> Result<()> {
+    pub fn handle(&mut self, event_loop: &Loop, token: usize) -> Result<()> {
         let i = (token - self.base) / 2;
         let source = if (token - self.base).is_multiple_of(2) {
             Source::Socket
@@ -96,13 +96,13 @@ impl PaneHost {
             Source::Socket => {
                 if !on_message(p)? {
                     eprintln!("pane {}: helper gone", p.id);
-                    close(slot);
+                    close(slot, Some(event_loop));
                 }
             }
             Source::Tty => {
                 if !on_input(p)? {
                     eprintln!("pane {}: closed with q", p.id);
-                    close(slot);
+                    close(slot, Some(event_loop));
                 }
             }
         }
@@ -149,7 +149,7 @@ impl PaneHost {
                     // the terminal was never shown anything
                     p.term.writer.clear();
                 }
-                close(slot);
+                close(slot, Some(event_loop));
                 Err(e)
             }
         }
@@ -231,10 +231,16 @@ fn print_size(p: &mut Pane) -> Result<()> {
     Ok(())
 }
 
-/// Restores the terminal and hangs up, so the helper exits. Does nothing for
+/// Takes the slot's fds off `event_loop` (none when it is ending too),
+/// restores the terminal and hangs up, so the helper exits. Does nothing for
 /// an empty slot.
-fn close(slot: &mut Option<Pane>) {
+fn close(slot: &mut Option<Pane>, event_loop: Option<&Loop>) {
     if let Some(mut p) = slot.take() {
+        if let Some(event_loop) = event_loop {
+            // (an fd that was never added is fine)
+            let _ = event_loop.remove(p.stream.as_raw_fd());
+            let _ = event_loop.remove(p.term.fd);
+        }
         p.term.deinit();
         close_fd(p.term.fd);
         // the stream closes as `p` drops

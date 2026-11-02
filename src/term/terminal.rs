@@ -119,7 +119,7 @@ mod tests {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                &raw mut ws,
             )
         };
         assert_eq!(0, rc);

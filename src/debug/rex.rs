@@ -173,7 +173,7 @@ fn serve(
                 }
                 token => {
                     if host.owns(token) {
-                        host.handle(token)?;
+                        host.handle(event_loop, token)?;
                     }
                 }
             }

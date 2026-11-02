@@ -5,6 +5,7 @@
 //! between holds the id and looks the pane up again (`by_id`/`by_id_mut`).
 //! Each lookup has a `_mut` twin.
 
+use super::event_loop::Loop;
 use super::pane::{NeovimWindowHandle, Pane};
 use crate::screen::float_groups::Group;
 
@@ -54,9 +55,19 @@ impl Panes {
         self.add(Pane::from_group(id, g))
     }
 
-    /// Hangs up pane `i` and forgets it. Set its `closing` first.
-    pub fn remove(&mut self, i: usize) {
-        self.list.remove(i).deinit();
+    /// Takes every pane's fds off `event_loop`, for before they are hung up.
+    pub fn unregister_all(&self, event_loop: &Loop) {
+        for p in &self.list {
+            p.unregister_from(event_loop);
+        }
+    }
+
+    /// Takes pane `i` off `event_loop`, hangs it up and forgets it. Set its
+    /// `closing` first.
+    pub fn remove(&mut self, i: usize, event_loop: &Loop) {
+        let pane = self.list.remove(i);
+        pane.unregister_from(event_loop);
+        pane.deinit();
     }
 
     pub fn index_of(&self, id: u32) -> Option<usize> {
@@ -130,7 +141,7 @@ mod tests {
     fn ids_are_never_reused() {
         let mut panes = Panes::default();
         let a = panes.add_for_window(1000).id;
-        panes.remove(panes.index_of(a).unwrap());
+        panes.remove(panes.index_of(a).unwrap(), &Loop::init().unwrap());
         let b = panes.add_for_window(1001).id;
         assert_ne!(a, b);
         assert!(panes.by_id(a).is_none());
