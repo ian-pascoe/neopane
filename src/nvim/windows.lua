@@ -56,23 +56,73 @@ local making_anchor = false
 local sizes = {}
 -- statusline formats we've set, to tell them from ones the user set
 local ours = {}
+-- laststatus=3 was set, and is 2 while neorex runs: every pane shows the one
+-- statusline a global one would, the current window's
+local mirroring = false
+-- window -> { text = the current window's statusline we last gave it, own = what
+-- it showed before }
+local copied = {}
 
 local function local_stl(win)
   return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
 end
 
--- external windows only show a local statusline: copy the global one
-local function give_statusline(win)
-  local cur = local_stl(win)
-  if cur ~= '' and not ours[cur] then return end
-  local want = vim.o.laststatus == 0 and '' or vim.go.statusline
-  if want ~= '' then ours[want] = true end
-  if cur ~= want then api.nvim_set_option_value('statusline', want, { win = win, scope = 'local' }) end
+local function set_local_stl(win, stl)
+  api.nvim_set_option_value('statusline', stl, { win = win, scope = 'local' })
 end
 
--- the text's height: what's left of the pane after the statusline
+local function has_statusline(win)
+  return vim.go.laststatus ~= 0 and local_stl(win) ~= ''
+end
+
+-- What a global statusline shows in `win`: the current window's own, which
+-- lualine's globalstatus keeps up to date. Nil if that's `win` itself, or the
+-- current window isn't a pane (a float, say) or has none: `win` keeps what it
+-- shows.
+local function global_line(win)
+  local cur = api.nvim_get_current_win()
+  if cur == win or not shown(cur) then return end
+  local stl = local_stl(cur)
+  if stl ~= '' then return stl end
+end
+
+-- Gives external `win` a local statusline, as they only show those: the global
+-- one, or the current window's while mirroring.
+local function give_statusline(win)
+  local cur = local_stl(win)
+  local line = mirroring and global_line(win)
+  if line then
+    if cur ~= line then set_local_stl(win, line) end
+    local c = copied[win]
+    copied[win] = { text = line, own = (c and c.text == cur) and c.own or cur }
+    return
+  end
+  local c = copied[win]
+  if c and c.text == cur and win == api.nvim_get_current_win() then
+    -- the copy of another window's statusline isn't the current window's
+    cur = c.own
+    set_local_stl(win, cur)
+    copied[win] = nil
+  end
+  if cur ~= '' and (mirroring or not ours[cur]) then return end
+  local want = vim.go.laststatus == 0 and '' or vim.go.statusline
+  if want ~= '' then ours[want] = true end
+  if cur ~= want then set_local_stl(win, want) end
+end
+
+-- Each pane's statusline is its own again: what it showed before a copy.
+local function stop_mirroring()
+  mirroring = false
+  for win, c in pairs(copied) do
+    if api.nvim_win_is_valid(win) and local_stl(win) == c.text then set_local_stl(win, c.own) end
+  end
+  copied = {}
+end
+
+-- the text's height: what's left of the pane after the statusline, if it has
+-- one
 local function text_height(win, h)
-  return math.max(h - (local_stl(win) ~= '' and 1 or 0), 1)
+  return math.max(h - (has_statusline(win) and 1 or 0), 1)
 end
 
 --- Sizes external `win` to fill `w` x `h`, statusline included.
@@ -90,6 +140,19 @@ local function refit()
   for win, s in pairs(sizes) do
     if api.nvim_win_is_valid(win) then M.size(win, s[1], s[2]) else sizes[win] = nil end
   end
+end
+
+-- Fits the windows to their panes again, once however many statuslines change
+-- meanwhile: refit's own writes fire OptionSet too.
+local refit_pending = false
+local function request_refit()
+  if refit_pending then return end
+  refit_pending = true
+  vim.schedule(function()
+    local ok, err = pcall(refit)
+    refit_pending = false
+    if not ok then error(err, 0) end
+  end)
 end
 
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
@@ -257,11 +320,58 @@ api.nvim_create_autocmd({ 'SafeState', 'TabNew', 'TabClosed' }, {
   callback = function() vim.schedule(report_tabline) end,
 })
 
--- a statusline came, went or changed: fit the windows to their panes again
+-- Neovim draws no statusline in an external window when laststatus=3, but each
+-- pane is its own screen: show one in every pane with laststatus=2 instead.
+-- Returns whether it changed laststatus. Run from SafeState, as OptionSet
+-- doesn't fire for an option set in an autocommand, as LazyVim loads lualine
+-- (nor for ours here, which is in one). The same goes for a laststatus=2 set in
+-- an autocommand: it can't end the mirroring, as it looks like ours.
+local function rewrite_laststatus_3()
+  if vim.go.laststatus ~= 3 then return false end
+  vim.go.laststatus = 2
+  mirroring = true
+  return true
+end
+rewrite_laststatus_3()
+
+-- a statusline came, went or changed: fit the windows to their panes again. A
+-- laststatus other than 3 set by the user ends the mirroring.
 api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = { 'statusline', 'laststatus' },
-  callback = function() vim.schedule(refit) end,
+  callback = function(ev)
+    if ev.match == 'laststatus' and mirroring and tonumber(vim.v.option_new) ~= 3 then
+      stop_mirroring()
+    end
+    request_refit()
+  end,
+})
+
+api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  callback = function(ev) copied[tonumber(ev.match)] = nil end,
+})
+
+-- the current window and its statusline, last time we looked
+local seen_win, seen_stl
+-- whenever Neovim waits for input: the statusline lualine writes for the
+-- current window in an autocommand fires no OptionSet either
+api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function()
+    local changed = rewrite_laststatus_3()
+    if mirroring and vim.go.laststatus < 2 then
+      stop_mirroring()
+      changed = true
+    end
+    if mirroring then
+      local cur = api.nvim_get_current_win()
+      local stl = local_stl(cur)
+      changed = changed or cur ~= seen_win or stl ~= seen_stl
+      seen_win, seen_stl = cur, stl
+    end
+    if changed then request_refit() end
+  end,
 })
 
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
