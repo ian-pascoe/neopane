@@ -34,9 +34,11 @@
 //!
 //! Usage:
 //!
-//!     let mut parser = Parser::default();
-//!     parser.feed(bytes_from_read);
-//!     while let Some(event) = parser.next() { ... }
+//! ```text
+//! let mut parser = Parser::default();
+//! parser.feed(bytes_from_read);
+//! while let Some(event) = parser.next() { ... }
+//! ```
 //!
 //! Rust port note: `Event::Paste` and `Event::Unknown` borrow from the parser
 //! (the borrow checker enforces "only valid until the next `next` or `feed`"),
