@@ -505,12 +505,11 @@ impl Daemon {
                 Some(b) => Some(b),
                 None => {
                     // its tab page's floating pane is on its way: split that once it's made
-                    if self
-                        .panes
-                        .list
-                        .iter()
-                        .any(|q| q.tab == sp.tab && q.layer.is_none())
-                    {
+                    if self.panes.list.iter().any(|q| {
+                        q.tab == sp.tab
+                            && q.layer.is_none()
+                            && q.closing != Some(Close::RequestFailed)
+                    }) {
                         return Ok(());
                     }
                     None
@@ -2236,6 +2235,42 @@ mod tests {
             block_id(2),
             block_id(3)
         )));
+    }
+
+    /// A tab page's first window has its floating pane requested; `fail` then
+    /// says whether Rex refused it before a second window of the tab page
+    /// opens. The methods sent.
+    fn second_window_requests(fail: bool) -> Vec<String> {
+        let frames = fake_rex_requests(|d| {
+            let split = |win| windows::Split {
+                win,
+                side_by_side: true,
+                before: false,
+                from: 0,
+                tab: 2,
+            };
+            d.changes.note_split(split(1));
+            d.new_pane(1).unwrap();
+            if fail {
+                let id = d.panes.by_win(1).unwrap().id;
+                d.panes.by_id_mut(id).unwrap().closing = Some(Close::RequestFailed);
+            }
+            d.changes.note_split(split(2));
+            d.new_pane(2).unwrap();
+        });
+        methods_of(&frames).into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_window_after_a_refused_tab_floating_pane_asks_for_its_own() {
+        let methods = second_window_requests(true);
+        assert_eq!(2, methods.len());
+        assert_eq!(methods[0], methods[1]);
+    }
+
+    #[test]
+    fn a_window_waits_for_its_tab_pages_floating_pane_still_on_its_way() {
+        assert_eq!(1, second_window_requests(false).len());
     }
 
     #[test]
