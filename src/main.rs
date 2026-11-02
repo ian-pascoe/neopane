@@ -21,8 +21,10 @@ neorex runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLO
 to find its pane. The debug commands that talk to Rex need the same.
 
 The daemon logs to `log` in its private directory, neorex-<launcher pid>.XXXXXX in
-$XDG_RUNTIME_DIR, else $TMPDIR, else /tmp. A clean exit removes the log. A daemon
-that fails to start names it; after any failure the log and directory stay.
+$XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
+When Neovim exits, even by crashing, the daemon exits cleanly and removes the log.
+When the daemon itself fails, the log and directory stay, and if it failed to start,
+neorex prints the log's path.
 ";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

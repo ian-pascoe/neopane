@@ -90,17 +90,18 @@ Rex sets in every pane:
 - `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
   uses it as the first window's pane, and logs a note if it isn't a block id.
 
-Without a terminal on stdin, `neorex` prints `error: NotATerminal`. In a
-terminal but without `REX_SERVER` or `REX_SESSION`, it prints "run it in a Rex
-pane". Either way it exits. The `debug-rex` command
-reads the same three variables.
+If stdin isn't a terminal, `neorex` prints `error: NotATerminal` and exits. In
+a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
+`neorex: run it in a Rex pane`, then `error: NotInRex`, and exits. The
+`debug-rex` command reads the same three variables.
 
 The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
 private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
-`$TMPDIR`, else `/tmp`. It logs to the file `log` there. A clean exit removes
-the log and the directory. A daemon that fails to start is named in what
-neorex prints; after any failure the log and directory stay. `neorex help`
-says the same.
+`$TMPDIR`, else `/tmp`; each is used only when it is an absolute path. It logs
+to the file `log` there. When Neovim exits, even by crashing, the daemon exits
+cleanly and removes the log and the directory. When the daemon itself fails,
+they stay, and if it failed to start, neorex prints the log's path. `neorex
+help` says the same.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
@@ -109,14 +110,14 @@ there, or in a terminal started with `REX_SESSION` set to that session's id
 
 ## Troubleshooting
 
-- "run it in a Rex pane": the environment above is missing. Start `neorex`
-  from a pane, not a plain terminal.
+- "run it in a Rex pane": `REX_SERVER` or `REX_SESSION` is missing. Start
+  `neorex` from a Rex pane, or set both (see above) to a session you made.
 - "the daemon didn't start; see <path>", or a failure line in the pane: read
   the log at that path.
-- To find a log left by an earlier failure, look in the directories named
+- To find a log left by a daemon failure, look in the directories named
   `neorex-*` in `$XDG_RUNTIME_DIR`, `$TMPDIR` or `/tmp`.
-- Neovim's own messages go to the same log, since the daemon's stderr is
-  Neovim's.
+- While it runs, Neovim's own messages go to the same log, since the
+  daemon's stderr is Neovim's.
 
 ## Current limitations
 
