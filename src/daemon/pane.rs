@@ -165,6 +165,13 @@ pub fn decode_token(t: usize) -> DecodedToken {
 }
 
 impl Pane {
+    /// Whether an ESC that ended the pane's last read waits for a timeout.
+    pub fn escape_pending(&self) -> bool {
+        self.terminal_surface
+            .as_ref()
+            .is_some_and(|s| s.forwarder.escape_pending())
+    }
+
     /// A pane with just `id`: no parts, nothing set.
     fn blank(id: u32) -> Pane {
         Pane {

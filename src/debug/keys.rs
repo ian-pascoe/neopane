@@ -17,6 +17,7 @@ const MODES_ON: &str = concat!(
     "\x1b[?1002h",                // mouse: presses, releases and drags
     "\x1b[?1006h",                // mouse: SGR encoding (ESC[<b;x;yM), no limit on size
     input::kitty_push_literal!(), // kitty keyboard protocol, after the screen switch
+    "\x1b[?u",                    // ask for its flags: the parser reads the answer
 );
 // Undone in reverse: pop kitty's flags while still on the alternate screen.
 const MODES_OFF: &str = concat!(
@@ -69,7 +70,13 @@ fn show_keys(term: &mut Terminal, signals: &mut Signals) -> Result<()> {
             },
         ];
         // SAFETY: `fds` is a valid array of two pollfds.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        // an ESC that ended a read waits for the rest of its sequence, a while
+        let wait = if parser.flush_due() {
+            input::ESCAPE_TIMEOUT_MS as libc::c_int
+        } else {
+            -1
+        };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
         if ready < 0 {
             // a signal interrupted poll; its byte is waiting in the pipe
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
@@ -85,6 +92,17 @@ fn show_keys(term: &mut Terminal, signals: &mut Signals) -> Result<()> {
                 write!(term.writer, "resize {}x{}\r\n", ws.ws_col, ws.ws_row)?;
                 term.flush()?;
             }
+        }
+        if ready == 0
+            && let Some(event) = parser.flush_pending()
+        {
+            write!(term.writer, "  {event}\r\n")?;
+            if is_quit(&event) {
+                term.flush()?;
+                return Ok(());
+            }
+            term.flush()?;
+            continue;
         }
         if fds[0].revents == 0 {
             continue;

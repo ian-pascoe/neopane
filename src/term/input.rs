@@ -32,6 +32,8 @@
 //! (`Parser::set_kitty`) it does too, as the Escape key is never a bare ESC
 //! then. Without them it waits for a timeout the caller owns: `flush_due` says
 //! when to start one, and `flush_pending` turns the ESC into the Escape key.
+//! The parser finds out for itself that the kitty flags are on: the terminal's
+//! answer to `KITTY_QUERY` (`ESC [ ? flags u`) is read and not passed on.
 //!
 //! The parser is a small state machine fed one byte at a time, in the style of
 //! Ghostty's VT parser (which follows vt100.net/emu/dec_ansi_parser). Its state
@@ -75,6 +77,17 @@ pub(crate) use kitty_push_literal;
 pub const KITTY_PUSH: &str = kitty_push_literal!();
 /// Turns it back off: pops what `KITTY_PUSH` pushed.
 pub const KITTY_POP: &str = kitty_pop_literal!();
+
+/// Asks the terminal for its kitty keyboard flags. One that has the protocol
+/// answers `ESC [ ? flags u`, which makes the parser set `kitty` itself; one
+/// that hasn't says nothing, and a bare ESC keeps timing out. Write it after
+/// `KITTY_PUSH`.
+pub const KITTY_QUERY: &str = "\x1b[?u";
+
+/// How long, in milliseconds, an ESC that ends a read waits for the rest of
+/// its sequence before it is the Escape key, without kitty flags on. Matches
+/// Neovim's default `ttimeoutlen`.
+pub const ESCAPE_TIMEOUT_MS: u32 = 50;
 
 /// Modifier keys held with a key or mouse event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -533,6 +546,8 @@ impl Parser {
     /// can feed them again later. Call between events. If the event ended at
     /// an ESC that starts the next one, that ESC is given back too.
     pub fn take_rest(&mut self) -> Vec<u8> {
+        // Only an ESC read from this input: one left pending by an earlier
+        // read has nothing here to give back.
         if self.state == State::Escape && self.pos > 0 && self.input[self.pos - 1] == 0x1b {
             self.state = State::Ground;
             self.pos -= 1;
@@ -833,6 +848,11 @@ impl Parser {
         if self.marker == b'<' && (final_ == b'M' || final_ == b'm') {
             return self.mouse(final_ == b'm');
         }
+        // The answer to `KITTY_QUERY`: the terminal has the protocol.
+        if self.marker == b'?' && final_ == b'u' {
+            self.kitty = true;
+            return None;
+        }
         if self.marker != 0 {
             return Some(Raw::UnknownSequence);
         }
@@ -934,6 +954,7 @@ impl Parser {
 
     /// SGR mouse report: `ESC [ < button ; col ; row M` (press) or `m`
     /// (release). Columns and rows count from 1.
+    ///
     /// None for buttons 8 to 11 (back and forward, bit 128): Neovim has no
     /// use for them here, and they mustn't pass for left, middle or right.
     fn mouse(&self, release: bool) -> Option<Raw> {
@@ -1334,6 +1355,30 @@ mod tests {
         assert!(parser.flush_pending().is_none());
         parser.feed(b"[A");
         assert_eq!(Some(test_named(Named::Up, NONE)), parser.next());
+    }
+
+    #[test]
+    fn the_answer_to_the_kitty_query_turns_kitty_on_and_is_not_an_event() {
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[?0u");
+        assert!(parser.next().is_none());
+        parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
+        parser.feed(b"[A");
+        assert_eq!(Some(test_named(Named::Up, NONE)), parser.next());
+        // split across reads, and with other flags
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[?");
+        assert!(parser.next().is_none());
+        parser.feed(b"1u\x1b");
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
+        // no answer, no kitty
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b");
+        assert!(parser.next().is_none());
+        assert!(parser.flush_due());
     }
 
     #[test]

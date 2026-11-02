@@ -129,6 +129,17 @@ impl NvimSession {
         self.gate.send(&mut self.client, panes, pane, bytes)
     }
 
+    /// As `type_into`, for a read that came at `at`.
+    pub fn type_into_at(
+        &mut self,
+        panes: &mut impl AimForwarder,
+        pane: u32,
+        bytes: &[u8],
+        at: std::time::Instant,
+    ) -> forwarder::Result<()> {
+        self.gate.send_at(&mut self.client, panes, pane, bytes, at)
+    }
+
     /// The timeout for an ESC pane `pane` read last: sends it as the Escape
     /// key (see `Forwarder::flush_pending`). False, doing nothing, while a
     /// window switch is in flight: the ESC may still begin a sequence that is
@@ -531,6 +542,14 @@ mod tests {
             self.session.type_into(&mut self.fwds, pane, bytes).unwrap();
         }
 
+        /// `type_into` for a read that came `ms` after `t0`.
+        fn type_into_at(&mut self, pane: u32, bytes: &[u8], t0: std::time::Instant, ms: u64) {
+            let at = t0 + std::time::Duration::from_millis(ms);
+            self.session
+                .type_into_at(&mut self.fwds, pane, bytes, at)
+                .unwrap();
+        }
+
         fn takes_focus(
             &mut self,
             pane: u32,
@@ -563,10 +582,11 @@ mod tests {
         r.type_into(0, b"x");
         r.type_into(0, b"y");
         r.make_current(1, r.wins[1]);
-        // Escape and the key after it are two reads, not Alt
-        r.type_into(1, b"\x1b");
-        r.type_into(1, b"A");
-        r.type_into(1, b"z");
+        // Escape and the key after it, a timeout later, are two reads, not Alt
+        let t0 = std::time::Instant::now();
+        r.type_into_at(1, b"\x1b", t0, 0);
+        r.type_into_at(1, b"A", t0, 60);
+        r.type_into_at(1, b"z", t0, 60);
         r.make_current(0, r.wins[0]);
         r.type_into(0, b"z");
         r.expect_texts("onexyz|twoz");
@@ -670,12 +690,40 @@ mod tests {
         r.until_blocking();
         r.make_current(0, r.wins[0]);
         // two Escapes in one read; the first ends the `f`
-        r.type_into(0, b"\x1b\x1b");
-        r.type_into(0, b"x");
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"\x1b\x1b", t0, 0);
+        r.type_into_at(0, b"x", t0, 60);
         r.tick();
         r.probe_answered();
         // the second Escape went with the rest, so `x` isn't Alt-x
         r.expect_texts("ne|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
+    fn a_held_esc_and_the_rest_of_its_sequence_read_close_together_make_the_key() {
+        let Some(mut r) = Rig::start() else { return };
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"Ax", t0, 0);
+        // Left arrow split after its ESC: in insert mode, `y` goes before `x`
+        r.type_into_at(0, b"\x1b", t0, 1);
+        r.type_into_at(0, b"[D", t0, 2);
+        r.type_into_at(0, b"y", t0, 3);
+        r.expect_texts("oneyx|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
+    fn a_held_esc_a_timeout_before_the_next_read_is_the_escape_key() {
+        let Some(mut r) = Rig::start() else { return };
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"Ax", t0, 0);
+        r.type_into_at(0, b"\x1b", t0, 1);
+        // Escape left insert mode, so this `A` appends again
+        r.type_into_at(0, b"Az", t0, 100);
+        r.expect_texts("onexz|two");
         r.expect_nothing_held();
     }
 

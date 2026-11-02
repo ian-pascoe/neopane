@@ -40,6 +40,7 @@ use crate::screen::float_groups;
 use crate::screen::grid::{Cell, Grid};
 use crate::screen::grids::{Grids, WinKind};
 use crate::screen::pane_view::{Opts, Rect};
+use crate::term::input;
 
 /// The daemon is a top layer: any error will do.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -145,9 +146,6 @@ const FOCUS_OUT_DELAY_MS: u32 = 80;
 /// How often a window switch still unanswered is checked for waiting behind
 /// a command that needs a key.
 const SWITCH_RECHECK_MS: u32 = 100;
-/// How long an ESC that ends a read waits for the rest of its sequence before
-/// it is the Escape key.
-const ESCAPE_TIMEOUT_MS: u32 = 50;
 
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const LAYOUT_WAIT_MS: u32 = 1000;
@@ -325,13 +323,8 @@ impl Daemon {
 
     /// Starts the escape timer if some pane's parser has an ESC waiting.
     fn arm_escape_timer(&mut self) -> Result<()> {
-        let waiting = self.panes.list.iter().any(|p| {
-            p.terminal_surface
-                .as_ref()
-                .is_some_and(|s| s.forwarder.escape_pending())
-        });
-        if waiting {
-            self.add_timer(Token::EscapeTimer, ESCAPE_TIMEOUT_MS)?;
+        if self.panes.list.iter().any(Pane::escape_pending) {
+            self.add_timer(Token::EscapeTimer, input::ESCAPE_TIMEOUT_MS)?;
         }
         Ok(())
     }
@@ -343,11 +336,7 @@ impl Daemon {
             .panes
             .list
             .iter()
-            .filter(|p| {
-                p.terminal_surface
-                    .as_ref()
-                    .is_some_and(|s| s.forwarder.escape_pending())
-            })
+            .filter(|p| p.escape_pending())
             .map(|p| p.id)
             .collect();
         for id in ids {
@@ -356,7 +345,7 @@ impl Daemon {
                 grids: &self.grids,
             };
             if !self.nvim.flush_pending(&mut fwds, id)? {
-                return self.add_timer(Token::EscapeTimer, ESCAPE_TIMEOUT_MS);
+                return self.add_timer(Token::EscapeTimer, input::ESCAPE_TIMEOUT_MS);
             }
         }
         Ok(())
