@@ -422,12 +422,20 @@ impl Daemon {
             hello.close();
             return Ok(());
         };
+        // a second hello for a pane keeps the terminal it has
+        if self
+            .panes
+            .by_id(id)
+            .is_some_and(|p| p.terminal_surface.is_some())
+        {
+            eprintln!("neorex daemon: a second helper for pane {id}; refused");
+            hello.close();
+            return Ok(());
+        }
         // (a failing `Surface::create` closes the helper's socket and terminal
         // itself)
         let surface = Surface::create(hello.stream, hello.tty)?;
         let pane = self.panes.by_id_mut(id).unwrap();
-        // a pane that already has a surface drops it below: off the loop first
-        pane.unregister_from(&self.event_loop);
         pane.terminal_surface = Some(surface);
         pane.register_with(&self.event_loop)?;
         if pane.awaiting_layout {
@@ -1745,6 +1753,57 @@ mod tests {
             rex_end,
             nvim_end,
         }
+    }
+
+    #[test]
+    fn a_second_hello_for_a_pane_is_refused_and_the_first_terminal_stays() {
+        use crate::daemon::{fdpass, pane_helper};
+        let mut fx = fixture();
+        fx.d.panes
+            .add(Pane::startup(None, Surface::for_test(80, 24)));
+        let before =
+            fx.d.panes
+                .by_id(0)
+                .unwrap()
+                .terminal_surface
+                .as_ref()
+                .unwrap()
+                .helper_fd();
+
+        let path = std::env::temp_dir().join(format!("neorex-dup-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let server = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let mut pipe: [i32; 2] = [0; 2];
+        assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
+        let mut buf = [0u8; 16];
+        fdpass::send(
+            &client,
+            pane_helper::hello_bytes(&mut buf, Some(0)).unwrap(),
+            pipe[1],
+        )
+        .unwrap();
+
+        fx.d.accept(&server).unwrap();
+
+        let after =
+            fx.d.panes
+                .by_id(0)
+                .unwrap()
+                .terminal_surface
+                .as_ref()
+                .unwrap()
+                .helper_fd();
+        assert_eq!(before, after);
+        // the refused helper was hung up on
+        let mut client = client;
+        let mut byte = [0u8; 1];
+        assert_eq!(0, client.read(&mut byte).unwrap());
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A daemon with a 200 x 50 screen and the tabline on, and panes to place.

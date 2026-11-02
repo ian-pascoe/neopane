@@ -7,6 +7,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::time::Duration;
 
 use super::fdpass;
 use crate::term::signals::Signals;
@@ -20,6 +21,8 @@ pub enum Error {
     BadHello,
     /// `hello_bytes`'s buffer is too small.
     NoSpaceLeft,
+    /// The peer runs as another user.
+    WrongUser,
     Io(io::Error),
 }
 
@@ -36,6 +39,7 @@ impl std::fmt::Display for Error {
             Error::NoTerminal => write!(f, "NoTerminal"),
             Error::BadHello => write!(f, "BadHello"),
             Error::NoSpaceLeft => write!(f, "NoSpaceLeft"),
+            Error::WrongUser => write!(f, "WrongUser"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
@@ -161,11 +165,69 @@ impl Hello {
     }
 }
 
-/// The daemon's side: takes the next helper and its hello. Closes both on failure.
+/// How long a connected peer has to send its hello.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The user id of the process on the other end of `stream`.
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `cred` and `len` are valid for the call.
+        let r = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: both out-pointers are valid.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+}
+
+/// Only the daemon's own user may hand it a terminal.
+fn check_peer(peer: u32, ours: u32) -> Result<()> {
+    if peer == ours {
+        Ok(())
+    } else {
+        Err(Error::WrongUser)
+    }
+}
+
+/// The daemon's side: takes the next helper and its hello. Closes both on
+/// failure. A peer of another user, or one that sends no hello within
+/// `HELLO_TIMEOUT`, is dropped.
 pub fn accept_hello(server: &UnixListener) -> Result<Hello> {
     let (stream, _) = server.accept()?;
+    accept_hello_on(stream, HELLO_TIMEOUT)
+}
+
+fn accept_hello_on(stream: UnixStream, timeout: Duration) -> Result<Hello> {
+    // SAFETY: `geteuid` has no preconditions.
+    check_peer(peer_uid(&stream)?, unsafe { libc::geteuid() })?;
+    stream.set_read_timeout(Some(timeout))?;
     let mut buf = [0u8; 16];
     let r = fdpass::recv(&stream, &mut buf)?;
+    stream.set_read_timeout(None)?;
     let tty = r.fd.ok_or(Error::NoTerminal)?;
     match parse_hello(&buf[..r.len]) {
         Ok(id) => Ok(Hello { stream, tty, id }),
@@ -209,6 +271,27 @@ mod tests {
         ));
         assert!(matches!(parse_hello(b"w"), Err(Error::BadHello)));
         assert!(matches!(parse_hello(b"px"), Err(Error::BadHello)));
+    }
+
+    #[test]
+    fn only_our_own_user_is_let_in() {
+        assert!(check_peer(501, 501).is_ok());
+        assert!(matches!(check_peer(0, 501), Err(Error::WrongUser)));
+    }
+
+    #[test]
+    fn a_peer_is_our_user() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(unsafe { libc::geteuid() }, peer_uid(&a).unwrap());
+    }
+
+    #[test]
+    fn a_silent_peer_times_out() {
+        let (ours, _silent) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        let r = accept_hello_on(ours, Duration::from_millis(100));
+        assert!(matches!(r, Err(Error::Io(_))));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     /// A hello over a real socket, with a terminal fd.
