@@ -14,6 +14,7 @@ const rpc = @import("../nvim/rpc.zig");
 const windows = @import("../nvim/windows.zig");
 const Forwarder = @import("../nvim/Forwarder.zig");
 const Grids = @import("../screen/Grids.zig");
+const Grid = @import("../screen/Grid.zig");
 const FloatGroups = @import("../screen/FloatGroups.zig");
 const PaneView = @import("../screen/PaneView.zig");
 const Client = @import("../rex/Client.zig");
@@ -39,6 +40,9 @@ panes: Panes = .{},
 rex: RexSession,
 nvim: NvimSession,
 changes: WindowChanges = .{},
+/// Rows the screen's tabline takes, as Neovim last said. Drawn over the
+/// panes along the top of the Rex window, as it would be over the screen.
+tabline_rows: u32 = 0,
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -70,6 +74,9 @@ const rex_default_size = [2]u32{ 80, 24 };
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
 const layer_frame = [2]i32{ 3, 2 };
+
+/// Where a new tab page's floating pane sits, as fractions of the window: x, y, w, h.
+const tab_layer_bounds = [4]f64{ 0.05, 0.05, 0.9, 0.9 };
 
 pub fn deinit(self: *Daemon) void {
     self.panes.deinit(self.gpa, self.io);
@@ -270,37 +277,55 @@ fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const
 fn newPane(self: *Daemon, win: i64) !void {
     if (self.rex.conn == .closed) return; // no Rex: the window stays in Neovim
     const sp = self.changes.splitOf(win);
-    // beside the window it came from, else any pane Rex knows
+    // beside the window it came from, else any pane Rex knows; null for a
+    // tab page's floating pane
     // a copy: appending below can move every pane
-    const anchor: Pane.RexBlock = blk: {
-        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
-        for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
+    const anchor: ?Pane.RexBlock = if (sp.tab != 0) self.tabAnchor(sp) orelse blk: {
+        // its tab page's floating pane is on its way: split that once it's made
+        for (self.panes.list.items) |q| if (q.tab == sp.tab and q.layer == null) return;
+        break :blk null;
+    } else blk: {
+        if (self.splitFrom(sp)) |f| if (f.tab == 0) if (f.rex_block) |b| break :blk b;
+        for (self.panes.list.items) |q| if (q.layer == null and q.tab == 0) if (q.rex_block) |b| break :blk b;
         return; // no anchor yet: next flush
     };
     // starts at the guess, not Rex's default
     const size = self.newPaneSize(win);
     const pane = try self.panes.addForWindow(self.gpa, win);
-    pane.awaiting_layout = true;
+    pane.tab = sp.tab;
     const pane_id = pane.id;
     self.changes.forgetSplit(win);
 
     var id_buf: [16]u8 = undefined;
     const id = try std.fmt.bufPrint(&id_buf, "{d}", .{pane_id});
+    const block = .{
+        .flavor = "com.superlogical.terminal.shell",
+        .label = "neorex",
+        .options = .{
+            .shell = "none",
+            .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
+            .size = .{ .columns = size[0], .rows = size[1] },
+        },
+    };
+    const a = anchor orelse return self.rex.newLayer(pane_id, tab_layer_bounds, .{ .block = block });
+    pane.awaiting_layout = true;
     try self.rex.request(.{ .new_split = pane_id }, "session.new_split", .{
         .session_id = self.rex.session_id,
-        .anchor_id = @as([]const u8, &anchor),
+        .anchor_id = @as([]const u8, &a),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
-        .layout = .{ .block = .{
-            .flavor = "com.superlogical.terminal.shell",
-            .label = "neorex",
-            .options = .{
-                .shell = "none",
-                .command = &[_][]const u8{ self.exe, "pane", self.sock, id },
-                .size = .{ .columns = size[0], .rows = size[1] },
-            },
-        } },
+        .layout = .{ .block = block },
     });
+}
+
+/// Where a window of a tab page made after setup splits: beside a pane of
+/// its tab page, the one it came from if it can. Neovim shows the tab page
+/// over every other window, so they share a Rex floating pane over theirs;
+/// null for the first.
+fn tabAnchor(self: *const Daemon, sp: windows.Split) ?Pane.RexBlock {
+    if (self.panes.byWin(sp.from)) |f| if (f.tab == sp.tab) if (f.rex_block) |b| return b;
+    for (self.panes.list.items) |q| if (q.tab == sp.tab and q.layer == null) if (q.rex_block) |b| return b;
+    return null;
 }
 
 /// The helper or terminal went away: Rex closed the pane. Close its
@@ -347,7 +372,9 @@ fn onNvim(self: *Daemon) !void {
                 .current => |win| try self.onCurrent(win),
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
+                .tabline => |rows| try self.onTabline(@intCast(std.math.clamp(rows, 0, 1))),
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
+                .reopened => |r| self.onReopened(r.old, r.new),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
             };
         },
@@ -367,13 +394,15 @@ fn onNvim(self: *Daemon) !void {
             if (r.err) |e| {
                 std.debug.print("neovim error: {s}\n", .{e});
             } else if (r.id == self.nvim.channel_req) {
-                const size = windowSize(self.panes.byId(startup_pane_id).?);
+                const size = self.windowSize(self.panes.byId(startup_pane_id).?);
                 self.nvim.setup_req = try windows.setup(self.nvim.client, try windows.parseChannel(&result), size[0], size[1]);
                 try self.nvim.client.flush();
             } else if (r.id == self.nvim.setup_req) {
                 const wins = try windows.parseSetup(&result);
                 if (self.panes.byId(startup_pane_id)) |launch| launch.neovim_window_handle = wins[0];
                 self.nvim.ready = true;
+                // its window is in its pane now: the editor can span the Rex window
+                if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
                 try self.reconcile();
                 try self.draw();
             }
@@ -424,10 +453,8 @@ fn reconcile(self: *Daemon) !void {
         const p = &self.panes.list.items[i];
         const win = p.neovim_window_handle orelse continue;
         if (self.grids.gridOf(win) != null) continue;
-        if (self.changes.takeReopening(win)) {
-            p.neovim_window_handle = null;
-            continue;
-        }
+        // its pane waits for the window that reopens it
+        if (self.changes.isReopening(win)) continue;
         p.closing = .window_closed;
         // hanging up closes the Rex pane only once its helper has connected
         if (p.terminal_surface == null) if (p.rex_block) |*b| try self.rex.closeBlock(b);
@@ -442,17 +469,13 @@ fn reconcile(self: *Daemon) !void {
     for (self.grids.wins.values()) |w| switch (w.kind) {
         .ordinary => {
             if (!try self.changes.shouldAdopt(self.gpa, w.win)) continue;
-            const size = if (self.panes.byWin(w.win)) |p| windowSize(p) else self.newWindowSize(w.win);
+            const size = if (self.panes.byWin(w.win)) |p| self.windowSize(p) else self.newWindowSize(w.win);
             try windows.adopt(self.nvim.client, w.win, size[0], size[1]);
         },
         .external => {
             self.changes.becameExternal(w.win);
             if (self.panes.byWin(w.win) != null or self.changes.isClosing(w.win)) continue;
-            if (self.waitingPane()) |p| {
-                p.neovim_window_handle = w.win;
-            } else {
-                try self.newPane(w.win);
-            }
+            try self.newPane(w.win);
         },
         .float, .hidden => {},
     };
@@ -461,10 +484,14 @@ fn reconcile(self: *Daemon) !void {
     try self.nvim.client.flush();
 }
 
-/// A pane kept for a reopened window.
-fn waitingPane(self: *const Daemon) ?*Pane {
-    for (self.panes.list.items) |*p| if (p.layer == null and p.neovim_window_handle == null and p.terminal_surface != null) return p;
-    return null;
+/// Window `new` reopened `old`, closing: it takes `old`'s pane. The next
+/// flush has it, and sizes it to the pane.
+fn onReopened(self: *Daemon, old: i64, new: i64) void {
+    if (!self.changes.takeReopening(old)) return;
+    const p = self.panes.byWin(old) orelse return;
+    p.neovim_window_handle = new;
+    p.last_asked_win_size = .{};
+    if (self.nvim.current_win == old) self.nvim.current_win = new;
 }
 
 /// A guess until the new pane says its size: half the pane it splits.
@@ -476,12 +503,22 @@ fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
 /// A guess at a new split's terminal size, cols x rows: half the pane it splits.
 fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
+    // a tab page's first: its floating pane's size
+    if (sp.tab != 0) if (self.tabAnchor(sp) == null) return self.tabPaneSize();
     const p = self.splitFrom(sp) orelse return rex_default_size;
     const s = p.terminal_surface orelse return rex_default_size;
     const cols = @max(s.view.cols, 1);
     const rows = @max(s.view.rows, 2);
     if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
     return .{ cols, @max(rows / 2, 2) };
+}
+
+/// A guess at a new tab page's floating pane's terminal size, cols x rows.
+fn tabPaneSize(self: *const Daemon) [2]u32 {
+    const screen = self.grids.get(1) orelse return rex_default_size;
+    const w: i64 = @intFromFloat(@as(f64, @floatFromInt(screen.width)) * tab_layer_bounds[2]);
+    const h: i64 = @intFromFloat(@as(f64, @floatFromInt(screen.height)) * tab_layer_bounds[3]);
+    return .{ @intCast(@max(w - layer_frame[0], 1)), @intCast(@max(h - layer_frame[1], 2)) };
 }
 
 /// The pane a new window splits: its origin's, else the focused one.
@@ -530,7 +567,13 @@ fn onLayerMade(self: *Daemon, pane_id: u32, block: []const u8, layer: ?[]const u
         break :blk null;
     };
     try self.rex.disown(block);
-    const l = &p.layer.?;
+    // a tab page's window: closing its last block closes the layer
+    const l = if (p.layer) |*l| l else {
+        if (p.neovim_window_handle == self.nvim.current_win) try self.rex.focus(p.rex_block);
+        // its tab page's other windows split it
+        try self.reconcile();
+        return self.draw();
+    };
     if (layer) |id| l.id = Pane.rexLayer(id) catch null;
     if (self.nvim.current_float != 0 and self.layerOfWin(self.nvim.current_float) == p) try self.rex.focus(p.rex_block);
 }
@@ -559,6 +602,8 @@ fn onRexFocus(self: *Daemon, block: []const u8) !void {
 /// A newer view: where our panes sit, so the editor and floats fit.
 fn onLayout(self: *Daemon, wins: []const std.json.Value) !void {
     self.readLayout(wins);
+    // a pane moved to or from the top: the tabline's over it, or not
+    for (self.panes.list.items) |*p| try self.sizeWindow(p);
     if (self.focusedPane()) |f| try self.nvim.fitUiTo(f);
     try self.nvim.client.flush();
     try self.draw();
@@ -573,6 +618,8 @@ fn readLayout(self: *Daemon, wins: []const std.json.Value) void {
         for (layers.array.items) |layer| {
             if (!std.mem.eql(u8, Client.getStr(layer, "kind") orelse "", "tiled")) {
                 self.readLayerBounds(layer);
+                // a tab page's windows float over the tiled ones
+                if (Client.get(layer, "layout")) |l| _ = self.readRects(l);
                 continue;
             }
             if (Client.get(layer, "layout")) |l| found = self.readRects(l) or found;
@@ -752,12 +799,19 @@ fn draw(self: *Daemon) !void {
         skip_buf[skip_n] = t;
         skip_n += 1;
     };
+    // the screen's tabline: grid 1's top row
+    const screen = self.grids.get(1);
+    const tabline_dirty = if (screen) |g| g.height > 0 and (g.dirty.isSet(0) or g.scrolls_len > 0) else false;
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
         // backwards, so removing this pane leaves the ones still to draw in place
         const p = &self.panes.list.items[i];
         const s = p.terminal_surface orelse continue;
+        var tabline_buf: [256]Grid.Cell = undefined;
+        const tabline = if (self.tablineRowsOf(p) > 0) if (screen) |g| tablineSlice(g, self.paneOrigin(p)[1], s.view.cols, &tabline_buf) else null else null;
+        s.forwarder.tabline_rows = if (tabline != null) 1 else 0;
+        s.forwarder.tabline_col = @intCast(std.math.clamp(self.paneOrigin(p)[1], 0, std.math.maxInt(u16)));
         // a floating pane waiting on its refit shows nothing yet
         if (p.layer != null and !p.layerShown()) continue;
         const drawn = if (p.layer) |*l| blk: {
@@ -769,10 +823,17 @@ fn draw(self: *Daemon) !void {
             .focused = p == focused,
             .origin = self.paneOrigin(p),
             .skip = skip_buf[0..skip_n],
+            .tabline = tabline,
+            .tabline_dirty = tabline_dirty,
         }, &s.terminal.writer) catch false;
         setTargets(&s.forwarder, s.view.drawnFloats());
         if (drawn) s.terminal.flush() catch try self.paneGone(p);
     }
+    // the panes along the top drew the tabline
+    if (tabline_dirty) if (screen) |g| {
+        g.dirty.unset(0);
+        g.scrolls_len = 0;
+    };
     // drawn into one pane at most; done with them
     if (self.grids.msg_grid) |id| if (self.grids.get(id)) |m| {
         m.dirty.unsetAll();
@@ -782,6 +843,17 @@ fn draw(self: *Daemon) !void {
         f.dirty.unsetAll();
         f.scrolls_len = 0;
     };
+}
+
+/// Grid 1's top row from column `col`, `cols` wide, in `buf`. A wide
+/// character cut at the left edge leaves a blank.
+fn tablineSlice(screen: *const Grid, col: i32, cols: u32, buf: []Grid.Cell) []const Grid.Cell {
+    const row = screen.row(0);
+    const from: usize = @intCast(std.math.clamp(col, 0, @as(i32, @intCast(row.len))));
+    const n = @min(row.len - from, cols, buf.len);
+    @memcpy(buf[0..n], row[from..][0..n]);
+    if (n > 0 and buf[0].len == 0) buf[0] = .{ .hl = buf[0].hl };
+    return buf[0..n];
 }
 
 /// Mouse events on the floats drawn go to their grids.
@@ -804,11 +876,10 @@ fn paneOrigin(self: *const Daemon, p: *const Pane) [2]i32 {
 
 /// Asks Neovim for the window to fit the pane, unless it already was.
 fn sizeWindow(self: *Daemon, p: *Pane) !void {
-    const s = p.terminal_surface orelse return;
-    if (p.awaiting_layout) return;
+    if (p.terminal_surface == null or p.awaiting_layout) return;
     const win = p.neovim_window_handle orelse return;
     const grid = self.grids.gridOf(win) orelse return;
-    const size = s.windowSize();
+    const size = self.windowSize(p);
     const last = p.last_asked_win_size;
     if (last.grid == grid and last.cols == size[0] and last.rows == size[1]) return;
     p.last_asked_win_size = .{ .grid = grid, .cols = size[0], .rows = size[1] };
@@ -836,6 +907,24 @@ fn gridOfPane(self: *const Daemon, pane: *const Pane) ?u32 {
 }
 
 /// No terminal yet: the smallest window, as Neovim allows.
-fn windowSize(p: *const Pane) [2]u32 {
-    return if (p.terminal_surface) |s| s.windowSize() else .{ 1, 1 };
+fn windowSize(self: *const Daemon, p: *const Pane) [2]u32 {
+    const s = p.terminal_surface orelse return .{ 1, 1 };
+    const size = s.windowSize();
+    return .{ size[0], @max(size[1] -| self.tablineRowsOf(p), 1) };
+}
+
+/// The tabline's rows over pane `p`: those of a window's pane along the top
+/// of the Rex window, which shows its share of the screen's tabline.
+fn tablineRowsOf(self: *const Daemon, p: *const Pane) u32 {
+    if (self.tabline_rows == 0 or p.layer != null or p.tab != 0) return 0;
+    return if (self.paneOrigin(p)[0] == 0) self.tabline_rows else 0;
+}
+
+/// The tabline came or went: the panes under it fit their windows again.
+fn onTabline(self: *Daemon, rows: u32) !void {
+    if (rows == self.tabline_rows) return;
+    self.tabline_rows = rows;
+    for (self.panes.list.items) |*p| try self.sizeWindow(p);
+    try self.nvim.client.flush();
+    try self.draw();
 }

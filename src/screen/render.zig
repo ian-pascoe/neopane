@@ -15,7 +15,7 @@ pub const Cursor = struct { row: u32, col: u32 };
 /// Clears `grid.dirty`.
 pub fn frame(grid: *Grid, style: *const Style, w: *Writer) Writer.Error!void {
     try begin(w);
-    try replayScrolls(grid, w);
+    try replayScrolls(grid, 0, w);
     var current: ?u32 = null;
     var it = grid.dirty.iterator(.{});
     while (it.next()) |r| try drawRow(grid.row(@intCast(r)), style, @intCast(r), grid.width, w, &current);
@@ -30,13 +30,13 @@ pub fn begin(w: *Writer) Writer.Error!void {
 
 /// Repeats the grid's pending scrolls with scroll regions, then forgets them.
 /// The grid must sit at the terminal's top left.
-pub fn replayScrolls(grid: *Grid, w: *Writer) Writer.Error!void {
+pub fn replayScrolls(grid: *Grid, offset: u32, w: *Writer) Writer.Error!void {
     const scrolls = grid.pendingScrolls();
     if (scrolls.len == 0) return;
     // SU and SD fill with the current background
     try w.writeAll("\x1b[0m");
     for (scrolls) |s| {
-        try w.print("\x1b[{d};{d}r", .{ s.top + 1, s.bot });
+        try w.print("\x1b[{d};{d}r", .{ s.top + 1 + offset, s.bot + offset });
         if (s.rows > 0) {
             try w.print("\x1b[{d}S", .{s.rows});
         } else {

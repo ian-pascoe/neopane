@@ -25,6 +25,8 @@ drawn_grid: u32 = 0,
 drawn_size: [2]u32 = .{ 0, 0 },
 /// Message rows drawn over the bottom last frame.
 drawn_msg: u32 = 0,
+/// Tabline rows drawn over the top last frame.
+drawn_tabline: u32 = 0,
 drawn_cursor: ?render.Cursor = null,
 /// The floats drawn last frame.
 drawn_floats: [Grids.max_floats]Rect = undefined,
@@ -39,6 +41,12 @@ pub const Opts = struct {
     origin: [2]i32 = .{ 0, 0 },
     /// Editor floats shown elsewhere, with every float hanging from them.
     skip: []const u32 = &.{},
+    /// The screen's tabline over this pane, for a pane along the top of the
+    /// Rex window: its row of grid 1 from the pane's column. The window
+    /// shows below it.
+    tabline: ?[]const Grid.Cell = null,
+    /// The tabline changed since the last frame.
+    tabline_dirty: bool = false,
 };
 
 /// A float as drawn, in terminal cells.
@@ -89,17 +97,24 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     const g: ?*Grid = if (grid_id) |i| grids.get(i) else null;
     const size: [2]u32 = if (g) |gr| .{ gr.width, gr.height } else .{ 0, 0 };
     if (id != self.drawn_grid or !std.mem.eql(u32, &size, &self.drawn_size)) self.full = true;
+    // rows over the window's grid: grid row i shows at terminal row top + i
+    const top: u32 = if (opts.tabline != null) @min(1, self.rows) else 0;
+    if (top != self.drawn_tabline) self.full = true;
 
     // the message grid's rows that show, from the bottom
     const msg_total = if (focused) grids.msgRows() else 0;
     const msg_n = @min(msg_total, self.rows);
     const msg: ?*Grid = if (msg_n > 0) grids.get(grids.msg_grid.?) else null;
     const msg_top = self.rows - msg_n;
-    const grid_rows = @min(size[1], msg_top);
+    const grid_rows = @min(size[1], msg_top -| top);
 
     var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
     var rects_buf: [Grids.max_floats]Rect = undefined;
     const rects = if (g != null) self.fitScreen(floatRects(grids, grids.floatsOver(id, focused, opts.skip, &placed_buf), &rects_buf), opts.origin, screenRows(grids)) else rects_buf[0..0];
+    // screen floats were placed in the terminal; from here on rects are on the window's grid
+    for (rects) |*r| if (r.on_screen) {
+        r.row -= @intCast(top);
+    };
     const floats_moved = !sameRects(rects, self.drawn_floats[0..self.drawn_floats_len]);
     var floats_changed = floats_moved;
     for (rects) |r| {
@@ -107,10 +122,11 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
         if (f.dirty.count() > 0 or f.scrolls_len > 0) floats_changed = true;
     }
 
-    const cur = self.cursorAt(grids, g, id, grid_rows, msg, msg_total, msg_n, rects);
+    const cur = self.cursorAt(grids, g, id, top, grid_rows, msg, msg_total, msg_n, rects);
     const grid_changed = floats_changed or if (g) |gr| gr.dirty.count() > 0 or gr.scrolls_len > 0 else false;
     const msg_changed = if (msg) |m| m.dirty.count() > 0 or msg_n != self.drawn_msg else msg_n != self.drawn_msg;
-    if (!self.full and !grid_changed and !msg_changed and std.meta.eql(cur, self.drawn_cursor)) return false;
+    var tabline_changed = top > 0 and (self.full or opts.tabline_dirty);
+    if (!self.full and !grid_changed and !msg_changed and !tabline_changed and std.meta.eql(cur, self.drawn_cursor)) return false;
 
     try render.begin(w);
     var current: ?u32 = null;
@@ -123,7 +139,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
             gr.scrolls_len = 0;
         }
     } else if (g) |gr| {
-        try self.scrolls(gr, grid_rows, rects, w);
+        try self.scrolls(gr, top, grid_rows, rects, w);
         // rows under floats that moved, changed or went
         if (floats_moved) for (self.drawn_floats[0..self.drawn_floats_len]) |r| markRows(gr, r, grid_rows);
         for (rects) |r| {
@@ -141,12 +157,17 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
         // rows the messages covered last frame and no longer do
         const old_top = self.rows - @min(self.drawn_msg, self.rows);
         for (@min(old_top, msg_top)..msg_top) |r| {
-            if (r < grid_rows) gr.dirty.set(r) else try render.clearRow(style, @intCast(r), w, &current);
+            if (r < top) {
+                tabline_changed = true;
+            } else if (r - top < grid_rows) gr.dirty.set(r - top) else try render.clearRow(style, @intCast(r), w, &current);
         }
     } else {
         const old_top = self.rows - @min(self.drawn_msg, self.rows);
-        for (@min(old_top, msg_top)..msg_top) |r| try render.clearRow(style, @intCast(r), w, &current);
+        for (@min(old_top, msg_top)..msg_top) |r| {
+            if (r < top) tabline_changed = true else try render.clearRow(style, @intCast(r), w, &current);
+        }
     }
+    if (tabline_changed) if (opts.tabline) |row| try render.drawRow(row[0..@min(row.len, self.cols)], style, 0, self.cols, w, &current);
     if (g) |gr| {
         var it = gr.dirty.iterator(.{});
         while (it.next()) |r| {
@@ -154,7 +175,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
             const row = gr.row(@intCast(r));
             var line: [max_cols]Grid.Cell = undefined;
             const shown = compose(grids, row, rects, @intCast(r), @min(self.cols, max_cols), &line);
-            try render.drawRow(shown, style, @intCast(r), self.cols, w, &current);
+            try render.drawRow(shown, style, @intCast(top + r), self.cols, w, &current);
         }
         gr.dirty.unsetAll();
     }
@@ -170,6 +191,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     self.drawn_grid = id;
     self.drawn_size = size;
     self.drawn_msg = msg_n;
+    self.drawn_tabline = top;
     self.drawn_cursor = cur;
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
@@ -339,7 +361,7 @@ fn floatCursor(grids: *const Grids, rects: []const Rect, rows: u32, cols: u32) ?
 
 /// Repeats the grid's scrolls if they stay clear of the messages and
 /// floats; else redraws the rows they moved.
-fn scrolls(self: *const PaneView, g: *Grid, grid_rows: u32, rects: []const Rect, w: *Writer) Writer.Error!void {
+fn scrolls(self: *const PaneView, g: *Grid, top: u32, grid_rows: u32, rects: []const Rect, w: *Writer) Writer.Error!void {
     const pending = g.pendingScrolls();
     for (pending) |s| if (s.bot > grid_rows or underFloat(s, rects, grid_rows)) {
         // one can't be repeated, so none are: the terminal must match each in turn
@@ -348,7 +370,7 @@ fn scrolls(self: *const PaneView, g: *Grid, grid_rows: u32, rects: []const Rect,
         return;
     };
     _ = self;
-    try render.replayScrolls(g, w);
+    try render.replayScrolls(g, top, w);
 }
 
 fn sameRects(a: []const Rect, b: []const Rect) bool {
@@ -429,17 +451,18 @@ fn blendCell(style: *Style, cell: Grid.Cell, line: []const Grid.Cell, i: usize) 
     return c;
 }
 
-/// Where the cursor shows in this pane, if it does.
-fn cursorAt(self: *const PaneView, grids: *const Grids, g: ?*Grid, id: u32, grid_rows: u32, msg: ?*Grid, msg_total: u32, msg_n: u32, rects: []const Rect) ?render.Cursor {
+/// Where the cursor shows in this pane, if it does. Grid rows show from
+/// terminal row `top`.
+fn cursorAt(self: *const PaneView, grids: *const Grids, g: ?*Grid, id: u32, top: u32, grid_rows: u32, msg: ?*Grid, msg_total: u32, msg_n: u32, rects: []const Rect) ?render.Cursor {
     for (rects) |r| if (grids.cursor_grid == r.grid) {
         const f = grids.get(r.grid).?;
         const row = @as(i64, r.row) + f.cursor_row;
         const col = @as(i64, r.col) + f.cursor_col;
         if (row < 0 or row >= grid_rows or col < 0 or col >= self.cols) return null;
-        return .{ .row = @intCast(row), .col = @intCast(col) };
+        return .{ .row = @intCast(top + row), .col = @intCast(col) };
     };
     if (g) |gr| if (grids.cursor_grid == id) {
-        if (gr.cursor_row < grid_rows and gr.cursor_col < self.cols) return .{ .row = gr.cursor_row, .col = gr.cursor_col };
+        if (gr.cursor_row < grid_rows and gr.cursor_col < self.cols) return .{ .row = top + gr.cursor_row, .col = gr.cursor_col };
         return null;
     };
     const m = msg orelse return null;
@@ -535,4 +558,36 @@ test "frameFloats draws a group on its own and the cursor in it" {
     gs.grids.getPtr(3).?.dirty.unsetAll();
     gs.grids.getPtr(4).?.dirty.unsetAll();
     try testing.expect(!try view.frameFloats(&gs, &placed, .{ 10, 20 }, &out.writer));
+}
+
+test "a pane under the tabline draws it on top and its window below" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 2, .{});
+    try gs.grids.getPtr(2).?.resize(testing.allocator, 6, 3);
+    gs.grids.getPtr(2).?.cells[0] = .init("w", 0);
+    gs.grids.getPtr(2).?.cursor_row = 1;
+    gs.grids.getPtr(2).?.cursor_col = 2;
+    gs.cursor_grid = 2;
+    const tabline = [_]Grid.Cell{ .init("T", 0), .init("1", 0) };
+    var view: PaneView = .init(6, 4);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try view.frame(&gs, 2, .{ .tabline = &tabline }, &out.writer));
+    // the tabline on row 1, the window's first row on row 2
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[1;1HT1") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[2;1Hw") != null);
+    try testing.expectEqual(render.Cursor{ .row = 2, .col = 2 }, view.drawn_cursor.?);
+
+    // only the tabline changed: only it is drawn
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .tabline = &tabline, .tabline_dirty = true }, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "T1") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "w") == null);
+
+    // the tabline went: everything is drawn again, the window from the top
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{}, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "T1") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[1;1Hw") != null);
 }

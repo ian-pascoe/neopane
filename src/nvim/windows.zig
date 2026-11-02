@@ -76,12 +76,16 @@ pub const Note = union(enum) {
     current: i64,
     /// This window is closing and reopening; keep its pane for the new one.
     reopen: i64,
+    /// The window that reopened `old`, which gets its pane.
+    reopened: struct { old: i64, new: i64 },
     /// A new window, and where Neovim put it.
     split: Split,
     /// The current window is now this float.
     float: i64,
     /// This float was just entered; sent before the redraw that shows it.
     entered: i64,
+    /// The tabline's rows at the top of the screen.
+    tabline: i64,
 };
 
 /// Where a new window sits in Neovim's layout.
@@ -93,6 +97,9 @@ pub const Split = struct {
     before: bool,
     /// The window it was split from, or 0.
     from: i64,
+    /// The tab page made after setup it belongs to, which Neovim shows
+    /// over the first one's windows, else 0.
+    tab: i64 = 0,
 };
 
 /// A notification from the Lua, or null for any other.
@@ -101,26 +108,38 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .current
     else if (std.mem.eql(u8, method, "neorex_reopen"))
         .reopen
+    else if (std.mem.eql(u8, method, "neorex_reopened"))
+        .reopened
     else if (std.mem.eql(u8, method, "neorex_split"))
         .split
     else if (std.mem.eql(u8, method, "neorex_float"))
         .float
     else if (std.mem.eql(u8, method, "neorex_entered"))
         .entered
+    else if (std.mem.eql(u8, method, "neorex_tabline"))
+        .tabline
     else
         return null;
-    if (try rpc.expectArray(params) < if (tag == .split) @as(u32, 4) else 1) return error.BadMessage;
+    const want: u32 = switch (tag) {
+        .split => 5,
+        .reopened => 2,
+        else => 1,
+    };
+    if (try rpc.expectArray(params) < want) return error.BadMessage;
     const win = try rpc.expectHandle(params);
     return switch (tag) {
         .current => .{ .current = win },
         .reopen => .{ .reopen = win },
+        .reopened => .{ .reopened = .{ .old = win, .new = try rpc.expectHandle(params) } },
         .float => .{ .float = win },
         .entered => .{ .entered = win },
+        .tabline => .{ .tabline = win },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
             .before = try rpc.expectBool(params),
             .from = try rpc.expectHandle(params),
+            .tab = try rpc.expectHandle(params),
         } },
     };
 }
@@ -204,6 +223,16 @@ const Harness = struct {
             if (h.notes.items[i] == .current) return h.notes.items[i].current;
         }
         return 0;
+    }
+
+    /// The tabline rows last reported, or -1.
+    fn lastTabline(h: *const Harness) i64 {
+        var i = h.notes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (h.notes.items[i] == .tabline) return h.notes.items[i].tabline;
+        }
+        return -1;
     }
 
     fn splitNote(h: *const Harness, win: i64) ?Note {
@@ -329,6 +358,206 @@ test "windows become external; the anchor stays hidden" {
     try testing.expect(!try h.until(struct {
         fn f(_: *Harness) bool {
             return false;
+        }
+    }.f));
+}
+
+test "a new tab page's window is marked, and closing it closes the tab page" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+    const first = h.wins[0];
+
+    h.notes.clearRetainingCapacity();
+    try h.input(":tabnew<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const tab = h.lastCurrent();
+    const tab_note = h.splitNote(tab).?.split;
+    try testing.expect(tab_note.tab != 0);
+    try testing.expectEqual(Split{ .win = tab, .side_by_side = false, .before = false, .from = 0, .tab = tab_note.tab }, tab_note);
+    try adopt(&h.nvim, tab, 30, 8);
+    try h.nvim.flush();
+    h.want = tab;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external;
+        }
+    }.f));
+
+    h.notes.clearRetainingCapacity();
+    try h.input(":vsplit<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and cur != x.want and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const split = h.lastCurrent();
+    // a split in it belongs to it
+    try testing.expectEqual(tab_note.tab, h.splitNote(split).?.split.tab);
+    // its first window closing leaves the tab page to its other windows, as
+    // Diffview replaces it
+    try close(&h.nvim, tab);
+    try h.nvim.flush();
+    h.gone = tab;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.gone) == null;
+        }
+    }.f));
+    var cmd_buf: [192]u8 = undefined;
+    _ = try h.nvim.request("nvim_command", 1);
+    try msgpack.writeStr(h.nvim.writer(), try std.fmt.bufPrint(&cmd_buf, "if tabpagenr('$') != 2 || !nvim_win_is_valid({d}) | throw 'tab page closed' | endif | call rpcnotify(0, 'neorex_win', 4242)", .{split}));
+    try h.nvim.flush();
+    h.want = 4242;
+    try testing.expect(try h.until(Harness.isCurrent));
+
+    // the last pane went away: the tab page goes with its anchor, back to the first
+    h.notes.clearRetainingCapacity();
+    try close(&h.nvim, split);
+    try h.nvim.flush();
+    h.want = first;
+    h.gone = split;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.isCurrent() and x.kind(x.gone) == null;
+        }
+    }.f));
+    // an error fails the wait; else a made-up report ends it
+    _ = try h.nvim.request("nvim_command", 1);
+    try msgpack.writeStr(h.nvim.writer(), try std.fmt.bufPrint(&cmd_buf, "if tabpagenr('$') != 1 || win_getid() != {d} | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4242)", .{first}));
+    try h.nvim.flush();
+    h.want = 4242;
+    try testing.expect(try h.until(Harness.isCurrent));
+}
+
+test ":tabclose from a tab page's window reopens the windows that followed it in" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+    const first = h.wins[0];
+
+    // two windows: the last one would reopen anyway, the other wouldn't
+    try h.input(":vsplit<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and cur != x.wins[0] and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const split = h.lastCurrent();
+    try adopt(&h.nvim, split, 20, 9);
+    try h.nvim.flush();
+    h.want = split;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external;
+        }
+    }.f));
+
+    try h.input(":tabnew<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != 0 and cur != x.want and x.kind(cur) == .ordinary;
+        }
+    }.f));
+    const tab = h.lastCurrent();
+    try adopt(&h.nvim, tab, 30, 8);
+    try h.nvim.flush();
+    h.want = tab;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external;
+        }
+    }.f));
+
+    // closes every other window in the tab page, which holds them all
+    h.notes.clearRetainingCapacity();
+    try h.input(":tabclose<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            var n: usize = 0;
+            for (x.notes.items) |note| if (note == .reopened and x.kind(note.reopened.new) == .external) {
+                n += 1;
+            };
+            return n == 2 and x.kind(x.want) == null;
+        }
+    }.f));
+    var olds: [2]i64 = undefined;
+    var k: usize = 0;
+    for (h.notes.items) |note| if (note == .reopened) {
+        olds[k] = note.reopened.old;
+        k += 1;
+    };
+    std.mem.sort(i64, &olds, {}, std.sort.asc(i64));
+    try testing.expectEqualSlices(i64, &.{ first, split }, &olds);
+}
+
+test "the tabline is reported and drawn on grid 1" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external and x.lastTabline() == 0;
+        }
+    }.f));
+
+    // as bufferline does, with a second buffer
+    try h.input(":file one | lua vim.o.showtabline = 2<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const screen = x.grids.get(1) orelse return false;
+            var text: [256]u8 = undefined;
+            return x.lastTabline() == 1 and screen.height > 0 and std.mem.indexOf(u8, Grid.rowText(screen, 0, &text), "one") != null;
+        }
+    }.f));
+
+    // a second tab page shows it with showtabline=1
+    try h.input(":set showtabline=1<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.lastTabline() == 0;
+        }
+    }.f));
+    try h.input(":tabnew<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.lastTabline() == 1;
         }
     }.f));
 }

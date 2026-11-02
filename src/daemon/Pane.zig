@@ -12,11 +12,14 @@ const Pane = @This();
 /// Matches a helper's hello. 0 is the startup pane.
 id: u32,
 rex_block: ?RexBlock = null,
-/// Null while a replacement window opens.
+/// Null for a floating pane of floats, and the startup pane before setup.
 neovim_window_handle: ?NeovimWindowHandle = null,
 /// Owned.
 terminal_surface: ?*Surface = null,
 closing: ?Close = null,
+/// The tab page made after setup its window belongs to, else 0. Its windows
+/// share a Rex floating pane.
+tab: i64 = 0,
 /// Set for a Rex floating pane showing a group of floats, not a window.
 layer: ?Layer = null,
 /// Where Rex put the pane in its window, as fractions: x, y, w, h.

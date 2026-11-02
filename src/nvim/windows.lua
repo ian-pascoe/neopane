@@ -10,6 +10,17 @@ _G.neorex = M
 local anchors = {}
 -- the window last reported as current
 local last
+-- tab page made after setup -> { back = the window current before it }.
+-- Its windows show in a Rex floating pane, and it closes with the last.
+local floating = {}
+-- window -> the tab page it belongs to: the one it was made in, or its
+-- origin's for a split. External windows follow the current tab page, so
+-- that's the only way to tell whose they are.
+local home = {}
+-- closing a window because its pane went away
+local closing_ours = false
+-- the tab page closing, with every window in it
+local closing_tab
 local group = api.nvim_create_augroup('neorex', {})
 
 local function is_anchor(win)
@@ -99,7 +110,10 @@ end
 
 --- Closes `win`, whose pane went away. Unsaved changes stay in its buffer.
 function M.close(win)
-  if api.nvim_win_is_valid(win) then pcall(api.nvim_win_close, win, true) end
+  if not api.nvim_win_is_valid(win) then return end
+  closing_ours = true
+  pcall(api.nvim_win_close, win, true)
+  closing_ours = false
 end
 
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
@@ -157,14 +171,27 @@ api.nvim_create_autocmd('WinNew', {
     if making_anchor then return end
     local win = api.nvim_get_current_win()
     local dir, first = placement(win)
-    if not dir then return end
+    if not dir then
+      -- the first window of a new tab page, as :tabnew, Neogit and Diffview
+      -- open. External windows follow the current tab page, so it opens
+      -- over them: its windows get a Rex floating pane.
+      local tab = api.nvim_win_get_tabpage(win)
+      if api.nvim_win_get_config(win).relative == '' and not anchor_of(tab) then
+        floating[tab] = floating[tab] or { back = last }
+        home[win] = tab
+        vim.rpcnotify(chan, 'neorex_split', win, false, false, 0, tab)
+      end
+      return
+    end
     local from = vim.fn.win_getid(vim.fn.winnr('#'))
+    local tab = home[from] or api.nvim_win_get_tabpage(win)
+    home[win] = tab
     -- Neovim doesn't keep the scroll when splitting an external window
     if shown(from) and api.nvim_win_get_buf(from) == api.nvim_win_get_buf(win) then
       local view = api.nvim_win_call(from, vim.fn.winsaveview)
       vim.fn.winrestview(view)
     end
-    vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0)
+    vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0, floating[tab] and tab or 0)
   end,
 })
 
@@ -213,6 +240,23 @@ api.nvim_create_autocmd('WinEnter', {
   end,
 })
 
+-- The tabline's rows on the screen, as last reported. The daemon draws them
+-- over the panes along the top of the Rex window.
+local tabline_rows
+local function report_tabline()
+  local stal = vim.o.showtabline
+  local n = (stal == 2 or (stal == 1 and #api.nvim_list_tabpages() > 1)) and 1 or 0
+  if n == tabline_rows then return end
+  tabline_rows = n
+  vim.rpcnotify(chan, 'neorex_tabline', n)
+end
+-- whenever Neovim waits for input: plugins such as bufferline set
+-- 'showtabline' in their own autocommands, which fire no OptionSet
+api.nvim_create_autocmd({ 'SafeState', 'TabNew', 'TabClosed' }, {
+  group = group,
+  callback = function() vim.schedule(report_tabline) end,
+})
+
 -- a statusline came, went or changed: fit the windows to their panes again
 api.nvim_create_autocmd('OptionSet', {
   group = group,
@@ -235,27 +279,84 @@ api.nvim_create_autocmd('QuitPre', {
   end,
 })
 
+-- A window of floating tab page `tab` closed: once none is left, close the
+-- tab page too, from another one, as external windows would go with it.
+local function close_tab(tab)
+  local t = floating[tab]
+  if not t then return end
+  for w, h in pairs(home) do
+    if h == tab and shown(w) then return end
+  end
+  floating[tab] = nil
+  -- back to the window it opened over
+  if not (last and api.nvim_win_is_valid(last)) then last = t.back end
+  if not api.nvim_tabpage_is_valid(tab) or #api.nvim_list_tabpages() == 1 then return end
+  if tab == api.nvim_get_current_tabpage() then vim.cmd('silent! tabnext #') end
+  if tab == api.nvim_get_current_tabpage() then vim.cmd('silent! tabprevious') end
+  if tab == api.nvim_get_current_tabpage() then return end
+  pcall(vim.cmd, 'tabclose! ' .. api.nvim_tabpage_get_number(tab))
+end
+
+-- Opens external `win`, about to close, again with its buffer and view, in
+-- tab page `from`. The daemon gives the new window its pane.
+local function reopen(win, from, enter)
+  local c = api.nvim_win_get_config(win)
+  local buf = api.nvim_win_get_buf(win)
+  local view = api.nvim_win_call(win, vim.fn.winsaveview)
+  vim.rpcnotify(chan, 'neorex_reopen', win)
+  vim.schedule(function()
+    if not api.nvim_buf_is_valid(buf) then buf = api.nvim_create_buf(true, false) end
+    local new = api.nvim_open_win(buf, enter, { external = true, width = c.width, height = c.height })
+    api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
+    home[new] = from
+    if last == win then last = new end
+    for _, t in pairs(floating) do
+      if t.back == win then t.back = new end
+    end
+    vim.rpcnotify(chan, 'neorex_reopened', win, new)
+    -- left on an anchor while there was nowhere to go
+    if is_anchor(api.nvim_get_current_win()) then schedule_report() end
+  end)
+end
+
 -- Neovim never closes its last window, but the anchor lets :close do it. So
--- reopen it, and the daemon gives the new window the same pane.
+-- reopen it, and the daemon gives the new window the same pane. Windows
+-- that only followed into a tab page, closed with it by :tabclose, are
+-- reopened too.
 api.nvim_create_autocmd('WinClosed', {
   group = group,
   callback = function(ev)
     local win = tonumber(ev.match)
-    if vim.v.exiting ~= vim.NIL or not shown(win) or others_shown(win) then return end
-    local c = api.nvim_win_get_config(win)
-    if not c.external then return end
-    local buf = api.nvim_win_get_buf(win)
-    local view = api.nvim_win_call(win, vim.fn.winsaveview)
-    vim.rpcnotify(chan, 'neorex_reopen', win)
-    vim.schedule(function()
-      if not api.nvim_buf_is_valid(buf) then buf = api.nvim_create_buf(true, false) end
-      local new = api.nvim_open_win(buf, true, { external = true, width = c.width, height = c.height })
-      api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
-    end)
+    local from = home[win]
+    home[win] = nil
+    if vim.v.exiting ~= vim.NIL then return end
+    if from and floating[from] then
+      -- after the command, which may open more windows in it
+      vim.schedule(function() close_tab(from) end)
+      return
+    end
+    if not shown(win) or not api.nvim_win_get_config(win).external then return end
+    local followed = closing_tab and not closing_ours and from and from ~= closing_tab and api.nvim_tabpage_is_valid(from)
+    if followed then return reopen(win, from, false) end
+    if not others_shown(win) then reopen(win, from, true) end
   end,
 })
 
+-- Every window in a closing tab page closes, external ones from other tab
+-- pages too. Not in older Neovim, which lacks the event.
+pcall(api.nvim_create_autocmd, 'TabClosedPre', {
+  group = group,
+  callback = function()
+    closing_tab = api.nvim_get_current_tabpage()
+    vim.schedule(function() closing_tab = nil end)
+  end,
+})
+
+for _, win in ipairs(api.nvim_list_wins()) do
+  if api.nvim_win_get_config(win).relative == '' then home[win] = api.nvim_win_get_tabpage(win) end
+end
 local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)
 schedule_report()
+report_tabline()
 return { first, anchor_of(api.nvim_get_current_tabpage()) }

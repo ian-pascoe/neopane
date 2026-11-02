@@ -71,7 +71,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, base: []const u8, nvim_args: []co
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "nvim", "--headless", "--listen", nvim_sock });
+    // before the user's config, so it can tell it runs under neorex
+    try argv.appendSlice(gpa, &.{ "nvim", "--headless", "--listen", nvim_sock, "--cmd", "let g:neorex = 1" });
     try argv.appendSlice(gpa, nvim_args);
     // its stderr is ours: the log
     var child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore });

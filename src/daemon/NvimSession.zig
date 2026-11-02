@@ -52,8 +52,12 @@ pub fn attachUi(self: *NvimSession, cols: u32, rows: u32) !void {
 }
 
 /// The editor spans the Rex window, so editor floats such as pickers can
-/// too. Messages show in the focused pane.
+/// too. Messages show in the focused pane. Not before setup: the first
+/// window still fills the editor, and growing it to the Rex window then
+/// shrinking it to its pane leaves it scrolled, as a dashboard drawn for
+/// the bigger size would be.
 pub fn fitUiTo(self: *NvimSession, p: *const Pane) !void {
+    if (!self.ready) return;
     const size = editorSize(p) orelse return;
     if (std.mem.eql(u32, &size, &self.editor_size)) return;
     self.editor_size = size;

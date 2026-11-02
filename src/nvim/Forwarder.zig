@@ -15,8 +15,12 @@ paste_phase: i64 = 1,
 ctrl_q_quits: bool = true,
 /// The grid mouse events land on; 0 without ext_multigrid.
 grid: u32 = 0,
-/// Floats drawn over the terminal, lowest first: mouse events on one go
-/// to its grid.
+/// Rows at the top showing the screen's tabline from column `tabline_col`:
+/// mouse events there go to grid 1, and below them move up past them.
+tabline_rows: u16 = 0,
+tabline_col: u16 = 0,
+/// Floats drawn over the terminal, below the tabline, lowest first: mouse
+/// events on one go to its grid.
 targets: [max_targets]Target = undefined,
 targets_len: u8 = 0,
 /// The float a button went down on: its drags and release go there too.
@@ -38,8 +42,14 @@ pub fn setTargets(self: *Forwarder, targets: []const Target) void {
 }
 
 /// The grid a mouse event lands on, and where on it.
-fn route(self: *Forwarder, m: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
-    const held = m.action == .drag or m.action == .release;
+fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
+    const held = event.action == .drag or event.action == .release;
+    if (event.row < self.tabline_rows and !(held and self.grab != null)) {
+        if (event.action == .release) self.grab = null;
+        return .{ .grid = 1, .row = event.row, .col = event.col +| self.tabline_col };
+    }
+    var m = event;
+    m.row -|= self.tabline_rows;
     const hit: ?Target = if (held and self.grab != null) self.grab else for (0..self.targets_len) |j| {
         const t = self.targets[self.targets_len - 1 - j];
         if (m.row >= t.row and m.row < @as(i64, t.row) + t.height and m.col >= t.col and m.col < @as(i64, t.col) + t.width) break t;
@@ -213,4 +223,23 @@ test "mouse events on a float go to its grid" {
     const under = f.route(.{ .button = .wheel_down, .action = .press, .row = 4, .col = 1 });
     try t.expectEqual(@as(u32, 3), under.grid);
     try t.expectEqual(@as(u16, 3), under.row);
+}
+
+test "mouse events on the tabline go to grid 1, and below it move up" {
+    const t = std.testing;
+    var f: Forwarder = .{ .grid = 2, .tabline_rows = 1, .tabline_col = 40 };
+    f.setTargets(&.{.{ .grid = 3, .row = 1, .col = 0, .width = 5, .height = 1 }});
+    const tab = f.route(.{ .button = .left, .action = .press, .row = 0, .col = 3 });
+    try t.expectEqual(@as(u32, 1), tab.grid);
+    try t.expectEqual(@as(u16, 0), tab.row);
+    try t.expectEqual(@as(u16, 43), tab.col);
+    _ = f.route(.{ .button = .left, .action = .release, .row = 0, .col = 3 });
+    // the window's first row is under the tabline
+    const win = f.route(.{ .button = .left, .action = .press, .row = 1, .col = 7 });
+    try t.expectEqual(@as(u32, 2), win.grid);
+    try t.expectEqual(@as(u16, 0), win.row);
+    _ = f.route(.{ .button = .left, .action = .release, .row = 1, .col = 7 });
+    // floats are placed on the window's grid too
+    const float = f.route(.{ .button = .wheel_down, .action = .press, .row = 2, .col = 1 });
+    try t.expectEqual(@as(u32, 3), float.grid);
 }
