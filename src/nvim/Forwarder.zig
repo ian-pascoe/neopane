@@ -41,9 +41,8 @@ pub fn setTargets(self: *Forwarder, targets: []const Target) void {
     self.targets_len = @intCast(n);
 }
 
-/// The grid a mouse event lands on, and where on it. Public for the
-/// daemon's tests of the tabline.
-pub fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
+/// The grid a mouse event lands on, and where on it.
+fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
     const held = event.action == .drag or event.action == .release;
     if (event.row < self.tabline_rows and !(held and self.grab != null)) {
         if (event.action == .release) self.grab = null;
@@ -243,4 +242,17 @@ test "mouse events on the tabline go to grid 1, and below it move up" {
     // floats are placed on the window's grid too
     const float = f.route(.{ .button = .wheel_down, .action = .press, .row = 2, .col = 1 });
     try t.expectEqual(@as(u32, 3), float.grid);
+}
+
+test "tabline clicks in panes that continue the tabline select its next columns" {
+    const t = std.testing;
+    // two panes of 60 columns: the second shows tabline columns 60 to 119
+    var left: Forwarder = .{ .grid = 2, .tabline_rows = 1, .tabline_col = 0 };
+    var right: Forwarder = .{ .grid = 4, .tabline_rows = 1, .tabline_col = 60 };
+    const a = left.route(.{ .button = .left, .action = .press, .row = 0, .col = 59 });
+    const b = right.route(.{ .button = .left, .action = .press, .row = 0, .col = 0 });
+    try t.expectEqual(@as(u32, 1), a.grid);
+    try t.expectEqual(@as(u32, 1), b.grid);
+    try t.expectEqual(@as(u16, 59), a.col);
+    try t.expectEqual(@as(u16, 60), b.col);
 }

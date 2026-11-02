@@ -27,6 +27,8 @@ drawn_size: [2]u32 = .{ 0, 0 },
 drawn_msg: u32 = 0,
 /// Tabline rows drawn over the top last frame.
 drawn_tabline: u32 = 0,
+/// The tabline column the row shown there started at.
+drawn_tabline_col: u32 = 0,
 drawn_cursor: ?render.Cursor = null,
 /// The floats drawn last frame.
 drawn_floats: [Grids.max_floats]Rect = undefined,
@@ -45,6 +47,9 @@ pub const Opts = struct {
     /// Rex window: its row of grid 1 from the pane's column. The window
     /// shows below it.
     tabline: ?[]const Grid.Cell = null,
+    /// The column of the screen's tabline that `tabline` starts at. When
+    /// it moves, the row is drawn again even if the tabline didn't change.
+    tabline_col: u32 = 0,
     /// The tabline changed since the last frame.
     tabline_dirty: bool = false,
 };
@@ -125,7 +130,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     const cur = self.cursorAt(grids, g, id, top, grid_rows, msg, msg_total, msg_n, rects);
     const grid_changed = floats_changed or if (g) |gr| gr.dirty.count() > 0 or gr.scrolls_len > 0 else false;
     const msg_changed = if (msg) |m| m.dirty.count() > 0 or msg_n != self.drawn_msg else msg_n != self.drawn_msg;
-    var tabline_changed = top > 0 and (self.full or opts.tabline_dirty);
+    var tabline_changed = top > 0 and (self.full or opts.tabline_dirty or opts.tabline_col != self.drawn_tabline_col);
     if (!self.full and !grid_changed and !msg_changed and !tabline_changed and std.meta.eql(cur, self.drawn_cursor)) return false;
 
     try render.begin(w);
@@ -192,6 +197,7 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
     self.drawn_size = size;
     self.drawn_msg = msg_n;
     self.drawn_tabline = top;
+    self.drawn_tabline_col = opts.tabline_col;
     self.drawn_cursor = cur;
     @memcpy(self.drawn_floats[0..rects.len], rects);
     self.drawn_floats_len = @intCast(rects.len);
@@ -590,4 +596,25 @@ test "a pane under the tabline draws it on top and its window below" {
     try testing.expect(try view.frame(&gs, 2, .{}, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "T1") == null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\x1b[1;1Hw") != null);
+}
+
+test "the tabline is drawn again when the column it starts at moves" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 2, .{});
+    try gs.grids.getPtr(2).?.resize(testing.allocator, 6, 3);
+    gs.cursor_grid = 2;
+    const first = [_]Grid.Cell{ .init("A", 0), .init("B", 0) };
+    const second = [_]Grid.Cell{ .init("C", 0), .init("D", 0) };
+    var view: PaneView = .init(6, 4);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try view.frame(&gs, 2, .{ .tabline = &first }, &out.writer));
+    // the same column, nothing dirty: nothing to draw
+    gs.grids.getPtr(2).?.dirty.unsetAll();
+    out.clearRetainingCapacity();
+    try testing.expect(!try view.frame(&gs, 2, .{ .tabline = &first }, &out.writer));
+    // panes to its left changed: it shows another part, with nothing else dirty
+    try testing.expect(try view.frame(&gs, 2, .{ .tabline = &second, .tabline_col = 2 }, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "CD") != null);
 }
