@@ -44,8 +44,10 @@ changes: WindowChanges = .{},
 /// panes along the top of the Rex window, as it would be over the screen.
 tabline_rows: u32 = 0,
 /// Rows at the bottom of every pane kept for Neovim's messages and command
-/// line: its 'cmdheight', as last said. One until it says. Messages that
-/// show beyond them are drawn over the window, in the focused pane.
+/// line: its 'cmdheight', as last said. One until it says. Each tab page has
+/// its own 'cmdheight', and this follows the current one, for every pane:
+/// those of other tab pages, and of a tab page's floating pane, too. Messages
+/// that show beyond them are drawn over the window, in the focused pane.
 msg_rows: u32 = 1,
 /// Where Neovim has the windows of each tab page made after setup, as it
 /// last said, and what was done to place their panes to match.
@@ -614,7 +616,7 @@ fn onReopened(self: *Daemon, old: i64, new: i64) void {
 /// A guess until the new pane says its size: half the pane it splits.
 fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     const size = self.newPaneSize(win);
-    return .{ size[0], @max(size[1] -| 1, 1) };
+    return Surface.windowFitting(size[0], size[1], self.msg_rows);
 }
 
 /// A guess at a new split's terminal size, cols x rows: half the pane it splits.
@@ -1088,9 +1090,7 @@ fn prepareTabline(self: *const Daemon, p: *const Pane, screen: ?*const Grid, buf
 fn onTabline(self: *Daemon, rows: u32) !void {
     if (rows == self.tabline_rows) return;
     self.tabline_rows = rows;
-    for (self.panes.list.items) |*p| try self.sizeWindow(p);
-    try self.nvim.client.flush();
-    try self.draw();
+    try self.refitWindows();
 }
 
 /// More rows than any terminal has: a 'cmdheight' past it is as good.
@@ -1101,6 +1101,11 @@ const max_msg_rows = 1000;
 fn onCmdheight(self: *Daemon, rows: u32) !void {
     if (rows == self.msg_rows) return;
     self.msg_rows = rows;
+    try self.refitWindows();
+}
+
+/// Every window is sized to its pane again, and drawn.
+fn refitWindows(self: *Daemon) !void {
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.nvim.client.flush();
     try self.draw();
@@ -1390,4 +1395,17 @@ test "the window leaves 'cmdheight' rows for messages, then the tabline's" {
     try t.expectEqual([2]u32{ 60, 17 }, fx.d.windowSize(p));
     fx.d.tabline_rows = 0;
     try t.expectEqual([2]u32{ 60, 18 }, fx.d.windowSize(p));
+}
+
+test "a window adopted before its pane exists leaves the same rows for messages" {
+    const t = std.testing;
+    var fx: TablineFixture = .{ .d = undefined };
+    try fx.init();
+    defer fx.deinit();
+    // no pane to split from: Rex's default size, 80 x 24
+    try t.expectEqual([2]u32{ 80, 23 }, fx.d.newWindowSize(1000));
+    fx.d.msg_rows = 0;
+    try t.expectEqual([2]u32{ 80, 24 }, fx.d.newWindowSize(1000));
+    fx.d.msg_rows = 2;
+    try t.expectEqual([2]u32{ 80, 22 }, fx.d.newWindowSize(1000));
 }

@@ -374,6 +374,17 @@ const Multi = struct {
         try m.nvim.flush();
     }
 
+    /// The daemon's part when 'cmdheight' changes: every window fits its
+    /// pane again, less the rows that are now kept for messages.
+    fn refit(m: *Multi, cmdheight: i64) !void {
+        m.reported_cmdheight = cmdheight;
+        m.msg_rows = @intCast(cmdheight);
+        for (m.panes) |p| if (p.win != 0) {
+            try windows.size(&m.nvim, p.win, p.view.cols, p.view.rows - m.msg_rows);
+        };
+        try m.nvim.flush();
+    }
+
     /// Applies messages until Neovim goes quiet, checking every frame.
     fn settle(m: *Multi) !void {
         while (true) {
@@ -387,7 +398,7 @@ const Multi = struct {
                         if (try m.gs.applyRedraw(gpa, &params)) try m.flushed();
                     } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
                         .current => |w| m.current = w,
-                        .cmdheight => |rows| m.reported_cmdheight = rows,
+                        .cmdheight => |rows| try m.refit(rows),
                         .reopen, .reopened, .split, .float, .entered, .tabline, .direction, .layout => {},
                     };
                 },
@@ -460,8 +471,9 @@ const Multi = struct {
         if (msg_n > 0) {
             try expectRows(&p.t, m.gs.get(m.gs.msg_grid.?).?, style, msg_total - msg_n, msg_top, msg_n, v.cols);
             m.stats.msg_rows += msg_n;
-        } else if (m.msg_rows > 0) {
-            // the message line of a pane without focus stays blank
+        } else if (grid_rows < v.rows) {
+            // the message line of a pane without focus stays blank, unless its
+            // window still fills the pane, as before it is fitted to a new 'cmdheight'
             try expectBlank(&p.t, v.rows - 1, v.cols);
         }
 
@@ -564,9 +576,10 @@ test "live neovim with a pane per window, and no row reserved for messages" {
 
 fn panePerWindow(cmdheight: u32) !void {
     var buf: [1024]u8 = undefined;
+    var set: [32]u8 = undefined;
     var m: Multi = .{
         .msg_rows = cmdheight,
-        .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n", "--cmd", if (cmdheight == 0) "set cmdheight=0" else "set cmdheight=1" }, &buf) catch |err| switch (err) {
+        .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n", "--cmd", try std.fmt.bufPrint(&set, "set cmdheight={d}", .{cmdheight}) }, &buf) catch |err| switch (err) {
             error.FileNotFound => return error.SkipZigTest,
             else => return err,
         },
@@ -599,4 +612,13 @@ fn panePerWindow(cmdheight: u32) !void {
     // all closed
     var placed_buf: [Grids.max_floats]Grids.Placed = undefined;
     for (m.panes) |p| try testing.expectEqual(0, m.gs.floatsOver(m.gs.gridOf(p.win).?, true, &.{}, &placed_buf).len);
+
+    // a new 'cmdheight' is reported, and the windows fit their panes again
+    for ([_]u32{ 2, 0, 1 }) |rows| {
+        var keys: [32]u8 = undefined;
+        try m.input(try std.fmt.bufPrint(&keys, ":set cmdheight={d}<CR>", .{rows}));
+        try m.settle();
+        try testing.expectEqual(@as(?i64, rows), m.reported_cmdheight);
+        for (m.panes) |p| try testing.expectEqual(p.view.rows - rows, m.gs.get(m.gs.gridOf(p.win).?).?.height);
+    }
 }

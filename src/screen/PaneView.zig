@@ -147,7 +147,10 @@ pub fn frame(self: *PaneView, grids: *Grids, grid_id: ?u32, opts: Opts, w: *Writ
             gr.scrolls_len = 0;
         }
     } else if (g) |gr| {
-        try self.scrolls(gr, top, grid_rows, rects, w);
+        // rows the messages covered last frame show them still, so a scroll
+        // over them can't be replayed: it would carry the message up
+        const clear_rows = @min(grid_rows, (self.rows - @min(self.drawn_msg, self.rows)) -| top);
+        try self.scrolls(gr, top, clear_rows, rects, w);
         // rows under floats that moved, changed or went
         if (floats_moved) for (self.drawn_floats[0..self.drawn_floats_len]) |r| markRows(gr, r, grid_rows);
         for (rects) |r| {
@@ -747,4 +750,38 @@ test "a cursor that only changes shape is drawn again" {
     try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
     gs.style.mode_idx = 0;
     try testing.expect(!try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+}
+
+test "a scroll in the frame the messages leave is drawn again, not replayed over the message" {
+    var gs: Grids = .{};
+    defer gs.deinit(testing.allocator);
+    try gs.grids.put(testing.allocator, 1, .{});
+    try gs.grids.getPtr(1).?.resize(testing.allocator, 6, 4);
+    try gs.grids.put(testing.allocator, 2, .{});
+    try gs.grids.getPtr(2).?.resize(testing.allocator, 6, 4);
+    for (0..4) |r| gs.grids.getPtr(2).?.cells[r * 6] = .init(&.{@as(u8, 'a') + @as(u8, @intCast(r))}, 0);
+    gs.cursor_grid = 2;
+    try gs.grids.put(testing.allocator, 5, .{});
+    const msg = gs.grids.getPtr(5).?;
+    try msg.resize(testing.allocator, 6, 1);
+    msg.cells[0] = .init("/", 0);
+    gs.msg_grid = 5;
+    gs.msg_row = 3;
+    var view: PaneView = .init(6, 4);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    // `/` covers the window's last row
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    try testing.expect(drewRow(out.written(), 4, "/"));
+
+    // `/pattern<CR>` scrolls the window, and the message is gone, in one flush
+    const win = gs.grids.getPtr(2).?;
+    try win.scroll(0, 4, 0, 6, 1);
+    win.cells[3 * 6] = .init("e", 0);
+    gs.msg_grid = null;
+    out.clearRetainingCapacity();
+    try testing.expect(try view.frame(&gs, 2, .{ .focused = true }, &out.writer));
+    // the terminal's message row would scroll up with the rows: every row is drawn instead
+    try testing.expect(std.mem.indexOf(u8, out.written(), "S") == null);
+    for ([_][]const u8{ "b", "c", "d", "e" }, 1..) |text, row| try testing.expect(drewRow(out.written(), @intCast(row), text));
 }

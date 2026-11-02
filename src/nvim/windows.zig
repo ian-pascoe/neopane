@@ -1078,14 +1078,14 @@ test "the tabline is reported and drawn on grid 1" {
     }.f));
 }
 
-/// The 'cmdheight' last reported, or -1.
-fn lastCmdheight(h: *const Harness) i64 {
+/// The 'cmdheight' last reported, if any.
+fn lastCmdheight(h: *const Harness) ?i64 {
     var i = h.notes.items.len;
     while (i > 0) {
         i -= 1;
         if (h.notes.items[i] == .cmdheight) return h.notes.items[i].cmdheight;
     }
-    return -1;
+    return null;
 }
 
 test "'cmdheight' is reported at setup and when it changes, from an autocommand too" {
@@ -1094,12 +1094,12 @@ test "'cmdheight' is reported at setup and when it changes, from an autocommand 
     try h.start(&buf);
     defer h.deinit();
     // the default, said at setup
-    try testing.expectEqual(@as(i64, 1), lastCmdheight(&h));
+    try testing.expectEqual(@as(?i64, 1), lastCmdheight(&h));
 
     try h.input(":set cmdheight=0<CR>");
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
-            return lastCmdheight(x) == 0;
+            return lastCmdheight(x) == @as(?i64, 0);
         }
     }.f));
 
@@ -1110,7 +1110,7 @@ test "'cmdheight' is reported at setup and when it changes, from an autocommand 
     );
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
-            return lastCmdheight(x) == 2;
+            return lastCmdheight(x) == @as(?i64, 2);
         }
     }.f));
 
@@ -1119,13 +1119,13 @@ test "'cmdheight' is reported at setup and when it changes, from an autocommand 
     try h.input(":set cmdheight=1<CR>");
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
-            return lastCmdheight(x) == 1;
+            return lastCmdheight(x) == @as(?i64, 1);
         }
     }.f));
     try h.input(":tabprevious<CR>");
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
-            return lastCmdheight(x) == 2;
+            return lastCmdheight(x) == @as(?i64, 2);
         }
     }.f));
 }

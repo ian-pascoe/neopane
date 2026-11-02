@@ -54,7 +54,13 @@ pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool
 /// The window that fits the pane, less the `msg_rows` at the bottom kept for
 /// Neovim's messages and command line ('cmdheight'). Never empty.
 pub fn windowSize(self: *const Surface, msg_rows: u32) [2]u32 {
-    return .{ @max(self.view.cols, 1), @max(self.view.rows -| msg_rows, 1) };
+    return windowFitting(self.view.cols, self.view.rows, msg_rows);
+}
+
+/// `windowSize` for a pane of `cols` x `rows`, one that may not exist yet.
+/// The only place the rule is.
+pub fn windowFitting(cols: u32, rows: u32, msg_rows: u32) [2]u32 {
+    return .{ @max(cols, 1), @max(rows -| msg_rows, 1) };
 }
 
 test "the window is the pane less the message rows, and never empty" {
