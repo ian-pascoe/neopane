@@ -294,11 +294,7 @@ pub fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
 #[cfg(test)]
 pub fn for_test_on(stream: UnixStream) -> Nvim {
     let writer = OwnedFd::from(stream.try_clone().unwrap());
-    Nvim::new(
-        None,
-        File::from(OwnedFd::from(stream)),
-        File::from(writer),
-    )
+    Nvim::new(None, File::from(OwnedFd::from(stream)), File::from(writer))
 }
 
 /// Starts `nvim --clean --embed` for a test, or None if it isn't installed.
