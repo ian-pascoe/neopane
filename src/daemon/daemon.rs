@@ -1263,7 +1263,8 @@ impl Daemon {
             let drawn = if let Some(l) = p.layer {
                 let members = float_groups::members(&self.grids, &l.group);
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
-                s.forwarder.grid = members.first().map_or(1, |m| m.grid);
+                // the group's own editor float, even when the cap on members dropped it
+                s.forwarder.grid = l.group.top_grids().first().copied().unwrap_or(1);
                 s.view.frame_floats(
                     &mut self.grids,
                     &members,
