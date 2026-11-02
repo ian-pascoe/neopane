@@ -10,7 +10,7 @@ A new note is a change on both sides: `vim.rpcnotify` in `windows.lua`, and the 
 
 ## Verify
 
-- Run `just test` after every change. Tests that need Neovim skip when `nvim` isn't installed, so a pass without `nvim` proves less.
+- Run `just test` after every change. Tests that need Neovim skip when `nvim` isn't installed, so a pass without `nvim` proves less. With `CI` set they panic instead; GitHub Actions runs fmt, clippy and the tests on every push to `main` and every PR.
 - Run `just golden` after changing what gets drawn (`src/screen/`, `PaneView`). It checks every frame through Ghostty's emulator, which it builds with Zig 0.17.
 - Run `just fmt` and `just lint` on Rust sources. `windows.lua` has no formatter config: keep its two-space hand formatting. If your edit tool reformats Lua, write the file from a shell command instead.
 

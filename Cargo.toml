@@ -2,6 +2,8 @@
 name = "neorex"
 version = "0.0.0"
 edition = "2024"
+# let-chains need 1.88; `cargo +1.87 check` fails
+rust-version = "1.88"
 license = "MIT"
 description = "A Rex-native Neovim frontend"
 repository = "https://github.com/ian-pascoe/neorex"

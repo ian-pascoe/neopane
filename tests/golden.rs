@@ -387,11 +387,15 @@ fn test_terminal(cols: u16, rows: u16) -> Result<Vt> {
 }
 
 /// Starts Neovim for a test, or None (after a note) if it isn't installed,
-/// so the test is skipped.
+/// so the test is skipped. Under `CI` (set and not empty) it panics instead,
+/// as `nvim_missing` in src/nvim/nvim.rs does.
 fn spawn_nvim(argv: &[&str]) -> Option<Nvim> {
     match Nvim::spawn(argv) {
         Ok(nvim) => Some(nvim),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if std::env::var_os("CI").is_some_and(|v| !v.is_empty()) {
+                panic!("nvim isn't installed, and CI is set");
+            }
             eprintln!("skipped: nvim isn't installed");
             None
         }

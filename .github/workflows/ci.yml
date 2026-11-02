@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, test (stable)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Neovim
+        run: |
+          brew install neovim
+          nvim --version
+          nvim --headless -u NONE '+lua if vim.fn.has("nvim-0.12") == 0 then vim.cmd("cquit 1") end' +qa || {
+            echo "::error::Neovim 0.12 or newer is required"
+            exit 1
+          }
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  msrv:
+    name: test (MSRV 1.88)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep the version in step with rust-version in Cargo.toml
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Neovim
+        run: brew install neovim
+      - run: cargo check --all-targets
+      - run: cargo test

@@ -276,15 +276,31 @@ impl Drop for Nvim {
     }
 }
 
-/// Starts `argv` for a test, or None if Neovim isn't installed.
+/// Whether a missing Neovim must fail the tests rather than skip them: `ci`,
+/// the `CI` environment variable, is set and not empty.
+#[cfg(test)]
+fn nvim_required(ci: Option<&OsStr>) -> bool {
+    ci.is_some_and(|v| !v.is_empty())
+}
+
+/// What a test does when `nvim` isn't installed: skip (None) after a note,
+/// or panic when `CI` is set, so a CI run can't pass without Neovim.
+#[cfg(test)]
+fn nvim_missing<T>() -> Option<T> {
+    if nvim_required(std::env::var_os("CI").as_deref()) {
+        panic!("nvim isn't installed, and CI is set: the tests that need Neovim can't be skipped");
+    }
+    eprintln!("skipped: nvim isn't installed");
+    None
+}
+
+/// Starts `argv` for a test, or None if Neovim isn't installed (a panic
+/// under `CI`).
 #[cfg(test)]
 pub fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
     match Nvim::spawn(argv) {
         Ok(nvim) => Some(nvim),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            eprintln!("skipped: nvim isn't installed");
-            None
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => nvim_missing(),
         Err(e) => panic!("spawning nvim: {e}"),
     }
 }
@@ -297,7 +313,8 @@ pub fn for_test_on(stream: UnixStream) -> Nvim {
     Nvim::new(None, File::from(OwnedFd::from(stream)), File::from(writer))
 }
 
-/// Starts `nvim --clean --embed` for a test, or None if it isn't installed.
+/// Starts `nvim --clean --embed` for a test, or None if it isn't installed
+/// (a panic under `CI`).
 #[cfg(test)]
 pub fn spawn_for_test() -> Option<Nvim> {
     spawn_for_test_with(&["nvim", "--clean", "--embed"])
@@ -378,6 +395,14 @@ mod tests {
         assert_eq!(nvim.next_id, before + 1);
     }
 
+    #[test]
+    fn ci_makes_a_missing_nvim_fatal_unless_empty_or_unset() {
+        assert!(nvim_required(Some(OsStr::new("true"))));
+        assert!(nvim_required(Some(OsStr::new("1"))));
+        assert!(!nvim_required(Some(OsStr::new(""))));
+        assert!(!nvim_required(None));
+    }
+
     /// A headless Neovim listening on `path`, hung up and reaped on drop.
     struct Server(Child, String);
 
@@ -392,7 +417,7 @@ mod tests {
                 .spawn();
             match child {
                 Ok(c) => Some(Server(c, path.to_string())),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => nvim_missing(),
                 Err(e) => panic!("{e}"),
             }
         }
