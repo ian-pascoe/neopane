@@ -64,6 +64,8 @@ pub struct Daemon {
     pub tab_layouts: IndexMap<i64, Tab>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
+    /// Whether the loop still watches Rex's fd.
+    rex_watched: bool,
     // Dropped last, in this order: the loop, then Rex, then Neovim.
     pub event_loop: Loop,
     pub rex: RexSession,
@@ -228,6 +230,7 @@ impl Daemon {
             msg_rows: 1,
             tab_layouts: IndexMap::new(),
             stopped: None,
+            rex_watched: true,
             event_loop,
             rex,
             nvim,
@@ -307,6 +310,7 @@ impl Daemon {
     /// Losing it waits a moment, in case another pane gains it.
     fn after_batch(&mut self) -> Result<()> {
         self.send_focus(false)?;
+        self.stop_watching_closed_rex()?;
         if self.nvim.watch_switch() {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
@@ -1020,10 +1024,23 @@ impl Daemon {
     // Rex
 
     fn on_rex(&mut self) -> Result<()> {
-        if !self.rex.read()? {
+        self.rex.read();
+        self.drain_rex()?;
+        self.stop_watching_closed_rex()
+    }
+
+    /// Rex is closed, however it came to be: stop watching its fd, and fail
+    /// the requests still waiting on it.
+    fn stop_watching_closed_rex(&mut self) -> Result<()> {
+        if self.rex.conn == Conn::Closed && self.rex_watched {
+            self.rex_watched = false;
             self.event_loop.remove(self.rex.client.fd())?;
-            return Ok(());
+            self.drain_rex()?;
         }
+        Ok(())
+    }
+
+    fn drain_rex(&mut self) -> Result<()> {
         while let Some(update) = self.rex.next()? {
             match update {
                 rex_session::Update::SplitMade { pane, block } => {
@@ -1860,7 +1877,7 @@ mod tests {
     use crate::rex::client::Client;
     use crate::screen::grids::{Float, Win};
     use serde_json::json;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
     /// A daemon with no Neovim or Rex behind it, only sockets that nothing
@@ -2752,5 +2769,64 @@ mod tests {
         assert_eq!(asked, layer_bounds_of(&d, id));
         drop(d);
         assert_eq!(0, place_group_requests(nvim_end));
+    }
+
+    /// A fixture whose Rex socket the loop watches, and a pane waiting on a
+    /// split Rex hasn't answered.
+    fn rex_with_a_split_pending() -> (Fixture, u32) {
+        let mut fx = fixture();
+        fx.d.event_loop
+            .add_read(fx.d.rex.client.fd(), Token::RexSocket as usize)
+            .unwrap();
+        let id = fx.d.panes.add(Pane::from_neovim_window(1, 1001)).id;
+        fx.d.rex
+            .request(Request::NewSplit(id), "block.split", json!({}))
+            .unwrap();
+        (fx, id)
+    }
+
+    /// Checks Rex counts as closed, unwatched, and the pane's split failed.
+    fn assert_rex_closed_and_split_failed(d: &Daemon, pane: u32) {
+        assert_eq!(Conn::Closed, d.rex.conn);
+        assert!(!d.rex_watched);
+        assert!(d.rex.pending_requests.is_empty());
+        assert!(matches!(
+            d.panes.by_id(pane).unwrap().closing,
+            Some(Close::RequestFailed)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_rex_message_closes_rex_and_fails_the_pending_split_without_stopping_the_daemon()
+    {
+        let (mut fx, id) = rex_with_a_split_pending();
+        // JSON, but without a `type`
+        let body = br#"{"payload":{}}"#;
+        let mut frame = vec![0x81, body.len() as u8];
+        frame.extend_from_slice(body);
+        fx.rex_end.write_all(&frame).unwrap();
+        fx.d.on_rex().unwrap();
+        assert_rex_closed_and_split_failed(&fx.d, id);
+        assert_eq!(None, fx.d.stopped);
+    }
+
+    #[test]
+    fn an_abrupt_rex_hangup_fails_the_pending_split() {
+        let (mut fx, id) = rex_with_a_split_pending();
+        let Fixture { rex_end, .. } = &mut fx;
+        rex_end.shutdown(std::net::Shutdown::Both).unwrap();
+        fx.d.on_rex().unwrap();
+        assert_rex_closed_and_split_failed(&fx.d, id);
+        assert_eq!(None, fx.d.stopped);
+    }
+
+    #[test]
+    fn a_failed_rex_write_closes_rex_and_fails_the_pending_split() {
+        let (fx, id) = rex_with_a_split_pending();
+        let Fixture { mut d, rex_end, .. } = fx;
+        drop(rex_end); // writes to a socket nobody holds fail
+        d.rex.focus_direction(rex_session::Direction::Left).unwrap();
+        d.after_batch().unwrap();
+        assert_rex_closed_and_split_failed(&d, id);
     }
 }

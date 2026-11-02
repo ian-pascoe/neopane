@@ -208,14 +208,27 @@ impl Session {
         )
     }
 
-    /// One read from Rex; false once it hung up. Then call `next` until None.
-    pub fn read(&mut self) -> Result<bool, ClientError> {
-        if !self.client.read()? {
-            eprintln!("neorex daemon: Rex hung up");
-            self.conn = Conn::Closed;
-            return Ok(false);
+    /// One read from Rex; false once it hung up or failed (logged, and Rex is
+    /// closed). Then call `next` until None.
+    pub fn read(&mut self) -> bool {
+        match self.client.read() {
+            Ok(true) => true,
+            Ok(false) => {
+                eprintln!("neorex daemon: Rex hung up");
+                self.conn = Conn::Closed;
+                false
+            }
+            Err(e) => {
+                self.fail(&e);
+                false
+            }
         }
-        Ok(true)
+    }
+
+    /// Any Rex error closes Rex: the windows keep working without it.
+    fn fail(&mut self, e: &ClientError) {
+        eprintln!("neorex daemon: Rex failed, treating it as closed: {e}");
+        self.conn = Conn::Closed;
     }
 
     /// The next update for the daemon, or None when there are none.
@@ -224,7 +237,15 @@ impl Session {
         if let Some(block) = self.queued_focus.take() {
             return Ok(Some(Update::FocusMoved(block)));
         }
-        while let Some(message) = self.client.next()? {
+        loop {
+            let message = match self.client.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => {
+                    self.fail(&e);
+                    break;
+                }
+            };
             match message {
                 client::Message::Response(r) => {
                     if let Some(update) = self.on_response(r)? {
@@ -416,8 +437,10 @@ impl Session {
         if self.conn == Conn::Closed {
             return Ok(());
         }
-        let id = self.client.request(method, Some(&payload))?;
-        self.pending_requests.push(Pending { id, req });
+        match self.client.request(method, Some(&payload)) {
+            Ok(id) => self.pending_requests.push(Pending { id, req }),
+            Err(e) => self.fail(&e),
+        }
         Ok(())
     }
 
