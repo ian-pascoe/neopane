@@ -16,6 +16,16 @@ commands:
   debug-rex SOCKET           open a split in this Rex session and drive its pane; print Rex events
   pane SOCKET [ID]           hand this terminal to the daemon at SOCKET, then wait
   help                       show this help
+
+neorex runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
+to find its pane. Only debug-rex reads them, of the debug commands.
+
+The daemon logs to `log` in its private directory, neorex-<launcher pid>.XXXXXX in
+$XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
+On a clean exit (Neovim quits or crashes, the last pane closes, or a signal) the
+daemon removes the log.
+When the daemon itself fails, the log and directory stay, and if it failed to start,
+neorex prints the log's path.
 ";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -117,7 +127,21 @@ fn parse_u32(s: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_u32;
+    use super::{USAGE, parse_u32};
+
+    #[test]
+    fn help_says_where_the_log_is() {
+        for want in [
+            "REX_SERVER",
+            "REX_SESSION",
+            "REX_BLOCK",
+            "XDG_RUNTIME_DIR",
+            "TMPDIR",
+            "`log` in its private directory, neorex-<launcher pid>.XXXXXX",
+        ] {
+            assert!(USAGE.contains(want), "{want}");
+        }
+    }
 
     #[test]
     fn pane_ids_parse_like_parse_int() {

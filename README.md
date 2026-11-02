@@ -78,6 +78,50 @@ can tell it's running under neorex:
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
 
+## How it runs
+
+Running `neorex` in a Rex pane starts a daemon in the background, which runs
+one headless Neovim and gives each of its windows a Rex pane. The pane you ran
+it in becomes the first window's. It takes its bearings from the environment
+Rex sets in every pane:
+
+- `REX_SERVER`: the URL of the Rex server to connect to. Required.
+- `REX_SESSION`: the Rex session to open panes in. Required.
+- `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
+  uses it as the first window's pane, and logs a note if it isn't a block id.
+
+If stdin isn't a terminal, `neorex` prints `error: NotATerminal` and exits. In
+a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
+`neorex: run it in a Rex pane`, then `error: NotInRex`, and exits. The
+`debug-rex` command reads the same three variables.
+
+The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
+private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
+`$TMPDIR`, else `/tmp`; each is used only when it is an absolute path. It logs
+to the file `log` there. On a clean exit (Neovim quits or crashes, the last
+pane closes, or a signal) the daemon removes the log and the directory. When
+the daemon itself fails, they stay, and if it failed to start, neorex prints
+the log's path. `neorex help` says the same.
+
+To try a build without it grabbing the focus in your own Rex session, which
+neorex does as it works, make a session of your own with `rex new`, and run it
+there, or in a terminal started with `REX_SESSION` set to that session's id
+(`REX_SERVER` stays as Rex set it). A terminal started from one of your own
+panes inherits that pane's `REX_BLOCK`, which the daemon would use as the first
+window's pane, in your session: unset `REX_BLOCK`, or set it to a block in the
+new session.
+
+## Troubleshooting
+
+- "run it in a Rex pane": `REX_SERVER` or `REX_SESSION` is missing. Start
+  `neorex` from a Rex pane, or set both (see above) to a session you made.
+- "the daemon didn't start; see <path>", or a failure line in the pane: read
+  the log at that path.
+- To find a log left by a daemon failure, look in the directories named
+  `neorex-*` in `$XDG_RUNTIME_DIR`, `$TMPDIR` or `/tmp`.
+- While it runs, Neovim's own messages go to the same log, since the
+  daemon's stderr is Neovim's.
+
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
