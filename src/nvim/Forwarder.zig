@@ -41,8 +41,9 @@ pub fn setTargets(self: *Forwarder, targets: []const Target) void {
     self.targets_len = @intCast(n);
 }
 
-/// The grid a mouse event lands on, and where on it.
-fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
+/// The grid a mouse event lands on, and where on it. Public for the
+/// daemon's tests of the tabline.
+pub fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col: u16 } {
     const held = event.action == .drag or event.action == .release;
     if (event.row < self.tabline_rows and !(held and self.grab != null)) {
         if (event.action == .release) self.grab = null;

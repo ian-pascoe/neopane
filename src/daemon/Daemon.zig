@@ -802,6 +802,9 @@ fn draw(self: *Daemon) !void {
     // the screen's tabline: grid 1's top row
     const screen = self.grids.get(1);
     const tabline_dirty = if (screen) |g| g.height > 0 and (g.dirty.isSet(0) or g.scrolls_len > 0) else false;
+    const tops = try self.gpa.alloc(?TopPane, self.panes.list.items.len);
+    defer self.gpa.free(tops);
+    for (self.panes.list.items, tops) |*p, *top| top.* = self.topPane(p);
     var i = self.panes.list.items.len;
     while (i > 0) {
         i -= 1;
@@ -809,9 +812,10 @@ fn draw(self: *Daemon) !void {
         const p = &self.panes.list.items[i];
         const s = p.terminal_surface orelse continue;
         var tabline_buf: [256]Grid.Cell = undefined;
-        const tabline = if (self.tablineRowsOf(p) > 0) if (screen) |g| tablineSlice(g, self.paneOrigin(p)[1], s.view.cols, &tabline_buf) else null else null;
+        const tabline_col = tablineStart(tops, i);
+        const tabline = if (self.tablineRowsOf(p) > 0) if (screen) |g| tablineSlice(g, @intCast(tabline_col), s.view.cols, &tabline_buf) else null else null;
         s.forwarder.tabline_rows = if (tabline != null) 1 else 0;
-        s.forwarder.tabline_col = @intCast(std.math.clamp(self.paneOrigin(p)[1], 0, std.math.maxInt(u16)));
+        s.forwarder.tabline_col = @intCast(@min(tabline_col, std.math.maxInt(u16)));
         // a floating pane waiting on its refit shows nothing yet
         if (p.layer != null and !p.layerShown()) continue;
         const drawn = if (p.layer) |*l| blk: {
@@ -854,6 +858,31 @@ fn tablineSlice(screen: *const Grid, col: i32, cols: u32, buf: []Grid.Cell) []co
     @memcpy(buf[0..n], row[from..][0..n]);
     if (n > 0 and buf[0].len == 0) buf[0] = .{ .hl = buf[0].hl };
     return buf[0..n];
+}
+
+/// A pane along the top that shows a share of the tabline: where it sits in
+/// the Rex window, as a fraction, and how wide it is.
+const TopPane = struct { x: f64, cols: u32 };
+
+/// `p` as one of the panes sharing the tabline, if it is.
+fn topPane(self: *const Daemon, p: *const Pane) ?TopPane {
+    const s = p.terminal_surface orelse return null;
+    if (self.tablineRowsOf(p) == 0) return null;
+    return .{ .x = if (p.rect) |r| r[0] else 0, .cols = s.view.cols };
+}
+
+/// The tabline column pane `me` of `tops` starts at: the panes sharing the
+/// tabline lay it out left to right from column 0, whatever else is in the
+/// Rex window, so each tab shows in exactly one of them. A tie in `x` goes
+/// to the earlier pane.
+fn tablineStart(tops: []const ?TopPane, me: usize) u32 {
+    const mine = tops[me] orelse return 0;
+    var col: u32 = 0;
+    for (tops, 0..) |other, i| {
+        const o = other orelse continue;
+        if (o.x < mine.x or (o.x == mine.x and i < me)) col += o.cols;
+    }
+    return col;
 }
 
 /// Mouse events on the floats drawn go to their grids.
@@ -927,4 +956,50 @@ fn onTabline(self: *Daemon, rows: u32) !void {
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.nvim.client.flush();
     try self.draw();
+}
+
+test "the leftmost top pane starts the tabline at column 0, the next continues from it" {
+    const t = std.testing;
+    // a non-Neovim pane at x = 0.4 isn't listed: the first Neovim pane is
+    // at 0.4 and still starts the tabline
+    const tops = [_]?TopPane{
+        .{ .x = 0.7, .cols = 30 },
+        .{ .x = 0.4, .cols = 20 },
+        null, // a pane that isn't on the top row
+        .{ .x = 0.9, .cols = 10 },
+    };
+    try t.expectEqual(@as(u32, 20), tablineStart(&tops, 0));
+    try t.expectEqual(@as(u32, 0), tablineStart(&tops, 1));
+    try t.expectEqual(@as(u32, 50), tablineStart(&tops, 3));
+    // alone, at any position: from column 0
+    try t.expectEqual(@as(u32, 0), tablineStart(&.{.{ .x = 0.5, .cols = 40 }}, 0));
+}
+
+test "every tab shows exactly once across the panes, and clicks land on it" {
+    const t = std.testing;
+    var screen: Grid = .{};
+    defer screen.deinit(t.allocator);
+    try screen.resize(t.allocator, 12, 1);
+    for (screen.row(0), 0..) |_, i| screen.cells[i] = .init(&.{@intCast('a' + i)}, 0);
+
+    // two Neovim panes of 5 and 7 columns, the left one at x = 0.3
+    const tops = [_]?TopPane{ .{ .x = 0.3, .cols = 5 }, .{ .x = 0.6, .cols = 7 } };
+    var seen: [12]u8 = undefined;
+    var n: usize = 0;
+    for (tops, 0..) |top, i| {
+        const col = tablineStart(&tops, i);
+        var buf: [256]Grid.Cell = undefined;
+        const slice = tablineSlice(&screen, @intCast(col), top.?.cols, &buf);
+        var f: Forwarder = .{ .grid = 2, .tabline_rows = 1, .tabline_col = @intCast(col) };
+        for (slice, 0..) |cell, c| {
+            seen[n] = cell.str()[0];
+            n += 1;
+            // a click on the cell goes to the same cell of the screen
+            const hit = f.route(.{ .button = .left, .action = .press, .row = 0, .col = @intCast(c) });
+            try t.expectEqual(@as(u32, 1), hit.grid);
+            try t.expectEqualStrings(cell.str(), screen.row(0)[hit.col].str());
+            _ = f.route(.{ .button = .left, .action = .release, .row = 0, .col = @intCast(c) });
+        }
+    }
+    try t.expectEqualStrings("abcdefghijkl", seen[0..n]);
 }
