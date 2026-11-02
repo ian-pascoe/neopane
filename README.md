@@ -14,9 +14,11 @@ pane they belong to.
 
 ## Status
 
-Very early and rough, bugs / missing features are to be expected.
+Very early and rough: expect bugs and missing features.
 
-AI has been used heavily in building neorex due to limits on my available time. A lot of the code needs large improvements, cleanup, better design etc. I will be doing this incrementally - any contributions are welcome.
+neorex has been built with heavy use of AI, first in Zig and now in Rust.
+Much of the code still needs cleanup and better design, which is happening
+incrementally. Contributions are welcome.
 
 ## Requirements
 
