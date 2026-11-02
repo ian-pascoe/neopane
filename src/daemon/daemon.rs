@@ -30,7 +30,7 @@ use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
 use super::pane_helper;
 use super::panes::Panes;
 use super::rex_layout::{self, LayoutSnapshot};
-use super::surface::{self, Surface};
+use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
 use crate::nvim::forwarder::{self, Forwarder};
@@ -1330,23 +1330,23 @@ impl Daemon {
             if p.layer.is_some() && !p.layer_shown() {
                 continue;
             }
-            // frames were dropped for a terminal that wasn't reading: it's
-            // drawn in full once it has caught up
-            if p.terminal_surface.as_ref().unwrap().backlog.dropped() {
-                continue;
-            }
+            // frames were dropped for a terminal that wasn't reading: no frame
+            // until it has caught up, when it's drawn in full; where its input
+            // goes is kept current all the same
+            let caught_up = !p.terminal_surface.as_ref().unwrap().backlog.dropped();
             let drawn = if let Some(l) = p.layer {
                 let members = float_groups::members(&self.grids, &l.group);
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
                 // the group's own editor float, even when the cap on members dropped it
                 s.forwarder.grid = l.group.top_grids().first().copied().unwrap_or(1);
-                s.view.frame_floats(
-                    &mut self.grids,
-                    &members,
-                    [l.group.row, l.group.col],
-                    &mut s.terminal.writer,
-                )
-            } else {
+                caught_up
+                    && s.view.frame_floats(
+                        &mut self.grids,
+                        &members,
+                        [l.group.row, l.group.col],
+                        &mut s.terminal.writer,
+                    )
+            } else if caught_up {
                 let grid = geometry::grid_of_pane(&self.grids, p);
                 let origin = self.geometry().pane_origin(p);
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
@@ -1363,10 +1363,14 @@ impl Daemon {
                     },
                     &mut s.terminal.writer,
                 )
+            } else {
+                false
             };
             let p = &mut self.panes.list[i];
             let token = p.token(PaneFd::Terminal);
             let s: &mut Surface = p.terminal_surface.as_deref_mut().unwrap();
+            // the floats of the frame last drawn: unchanged while frames are
+            // held back, as no frame is built
             set_targets(&mut s.forwarder, s.view.drawn_floats());
             if !drawn {
                 continue;
@@ -1374,8 +1378,8 @@ impl Daemon {
             // never waits: what the terminal can't take yet waits until it has room
             match s.send_frame() {
                 Err(_) => self.pane_gone(id)?,
-                Ok(true) => self.event_loop.add_write(s.terminal.fd, token)?,
-                Ok(false) => {}
+                Ok(Sent::Waiting) => self.event_loop.add_write(s.terminal.fd, token)?,
+                Ok(Sent::All) => {}
             }
         }
         // the panes along the top drew the tabline

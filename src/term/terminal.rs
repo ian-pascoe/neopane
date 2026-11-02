@@ -57,6 +57,16 @@ impl Terminal {
         let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) });
     }
 
+    /// Restores the original settings now, without waiting for the output
+    /// still queued to be read, as `deinit` does; input not yet read is
+    /// dropped all the same. Errors are ignored.
+    pub fn restore_now(&mut self) {
+        // SAFETY: plain calls on the terminal's fd; `original` is the termios
+        // `init` read.
+        unsafe { libc::tcflush(self.fd, libc::TCIFLUSH) };
+        let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) });
+    }
+
     /// Current size in cells.
     pub fn size(&self) -> io::Result<libc::winsize> {
         let mut ws = libc::winsize {

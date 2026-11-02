@@ -13,9 +13,10 @@ use std::sync::{Arc, Mutex};
 
 const BLOCK: &[u8] = b"block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
 
-/// The token of the timer that bounds each of the rig's waits on the loop.
-const TICK: usize = usize::MAX;
-const TICK_TIMER: usize = 100;
+/// The timer that bounds each of the rig's waits on the loop, so it checks
+/// whether it's done: its id, and the token it fires with.
+const PUMP_TIMER_ID: usize = 100;
+const PUMP_TIMER_TOKEN: usize = usize::MAX;
 
 /// How long the unread pane is held before the daemon counts as stalled.
 const STALL_LIMIT: Duration = Duration::from_secs(3);
@@ -225,10 +226,13 @@ impl Rig {
         let mut events = [Event::default(); 16];
         while !done(self) {
             assert!(Instant::now() < deadline, "TestTimedOut");
-            self.d.event_loop.add_timer(TICK_TIMER, 50, TICK).unwrap();
+            self.d
+                .event_loop
+                .add_timer(PUMP_TIMER_ID, 50, PUMP_TIMER_TOKEN)
+                .unwrap();
             let n = self.d.event_loop.wait(&mut events).unwrap().len();
             for &e in &events[..n] {
-                if e.token != TICK {
+                if e.token != PUMP_TIMER_TOKEN {
                     self.d.handle(e).unwrap();
                 }
             }
@@ -371,4 +375,25 @@ fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again() {
         );
     }
     assert!(!rig.panes[0].stalled.load(Ordering::SeqCst));
+}
+
+// Closing a pane restores its terminal; for one nobody reads, that mustn't
+// wait for it either.
+#[test]
+fn a_pane_nobody_reads_closes_without_stopping_the_others() {
+    let Some(mut rig) = Rig::start() else {
+        return;
+    };
+    rig.panes[1].held.store(true, Ordering::SeqCst);
+    rig.churn(1, 20);
+    let win = rig.win(1);
+    rig.lua(&format!("vim.api.nvim_win_close({win}, true)"));
+    rig.pump(|r| r.d.panes.by_id(1).is_none());
+    let before = rig.panes[0].seen_len();
+    rig.panes[0].type_text("ihello");
+    rig.pump(|r| r.panes[0].seen_from(before).contains("hello"));
+    assert!(
+        !rig.panes[1].stalled.load(Ordering::SeqCst),
+        "the daemon waited for the closing pane"
+    );
 }

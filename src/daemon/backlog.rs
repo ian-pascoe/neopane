@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::RawFd;
+use std::time::{Duration, Instant};
 
 /// Most bytes a pane keeps waiting: a few full frames of a big terminal.
 pub const CAP: usize = 1 << 20;
@@ -115,6 +116,36 @@ impl Backlog {
             ..Backlog::default()
         };
         rest
+    }
+}
+
+/// Writes `bytes` to `fd`, waiting at most `wait` for room; what doesn't fit
+/// by then is dropped. For a terminal being restored as its pane goes: a
+/// terminal nobody reads mustn't hold the daemon up.
+pub fn write_within(fd: RawFd, bytes: &[u8], wait: Duration) {
+    let deadline = Instant::now() + wait;
+    let mut done = 0;
+    loop {
+        match write_some(fd, &bytes[done..]) {
+            Ok(n) => done += n,
+            Err(_) => return,
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if done == bytes.len() || left.is_zero() {
+            return;
+        }
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        let ms = left.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } < 0
+            && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            return;
+        }
     }
 }
 
