@@ -44,8 +44,9 @@ pub const Opts = struct {
     /// Editor floats shown elsewhere, with every float hanging from them.
     skip: []const u32 = &.{},
     /// The screen's tabline over this pane, for a pane along the top of the
-    /// Rex window: its row of grid 1 from the pane's column. The window
-    /// shows below it.
+    /// Rex window: its row of grid 1 from `tabline_col`, which the panes
+    /// along the top lay out from column 0, left to right. The window shows
+    /// below it.
     tabline: ?[]const Grid.Cell = null,
     /// The column of the screen's tabline that `tabline` starts at. When
     /// it moves, the row is drawn again even if the tabline didn't change.
