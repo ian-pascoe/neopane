@@ -1859,6 +1859,7 @@ mod tests {
     use crate::nvim::windows::{Kind, Node};
     use crate::rex::client::Client;
     use crate::screen::grids::{Float, Win};
+    use serde_json::json;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 
@@ -1867,7 +1868,7 @@ mod tests {
     struct Fixture {
         d: Daemon,
         rex_end: UnixStream,
-        _nvim_end: UnixStream,
+        nvim_end: UnixStream,
     }
 
     fn fixture() -> Fixture {
@@ -1885,7 +1886,7 @@ mod tests {
         Fixture {
             d,
             rex_end,
-            _nvim_end: nvim_end,
+            nvim_end,
         }
     }
 
@@ -2049,7 +2050,7 @@ mod tests {
         let Fixture {
             mut d,
             mut rex_end,
-            _nvim_end,
+            nvim_end: _,
         } = fixture();
         body(&mut d);
         drop(d); // the end of what it sent
@@ -2355,5 +2356,401 @@ mod tests {
         assert_eq!([80, 24], fx.d().new_window_size(1000));
         fx.d().msg_rows = 2;
         assert_eq!([80, 22], fx.d().new_window_size(1000));
+    }
+
+    // Rex's layout and floating panes
+
+    /// Gives pane `id` the Rex block `block_id(n)`.
+    fn set_block(d: &mut Daemon, id: u32, n: u32) {
+        d.panes.by_id_mut(id).unwrap().rex_block =
+            Some(pane::rex_block(block_id(n).as_bytes()).unwrap());
+    }
+
+    fn layer_bounds_of(d: &Daemon, id: u32) -> [f64; 4] {
+        d.panes.by_id(id).unwrap().layer.as_ref().unwrap().bounds
+    }
+
+    /// Reads `view` as Rex's, and sends what that asked of Neovim.
+    fn read_and_flush(d: &mut Daemon, view: Value) {
+        d.read_layout(&[view]);
+        d.nvim.client.flush().unwrap();
+    }
+
+    fn approx(a: [f64; 4], b: [f64; 4]) {
+        for i in 0..4 {
+            assert!((a[i] - b[i]).abs() < 1e-9, "{a:?} != {b:?}");
+        }
+    }
+
+    fn window_id(n: u32) -> String {
+        let id = format!("window:00000000-0000-0000-0000-{n:0>12}");
+        assert_eq!(43, id.len());
+        id
+    }
+
+    /// A group at row 4, column 10 of grid 1, 60 x 20 cells.
+    fn picker_group() -> Group {
+        let mut g = Group {
+            key: 1002,
+            row: 4,
+            col: 10,
+            width: 60,
+            height: 20,
+            ..Group::default()
+        };
+        g.tops[0] = 3;
+        g.tops_len = 1;
+        g
+    }
+
+    /// Grid 1 of 200 x 50, and an entered picker float, as one group, on top.
+    fn show_picker(d: &mut Daemon) {
+        d.grids.grids.insert(1, Grid::default());
+        d.grids.get_mut(1).unwrap().resize(200, 50);
+        d.grids.grids.insert(3, Grid::default());
+        d.grids.get_mut(3).unwrap().resize(60, 20);
+        d.grids.wins.insert(
+            3,
+            Win {
+                win: 1002,
+                kind: WinKind::Float,
+                float: Float {
+                    screen: Some([4, 10]),
+                    ..Float::default()
+                },
+            },
+        );
+        d.nvim.note_entered(1002);
+    }
+
+    #[test]
+    fn rect4_reads_four_numbers_and_nothing_else() {
+        let v = json!([0.25, 0, 1, 0.5]);
+        assert_eq!(Some([0.25, 0.0, 1.0, 0.5]), rect4(Some(&v)));
+        assert_eq!(None, rect4(None));
+        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3]))));
+        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3, 0.4, 0.5]))));
+        // std.json keeps some numbers as strings: not ones to read
+        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3, "0.4"]))));
+        assert_eq!(None, rect4(Some(&json!({ "x": 1 }))));
+    }
+
+    #[test]
+    fn a_floating_panes_bounds_are_fractions_of_the_screen_around_its_group_and_its_frame() {
+        let mut fx = TablineFixture::init();
+        let d = fx.d();
+        // 3 x 2 cells of frame: half of each around the group
+        approx(
+            [0.045, 0.06, 0.315, 0.44],
+            d.layer_bounds(&picker_group()).unwrap(),
+        );
+
+        // too big for the screen: it fills it
+        let mut big = picker_group();
+        big.width = 300;
+        big.height = 80;
+        approx([0.0, 0.0, 1.0, 1.0], d.layer_bounds(&big).unwrap());
+
+        // at the right and bottom edges: pulled back in, so it's whole
+        let mut edge = picker_group();
+        edge.col = 190;
+        edge.row = 45;
+        let b = d.layer_bounds(&edge).unwrap();
+        approx([1.0 - b[2], 1.0 - b[3], 63.0 / 200.0, 22.0 / 50.0], b);
+
+        // off the top left: pulled in to it
+        let mut off = picker_group();
+        off.col = 0;
+        off.row = 0;
+        let b = d.layer_bounds(&off).unwrap();
+        assert_eq!([0.0, 0.0], [b[0], b[1]]);
+
+        // no screen to measure by, or an empty one
+        d.grids.get_mut(1).unwrap().resize(0, 0);
+        assert_eq!(None, d.layer_bounds(&picker_group()));
+        d.grids.grids.swap_remove(&1);
+        assert_eq!(None, d.layer_bounds(&picker_group()));
+    }
+
+    #[test]
+    fn bounds_within_half_a_cell_of_grid_1_are_the_same() {
+        let mut fx = TablineFixture::init();
+        let d = fx.d();
+        let a = [0.1, 0.2, 0.3, 0.4];
+        // a cell is 1/200 wide and 1/50 high
+        assert!(d.same_bounds(a, a));
+        assert!(d.same_bounds(a, [0.1 + 0.0024, 0.2 + 0.009, 0.3 - 0.0024, 0.4 - 0.009]));
+        assert!(!d.same_bounds(a, [0.1 + 0.0026, 0.2, 0.3, 0.4]));
+        assert!(!d.same_bounds(a, [0.1, 0.2 + 0.0101, 0.3, 0.4]));
+        assert!(!d.same_bounds(a, [0.1, 0.2, 0.3 + 0.0026, 0.4]));
+        assert!(!d.same_bounds(a, [0.1, 0.2, 0.3, 0.4 + 0.0101]));
+        // no screen: nothing to tell them apart by
+        d.grids.grids.swap_remove(&1);
+        assert!(d.same_bounds(a, [0.9, 0.9, 0.9, 0.9]));
+    }
+
+    #[test]
+    fn the_layout_gives_our_panes_their_rects_and_the_window_holding_them_its_id() {
+        let mut fx = TablineFixture::init();
+        let a = fx.add(0, 60, None);
+        let b = fx.add(1, 60, None);
+        let other = fx.add(2, 60, None);
+        let d = fx.d();
+        set_block(d, a, 1);
+        set_block(d, b, 2);
+        set_block(d, other, 3);
+        let wins = vec![
+            // no panes of ours: its id isn't ours
+            json!({ "window_id": window_id(8), "layers": [ { "kind": "tiled", "layout": {
+                "kind": "leaf", "block_id": block_id(99), "rect": [0, 0, 1, 1] } } ] }),
+            json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
+                "kind": "split", "children": [
+                    { "kind": "leaf", "block_id": block_id(1), "rect": [0.0, 0.0, 0.5, 1.0] },
+                    { "kind": "split", "children": [
+                        { "kind": "leaf", "block_id": block_id(2), "rect": [0.5, 0.0, 0.5, 0.25] },
+                        // a bad rect: kept as it was
+                        { "kind": "leaf", "block_id": block_id(3), "rect": [0.5, 0.25, 0.5] },
+                    ] },
+                ] } } ] }),
+        ];
+        d.read_layout(&wins);
+        assert_eq!(Some([0.0, 0.0, 0.5, 1.0]), d.panes.by_id(a).unwrap().rect);
+        assert_eq!(Some([0.5, 0.0, 0.5, 0.25]), d.panes.by_id(b).unwrap().rect);
+        assert_eq!(None, d.panes.by_id(other).unwrap().rect);
+        assert_eq!(
+            Some(*window_id(9).as_bytes().first_chunk().unwrap()),
+            d.rex.window
+        );
+    }
+
+    #[test]
+    fn a_window_id_of_the_wrong_length_or_without_our_panes_isnt_kept() {
+        let mut fx = TablineFixture::init();
+        let a = fx.add(0, 60, None);
+        let d = fx.d();
+        set_block(d, a, 1);
+        let layers = json!([ { "kind": "tiled", "layout": {
+            "block_id": block_id(1), "rect": [0.0, 0.0, 1.0, 1.0] } } ]);
+        d.read_layout(&[json!({ "window_id": "window:short", "layers": layers })]);
+        assert_eq!(None, d.rex.window);
+        assert!(d.panes.by_id(a).unwrap().rect.is_some());
+        d.read_layout(&[json!({ "layers": layers })]);
+        assert_eq!(None, d.rex.window);
+        // our pane only in a floating layer: the tiled ones hold the window
+        d.read_layout(&[
+            json!({ "window_id": window_id(4), "layers": [ { "kind": "floating",
+            "layout": { "block_id": block_id(1), "rect": [0.1, 0.1, 0.2, 0.2] } } ] }),
+        ]);
+        assert_eq!(None, d.rex.window);
+        assert_eq!(Some([0.1, 0.1, 0.2, 0.2]), d.panes.by_id(a).unwrap().rect);
+    }
+
+    #[test]
+    fn a_float_group_asks_rex_for_a_floating_pane_at_its_bounds_and_its_close_closes_it() {
+        let Fixture {
+            mut d,
+            mut rex_end,
+            nvim_end: _,
+        } = fixture();
+        show_picker(&mut d);
+        d.reconcile_layers().unwrap();
+        // already has one
+        d.reconcile_layers().unwrap();
+        assert_eq!(1, d.panes.list.len());
+        let id = d.panes.list[0].id;
+        approx(
+            [0.045, 0.06, 0.315, 0.44],
+            d.panes.by_id(id).unwrap().layer.as_ref().unwrap().bounds,
+        );
+        // Rex answers with its layer
+        d.panes.by_id_mut(id).unwrap().layer.as_mut().unwrap().id =
+            Some(pane::rex_layer(block_id(5).replace("block:", "layer:").as_bytes()).unwrap());
+        // the float closes
+        d.grids.wins.swap_remove(&3);
+        d.reconcile_layers().unwrap();
+        assert!(d.panes.list.is_empty());
+        drop(d);
+        let mut all = Vec::new();
+        rex_end.read_to_end(&mut all).unwrap();
+        let frames = client_frames(&all);
+        assert_eq!(
+            vec!["session.new_layer", "session.close_layer"],
+            methods_of(&frames)
+        );
+        let new: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+        assert_eq!("session:s", new["payload"]["session_id"]);
+        assert_eq!(json!([0.045, 0.06, 0.315, 0.44]), new["payload"]["bounds"]);
+        assert_eq!(
+            json!(["neorex", "pane"]),
+            json!([
+                new["payload"]["layout"]["block"]["label"],
+                new["payload"]["layout"]["block"]["options"]["command"][1]
+            ])
+        );
+        let close: serde_json::Value = serde_json::from_str(&frames[1]).unwrap();
+        assert_eq!(
+            block_id(5).replace("block:", "layer:"),
+            close["payload"]["layer_id"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_float_group_that_closes_before_rex_answers_sends_no_close() {
+        let frames = fake_rex_requests(|d| {
+            show_picker(d);
+            d.reconcile_layers().unwrap();
+            d.grids.wins.swap_remove(&3);
+            d.reconcile_layers().unwrap();
+            assert!(d.panes.list.is_empty());
+        });
+        assert_eq!(vec!["session.new_layer"], methods_of(&frames));
+    }
+
+    #[test]
+    fn an_unentered_float_or_a_closed_rex_connection_gets_no_floating_pane() {
+        let frames = fake_rex_requests(|d| {
+            show_picker(d);
+            d.nvim = NvimSession::new(for_test_on(UnixStream::pair().unwrap().0));
+            d.reconcile_layers().unwrap();
+            assert!(d.panes.list.is_empty());
+            d.nvim.note_entered(1002);
+            d.rex.conn = Conn::Closed;
+            d.reconcile_layers().unwrap();
+            assert!(d.panes.list.is_empty());
+        });
+        assert!(frames.is_empty());
+    }
+
+    /// A floating pane of the picker group, with a surface of `cols` x `rows`,
+    /// that Rex has answered, in `d`. Its id and block.
+    fn made_picker_pane(d: &mut Daemon, cols: u32, rows: u32) -> u32 {
+        show_picker(d);
+        d.reconcile_layers().unwrap();
+        let p = &mut d.panes.list[0];
+        p.terminal_surface = Some(Surface::for_test(cols, rows));
+        let id = p.id;
+        set_block(d, id, 7);
+        id
+    }
+
+    fn floating_layer_view(bounds: [f64; 4]) -> Value {
+        json!({ "window_id": window_id(1), "layers": [ { "kind": "floating",
+            "bounds": bounds, "blocks": [ { "block_id": block_id(7) } ],
+            "layout": { "block_id": block_id(7), "rect": [0.0, 0.0, 1.0, 1.0] } } ] })
+    }
+
+    /// How many times the daemon asked Neovim to place floats, as it wrote them.
+    fn place_group_requests(mut nvim_end: UnixStream) -> usize {
+        let mut all = Vec::new();
+        nvim_end.read_to_end(&mut all).unwrap();
+        String::from_utf8_lossy(&all)
+            .matches("neorex.place_group")
+            .count()
+    }
+
+    fn requests_sent(mut end: UnixStream) -> Vec<String> {
+        let mut all = Vec::new();
+        end.read_to_end(&mut all).unwrap();
+        client_frames(&all)
+    }
+
+    #[test]
+    fn a_floating_pane_the_user_moved_moves_its_floats_once_and_doesnt_oscillate() {
+        let Fixture {
+            mut d,
+            rex_end,
+            nvim_end,
+        } = fixture();
+        let id = made_picker_pane(&mut d, 60, 20);
+        let asked = layer_bounds_of(&d, id);
+
+        // Rex reports the bounds we asked for: nothing to follow
+        read_and_flush(&mut d, floating_layer_view(asked));
+        // within half a cell: the same
+        let near = [asked[0] + 0.002, asked[1], asked[2], asked[3]];
+        read_and_flush(&mut d, floating_layer_view(near));
+        assert_eq!(asked, layer_bounds_of(&d, id));
+
+        // the user moves it 20 columns right: its floats follow, once
+        let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
+        read_and_flush(&mut d, floating_layer_view(moved));
+        assert_eq!(moved, layer_bounds_of(&d, id));
+        // Neovim has put them there: the next flush's group, and Rex's view again
+        d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 30]);
+        d.reconcile_layers().unwrap();
+        assert_eq!(30, d.panes.list[0].layer.as_ref().unwrap().group.col);
+        read_and_flush(&mut d, floating_layer_view(moved));
+        read_and_flush(&mut d, floating_layer_view(moved));
+        assert_eq!(1, d.panes.list.len());
+        drop(d);
+        assert_eq!(1, place_group_requests(nvim_end));
+        // and Rex is told nothing of it but the pane we asked for
+        assert_eq!(
+            vec!["session.new_layer"],
+            methods_of(&requests_sent(rex_end))
+        );
+    }
+
+    #[test]
+    fn a_floating_panes_floats_stay_if_it_is_already_where_rex_says() {
+        let Fixture {
+            mut d,
+            rex_end: _rex_end,
+            nvim_end,
+        } = fixture();
+        let id = made_picker_pane(&mut d, 60, 20);
+        // a change of size beyond a half cell, but not of its place: the
+        // floats' size is the pane's, which is theirs already
+        let asked = layer_bounds_of(&d, id);
+        let wider = [asked[0], asked[1], asked[2] + 0.1, asked[3]];
+        read_and_flush(&mut d, floating_layer_view(wider));
+        assert_eq!(wider, layer_bounds_of(&d, id));
+        drop(d);
+        assert_eq!(0, place_group_requests(nvim_end));
+    }
+
+    #[test]
+    fn a_floating_layer_that_isnt_one_of_ours_to_follow_changes_nothing() {
+        let Fixture {
+            mut d,
+            rex_end: _rex_end,
+            nvim_end,
+        } = fixture();
+        let id = made_picker_pane(&mut d, 60, 20);
+        let asked = layer_bounds_of(&d, id);
+        let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
+        let view = |layer: Value| json!({ "window_id": window_id(1), "layers": [layer] });
+        for layer in [
+            // no bounds
+            json!({ "kind": "floating", "blocks": [ { "block_id": block_id(7) } ] }),
+            // bounds that aren't four numbers
+            json!({ "kind": "floating", "bounds": [0.1, 0.2],
+                "blocks": [ { "block_id": block_id(7) } ] }),
+            // no blocks, or none
+            json!({ "kind": "floating", "bounds": moved }),
+            json!({ "kind": "floating", "bounds": moved, "blocks": [] }),
+            // its first isn't ours, or has no id
+            json!({ "kind": "floating", "bounds": moved,
+                "blocks": [ { "block_id": block_id(8) }, { "block_id": block_id(7) } ] }),
+            json!({ "kind": "floating", "bounds": moved, "blocks": [ {} ] }),
+        ] {
+            read_and_flush(&mut d, view(layer));
+            assert_eq!(asked, layer_bounds_of(&d, id));
+        }
+
+        // a pane of ours that has no floating pane: a window's, in a layer
+        let w = d.panes.add(Pane::from_neovim_window(50, 1000)).id;
+        set_block(&mut d, w, 9);
+        let before = d.panes.by_id(w).unwrap().rect;
+        read_and_flush(
+            &mut d,
+            view(json!({ "kind": "floating", "bounds": moved,
+                "blocks": [ { "block_id": block_id(9) } ] })),
+        );
+        assert_eq!(before, d.panes.by_id(w).unwrap().rect);
+        assert!(d.panes.by_id(w).unwrap().layer.is_none());
+        assert_eq!(asked, layer_bounds_of(&d, id));
+        drop(d);
+        assert_eq!(0, place_group_requests(nvim_end));
     }
 }
