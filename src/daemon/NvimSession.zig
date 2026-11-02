@@ -66,6 +66,19 @@ pub fn switchToFloat(self: *NvimSession, gpa: std.mem.Allocator, pane: u32, win:
     try self.gate.switchTo(gpa, self.client, win, pane);
 }
 
+/// Whether `bytes`, read from pane `pane`, whose window is `win`, make it
+/// current, and Rex should focus it: the pane has no focus (`rex_focused`
+/// says Rex has given it) and what was typed or clicked into it takes
+/// focus. Scrolling it, or moving the pointer over it, doesn't: those reach
+/// its window through `typeInto` all the same, by its grid, without a
+/// switch. `panes` is as for `typeInto`.
+pub fn takesFocus(self: *const NvimSession, panes: anytype, pane: u32, win: ?i64, rex_focused: bool, bytes: []const u8) bool {
+    const w = win orelse return false;
+    if (w == self.current_win or rex_focused) return false;
+    const fwd = panes.aimForwarder(pane) orelse return false;
+    return fwd.takesFocus(bytes);
+}
+
 /// Sends `bytes`, typed into pane `pane`, to Neovim after the window
 /// switches before it. `panes.aimForwarder(pane)` finds the pane's `Forwarder`.
 pub fn typeInto(self: *NvimSession, gpa: std.mem.Allocator, panes: anytype, pane: u32, bytes: []const u8) !void {
@@ -312,6 +325,36 @@ const Rig = struct {
         try r.nvim.flush();
     }
 
+    /// Fills the first window's buffer with 100 lines.
+    fn fillFirst(r: *Rig) !void {
+        var code: [256]u8 = undefined;
+        gpa.free(try r.lua(try std.fmt.bufPrint(&code,
+            \\local b = vim.api.nvim_win_get_buf({d})
+            \\local l = {{}}
+            \\for i = 1, 100 do l[i] = 'line ' .. i end
+            \\vim.api.nvim_buf_set_lines(b, 0, -1, false, l)
+            \\return 'ok'
+        , .{r.wins[0]})));
+    }
+
+    /// The first line `win` shows, after all that was typed.
+    fn topline(r: *Rig, win: i64) !i64 {
+        try r.settle();
+        var code: [96]u8 = undefined;
+        const top = try r.lua(try std.fmt.bufPrint(&code, "return tostring(vim.fn.getwininfo({d})[1].topline)", .{win}));
+        defer gpa.free(top);
+        return std.fmt.parseInt(i64, top, 10);
+    }
+
+    /// Input read from pane `pane`, as the Daemon takes it: the pane is
+    /// made current if the input takes focus. Whether it did.
+    fn input(r: *Rig, pane: u32, bytes: []const u8) !bool {
+        const focus = r.session.takesFocus(r, pane, r.wins[pane], false, bytes);
+        if (focus) try r.session.makeCurrent(gpa, pane, r.wins[pane]);
+        try r.session.typeInto(gpa, r, pane, bytes);
+        return focus;
+    }
+
     /// The window Neovim has as current.
     fn currentWin(r: *Rig) !i64 {
         const cur = try r.lua("return tostring(vim.api.nvim_get_current_win())");
@@ -547,4 +590,91 @@ test "focus reports don't wait for a switch, unless the parser is partway throug
     r.fwds[0].parser.state = .ground;
     try r.settle();
     try testing.expectEqual(@as(?bool, true), r.fwds[0].focused);
+}
+
+// SGR mouse reports at column 31, row 2 (1-based), where the first window is
+const wheel_down_first = "\x1b[<65;31;2M";
+const wheel_up_first = "\x1b[<64;31;2M";
+const click_first = "\x1b[<0;31;2M";
+
+test "a wheel event in an unfocused pane scrolls its window and moves no focus" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try r.fillFirst();
+    try testing.expect(!try r.input(0, wheel_down_first));
+    try testing.expectEqual(@as(i64, 4), try r.topline(r.wins[0]));
+    try r.expectNothingHeld();
+    try testing.expectEqual(r.wins[1], r.session.current_win);
+    try testing.expectEqual(r.wins[1], try r.currentWin());
+}
+
+test "a click in an unfocused pane makes it current" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try r.fillFirst();
+    try testing.expect(try r.input(0, click_first));
+    try r.settle();
+    try testing.expectEqual(r.wins[0], r.session.current_win);
+    try testing.expectEqual(r.wins[0], try r.currentWin());
+}
+
+test "what is typed into an unfocused pane still makes it current" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try testing.expect(try r.input(0, "x"));
+    try r.expectTexts("ne|two");
+    try testing.expectEqual(r.wins[0], try r.currentWin());
+}
+
+test "only input that takes focus, to a pane that has none, makes it current" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    const wheel = "\x1b[<65;31;2M";
+    try testing.expect(r.session.takesFocus(&r, 0, r.wins[0], false, "x"));
+    try testing.expect(!r.session.takesFocus(&r, 0, r.wins[0], false, wheel));
+    // motion with no button, a release, and the focus reports Rex sends as it moves focus away
+    try testing.expect(!r.session.takesFocus(&r, 0, r.wins[0], false, "\x1b[<35;31;2M"));
+    try testing.expect(!r.session.takesFocus(&r, 0, r.wins[0], false, "\x1b[<0;31;2m"));
+    try testing.expect(!r.session.takesFocus(&r, 0, r.wins[0], false, "\x1b[O"));
+    // Rex has the pane focused, or Neovim's current window is its window, or it has none
+    try testing.expect(!r.session.takesFocus(&r, 0, r.wins[0], true, "x"));
+    try testing.expect(!r.session.takesFocus(&r, 1, r.wins[1], false, "x"));
+    try testing.expect(!r.session.takesFocus(&r, 0, null, false, "x"));
+    // a pane that's gone
+    try testing.expect(!r.session.takesFocus(&r, 7, r.wins[0], false, "x"));
+}
+
+test "a wheel event waits its turn behind a switch and the keys before it, and starts none" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try r.fillFirst();
+    // `G` in the first window, then wheel up over it: in the other order the
+    // view would end at the bottom, line 93
+    try testing.expect(try r.input(0, "G"));
+    try testing.expect(!try r.input(0, wheel_up_first));
+    try testing.expectEqual(@as(usize, 2), r.session.gate.queue.items.len);
+    try r.settle();
+    try r.expectNothingHeld();
+    try testing.expectEqual(@as(i64, 90), try r.topline(r.wins[0]));
+    try testing.expectEqual(r.wins[0], try r.currentWin());
+}
+
+test "a wheel event in a pane behind the one being switched to starts no switch" {
+    var r: Rig = undefined;
+    try r.start();
+    defer r.deinit();
+    try r.fillFirst();
+    // the second window is current; Rex moves focus to the first, and the wheel is over the second
+    try r.session.makeCurrent(Rig.gpa, 0, r.wins[0]);
+    // over pane 1's window at column 5, row 2
+    try testing.expect(!try r.input(1, "\x1b[<65;5;2M"));
+    try testing.expectEqual(@as(usize, 1), r.session.gate.queue.items.len);
+    try r.settle();
+    try testing.expectEqual(r.wins[0], r.session.current_win);
+    try testing.expectEqual(r.wins[0], try r.currentWin());
 }

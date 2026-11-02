@@ -7,7 +7,6 @@
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const input = @import("../term/input.zig");
 const Nvim = @import("../nvim/Nvim.zig");
 const msgpack = @import("../nvim/msgpack.zig");
 const rpc = @import("../nvim/rpc.zig");
@@ -271,7 +270,7 @@ fn onInput(self: *Daemon, pane: *Pane) !void {
     if (n == 0) return self.paneGone(pane);
 
     const bytes = buf[0..n];
-    if (self.typedIntoUnfocusedPane(pane, bytes)) {
+    if (self.nvim.takesFocus(self, pane.id, pane.neovim_window_handle, self.rex.hasFocused(pane.rex_block), bytes)) {
         try self.makeCurrent(pane);
         try self.rex.focus(pane.rex_block);
     }
@@ -287,15 +286,6 @@ pub fn aimForwarder(self: *Daemon, id: u32) ?*Forwarder {
     // a floating pane's default grid is set as it draws
     if (pane.layer == null) surface.forwarder.grid = self.gridOfPane(pane) orelse 0;
     return &surface.forwarder;
-}
-
-/// Typed into a pane Rex hasn't focused, as `rex send` can. Focus reports
-/// don't count: Rex sends them as it moves focus away.
-fn typedIntoUnfocusedPane(self: *const Daemon, pane: *const Pane, bytes: []const u8) bool {
-    const win = pane.neovim_window_handle orelse return false;
-    return win != self.nvim.current_win and
-        !self.rex.hasFocused(pane.rex_block) and
-        !input.onlyFocusReports(bytes);
 }
 
 fn newPane(self: *Daemon, win: i64) !void {
