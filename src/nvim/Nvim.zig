@@ -270,6 +270,38 @@ pub fn connectRetry(io: Io, path: []const u8, buffer: []u8) !Nvim {
     return error.Timeout;
 }
 
+test "a config slower than connectRetry's wait still starts" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // Neovim listens before it runs the config, so the connect doesn't wait for it
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/neorex-test-slow-{d}.sock", .{std.c.getpid()});
+    var server = std.process.spawn(io, .{
+        .argv = &.{ "nvim", "--clean", "--headless", "--listen", path, "--cmd", "lua vim.uv.sleep(2500)" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer {
+        _ = std.c.kill(server.id.?, .HUP);
+        _ = server.wait(io) catch {};
+        Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
+
+    var buf: [256]u8 = undefined;
+    var nvim = try connectRetry(io, path, &buf);
+    defer nvim.deinit(gpa);
+    // it answers once the config has run
+    const id = try nvim.request("nvim_eval", 1);
+    try msgpack.writeStr(nvim.writer(), "1+2");
+    try nvim.flush();
+    var r = try waitResponse(&nvim, gpa, id);
+    try std.testing.expectEqual(@as(i64, 3), try rpc.expectInt(&r.result));
+}
+
 test "large reply over several reads" {
     const gpa = std.testing.allocator;
     var buf: [256]u8 = undefined;
