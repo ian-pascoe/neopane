@@ -76,17 +76,37 @@ impl PaneHost {
 
     /// Whether `token` is one of this host's.
     pub fn owns(&self, token: usize) -> bool {
-        token >= self.base && token < self.base + 2 * MAX_PANES
+        token >= self.base && token <= self.escape_timer()
+    }
+
+    /// The token of the timer for ESCs waiting in the panes.
+    fn escape_timer(&self) -> usize {
+        self.base + 2 * MAX_PANES
+    }
+
+    /// The escape timer fired: an ESC still waiting in a pane is its Escape key.
+    fn flush_pending_escapes(&mut self) -> Result<()> {
+        for p in self.panes.iter_mut().flatten() {
+            if let Some(event) = p.parser.flush_pending() {
+                write!(p.term.writer, "  {event}\r\n")?;
+                p.term.flush()?;
+            }
+        }
+        Ok(())
     }
 
     /// Handles an event for one of this host's tokens.
     pub fn handle(&mut self, event_loop: &Loop, token: usize) -> Result<()> {
+        if token == self.escape_timer() {
+            return self.flush_pending_escapes();
+        }
         let i = (token - self.base) / 2;
         let source = if (token - self.base).is_multiple_of(2) {
             Source::Socket
         } else {
             Source::Tty
         };
+        let timer = self.escape_timer();
         let slot = &mut self.panes[i];
         // null if closed earlier in this batch
         let Some(p) = slot.as_mut() else {
@@ -103,6 +123,8 @@ impl PaneHost {
                 if !on_input(p)? {
                     eprintln!("pane {}: closed with q", p.id);
                     close(slot, Some(event_loop));
+                } else if p.parser.flush_due() {
+                    event_loop.add_timer(timer, input::ESCAPE_TIMEOUT_MS, timer)?;
                 }
             }
         }

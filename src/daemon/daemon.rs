@@ -16,6 +16,7 @@
 use std::borrow::Cow;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixListener;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -40,6 +41,7 @@ use crate::screen::float_groups;
 use crate::screen::grid::{Cell, Grid};
 use crate::screen::grids::{Grids, WinKind};
 use crate::screen::pane_view::{Opts, Rect};
+use crate::term::input;
 
 /// The daemon is a top layer: any error will do.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -65,6 +67,8 @@ pub struct Daemon {
     pub tab_layouts: IndexMap<i64, Tab>,
     /// The Rex layout last applied to the panes.
     pub rex_layout: Option<LayoutSnapshot>,
+    /// When the escape timer is set to fire, if it is.
+    escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
     /// Whether the loop still watches Rex's fd.
@@ -104,6 +108,7 @@ pub enum Token {
     FocusTimer,
     LayoutTimer,
     SwitchTimer,
+    EscapeTimer,
 }
 
 impl Token {
@@ -117,6 +122,7 @@ impl Token {
             4 => Token::FocusTimer,
             5 => Token::LayoutTimer,
             6 => Token::SwitchTimer,
+            7 => Token::EscapeTimer,
             _ => return None,
         })
     }
@@ -130,7 +136,7 @@ pub struct PaneEvent {
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::SwitchTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::EscapeTimer as usize) < pane::TOKEN_BASE);
 
 /// The id `Pane::startup` gives the pane neorex was run in.
 const STARTUP_PANE_ID: u32 = 0;
@@ -229,6 +235,7 @@ impl Daemon {
             msg_rows: 1,
             tab_layouts: IndexMap::new(),
             rex_layout: None,
+            escape_timer_due: None,
             stopped: None,
             rex_watched: true,
             event_loop,
@@ -300,6 +307,7 @@ impl Daemon {
             Some(Token::FocusTimer) => self.send_focus(true)?,
             Some(Token::LayoutTimer) => self.layout_wait_over()?,
             Some(Token::SwitchTimer) => self.recheck_switch()?,
+            Some(Token::EscapeTimer) => self.flush_pending_escapes()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e.token)?,
         }
@@ -315,6 +323,59 @@ impl Daemon {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
         Ok(())
+    }
+
+    /// Starts the escape timer for the earliest deadline among the panes' waiting
+    /// ESCs, unless it already runs for one that early: reads of other panes
+    /// don't put an ESC's deadline back.
+    fn arm_escape_timer(&mut self) -> Result<()> {
+        let Some(due) = self
+            .panes
+            .list
+            .iter()
+            .filter_map(Pane::escape_deadline)
+            .min()
+        else {
+            return Ok(());
+        };
+        if self.escape_timer_due.is_some_and(|armed| armed <= due) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        // round up, so the timer doesn't fire before the deadline
+        let ms = due
+            .saturating_duration_since(now)
+            .as_micros()
+            .div_ceil(1000);
+        self.escape_timer_due = Some(due);
+        self.add_timer(Token::EscapeTimer, u32::try_from(ms).unwrap_or(u32::MAX))
+    }
+
+    /// The escape timer fired: an ESC still waiting in a pane whose deadline
+    /// has passed is the Escape key. Tries again later for one held up by a
+    /// window switch, and starts the timer again for ESCs not yet due.
+    fn flush_pending_escapes(&mut self) -> Result<()> {
+        self.escape_timer_due = None;
+        let now = Instant::now();
+        let ids: Vec<u32> = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| p.escape_deadline().is_some_and(|d| d <= now))
+            .map(|p| p.id)
+            .collect();
+        for id in ids {
+            let mut fwds = PaneForwarders {
+                panes: &mut self.panes,
+                grids: &self.grids,
+            };
+            if !self.nvim.flush_pending(&mut fwds, id)? {
+                self.escape_timer_due =
+                    Some(now + Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS)));
+                return self.add_timer(Token::EscapeTimer, input::ESCAPE_TIMEOUT_MS);
+            }
+        }
+        self.arm_escape_timer()
     }
 
     fn recheck_switch(&mut self) -> Result<()> {
@@ -486,7 +547,7 @@ impl Daemon {
             grids: &self.grids,
         };
         self.nvim.type_into(&mut fwds, id, bytes)?;
-        Ok(())
+        self.arm_escape_timer()
     }
 
     /// Pane `id`'s surface, which a pane that gets fd events has.
@@ -699,6 +760,8 @@ impl Daemon {
             grids: &self.grids,
         };
         self.nvim.answered(&mut fwds, id, err, result)?;
+        // held input may have gone through and left an ESC waiting
+        self.arm_escape_timer()?;
         let mut show_now = false;
         for p in self.panes.list.iter_mut() {
             if let Some(l) = &mut p.layer

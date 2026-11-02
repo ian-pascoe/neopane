@@ -25,6 +25,7 @@
 //! A failed write leaves the switch in flight: Neovim's connection is gone.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use crate::nvim::forwarder::{self, Forwarder};
 use crate::nvim::msgpack::Decoder;
@@ -55,6 +56,11 @@ pub struct FocusGate {
     /// What waits for the switch in flight, in the order it came. Never
     /// nonempty without `pending`.
     pub queue: Vec<Item>,
+    /// The pane and arrival time of the last read that went to its forwarder,
+    /// held or direct and leaving an ESC waiting. That ESC is the Escape key
+    /// if the next held read of the pane came a timeout later. Cleared when
+    /// the queue is through.
+    last_held: Option<(u32, Instant)>,
 }
 
 /// A request, and the pane whose window it makes current.
@@ -75,6 +81,8 @@ pub enum Item {
         pane: u32,
         bytes: Vec<u8>,
         read: usize,
+        /// When the read came.
+        at: Instant,
     },
 }
 
@@ -104,6 +112,18 @@ impl FocusGate {
         pane: u32,
         bytes: &[u8],
     ) -> forwarder::Result<()> {
+        self.send_at(nvim, panes, pane, bytes, Instant::now())
+    }
+
+    /// As `send`, for a read that came at `at`.
+    pub fn send_at(
+        &mut self,
+        nvim: &mut Nvim,
+        panes: &mut impl AimForwarder,
+        pane: u32,
+        bytes: &[u8],
+        at: Instant,
+    ) -> forwarder::Result<()> {
         if self.pending.is_some() && input::only_focus_reports(bytes) {
             // no wait, unless the parser is partway through something
             let Some(fwd) = panes.aim_forwarder(pane) else {
@@ -118,14 +138,20 @@ impl FocusGate {
                 return Ok(());
             };
             fwd.feed(nvim, bytes)?;
+            // An ESC left waiting starts the clock for a read held behind a
+            // switch begun before the escape timer fires.
+            if fwd.escape_pending() {
+                self.last_held = Some((pane, at));
+            }
             return Ok(());
         }
-        // one item per read: the parser takes the end of a read for the end of
-        // a key, as for a lone Escape
+        // one item per read, with its time: an ESC ending a read is the Escape
+        // key if the next read came a timeout after it
         self.queue.push(Item::Input {
             pane,
             bytes: bytes.to_vec(),
             read: 0,
+            at,
         });
         if self.blocked {
             self.release(nvim, panes)?;
@@ -169,10 +195,17 @@ impl FocusGate {
         while !self.queue.is_empty() {
             match self.queue.remove(0) {
                 Item::SwitchTo { win, pane } => return Ok(self.start(nvim, win, pane)?),
-                Item::Input { pane, bytes, read } => {
+                Item::Input {
+                    pane,
+                    bytes,
+                    read,
+                    at,
+                } => {
                     let Some(fwd) = panes.aim_forwarder(pane) else {
                         continue;
                     };
+                    flush_if_timed_out(self.last_held, fwd, nvim, pane, at)?;
+                    self.last_held = Some((pane, at));
                     let rest = &bytes[read..];
                     if failed && pane == switching.pane {
                         fwd.discard(nvim, rest)?;
@@ -183,6 +216,7 @@ impl FocusGate {
             }
         }
         self.pending = None;
+        self.last_held = None;
         Ok(())
     }
 
@@ -219,7 +253,13 @@ impl FocusGate {
     fn release(&mut self, nvim: &mut Nvim, panes: &mut impl AimForwarder) -> forwarder::Result<()> {
         let mut i: usize = 0;
         while i < self.queue.len() {
-            let Item::Input { pane, bytes, read } = &mut self.queue[i] else {
+            let Item::Input {
+                pane,
+                bytes,
+                read,
+                at,
+            } = &mut self.queue[i]
+            else {
                 i += 1;
                 continue;
             };
@@ -227,6 +267,10 @@ impl FocusGate {
                 self.queue.remove(i);
                 continue;
             };
+            if *read == 0 {
+                flush_if_timed_out(self.last_held, fwd, nvim, *pane, *at)?;
+            }
+            self.last_held = Some((*pane, *at));
             let fed = fwd.feed_key(nvim, &bytes[*read..])?;
             *read += fed.read;
             if *read >= bytes.len() {
@@ -241,6 +285,27 @@ impl FocusGate {
         }
         Ok(())
     }
+}
+
+/// Before a held read of `pane` that came at `at` goes to `fwd`: an ESC
+/// waiting from the last held read, of the same pane, is the Escape key if
+/// that read came `ESCAPE_TIMEOUT_MS` or more earlier. The escape timer can't
+/// say so while input is held. (With kitty flags on, nothing is flushed.)
+fn flush_if_timed_out(
+    last: Option<(u32, Instant)>,
+    fwd: &mut Forwarder,
+    nvim: &mut Nvim,
+    pane: u32,
+    at: Instant,
+) -> forwarder::Result<()> {
+    if let Some((last_pane, last_at)) = last
+        && last_pane == pane
+        && at.saturating_duration_since(last_at)
+            >= Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS))
+    {
+        fwd.flush_pending(nvim)?;
+    }
+    Ok(())
 }
 
 /// Whether the `nvim_get_mode` result at `result` says Neovim is waiting for a key.

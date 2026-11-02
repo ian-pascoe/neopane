@@ -10,6 +10,7 @@ use crate::nvim::nvim::{Nvim, UiOptions};
 use crate::nvim::rpc;
 use crate::screen::grids::Grids;
 use crate::screen::render;
+use crate::term::input;
 use crate::term::modes;
 use crate::term::signals::Signals;
 use crate::term::terminal::Terminal;
@@ -76,13 +77,24 @@ fn drive<S: AsRef<OsStr>>(
                 revents: 0,
             },
         ];
+        // an ESC that ended a read waits for the rest of its sequence, a while
+        let wait = if forwarder.escape_pending() {
+            input::ESCAPE_TIMEOUT_MS as libc::c_int
+        } else {
+            -1
+        };
         // SAFETY: `fds` is a valid array of three pollfds.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, wait) };
         if ready < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return Err(io::Error::other("PollFailed").into());
+        }
+        if ready == 0 {
+            // no more input came: the ESC was the Escape key
+            forwarder.flush_pending(&mut nvim)?;
+            continue;
         }
 
         if fds[1].revents != 0 {

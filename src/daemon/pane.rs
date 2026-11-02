@@ -165,6 +165,14 @@ pub fn decode_token(t: usize) -> DecodedToken {
 }
 
 impl Pane {
+    /// When the ESC that ended the pane's last read, if one waits, is due to
+    /// be the Escape key.
+    pub fn escape_deadline(&self) -> Option<std::time::Instant> {
+        self.terminal_surface
+            .as_ref()
+            .and_then(|s| s.forwarder.escape_deadline())
+    }
+
     /// A pane with just `id`: no parts, nothing set.
     fn blank(id: u32) -> Pane {
         Pane {
