@@ -165,11 +165,12 @@ pub fn decode_token(t: usize) -> DecodedToken {
 }
 
 impl Pane {
-    /// Whether an ESC that ended the pane's last read waits for a timeout.
-    pub fn escape_pending(&self) -> bool {
+    /// When the ESC that ended the pane's last read, if one waits, is due to
+    /// be the Escape key.
+    pub fn escape_deadline(&self) -> Option<std::time::Instant> {
         self.terminal_surface
             .as_ref()
-            .is_some_and(|s| s.forwarder.escape_pending())
+            .and_then(|s| s.forwarder.escape_deadline())
     }
 
     /// A pane with just `id`: no parts, nothing set.

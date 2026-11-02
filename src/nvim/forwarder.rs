@@ -1,6 +1,7 @@
 //! Turns terminal input into Neovim API calls: keys, pastes, focus and mouse.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use super::msgpack;
 use super::nvim::Nvim;
@@ -61,6 +62,8 @@ pub struct Forwarder {
     pub send_focus: bool,
     /// The last focus report seen.
     pub focused: Option<bool>,
+    /// When the read that left an ESC waiting ended, if one is waiting.
+    pub escape_since: Option<Instant>,
 }
 
 impl Default for Forwarder {
@@ -78,6 +81,7 @@ impl Default for Forwarder {
             grab: None,
             send_focus: true,
             focused: None,
+            escape_since: None,
         }
     }
 }
@@ -201,6 +205,7 @@ impl Forwarder {
                 _ => {}
             }
         }
+        self.note_escape();
         nvim.flush()?;
         Ok(())
     }
@@ -243,10 +248,29 @@ impl Forwarder {
         self.parser.flush_due()
     }
 
+    /// When the ESC waiting for a timeout is due to be the Escape key: the
+    /// timeout after the read that left it. None if none waits. Each
+    /// forwarder has its own, so one pane's reads don't put off another's.
+    pub fn escape_deadline(&self) -> Option<Instant> {
+        self.escape_since
+            .map(|t| t + Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS)))
+    }
+
+    /// Notes, after a read, whether an ESC now waits and since when.
+    fn note_escape(&mut self) {
+        self.escape_since = if self.parser.flush_due() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+    }
+
     /// The timeout for a pending ESC: nothing followed it, so it is the Escape
     /// key. Sends it. Does nothing if no ESC is waiting.
     pub fn flush_pending(&mut self, nvim: &mut Nvim) -> Result<()> {
-        let Some(Event::Key(k)) = self.parser.flush_pending() else {
+        let flushed = self.parser.flush_pending();
+        self.escape_since = None;
+        let Some(Event::Key(k)) = flushed else {
             return Ok(());
         };
         let mut keys = Vec::new();
@@ -337,6 +361,7 @@ impl Forwarder {
                 Event::Unknown(_) => {}
             }
         }
+        self.note_escape();
         send_keys(nvim, &mut keys)?;
         nvim.flush()?;
         Ok(result)
@@ -705,5 +730,36 @@ mod tests {
         );
         // Ctrl+Q quits
         assert!(!f.feed(&mut nvim, b"\x11").unwrap());
+    }
+
+    #[test]
+    fn each_forwarders_waiting_esc_has_its_own_deadline() {
+        let Some(mut nvim) = crate::nvim::nvim::spawn_for_test() else {
+            return;
+        };
+        let mut a = Forwarder::default();
+        let mut b = Forwarder::default();
+        assert_eq!(None, a.escape_deadline());
+        a.feed(&mut nvim, b"\x1b").unwrap();
+        let due = a.escape_deadline().expect("A's ESC waits");
+        let timeout = Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS));
+        assert!(due <= Instant::now() + timeout);
+        // B keeps getting reads: A's deadline stays
+        std::thread::sleep(Duration::from_millis(5));
+        for _ in 0..3 {
+            b.feed(&mut nvim, b"\x1b[<35;3;3M").unwrap();
+            b.feed(&mut nvim, b"\x1b[I").unwrap();
+        }
+        assert_eq!(Some(due), a.escape_deadline());
+        assert_eq!(None, b.escape_deadline());
+        // the timeout: sent, and nothing waits
+        a.flush_pending(&mut nvim).unwrap();
+        assert_eq!(None, a.escape_deadline());
+        // a read that leaves an ESC waiting sets a new deadline
+        a.feed(&mut nvim, b"x\x1b").unwrap();
+        assert!(a.escape_deadline().unwrap() > due);
+        // and one that completes it clears it
+        a.feed(&mut nvim, b"[A").unwrap();
+        assert_eq!(None, a.escape_deadline());
     }
 }

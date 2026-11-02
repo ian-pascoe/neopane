@@ -859,9 +859,7 @@ impl Parser {
         // which makes Escape a CSI sequence. A reply without it (`0`) is from
         // something that knows the query but didn't take the push, such as tmux.
         if self.marker == b'?' && final_ == b'u' {
-            if self.param(0, 0) & 1 != 0 {
-                self.kitty = true;
-            }
+            self.kitty = self.param(0, 0) & 1 != 0;
             return None;
         }
         if self.marker != 0 {
@@ -1396,6 +1394,14 @@ mod tests {
             assert!(parser.next().is_none());
             assert!(parser.flush_due());
         }
+        // each answer says it: a later one without the bit turns it off again
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[?5u\x1b[?0u\x1b");
+        assert!(parser.next().is_none());
+        assert!(parser.flush_due());
+        parser.feed(b"[?1u");
+        assert!(parser.next().is_none());
+        assert!(!parser.flush_due());
         // no answer, no kitty
         let mut parser = Parser::default();
         parser.feed(b"\x1b");

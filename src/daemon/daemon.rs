@@ -16,6 +16,7 @@
 use std::borrow::Cow;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixListener;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -66,6 +67,8 @@ pub struct Daemon {
     pub tab_layouts: IndexMap<i64, Tab>,
     /// The Rex layout last applied to the panes.
     pub rex_layout: Option<LayoutSnapshot>,
+    /// When the escape timer is set to fire, if it is.
+    escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
     /// Whether the loop still watches Rex's fd.
@@ -232,6 +235,7 @@ impl Daemon {
             msg_rows: 1,
             tab_layouts: IndexMap::new(),
             rex_layout: None,
+            escape_timer_due: None,
             stopped: None,
             rex_watched: true,
             event_loop,
@@ -321,22 +325,43 @@ impl Daemon {
         Ok(())
     }
 
-    /// Starts the escape timer if some pane's parser has an ESC waiting.
+    /// Starts the escape timer for the earliest deadline among the panes' waiting
+    /// ESCs, unless it already runs for one that early: reads of other panes
+    /// don't put an ESC's deadline back.
     fn arm_escape_timer(&mut self) -> Result<()> {
-        if self.panes.list.iter().any(Pane::escape_pending) {
-            self.add_timer(Token::EscapeTimer, input::ESCAPE_TIMEOUT_MS)?;
+        let Some(due) = self
+            .panes
+            .list
+            .iter()
+            .filter_map(Pane::escape_deadline)
+            .min()
+        else {
+            return Ok(());
+        };
+        if self.escape_timer_due.is_some_and(|armed| armed <= due) {
+            return Ok(());
         }
-        Ok(())
+        let now = Instant::now();
+        // round up, so the timer doesn't fire before the deadline
+        let ms = due
+            .saturating_duration_since(now)
+            .as_micros()
+            .div_ceil(1000);
+        self.escape_timer_due = Some(due);
+        self.add_timer(Token::EscapeTimer, u32::try_from(ms).unwrap_or(u32::MAX))
     }
 
-    /// The escape timer fired: an ESC still pending in a pane's parser is the
-    /// Escape key. Tries again later for one held up by a window switch.
+    /// The escape timer fired: an ESC still waiting in a pane whose deadline
+    /// has passed is the Escape key. Tries again later for one held up by a
+    /// window switch, and starts the timer again for ESCs not yet due.
     fn flush_pending_escapes(&mut self) -> Result<()> {
+        self.escape_timer_due = None;
+        let now = Instant::now();
         let ids: Vec<u32> = self
             .panes
             .list
             .iter()
-            .filter(|p| p.escape_pending())
+            .filter(|p| p.escape_deadline().is_some_and(|d| d <= now))
             .map(|p| p.id)
             .collect();
         for id in ids {
@@ -345,10 +370,12 @@ impl Daemon {
                 grids: &self.grids,
             };
             if !self.nvim.flush_pending(&mut fwds, id)? {
+                self.escape_timer_due =
+                    Some(now + Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS)));
                 return self.add_timer(Token::EscapeTimer, input::ESCAPE_TIMEOUT_MS);
             }
         }
-        Ok(())
+        self.arm_escape_timer()
     }
 
     fn recheck_switch(&mut self) -> Result<()> {
