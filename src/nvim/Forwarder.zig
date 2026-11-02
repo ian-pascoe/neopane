@@ -67,16 +67,52 @@ fn route(self: *Forwarder, event: input.Mouse) struct { grid: u32, row: u16, col
 /// Sends the input in `bytes` to Neovim and flushes. False if the user
 /// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
 pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
+    return (try self.read(nvim, bytes, false)).more;
+}
+
+/// What `feedKey` read of its bytes.
+pub const KeyFed = struct {
+    /// How many bytes, up to the end of the key it sent if it did.
+    read: usize,
+    sent_key: bool,
+};
+
+/// Like `feed`, but stops after the first key: what follows it is left for
+/// a later `feed`. Doesn't quit.
+pub fn feedKey(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !KeyFed {
+    const fed = try self.read(nvim, bytes, true);
+    return .{ .read = fed.read, .sent_key = fed.sent_key };
+}
+
+/// Reads `bytes` as `feed` does, but sends nothing: for input whose window
+/// is gone. Keeps what the forwarder remembers of the input, such as focus.
+pub fn discard(self: *Forwarder, bytes: []const u8) void {
+    self.parser.feed(bytes);
+    while (self.parser.next()) |event| switch (event) {
+        .focus => |focused| self.focused = focused,
+        .paste_start => self.paste_phase = 1,
+        else => {},
+    };
+}
+
+const Read = struct { more: bool, read: usize, sent_key: bool };
+
+fn read(self: *Forwarder, nvim: *Nvim, bytes: []const u8, one_key: bool) !Read {
     // keys from one read go in one nvim_input
     var keys_buf: [4096]u8 = undefined;
     var keys: Writer = .fixed(&keys_buf);
+    var result: Read = .{ .more = true, .read = bytes.len, .sent_key = false };
     self.parser.feed(bytes);
-    while (self.parser.next()) |event| switch (event) {
+    events: while (self.parser.next()) |event| switch (event) {
         .key => |k| {
-            if (self.ctrl_q_quits and isQuit(k)) return false;
+            if (!one_key and self.ctrl_q_quits and isQuit(k)) return .{ .more = false, .read = bytes.len, .sent_key = false };
             // room for the longest key name
             if (keys.unusedCapacityLen() < 32) try sendKeys(nvim, &keys);
             try input.writeNvim(k, &keys);
+            if (one_key) {
+                result = .{ .more = true, .read = bytes.len - self.parser.takeRest().len, .sent_key = true };
+                break :events;
+            }
         },
         .paste_start => self.paste_phase = 1,
         .paste => |text| {
@@ -105,7 +141,7 @@ pub fn feed(self: *Forwarder, nvim: *Nvim, bytes: []const u8) !bool {
     };
     try sendKeys(nvim, &keys);
     try nvim.flush();
-    return true;
+    return result;
 }
 
 /// Sends buffered keys with `nvim_input`, then empties the buffer.

@@ -322,6 +322,15 @@ pub const Parser = struct {
         self.pos = 0;
     }
 
+    /// Gives up the fed bytes not read yet and returns them, so the caller
+    /// can feed them again later. Call between events.
+    pub fn takeRest(self: *Parser) []const u8 {
+        const rest = self.input[self.pos..];
+        self.input = "";
+        self.pos = 0;
+        return rest;
+    }
+
     /// The next event from the fed bytes, or null when they are used up.
     pub fn next(self: *Parser) ?Event {
         while (self.pos < self.input.len) {
