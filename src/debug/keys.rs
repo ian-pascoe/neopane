@@ -103,6 +103,8 @@ fn show_keys(term: &mut Terminal, signals: &mut Signals) -> Result<()> {
         }
         let bytes = &buf[..n as usize];
 
+        // One line per read: the raw bytes, then the events they made.
+        term.writer.extend_from_slice(b"read ");
         for b in bytes {
             write!(term.writer, "{b:02x} ")?;
         }

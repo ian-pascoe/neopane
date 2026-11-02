@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn print_value_formats_each_kind() {
+    fn print_value_() {
         // [1, "a\x1b", {"k": true}, ext buffer 5, -2.5]
         let mut d = Decoder::of(
             b"\x95\x01\xa2a\x1b\x81\xa1k\xc3\xd4\x00\x05\xcb\xc0\x04\x00\x00\x00\x00\x00\x00",
