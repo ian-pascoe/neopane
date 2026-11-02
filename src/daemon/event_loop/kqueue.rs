@@ -17,6 +17,7 @@ impl Backend {
             return Err(Error::CreateFailed);
         }
         // not inherited by children such as Neovim
+        // SAFETY: `kq` is the open kqueue fd made above.
         unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) };
         Ok(Backend { kq })
     }
@@ -127,6 +128,7 @@ impl Backend {
 
 impl Drop for Backend {
     fn drop(&mut self) {
+        // SAFETY: `kq` is open and owned by this backend, and closed only here.
         unsafe { libc::close(self.kq) };
     }
 }

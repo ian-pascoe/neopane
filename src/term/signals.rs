@@ -66,19 +66,21 @@ fn sigaction(sig: i32, action: &libc::sigaction, old: Option<&mut libc::sigactio
 /// This thread's errno slot. Async-signal-safe, unlike `io::Error::last_os_error`,
 /// which can read errno but not write it back.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-unsafe fn errno_location() -> *mut libc::c_int {
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: `__error` takes no arguments and returns this thread's errno slot.
     unsafe { libc::__error() }
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-unsafe fn errno_location() -> *mut libc::c_int {
+fn errno_location() -> *mut libc::c_int {
+    // SAFETY: `__errno_location` takes no arguments and returns this thread's errno slot.
     unsafe { libc::__errno_location() }
 }
 
 /// Writes the signal number to the pipe. Only async-signal-safe calls here.
 extern "C" fn handle(sig: libc::c_int) {
     // write can clobber errno mid-check in the interrupted code
-    // SAFETY: `errno_location` returns this thread's errno slot.
+    // SAFETY: `errno_location` returns a valid pointer to this thread's errno slot.
     let saved = unsafe { *errno_location() };
     let byte = [sig as u8];
     // SAFETY: `write` is async-signal-safe; `byte` is a valid 1-byte buffer.

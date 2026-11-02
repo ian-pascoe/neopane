@@ -41,7 +41,8 @@ fn random(buf: &mut [u8]) {
 fn random(buf: &mut [u8]) {
     let mut filled = 0;
     while filled < buf.len() {
-        // SAFETY: the pointer and length stay inside `buf`.
+        // SAFETY: `buf[filled..]` is valid for writes, and getrandom writes at most
+        // `buf.len() - filled` bytes starting inside `buf`.
         let n =
             unsafe { libc::getrandom(buf[filled..].as_mut_ptr().cast(), buf.len() - filled, 0) };
         if n < 0 {
