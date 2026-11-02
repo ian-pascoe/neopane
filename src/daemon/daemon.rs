@@ -504,12 +504,9 @@ impl Daemon {
             match self.tab_anchor(sp) {
                 Some(b) => Some(b),
                 None => {
-                    // its tab page's floating pane is on its way: split that once it's made
-                    if self.panes.list.iter().any(|q| {
-                        q.tab == sp.tab
-                            && q.layer.is_none()
-                            && q.closing != Some(Close::RequestFailed)
-                    }) {
+                    // its tab page's floating pane is on its way: split that once
+                    // it's made, or ask for its own if the request failed
+                    if self.tab_floating_pane_pending(sp.tab) {
                         return Ok(());
                     }
                     None
@@ -585,6 +582,15 @@ impl Daemon {
             .iter()
             .filter(|q| q.tab == sp.tab && q.layer.is_none())
             .find_map(|q| q.rex_block)
+    }
+
+    /// True while a pane of tab page `tab` asked Rex for its floating pane
+    /// and has no answer: a refused request is no longer on its way.
+    fn tab_floating_pane_pending(&self, tab: i64) -> bool {
+        self.panes
+            .list
+            .iter()
+            .any(|q| q.tab == tab && q.layer.is_none() && q.closing != Some(Close::RequestFailed))
     }
 
     /// The helper or terminal went away: Rex closed the pane. Close its
@@ -1028,6 +1034,9 @@ impl Daemon {
                 | rex_session::Update::LayerFailed(failed) => {
                     if let Some(p) = self.panes.by_id_mut(failed.pane) {
                         p.closing = Some(Close::RequestFailed);
+                        // windows of its tab page that waited for it ask for their own
+                        self.reconcile()?;
+                        self.draw()?;
                     }
                 }
                 rex_session::Update::LayerMade { pane, block, layer } => {
@@ -2237,40 +2246,85 @@ mod tests {
         )));
     }
 
-    /// A tab page's first window has its floating pane requested; `fail` then
-    /// says whether Rex refused it before a second window of the tab page
-    /// opens. The methods sent.
-    fn second_window_requests(fail: bool) -> Vec<String> {
-        let frames = fake_rex_requests(|d| {
-            let split = |win| windows::Split {
-                win,
+    /// The text frame a Rex server sends: unmasked.
+    fn server_frame(text: &str) -> Vec<u8> {
+        let mut f = vec![0x81];
+        match text.len() {
+            n if n < 126 => f.push(n as u8),
+            n => {
+                f.push(126);
+                f.extend((n as u16).to_be_bytes());
+            }
+        }
+        f.extend(text.as_bytes());
+        f
+    }
+
+    /// A daemon whose windows 1 and 2 are drawn, in tab page 2, and don't have
+    /// panes yet.
+    fn two_windows_of_a_tab_page() -> Fixture {
+        let mut fx = fixture();
+        fx.d.nvim.ready = true;
+        for n in [1i64, 2] {
+            fx.d.grids.wins.insert(
+                n as u32 + 10,
+                Win {
+                    win: n,
+                    kind: WinKind::External,
+                    float: Float::default(),
+                },
+            );
+            fx.d.changes.note_split(windows::Split {
+                win: n,
                 side_by_side: true,
                 before: false,
                 from: 0,
                 tab: 2,
-            };
-            d.changes.note_split(split(1));
-            d.new_pane(1).unwrap();
-            if fail {
-                let id = d.panes.by_win(1).unwrap().id;
-                d.panes.by_id_mut(id).unwrap().closing = Some(Close::RequestFailed);
-            }
-            d.changes.note_split(split(2));
-            d.new_pane(2).unwrap();
-        });
-        methods_of(&frames).into_iter().map(String::from).collect()
+            });
+        }
+        fx
+    }
+
+    /// Every request the daemon sent Rex, as methods.
+    fn sent_methods(mut fx: Fixture) -> Vec<String> {
+        drop(fx.d);
+        let mut all = Vec::new();
+        fx.rex_end.read_to_end(&mut all).unwrap();
+        methods_of(&client_frames(&all))
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     #[test]
-    fn a_window_after_a_refused_tab_floating_pane_asks_for_its_own() {
-        let methods = second_window_requests(true);
-        assert_eq!(2, methods.len());
-        assert_eq!(methods[0], methods[1]);
+    fn a_window_waiting_for_its_tab_pages_floating_pane_asks_for_its_own_once_rex_refuses_it() {
+        let mut fx = two_windows_of_a_tab_page();
+        // the first window asks for the floating pane; the second waits for it
+        fx.d.new_pane(1).unwrap();
+        fx.d.reconcile().unwrap();
+        assert_eq!(1, fx.d.panes.list.len());
+        assert!(fx.d.panes.by_win(2).is_none());
+
+        // Rex refuses request 1
+        use std::io::Write;
+        let refusal = r#"{"type":"response","id":"1","seq":0,"error":{"code":"refused","message":"no","status":400}}"#;
+        fx.rex_end.write_all(&server_frame(refusal)).unwrap();
+        fx.d.on_rex().unwrap();
+
+        assert!(fx.d.panes.by_win(2).is_some());
+        assert_eq!(
+            vec!["session.new_layer", "session.new_layer"],
+            sent_methods(fx)
+        );
     }
 
     #[test]
-    fn a_window_waits_for_its_tab_pages_floating_pane_still_on_its_way() {
-        assert_eq!(1, second_window_requests(false).len());
+    fn a_window_keeps_waiting_for_its_tab_pages_floating_pane_still_on_its_way() {
+        let mut fx = two_windows_of_a_tab_page();
+        fx.d.new_pane(1).unwrap();
+        fx.d.reconcile().unwrap();
+        assert!(fx.d.panes.by_win(2).is_none());
+        assert_eq!(vec!["session.new_layer"], sent_methods(fx));
     }
 
     #[test]
