@@ -14,6 +14,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::daemon::{Daemon, Token};
 use super::event_loop::Loop;
@@ -136,15 +137,44 @@ impl Drop for RemoveFiles {
 /// Neovim's process. As it drops, after the terminals are restored: SIGHUP
 /// makes Neovim save swap files and exit, and it's waited for. Not one that
 /// has already ended.
-struct NvimChild(Child);
+///
+/// A Neovim that doesn't end within `grace` of the SIGHUP is killed: one
+/// caught in a `system()` call, such as a clipboard read from an autocommand,
+/// can hang on its way out, and would keep the daemon waiting for good.
+struct NvimChild {
+    child: Child,
+    grace: Duration,
+}
+
+/// How long Neovim has to exit after SIGHUP before it's killed.
+const NVIM_EXIT_GRACE: Duration = Duration::from_secs(3);
+
+impl NvimChild {
+    fn new(child: Child) -> NvimChild {
+        NvimChild {
+            child,
+            grace: NVIM_EXIT_GRACE,
+        }
+    }
+}
 
 impl Drop for NvimChild {
     fn drop(&mut self) {
-        if let Ok(None) = self.0.try_wait() {
-            // SAFETY: signalling our own child, which hasn't been reaped.
-            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGHUP) };
-            let _ = self.0.wait();
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
         }
+        // SAFETY: signalling our own child, which hasn't been reaped.
+        unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP) };
+        let deadline = Instant::now() + self.grace;
+        while Instant::now() < deadline {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("neorex daemon: Neovim didn't exit after SIGHUP; killing it");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -199,20 +229,28 @@ pub fn serve<S: AsRef<OsStr>>(base: &str, nvim_args: &[S], mut config: Config<'_
         // its stderr is ours: the log
         .spawn();
     let mut child = match spawned {
-        Ok(child) => NvimChild(child),
+        Ok(child) => NvimChild::new(child),
         Err(err) => return Err(startup.give_up(StartStep::StartNvim, Box::new(err), None)),
     };
 
     let nvim = match (config.connect)(&nvim_sock) {
         Ok(nvim) => nvim,
         Err(err) => {
-            return Err(startup.give_up(StartStep::ConnectNvim, Box::new(err), Some(&mut child.0)));
+            return Err(startup.give_up(
+                StartStep::ConnectNvim,
+                Box::new(err),
+                Some(&mut child.child),
+            ));
         }
     };
     let rex = match Client::connect(config.rex_url) {
         Ok(rex) => rex,
         Err(err) => {
-            return Err(startup.give_up(StartStep::ConnectRex, Box::new(err), Some(&mut child.0)));
+            return Err(startup.give_up(
+                StartStep::ConnectRex,
+                Box::new(err),
+                Some(&mut child.child),
+            ));
         }
     };
 
@@ -385,7 +423,43 @@ mod tests {
     use crate::daemon::fdpass;
     use std::os::fd::RawFd;
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
+
+    #[test]
+    fn a_neovim_that_wont_exit_on_sighup_is_killed_after_the_grace() {
+        // ignores SIGHUP, as a Neovim stuck on its way out does
+        let child = Command::new("sh")
+            .args(["-c", "trap '' HUP; echo ready; while :; do sleep 0.1; done"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        let mut child = NvimChild {
+            child,
+            grace: Duration::from_millis(200),
+        };
+        // the trap is set once it says so
+        let mut ready = [0u8; 6];
+        std::io::Read::read_exact(child.child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+        let started = Instant::now();
+        drop(child);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // reaped: no such process
+        assert_eq!(-1, unsafe { libc::kill(pid, 0) });
+    }
+
+    #[test]
+    fn a_neovim_that_exits_on_sighup_is_waited_for_not_killed() {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let child = NvimChild {
+            child,
+            grace: Duration::from_secs(30),
+        };
+        let pid = child.child.id() as libc::pid_t;
+        let started = Instant::now();
+        drop(child);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(-1, unsafe { libc::kill(pid, 0) });
+    }
 
     #[test]
     fn base_path_fits_a_socket() {

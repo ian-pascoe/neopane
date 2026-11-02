@@ -16,6 +16,10 @@ pub struct WindowChanges {
     /// taking windows that only followed into its tab page): their panes wait
     /// for the new window instead of hanging up. Kept until it opens.
     pub reopening: IndexSet<i64>,
+    /// New windows that reopened closing ones, not drawn yet. A slow command,
+    /// such as an autocommand that reads the clipboard, can flush a redraw
+    /// before the new window is drawn, so their panes wait for it.
+    pub reopened: IndexSet<i64>,
     /// New windows without panes yet, and where Neovim put them.
     pub splits: IndexMap<i64, PendingSplit>,
 }
@@ -32,6 +36,8 @@ pub struct PendingSplit {
 impl WindowChanges {
     /// Forgets windows Neovim no longer has.
     pub fn forget_gone(&mut self, grids: &Grids) {
+        // drawn: an ordinary window from here on
+        self.reopened.retain(|&win| grids.grid_of(win).is_none());
         for set in [&mut self.asked, &mut self.closing] {
             let mut j = set.len();
             while j > 0 {
@@ -82,6 +88,17 @@ impl WindowChanges {
     /// True if `win` was closing to reopen; forgets it.
     pub fn take_reopening(&mut self, win: i64) -> bool {
         self.reopening.swap_remove(&win)
+    }
+
+    /// `win` reopened a closing window, and isn't drawn yet.
+    pub fn mark_reopened(&mut self, win: i64) {
+        self.reopened.insert(win);
+    }
+
+    /// True while `win`'s pane waits for it: closing to reopen, or the new
+    /// window not drawn yet.
+    pub fn awaits_reopen(&self, win: i64) -> bool {
+        self.reopening.contains(&win) || self.reopened.contains(&win)
     }
 
     pub fn note_split(&mut self, sp: windows::Split) {

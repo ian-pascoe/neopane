@@ -810,8 +810,8 @@ impl Daemon {
             if self.grids.grid_of(win).is_some() {
                 continue;
             }
-            // its pane waits for the window that reopens it
-            if self.changes.is_reopening(win) {
+            // its pane waits for the window that reopens it to be drawn
+            if self.changes.awaits_reopen(win) {
                 continue;
             }
             p.closing = Some(Close::WindowClosed);
@@ -942,12 +942,13 @@ impl Daemon {
         Some(Blocks { moved, anchor })
     }
 
-    /// Window `new` reopened `old`, closing: it takes `old`'s pane. The next
-    /// flush has it, and sizes it to the pane.
+    /// Window `new` reopened `old`, closing: it takes `old`'s pane, which
+    /// waits for it to be drawn, then sizes it to the pane.
     fn on_reopened(&mut self, old: i64, new: i64) {
         if !self.changes.take_reopening(old) {
             return;
         }
+        self.changes.mark_reopened(new);
         let Some(p) = self.panes.by_win_mut(old) else {
             return;
         };
@@ -2127,6 +2128,56 @@ mod tests {
         let id = format!("block:00000000-0000-0000-0000-{n:0>12}");
         assert_eq!(42, id.len());
         id
+    }
+
+    #[test]
+    fn a_reopened_windows_pane_waits_for_it_to_be_drawn_across_flushes() {
+        let mut fx = fixture();
+        let d = &mut fx.d;
+        d.nvim.ready = true;
+        let draw = |d: &mut Daemon, grid: u32, win: i64| {
+            d.grids.wins.insert(
+                grid,
+                Win {
+                    win,
+                    kind: WinKind::External,
+                    float: Float::default(),
+                },
+            );
+        };
+        draw(d, 2, 1000);
+        let id = d.panes.add(Pane::from_neovim_window(1, 1000)).id;
+        d.reconcile().unwrap();
+        assert!(d.panes.by_id(id).is_some());
+
+        // :tabclose takes window 1000, and the plugin reopens it as 1010
+        d.on_note(windows::Note::Reopen(1000)).unwrap();
+        d.grids.wins.swap_remove(&2);
+        d.reconcile().unwrap();
+        assert!(d.panes.by_id(id).is_some());
+        d.on_note(windows::Note::Reopened {
+            old: 1000,
+            new: 1010,
+        })
+        .unwrap();
+        assert_eq!(Some(1010), d.panes.by_id(id).unwrap().neovim_window_handle);
+
+        // a flush before 1010 is drawn, as a slow autocommand can make
+        d.reconcile().unwrap();
+        assert!(
+            d.panes.by_id(id).is_some(),
+            "the pane hung up before its window was drawn"
+        );
+        assert_eq!(None, d.stopped);
+
+        draw(d, 3, 1010);
+        d.reconcile().unwrap();
+        assert!(d.panes.by_id(id).is_some());
+
+        // drawn, then closed: its pane goes
+        d.grids.wins.swap_remove(&3);
+        d.reconcile().unwrap();
+        assert!(d.panes.by_id(id).is_none());
     }
 
     #[test]
