@@ -81,24 +81,27 @@ pub(crate) use kitty_query_literal;
 /// for keys the legacy encoding garbles) and 4 (report the shifted key, so
 /// Alt+Shift+1 can be `<M-!>`). The terminal keeps a stack of flags, one per
 /// screen (main and alternate), so push after switching screens.
-pub const KITTY_PUSH: &str = kitty_push_literal!();
+#[cfg(test)]
+pub(crate) const KITTY_PUSH: &str = kitty_push_literal!();
 /// Turns it back off: pops what `KITTY_PUSH` pushed.
-pub const KITTY_POP: &str = kitty_pop_literal!();
+#[cfg(test)]
+pub(crate) const KITTY_POP: &str = kitty_pop_literal!();
 
 /// Asks the terminal for its kitty keyboard flags. One that has the protocol
 /// answers `ESC [ ? flags u`, which makes the parser set `kitty` itself; one
 /// that hasn't says nothing, and a bare ESC keeps timing out. Write it after
 /// `KITTY_PUSH`.
-pub const KITTY_QUERY: &str = kitty_query_literal!();
+#[cfg(test)]
+pub(crate) const KITTY_QUERY: &str = kitty_query_literal!();
 
 /// How long, in milliseconds, an ESC that ends a read waits for the rest of
 /// its sequence before it is the Escape key, without kitty flags on. Matches
 /// Neovim's default `ttimeoutlen`.
-pub const ESCAPE_TIMEOUT_MS: u32 = 50;
+pub(crate) const ESCAPE_TIMEOUT_MS: u32 = 50;
 
 /// Modifier keys held with a key or mouse event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Mods {
+pub(crate) struct Mods {
     pub shift: bool,
     pub alt: bool,
     pub ctrl: bool,
@@ -109,7 +112,7 @@ impl Mods {
     /// From the modifier parameter in sequences like `ESC [ 1 ; 5 C`. The
     /// value minus one is a set of bits: 1 shift, 2 alt, 4 ctrl, 8 super.
     /// Higher bits (hyper, meta, caps lock, num lock) are ignored.
-    pub fn from_param(param: u32) -> Mods {
+    pub(crate) fn from_param(param: u32) -> Mods {
         if param <= 1 {
             return Mods::default();
         }
@@ -122,14 +125,14 @@ impl Mods {
         }
     }
 
-    pub fn is_empty(self) -> bool {
+    pub(crate) fn is_empty(self) -> bool {
         !self.shift && !self.alt && !self.ctrl && !self.super_
     }
 }
 
 /// Keys that aren't characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Named {
+pub(crate) enum Named {
     Enter,
     Tab,
     Backspace,
@@ -160,7 +163,7 @@ pub enum Named {
 
 /// Which key: a character, or a named key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
+pub(crate) enum Key {
     /// A character, as a Unicode codepoint (a `u32`, since a terminal can send
     /// a surrogate, which `char` can't hold). Ctrl+A is
     /// `'a'` with `ctrl` set.
@@ -169,14 +172,15 @@ pub enum Key {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyEvent {
+pub(crate) struct KeyEvent {
     pub key: Key,
     pub mods: Mods,
 }
 
 impl KeyEvent {
     /// A key with no modifiers.
-    pub fn new(key: Key) -> KeyEvent {
+    #[cfg(test)]
+    pub(crate) fn new(key: Key) -> KeyEvent {
         KeyEvent {
             key,
             mods: Mods::default(),
@@ -186,7 +190,7 @@ impl KeyEvent {
 
 /// Which mouse button an event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseButton {
+pub(crate) enum MouseButton {
     Left,
     Middle,
     Right,
@@ -199,7 +203,7 @@ pub enum MouseButton {
 
 impl MouseButton {
     /// The variant's name, as logged.
-    pub fn tag_name(self) -> &'static str {
+    pub(crate) fn tag_name(self) -> &'static str {
         match self {
             MouseButton::Left => "left",
             MouseButton::Middle => "middle",
@@ -215,7 +219,7 @@ impl MouseButton {
 
 /// What a mouse event did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseAction {
+pub(crate) enum MouseAction {
     Press,
     Release,
     Drag,
@@ -224,7 +228,7 @@ pub enum MouseAction {
 
 impl MouseAction {
     /// The variant's name, as logged.
-    pub fn tag_name(self) -> &'static str {
+    pub(crate) fn tag_name(self) -> &'static str {
         match self {
             MouseAction::Press => "press",
             MouseAction::Release => "release",
@@ -235,7 +239,7 @@ impl MouseAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mouse {
+pub(crate) struct Mouse {
     pub button: MouseButton,
     pub action: MouseAction,
     pub mods: Mods,
@@ -245,7 +249,7 @@ pub struct Mouse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Event<'a> {
+pub(crate) enum Event<'a> {
     Key(KeyEvent),
     /// Bracketed paste: `PasteStart`, then the text in one or more `Paste`
     /// chunks, then `PasteEnd`. Pasted text never turns into key events.
@@ -319,7 +323,7 @@ impl fmt::Display for Event<'_> {
 }
 
 /// True if `bytes` hold nothing but focus reports (`CSI I`, `CSI O`).
-pub fn only_focus_reports(bytes: &[u8]) -> bool {
+pub(crate) fn only_focus_reports(bytes: &[u8]) -> bool {
     let mut rest = bytes;
     while !rest.is_empty() {
         if !rest.starts_with(b"\x1b[I") && !rest.starts_with(b"\x1b[O") {
@@ -332,7 +336,7 @@ pub fn only_focus_reports(bytes: &[u8]) -> bool {
 
 /// Writes a key in Neovim's key notation, the form `nvim_input` takes:
 /// `a`, `<lt>`, `<CR>`, `<C-Right>`, `<M-x>`, `<C-Space>`.
-pub fn write_nvim(event: KeyEvent, w: &mut Vec<u8>) {
+pub(crate) fn write_nvim(event: KeyEvent, w: &mut Vec<u8>) {
     // Keys that need a name inside <...>.
     let name: Option<&str> = match event.key {
         Key::Named(n) => Some(nvim_name(n)),
@@ -471,7 +475,7 @@ enum Raw {
 
 // Clone: `Forwarder::takes_focus` reads from a copy.
 #[derive(Clone)]
-pub struct Parser {
+pub(crate) struct Parser {
     state: State,
 
     /// The bytes from the last `feed`, and how far through them we are.
@@ -542,7 +546,7 @@ fn key_raw(key: Key, mods: Mods) -> Raw {
 impl Parser {
     /// Give the parser the bytes from one read. Call `next` until it returns
     /// `None` before feeding more.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
         debug_assert!(self.pos >= self.input.len());
         self.input.clear();
         self.input.extend_from_slice(bytes);
@@ -552,7 +556,7 @@ impl Parser {
     /// Gives up the fed bytes not read yet and returns them, so the caller
     /// can feed them again later. Call between events. If the event ended at
     /// an ESC that starts the next one, that ESC is given back too.
-    pub fn take_rest(&mut self) -> Vec<u8> {
+    pub(crate) fn take_rest(&mut self) -> Vec<u8> {
         // Only an ESC read from this input: one left pending by an earlier
         // read has nothing here to give back.
         if self.state == State::Escape && self.pos > 0 && self.input[self.pos - 1] == 0x1b {
@@ -567,7 +571,8 @@ impl Parser {
 
     /// Tells the parser whether the kitty keyboard flags are on. With them on,
     /// an ESC that ends a read always waits for the next one.
-    pub fn set_kitty(&mut self, on: bool) {
+    #[cfg(test)]
+    pub(crate) fn set_kitty(&mut self, on: bool) {
         self.kitty = on;
     }
 
@@ -576,14 +581,14 @@ impl Parser {
     /// should start a short timer and call `flush_pending` when it fires, if
     /// no input came first. False inside a paste and with kitty flags on,
     /// where the ESC waits for more input however long it takes.
-    pub fn flush_due(&self) -> bool {
+    pub(crate) fn flush_due(&self) -> bool {
         self.state == State::Escape && !self.in_paste && !self.kitty
     }
 
     /// The timeout for a pending ESC: no more input came, so it was the Escape
     /// key. Call once `next` has returned `None`. Does nothing, and returns
     /// `None`, when `flush_due` is false.
-    pub fn flush_pending(&mut self) -> Option<Event<'_>> {
+    pub(crate) fn flush_pending(&mut self) -> Option<Event<'_>> {
         if !self.flush_due() {
             return None;
         }
@@ -594,21 +599,21 @@ impl Parser {
 
     /// Whether the parser is between inputs: not partway through an escape
     /// sequence or character.
-    pub fn at_ground(&self) -> bool {
+    pub(crate) fn at_ground(&self) -> bool {
         self.state == State::Ground
     }
 
     /// Puts the parser partway through a CSI sequence, or back between keys:
     /// the tests can't set `state` directly, which is private.
     #[cfg(test)]
-    pub fn set_partway_for_test(&mut self, partway: bool) {
+    pub(crate) fn set_partway_for_test(&mut self, partway: bool) {
         self.state = if partway { State::Csi } else { State::Ground };
     }
 
     /// The next event from the fed bytes, or `None` when they are used up.
     // Not an `Iterator`: the events borrow from the parser.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<Event<'_>> {
+    pub(crate) fn next(&mut self) -> Option<Event<'_>> {
         let raw = self.next_raw()?;
         Some(self.resolve(raw))
     }

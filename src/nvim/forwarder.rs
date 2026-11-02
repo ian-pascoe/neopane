@@ -10,7 +10,7 @@ use crate::term::input::{self, Event, MouseAction, MouseButton};
 /// What can go wrong forwarding input: Neovim's pipe failing, or a paste too
 /// long for a msgpack string.
 #[derive(Debug)]
-pub enum Error {
+pub(crate) enum Error {
     Io(io::Error),
     TooLong,
 }
@@ -32,12 +32,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Room for the keys of one read.
 const KEYS_CAPACITY: usize = 4096;
 
-pub struct Forwarder {
+pub(crate) struct Forwarder {
     pub parser: input::Parser,
     /// The next `nvim_paste` phase: 1 starts a paste, 2 continues it.
     pub paste_phase: i64,
@@ -88,7 +88,7 @@ impl Default for Forwarder {
 
 /// A float's grid and where it's drawn, in terminal cells.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Target {
+pub(crate) struct Target {
     pub grid: u32,
     pub row: i32,
     pub col: i32,
@@ -96,7 +96,7 @@ pub struct Target {
     pub height: u32,
 }
 
-pub const MAX_TARGETS: usize = 16;
+pub(crate) const MAX_TARGETS: usize = 16;
 
 /// The grid a mouse event lands on, and where on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +108,7 @@ struct Route {
 
 /// What `feed` and `feed_key` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Fed {
+pub(crate) struct Fed {
     /// False if the user quit.
     pub more: bool,
     /// How many bytes were read: all, unless `feed_key` stopped after a key.
@@ -117,7 +117,7 @@ pub struct Fed {
 }
 
 impl Forwarder {
-    pub fn set_targets(&mut self, targets: &[Target]) {
+    pub(crate) fn set_targets(&mut self, targets: &[Target]) {
         let n = targets.len().min(MAX_TARGETS);
         self.targets[..n].copy_from_slice(&targets[..n]);
         self.targets_len = n as u8;
@@ -176,7 +176,7 @@ impl Forwarder {
 
     /// Sends the input in `bytes` to Neovim and flushes. False if the user
     /// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
-    pub fn feed(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<bool> {
+    pub(crate) fn feed(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<bool> {
         Ok(self.read(nvim, bytes, false)?.more)
     }
 
@@ -188,14 +188,14 @@ impl Forwarder {
 
     /// Like `feed`, but stops after the first key: what follows it is left for
     /// a later `feed`. Doesn't quit.
-    pub fn feed_key(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<Fed> {
+    pub(crate) fn feed_key(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<Fed> {
         self.read(nvim, bytes, true)
     }
 
     /// Reads `bytes` as `feed` does, but sends nothing: for input whose window
     /// is gone. Keeps what the forwarder remembers of the input, such as focus,
     /// and closes a paste that was begun.
-    pub fn discard(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn discard(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<()> {
         self.parser.feed(bytes);
         while let Some(event) = self.parser.next() {
             match event {
@@ -214,7 +214,7 @@ impl Forwarder {
     /// the pane, as opposed to what only reports or looks: focus reports, and
     /// mouse events other than a button going down, such as the wheel and a
     /// pointer moving. Changes nothing: the parser is read from a copy.
-    pub fn takes_focus(&self, bytes: &[u8]) -> bool {
+    pub(crate) fn takes_focus(&self, bytes: &[u8]) -> bool {
         let mut parser = self.parser.clone();
         parser.feed(bytes);
         while let Some(event) = parser.next() {
@@ -244,14 +244,14 @@ impl Forwarder {
     /// Whether an ESC that ended a read waits for a timeout: start one, and
     /// call `flush_pending` when it fires without more input. (See
     /// `Parser::flush_due`.)
-    pub fn escape_pending(&self) -> bool {
+    pub(crate) fn escape_pending(&self) -> bool {
         self.parser.flush_due()
     }
 
     /// When the ESC waiting for a timeout is due to be the Escape key: the
     /// timeout after the read that left it. None if none waits. Each
     /// forwarder has its own, so one pane's reads don't put off another's.
-    pub fn escape_deadline(&self) -> Option<Instant> {
+    pub(crate) fn escape_deadline(&self) -> Option<Instant> {
         self.escape_since
             .map(|t| t + Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS)))
     }
@@ -267,7 +267,7 @@ impl Forwarder {
 
     /// The timeout for a pending ESC: nothing followed it, so it is the Escape
     /// key. Sends it. Does nothing if no ESC is waiting.
-    pub fn flush_pending(&mut self, nvim: &mut Nvim) -> Result<()> {
+    pub(crate) fn flush_pending(&mut self, nvim: &mut Nvim) -> Result<()> {
         let flushed = self.parser.flush_pending();
         self.escape_since = None;
         let Some(Event::Key(k)) = flushed else {
@@ -282,7 +282,7 @@ impl Forwarder {
 
     /// Whether the parser is between inputs, not partway through an escape
     /// sequence or character.
-    pub fn at_boundary(&self) -> bool {
+    pub(crate) fn at_boundary(&self) -> bool {
         self.parser.at_ground()
     }
 

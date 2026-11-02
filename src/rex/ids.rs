@@ -1,11 +1,11 @@
 //! Rex ids.
 
 /// `block:` and a UUID.
-pub type Block = [u8; 42];
+pub(crate) type Block = [u8; 42];
 
 /// A malformed Rex id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     BadRexBlock,
     BadRexLayer,
 }
@@ -21,17 +21,17 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub fn block(id: &[u8]) -> Result<Block, Error> {
+pub(crate) fn block(id: &[u8]) -> Result<Block, Error> {
     id.try_into().map_err(|_| Error::BadRexBlock)
 }
 
 /// `layer:` and a UUID.
-pub type Layer = [u8; 42];
+pub(crate) type Layer = [u8; 42];
 
-pub fn layer(id: &[u8]) -> Result<Layer, Error> {
+pub(crate) fn layer(id: &[u8]) -> Result<Layer, Error> {
     id.try_into().map_err(|_| Error::BadRexLayer)
 }
 
-pub fn same_block(a: Block, b: Block) -> bool {
+pub(crate) fn same_block(a: Block, b: Block) -> bool {
     a == b
 }

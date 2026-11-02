@@ -21,7 +21,7 @@ const TOKEN_PANES: usize = 3;
 
 /// What `run` refuses to start without.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     SocketPathNotAbsolute,
     NoRexServer,
     NoRexSession,

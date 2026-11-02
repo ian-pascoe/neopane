@@ -10,6 +10,7 @@ const LUA: &str = include_str!("windows.lua");
 
 /// Installs the Lua on our channel `chan` and makes the current window
 /// external at `cols` x `rows`. Its response is `[first window, anchor]`.
+#[doc(hidden)]
 pub fn setup(nvim: &mut Nvim, chan: i64, cols: u32, rows: u32) -> u32 {
     let id = nvim.exec_lua(LUA, 3);
     msgpack::write_int(nvim.writer(), chan);
@@ -19,6 +20,7 @@ pub fn setup(nvim: &mut Nvim, chan: i64, cols: u32, rows: u32) -> u32 {
 }
 
 /// Makes ordinary window `win` external at `cols` x `rows`; anchors stay.
+#[doc(hidden)]
 pub fn adopt(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
     nvim.exec_lua("neorex.adopt(...)", 3);
     msgpack::write_int(nvim.writer(), win);
@@ -27,6 +29,7 @@ pub fn adopt(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
 }
 
 /// Sizes external window `win` to fill `cols` x `rows`, its statusline included.
+#[doc(hidden)]
 pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
     nvim.exec_lua("neorex.size(...)", 3);
     msgpack::write_int(nvim.writer(), win);
@@ -37,7 +40,7 @@ pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
 /// Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
 /// `col`; `cur` is where they are now: row, col, width, height.
 /// Returns the request's id.
-pub fn place_group(
+pub(crate) fn place_group(
     nvim: &mut Nvim,
     tops: &[i64],
     row: i32,
@@ -64,19 +67,20 @@ pub fn place_group(
 }
 
 /// Closes `win`, keeping unsaved changes in its buffer.
-pub fn close(nvim: &mut Nvim, win: i64) {
+pub(crate) fn close(nvim: &mut Nvim, win: i64) {
     nvim.exec_lua("neorex.close(...)", 1);
     msgpack::write_int(nvim.writer(), win);
 }
 
 /// Returns the request's id.
-pub fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
+pub(crate) fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
     let id = nvim.request("nvim_set_current_win", 1);
     msgpack::write_int(nvim.writer(), win);
     id
 }
 
 /// Asks for our channel id: the response to the returned id starts with it.
+#[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {
     nvim.request("nvim_get_api_info", 0)
 }
@@ -85,6 +89,7 @@ pub fn ask_channel(nvim: &mut Nvim) -> u32 {
 // A layout is held inline; see `Layout`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[doc(hidden)]
 pub enum Note {
     /// The current window is now this one.
     Current(i64),
@@ -116,11 +121,12 @@ pub enum Note {
 /// A note holds it inline, about 1.5 KB: `parse_note` has no allocator, a
 /// note is used and dropped at once, and the daemon keeps one per tab page.
 #[derive(Clone, Copy)]
+#[doc(hidden)]
 pub struct Layout {
-    pub tab: i64,
-    pub len: usize,
+    pub(crate) tab: i64,
+    pub(crate) len: usize,
     /// Parents before their kids.
-    pub nodes: [Node; Layout::MAX_NODES],
+    pub(crate) nodes: [Node; Layout::MAX_NODES],
 }
 
 impl std::fmt::Debug for Layout {
@@ -141,18 +147,18 @@ impl PartialEq for Layout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Node {
-    pub kind: Kind,
+pub(crate) struct Node {
+    pub(crate) kind: Kind,
     /// A window's handle.
-    pub win: i64,
-    pub w: u32,
-    pub h: u32,
+    pub(crate) win: i64,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
     /// The index after this node and everything in it.
-    pub end: usize,
+    pub(crate) end: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Kind {
+pub(crate) enum Kind {
     #[default]
     Window,
     Row,
@@ -162,10 +168,10 @@ pub enum Kind {
 impl Layout {
     /// The most nodes there are room for. The same as `MAX_LAYOUT_NODES` in
     /// windows.lua, which sends none for a bigger layout.
-    pub const MAX_NODES: usize = 63;
+    pub(crate) const MAX_NODES: usize = 63;
 
     /// An empty layout of tab page `tab`.
-    pub fn new(tab: i64) -> Layout {
+    pub(crate) fn new(tab: i64) -> Layout {
         Layout {
             tab,
             len: 0,
@@ -174,12 +180,12 @@ impl Layout {
     }
 
     /// The nodes in use.
-    pub fn items(&self) -> &[Node] {
+    pub(crate) fn items(&self) -> &[Node] {
         &self.nodes[0..self.len]
     }
 
     /// The indices of the kids of the node at `at`, in order.
-    pub fn kids(&self, at: usize) -> Kids<'_> {
+    pub(crate) fn kids(&self, at: usize) -> Kids<'_> {
         Kids {
             layout: self,
             next_at: at + 1,
@@ -227,7 +233,7 @@ impl Layout {
 }
 
 /// The indices of a node's kids; see `Layout::kids`.
-pub struct Kids<'a> {
+pub(crate) struct Kids<'a> {
     layout: &'a Layout,
     next_at: usize,
     end: usize,
@@ -248,7 +254,7 @@ impl Iterator for Kids<'_> {
 
 /// Which way a window command goes: `h`, `j`, `k` or `l`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
+pub(crate) enum Direction {
     Left,
     Down,
     Up,
@@ -257,27 +263,30 @@ pub enum Direction {
 
 /// A directional window command, `count` times as typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Move {
-    pub dir: Direction,
-    pub count: u32,
+    pub(crate) dir: Direction,
+    pub(crate) count: u32,
 }
 
 /// Where a new window sits in Neovim's layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[doc(hidden)]
 pub struct Split {
-    pub win: i64,
+    pub(crate) win: i64,
     /// Side by side (`:vsplit`), else one above the other.
-    pub side_by_side: bool,
+    pub(crate) side_by_side: bool,
     /// Left of or above the window beside it.
-    pub before: bool,
+    pub(crate) before: bool,
     /// The window it was split from, or 0.
-    pub from: i64,
+    pub(crate) from: i64,
     /// The tab page made after setup it belongs to, which Neovim shows
     /// over the first one's windows, else 0.
-    pub tab: i64,
+    pub(crate) tab: i64,
 }
 
 /// A notification from the Lua, or None for any other.
+#[doc(hidden)]
 pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option<Note>> {
     #[derive(Clone, Copy, PartialEq)]
     enum Tag {
@@ -377,6 +386,7 @@ fn parse_direction(params: &mut Decoder<'_>) -> rpc::Result<Note> {
 }
 
 /// `[first, anchor]` from `setup`'s response.
+#[doc(hidden)]
 pub fn parse_setup(result: &mut Decoder<'_>) -> rpc::Result<[i64; 2]> {
     if rpc::expect_array(result)? < 2 {
         return Err(rpc::Error::BadMessage);
@@ -385,6 +395,7 @@ pub fn parse_setup(result: &mut Decoder<'_>) -> rpc::Result<[i64; 2]> {
 }
 
 /// Our channel id from `ask_channel`'s response.
+#[doc(hidden)]
 pub fn parse_channel(result: &mut Decoder<'_>) -> rpc::Result<i64> {
     if rpc::expect_array(result)? < 1 {
         return Err(rpc::Error::BadMessage);

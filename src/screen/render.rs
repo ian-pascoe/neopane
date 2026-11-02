@@ -9,6 +9,7 @@ use super::grid::{Cell, Grid};
 use super::style::{Attr, CursorMode, Shape, Style, Underline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Cursor {
     pub row: u32,
     pub col: u32,
@@ -17,6 +18,7 @@ pub struct Cursor {
 /// One frame of `grid` filling the terminal: the dirty rows, then the
 /// cursor, inside synchronized output so the terminal shows it all at once.
 /// Clears `grid.dirty`.
+#[doc(hidden)]
 pub fn frame(grid: &mut Grid, style: &Style, w: &mut Vec<u8>) {
     begin(w);
     replay_scrolls(grid, 0, w);
@@ -43,13 +45,13 @@ pub fn frame(grid: &mut Grid, style: &Style, w: &mut Vec<u8>) {
 }
 
 /// Starts a frame: synchronized output on, cursor hidden while drawing.
-pub fn begin(w: &mut Vec<u8>) {
+pub(crate) fn begin(w: &mut Vec<u8>) {
     w.extend_from_slice(b"\x1b[?2026h\x1b[?25l");
 }
 
 /// Repeats the grid's pending scrolls with scroll regions, then forgets them.
 /// The grid must sit at the terminal's top left.
-pub fn replay_scrolls(grid: &mut Grid, offset: u32, w: &mut Vec<u8>) {
+pub(crate) fn replay_scrolls(grid: &mut Grid, offset: u32, w: &mut Vec<u8>) {
     let scrolls = grid.pending_scrolls();
     if scrolls.is_empty() {
         return;
@@ -69,7 +71,7 @@ pub fn replay_scrolls(grid: &mut Grid, offset: u32, w: &mut Vec<u8>) {
 }
 
 /// Ends a frame: the cursor where it belongs, or left hidden if None.
-pub fn end(style: &Style, cursor: Option<Cursor>, w: &mut Vec<u8>) {
+pub(crate) fn end(style: &Style, cursor: Option<Cursor>, w: &mut Vec<u8>) {
     if let Some(c) = cursor {
         if let Some(m) = style.cursor_mode() {
             write_cursor_style(m, w);
@@ -96,7 +98,7 @@ fn write_cursor_style(m: CursorMode, w: &mut Vec<u8>) {
 
 /// Draws `row` at terminal row `r`, cut at `cols` columns. `current` is the
 /// SGR the terminal has, None if unknown.
-pub fn draw_row(
+pub(crate) fn draw_row(
     row: &[Cell],
     style: &Style,
     r: u32,
@@ -140,7 +142,7 @@ pub fn draw_row(
 }
 
 /// Blanks terminal row `r` in the default colors.
-pub fn clear_row(style: &Style, r: u32, w: &mut Vec<u8>, current: &mut Option<u32>) {
+pub(crate) fn clear_row(style: &Style, r: u32, w: &mut Vec<u8>, current: &mut Option<u32>) {
     write!(w, "\x1b[{};1H", r + 1).unwrap();
     clear_to_end(style, w, current);
 }
@@ -160,7 +162,7 @@ fn is_blank(cell: &Cell, hl: u32) -> bool {
     cell.hl == hl && cell.str() == b" "
 }
 
-pub fn set_hl(style: &Style, hl: u32, w: &mut Vec<u8>, current: &mut Option<u32>) {
+pub(crate) fn set_hl(style: &Style, hl: u32, w: &mut Vec<u8>, current: &mut Option<u32>) {
     if *current == Some(hl) {
         return;
     }
@@ -171,7 +173,7 @@ pub fn set_hl(style: &Style, hl: u32, w: &mut Vec<u8>, current: &mut Option<u32>
 /// One SGR sequence that resets, then sets everything in `attr`. Colors an
 /// `attr` leaves null use the style's defaults; if those are null too, the
 /// terminal's own (from ext_termcolors).
-pub fn write_sgr(attr: &Attr, style: &Style, w: &mut Vec<u8>) {
+pub(crate) fn write_sgr(attr: &Attr, style: &Style, w: &mut Vec<u8>) {
     w.extend_from_slice(b"\x1b[0");
     if attr.bold {
         w.extend_from_slice(b";1");

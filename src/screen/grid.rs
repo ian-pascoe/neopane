@@ -7,23 +7,15 @@ use crate::nvim::rpc;
 /// Rows changed since the renderer last cleared this: a bit set with the
 /// operations `Grid` and its users need.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct DirtyRows {
     words: Vec<u64>,
     len: usize,
 }
 
 impl DirtyRows {
-    /// Number of rows tracked.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// Tracks `new_len` rows; rows added are set to `fill`.
-    pub fn resize(&mut self, new_len: usize, fill: bool) {
+    pub(crate) fn resize(&mut self, new_len: usize, fill: bool) {
         let old = self.len;
         self.words.resize(new_len.div_ceil(64), 0);
         self.len = new_len;
@@ -46,7 +38,7 @@ impl DirtyRows {
         }
     }
 
-    pub fn is_set(&self, i: usize) -> bool {
+    pub(crate) fn is_set(&self, i: usize) -> bool {
         debug_assert!(i < self.len);
         self.words[i / 64] & (1u64 << (i % 64)) != 0
     }
@@ -56,12 +48,12 @@ impl DirtyRows {
         self.words[i / 64] |= 1u64 << (i % 64);
     }
 
-    pub fn unset(&mut self, i: usize) {
+    pub(crate) fn unset(&mut self, i: usize) {
         debug_assert!(i < self.len);
         self.words[i / 64] &= !(1u64 << (i % 64));
     }
 
-    pub fn set_value(&mut self, i: usize, value: bool) {
+    pub(crate) fn set_value(&mut self, i: usize, value: bool) {
         if value {
             self.set(i);
         } else {
@@ -69,7 +61,7 @@ impl DirtyRows {
         }
     }
 
-    pub fn set_all(&mut self) {
+    pub(crate) fn set_all(&mut self) {
         self.words.fill(!0);
         self.mask_tail();
     }
@@ -79,17 +71,18 @@ impl DirtyRows {
     }
 
     /// How many rows are set.
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
     /// The set rows, in ascending order.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.len).filter(|&i| self.is_set(i))
     }
 }
 
 #[derive(Debug, Clone)]
+#[doc(hidden)]
 pub struct Grid {
     pub width: u32,
     pub height: u32,
@@ -100,7 +93,7 @@ pub struct Grid {
     pub cursor_row: u32,
     pub cursor_col: u32,
     /// Full-width scrolls since the last frame, for the terminal to repeat.
-    pub scrolls: [Scroll; MAX_SCROLLS],
+    pub(crate) scrolls: [Scroll; MAX_SCROLLS],
     pub scrolls_len: u8,
 }
 
@@ -123,23 +116,25 @@ const MAX_SCROLLS: usize = 8;
 
 /// Rows `top..bot` moved up by `rows`, down if negative.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Scroll {
-    pub top: u32,
-    pub bot: u32,
-    pub rows: i32,
+    pub(crate) top: u32,
+    pub(crate) bot: u32,
+    pub(crate) rows: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Cell {
     /// One grapheme cluster. Empty for the right half of a wide char.
-    pub text: [u8; Cell::MAX_TEXT],
+    pub(crate) text: [u8; Cell::MAX_TEXT],
     pub len: u8,
     pub hl: u32,
 }
 
 /// `cells` cut off before `beyond`, the cell that followed them: a wide
 /// character whose right half is `beyond` loses its left half to a blank.
-pub fn blank_cut_wide(cells: &mut [Cell], beyond: Option<&Cell>) {
+pub(crate) fn blank_cut_wide(cells: &mut [Cell], beyond: Option<&Cell>) {
     if let (Some(last), Some(b)) = (cells.last_mut(), beyond)
         && b.len == 0
     {
@@ -164,7 +159,7 @@ impl Default for Cell {
 
 impl Cell {
     /// Longer clusters are stored as U+FFFD.
-    pub const MAX_TEXT: usize = 31;
+    pub(crate) const MAX_TEXT: usize = 31;
 
     pub fn str(&self) -> &[u8] {
         &self.text[0..self.len as usize]
@@ -218,14 +213,14 @@ impl Grid {
         self.cursor_col = self.cursor_col.min(w.saturating_sub(1));
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.cells.fill(Cell::default());
         self.dirty.set_all();
         self.scrolls_len = 0;
     }
 
     /// `grid_line`'s cells: `[text, hl_id?, repeat?]`, from column `col`.
-    pub fn line(&mut self, d: &mut Decoder<'_>, r: u32, col: u32) -> rpc::Result<()> {
+    pub(crate) fn line(&mut self, d: &mut Decoder<'_>, r: u32, col: u32) -> rpc::Result<()> {
         if r >= self.height {
             return Err(rpc::Error::BadMessage);
         }
@@ -264,7 +259,7 @@ impl Grid {
 
     /// Moves rows `top..bot`, columns `left..right`, up by `rows` (down if
     /// negative). The rows left behind are refilled by grid_line events.
-    pub fn scroll(
+    pub(crate) fn scroll(
         &mut self,
         top: u32,
         bot: u32,
@@ -341,7 +336,8 @@ impl Grid {
     }
 
     /// Row `r` as text, wide-char halves dropped.
-    pub fn row_text(&self, r: u32) -> String {
+    #[cfg(test)]
+    pub(crate) fn row_text(&self, r: u32) -> String {
         let mut out = Vec::new();
         for c in self.row(r) {
             out.extend_from_slice(c.str());

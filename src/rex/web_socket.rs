@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 
 /// What can go wrong in the handshake or in framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     NotUpgraded,
     UnexpectedExtension,
     BadAccept,
@@ -56,7 +56,7 @@ fn random(buf: &mut [u8]) {
     }
 }
 
-pub struct WebSocket {
+pub(crate) struct WebSocket {
     /// Bytes received: handed-out frames, then ones not yet parsed.
     pub buf: Vec<u8>,
     /// Offset of the first frame not yet parsed.
@@ -86,7 +86,7 @@ struct Joined {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Opcode {
+pub(crate) enum Opcode {
     Continuation = 0,
     Text = 1,
     Binary = 2,
@@ -111,7 +111,7 @@ impl Opcode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message<'a> {
+pub(crate) enum Message<'a> {
     Text(&'a str),
     Ping(&'a [u8]),
     Pong(&'a [u8]),
@@ -121,7 +121,7 @@ pub enum Message<'a> {
 /// A close frame. (`reason` is owned, not a slice of the buffer, so a close
 /// can outlive the next `feed`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Close {
+pub(crate) struct Close {
     /// None when the frame had no body.
     pub code: Option<u16>,
     pub reason: Vec<u8>,
@@ -137,7 +137,7 @@ enum Parsed {
 
 impl WebSocket {
     /// Adds bytes read from the socket. Invalidates messages from `next`.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
         // drop parsed frames, keeping a message still being joined
         let drop = match self.joined {
             Some(j) => j.start,
@@ -154,7 +154,7 @@ impl WebSocket {
 
     /// The next whole message, or None until more is fed. Valid until `next` or `feed`.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Message<'_>>, Error> {
+    pub(crate) fn next(&mut self) -> Result<Option<Message<'_>>, Error> {
         // (the parsing loop yields ranges, so the borrow handed out starts
         // only after it)
         let Some(parsed) = self.parse()? else {
@@ -266,9 +266,9 @@ fn check_utf8(text: &[u8]) -> Result<&str, Error> {
 }
 
 /// A `Sec-WebSocket-Key`: 16 random bytes in base64.
-pub type Key = [u8; 24];
+pub(crate) type Key = [u8; 24];
 
-pub fn new_key() -> Key {
+pub(crate) fn new_key() -> Key {
     let mut nonce = [0u8; 16];
     random(&mut nonce);
     let mut key = [0u8; 24];
@@ -279,7 +279,7 @@ pub fn new_key() -> Key {
 }
 
 /// The `Sec-WebSocket-Accept` a server must answer `key` with.
-pub fn accept_for(key: &Key) -> [u8; 28] {
+pub(crate) fn accept_for(key: &Key) -> [u8; 28] {
     let mut h = sha1_smol::Sha1::new();
     h.update(key);
     h.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
@@ -292,7 +292,7 @@ pub fn accept_for(key: &Key) -> [u8; 28] {
 }
 
 /// Writes the HTTP upgrade request.
-pub fn write_request(w: &mut Vec<u8>, host: &str, path: &str, protocol: &str, key: &Key) {
+pub(crate) fn write_request(w: &mut Vec<u8>, host: &str, path: &str, protocol: &str, key: &Key) {
     let key = String::from_utf8_lossy(key);
     w.extend_from_slice(
         format!(
@@ -310,7 +310,7 @@ pub fn write_request(w: &mut Vec<u8>, host: &str, path: &str, protocol: &str, ke
 }
 
 /// Length of the response head through its blank line, or None if it's cut off.
-pub fn head_end(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn head_end(bytes: &[u8]) -> Option<usize> {
     let i = bytes.windows(4).position(|w| w == b"\r\n\r\n")?;
     Some(i + 4)
 }
@@ -327,7 +327,7 @@ fn trim_blanks(mut bytes: &[u8]) -> &[u8] {
 }
 
 /// Checks the server's response head: 101, the accept, and the subprotocol.
-pub fn check_response(head: &[u8], key: &Key, protocol: &str) -> Result<(), Error> {
+pub(crate) fn check_response(head: &[u8], key: &Key, protocol: &str) -> Result<(), Error> {
     // split on "\r\n"
     let mut lines = Vec::new();
     let mut from = 0;
@@ -376,14 +376,14 @@ pub fn check_response(head: &[u8], key: &Key, protocol: &str) -> Result<(), Erro
 }
 
 /// Writes one masked frame with a random mask. Doesn't flush.
-pub fn write_frame(w: &mut Vec<u8>, opcode: Opcode, payload: &[u8]) {
+pub(crate) fn write_frame(w: &mut Vec<u8>, opcode: Opcode, payload: &[u8]) {
     let mut mask = [0u8; 4];
     random(&mut mask);
     write_frame_masked(w, opcode, payload, mask);
 }
 
 /// Writes one final frame masked with `mask`.
-pub fn write_frame_masked(w: &mut Vec<u8>, opcode: Opcode, payload: &[u8], mask: [u8; 4]) {
+pub(crate) fn write_frame_masked(w: &mut Vec<u8>, opcode: Opcode, payload: &[u8], mask: [u8; 4]) {
     w.push(0x80 | opcode as u8);
     if payload.len() < 126 {
         w.push(0x80 | payload.len() as u8);
@@ -399,7 +399,7 @@ pub fn write_frame_masked(w: &mut Vec<u8>, opcode: Opcode, payload: &[u8], mask:
 }
 
 /// Writes a close frame with `code`. Doesn't flush.
-pub fn write_close(w: &mut Vec<u8>, code: u16) {
+pub(crate) fn write_close(w: &mut Vec<u8>, code: u16) {
     write_frame(w, Opcode::Close, &code.to_be_bytes());
 }
 

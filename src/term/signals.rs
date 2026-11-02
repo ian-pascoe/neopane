@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-pub struct Signals {
+pub(crate) struct Signals {
     /// Read end. Poll it; readable when a signal has fired.
     pub read_fd: RawFd,
     /// Write end, written by the handler.
@@ -92,7 +92,7 @@ extern "C" fn handle(sig: libc::c_int) {
 
 impl Signals {
     /// Creates the pipe and installs the handler for each signal. One per process.
-    pub fn init(signals: &[i32]) -> io::Result<Signals> {
+    pub(crate) fn init(signals: &[i32]) -> io::Result<Signals> {
         // one Signals per process
         assert_eq!(HANDLER_FD.load(Ordering::Relaxed), -1);
 
@@ -127,7 +127,7 @@ impl Signals {
     }
 
     /// Restores the old actions, then closes the pipe.
-    pub fn deinit(&mut self) {
+    pub(crate) fn deinit(&mut self) {
         if self.read_fd < 0 {
             return; // already deinitialised
         }
@@ -150,7 +150,7 @@ impl Signals {
     }
 
     /// Empties the pipe and returns which signals fired. Call when read_fd is readable.
-    pub fn drain(&mut self) -> io::Result<Set> {
+    pub(crate) fn drain(&mut self) -> io::Result<Set> {
         let mut set = Set::default();
         let mut buf = [0u8; 64];
         loop {
@@ -187,12 +187,12 @@ impl Drop for Signals {
 
 /// Which signals fired since the last drain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Set {
+pub(crate) struct Set {
     pub bits: u32,
 }
 
 impl Set {
-    pub fn contains(self, sig: i32) -> bool {
+    pub(crate) fn contains(self, sig: i32) -> bool {
         (0..32).contains(&sig) && self.bits & (1u32 << sig) != 0
     }
 }

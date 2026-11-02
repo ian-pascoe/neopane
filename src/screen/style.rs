@@ -7,6 +7,7 @@ use crate::nvim::msgpack::Decoder;
 use crate::nvim::rpc;
 
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct Style {
     /// Highlight attributes by id. Id 0 is the default.
     pub attrs: Vec<Attr>,
@@ -28,24 +29,27 @@ pub struct Style {
 }
 
 /// Ids from here are blended highlights, never Neovim's.
-pub const BLEND_BASE: u32 = 1 << 31;
+pub(crate) const BLEND_BASE: u32 = 1 << 31;
 const MAX_BLENDED: usize = 512;
 
 #[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
 pub struct Blended {
-    pub front: u32,
-    pub back: u32,
-    pub through: bool,
-    pub attr: Attr,
+    pub(crate) front: u32,
+    pub(crate) back: u32,
+    pub(crate) through: bool,
+    pub(crate) attr: Attr,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct CursorMode {
     pub shape: Shape,
     pub blink: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum Shape {
     #[default]
     Block,
@@ -55,6 +59,7 @@ pub enum Shape {
 
 /// A highlight from `hl_attr_define`. Null colors mean the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Attr {
     pub fg: Option<u32>,
     pub bg: Option<u32>,
@@ -74,6 +79,7 @@ pub struct Attr {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum Underline {
     #[default]
     None,
@@ -95,14 +101,14 @@ impl Style {
     }
 
     /// Forgets the blended highlights; call at the start of each frame.
-    pub fn clear_blends(&mut self) {
+    pub(crate) fn clear_blends(&mut self) {
         self.blended.clear();
     }
 
     /// Float highlight `front` over `back`, as Neovim's compositor blends them
     /// by `front`'s blend. `through`: the float's cell is blank and `back`'s
     /// text shows. Just `front` when it doesn't blend or colors are unknown.
-    pub fn blend_over(&mut self, front: u32, back: u32, through: bool) -> u32 {
+    pub(crate) fn blend_over(&mut self, front: u32, back: u32, through: bool) -> u32 {
         let f = self.attr(front);
         if f.blend == 0 {
             return front;
@@ -153,7 +159,12 @@ impl Style {
 
     /// Applies one event's args, after their array header of `len`. Returns
     /// how many args it read.
-    pub fn apply(&mut self, event: Event, d: &mut Decoder<'_>, len: u32) -> rpc::Result<u32> {
+    pub(crate) fn apply(
+        &mut self,
+        event: Event,
+        d: &mut Decoder<'_>,
+        len: u32,
+    ) -> rpc::Result<u32> {
         match event {
             Event::HlAttrDefine => {
                 if len < 2 {
@@ -217,28 +228,13 @@ fn mix(ratio: u8, back: u32, front: u32) -> u32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Event {
+pub(crate) enum Event {
     HlAttrDefine,
     DefaultColorsSet,
     ModeInfoSet,
     ModeChange,
     BusyStart,
     BusyStop,
-}
-
-impl Event {
-    /// The event named by a redraw event's name, as `std.meta.stringToEnum`.
-    pub fn from_name(name: &[u8]) -> Option<Event> {
-        Some(match name {
-            b"hl_attr_define" => Event::HlAttrDefine,
-            b"default_colors_set" => Event::DefaultColorsSet,
-            b"mode_info_set" => Event::ModeInfoSet,
-            b"mode_change" => Event::ModeChange,
-            b"busy_start" => Event::BusyStart,
-            b"busy_stop" => Event::BusyStop,
-            _ => return None,
-        })
-    }
 }
 
 /// A `mode_info_set` entry. Only shape and blink are used.

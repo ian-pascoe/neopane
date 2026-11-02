@@ -1,4 +1,4 @@
-pub mod client;
-pub mod ids;
-pub mod session;
-pub mod web_socket;
+pub(crate) mod client;
+pub(crate) mod ids;
+pub(crate) mod session;
+pub(crate) mod web_socket;

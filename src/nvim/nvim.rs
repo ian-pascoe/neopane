@@ -14,6 +14,7 @@ use super::msgpack;
 use super::rpc;
 
 #[derive(Debug)]
+#[doc(hidden)]
 pub enum Error {
     Io(io::Error),
     Framer(framer::Error),
@@ -53,11 +54,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// One whole message's bytes, owned, so handling it doesn't borrow the
 /// `Nvim` it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Frame(pub Vec<u8>);
 
 impl Frame {
@@ -67,9 +69,10 @@ impl Frame {
     }
 }
 
+#[doc(hidden)]
 pub struct Nvim {
     /// None when connected to a socket.
-    pub child: Option<Child>,
+    pub(crate) child: Option<Child>,
     /// Neovim's stdout, or the socket.
     reader: File,
     /// Neovim's stdin, or the socket. None once closed.
@@ -78,13 +81,14 @@ pub struct Nvim {
     out: Vec<u8>,
     /// Splits Neovim's stdout into messages.
     framer: Framer,
-    pub next_id: u32,
+    pub(crate) next_id: u32,
     /// The UI size last sent, as columns and rows.
-    pub ui_size: [u32; 2],
+    pub(crate) ui_size: [u32; 2],
 }
 
 /// Options for `ui_attach`. ext_linegrid and rgb are always on.
 #[derive(Debug, Clone, Copy, Default)]
+#[doc(hidden)]
 pub struct UiOptions {
     /// Unset default colors arrive as -1, so the terminal's own are used.
     pub ext_termcolors: bool,
@@ -123,7 +127,7 @@ impl Nvim {
     }
 
     /// Connects to the socket of a Neovim started with `--listen`.
-    pub fn connect(path: impl AsRef<std::path::Path>) -> io::Result<Nvim> {
+    pub(crate) fn connect(path: impl AsRef<std::path::Path>) -> io::Result<Nvim> {
         let stream = UnixStream::connect(path)?;
         let writer = OwnedFd::from(stream.try_clone()?);
         Ok(Nvim::new(
@@ -134,7 +138,7 @@ impl Nvim {
     }
 
     /// `connect`, retrying for up to 2 s: Neovim makes its socket a moment after starting.
-    pub fn connect_retry(path: impl AsRef<std::path::Path>) -> Result<Nvim> {
+    pub(crate) fn connect_retry(path: impl AsRef<std::path::Path>) -> Result<Nvim> {
         for _ in 0..200 {
             match Nvim::connect(path.as_ref()) {
                 Ok(nvim) => return Ok(nvim),
@@ -204,7 +208,7 @@ impl Nvim {
 
     /// Asks to resize the UI and flushes. Neovim answers with grid_resize. Does
     /// nothing for the size it already has: every resize redraws the whole screen.
-    pub fn ui_try_resize(&mut self, cols: u32, rows: u32) -> io::Result<()> {
+    pub(crate) fn ui_try_resize(&mut self, cols: u32, rows: u32) -> io::Result<()> {
         if self.ui_size == [cols, rows] {
             return Ok(());
         }
@@ -216,17 +220,9 @@ impl Nvim {
         Ok(())
     }
 
-    /// Asks for grid `grid` (a window's) to be `cols` x `rows`. Doesn't flush.
-    pub fn ui_try_resize_grid(&mut self, grid: u32, cols: u32, rows: u32) {
-        self.request("nvim_ui_try_resize_grid", 3);
-        msgpack::write_int(&mut self.out, grid);
-        msgpack::write_int(&mut self.out, cols.max(1));
-        msgpack::write_int(&mut self.out, rows.max(1));
-    }
-
     /// Starts `nvim_exec_lua(code, args)` and returns its id. Write `arg_count`
     /// args to `writer()` after it, then `flush`.
-    pub fn exec_lua(&mut self, code: &str, arg_count: u32) -> u32 {
+    pub(crate) fn exec_lua(&mut self, code: &str, arg_count: u32) -> u32 {
         let id = self.request("nvim_exec_lua", 2);
         msgpack::write_str(&mut self.out, code);
         msgpack::write_array_header(&mut self.out, arg_count);
@@ -297,7 +293,7 @@ fn nvim_missing<T>() -> Option<T> {
 /// Starts `argv` for a test, or None if Neovim isn't installed (a panic
 /// under `CI`).
 #[cfg(test)]
-pub fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
+pub(crate) fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
     match Nvim::spawn(argv) {
         Ok(nvim) => Some(nvim),
         Err(e) if e.kind() == io::ErrorKind::NotFound => nvim_missing(),
@@ -308,7 +304,7 @@ pub fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
 /// A connection over `stream`, for tests that need an `Nvim` but no Neovim
 /// to talk to.
 #[cfg(test)]
-pub fn for_test_on(stream: UnixStream) -> Nvim {
+pub(crate) fn for_test_on(stream: UnixStream) -> Nvim {
     let writer = OwnedFd::from(stream.try_clone().unwrap());
     Nvim::new(None, File::from(OwnedFd::from(stream)), File::from(writer))
 }
@@ -316,14 +312,14 @@ pub fn for_test_on(stream: UnixStream) -> Nvim {
 /// Starts `nvim --clean --embed` for a test, or None if it isn't installed
 /// (a panic under `CI`).
 #[cfg(test)]
-pub fn spawn_for_test() -> Option<Nvim> {
+pub(crate) fn spawn_for_test() -> Option<Nvim> {
     spawn_for_test_with(&["nvim", "--clean", "--embed"])
 }
 
 /// Reads until the response to `id`, skipping other messages. Returns the
 /// frame holding it.
 #[cfg(test)]
-pub fn wait_response(nvim: &mut Nvim, id: u32) -> Frame {
+pub(crate) fn wait_response(nvim: &mut Nvim, id: u32) -> Frame {
     loop {
         while let Some(frame) = nvim.next().unwrap() {
             if let rpc::Message::Response { id: got, .. } = frame.message().unwrap()

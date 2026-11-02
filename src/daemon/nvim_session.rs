@@ -16,7 +16,7 @@ use crate::nvim::windows;
 /// How many float windows that have been current are remembered.
 const MAX_ENTERED: usize = 32;
 
-pub struct NvimSession {
+pub(crate) struct NvimSession {
     pub client: Nvim,
     /// Neovim's current window, as the Lua last said; 0 before setup.
     pub current_win: i64,
@@ -42,7 +42,7 @@ pub struct NvimSession {
 
 impl NvimSession {
     /// A session on `client`, before setup.
-    pub fn new(client: Nvim) -> NvimSession {
+    pub(crate) fn new(client: Nvim) -> NvimSession {
         NvimSession {
             client,
             current_win: 0,
@@ -60,7 +60,7 @@ impl NvimSession {
     }
 
     /// Float `win` became current: its group may go native.
-    pub fn note_entered(&mut self, win: i64) {
+    pub(crate) fn note_entered(&mut self, win: i64) {
         if self.entered_floats().contains(&win) {
             return;
         }
@@ -73,21 +73,21 @@ impl NvimSession {
         self.entered_len += 1;
     }
 
-    pub fn entered_floats(&self) -> &[i64] {
+    pub(crate) fn entered_floats(&self) -> &[i64] {
         &self.entered_floats[0..self.entered_len as usize]
     }
 
     /// Makes `win`, the window of pane `pane`, Neovim's current window: the
     /// pane has focus. Input sent from here on goes to it, once Neovim has
     /// switched.
-    pub fn make_current(&mut self, pane: u32, win: i64) -> io::Result<()> {
+    pub(crate) fn make_current(&mut self, pane: u32, win: i64) -> io::Result<()> {
         self.current_win = win;
         self.gate.switch_to(&mut self.client, win, pane)
     }
 
     /// Makes `win`, a float in floating pane `pane`, current. Doesn't touch
     /// `current_win`, which floats don't change. Input waits as for `make_current`.
-    pub fn switch_to_float(&mut self, pane: u32, win: i64) -> io::Result<()> {
+    pub(crate) fn switch_to_float(&mut self, pane: u32, win: i64) -> io::Result<()> {
         self.gate.switch_to(&mut self.client, win, pane)
     }
 
@@ -98,7 +98,7 @@ impl NvimSession {
     /// its window through `type_into` all the same, by its grid, without a
     /// switch. `panes` is as for `type_into`. (`&mut`: aiming a forwarder
     /// sets its grid.)
-    pub fn takes_focus(
+    pub(crate) fn takes_focus(
         &self,
         panes: &mut impl AimForwarder,
         pane: u32,
@@ -120,7 +120,7 @@ impl NvimSession {
 
     /// Sends `bytes`, typed into pane `pane`, to Neovim after the window
     /// switches before it. `panes.aim_forwarder(pane)` finds the pane's `Forwarder`.
-    pub fn type_into(
+    pub(crate) fn type_into(
         &mut self,
         panes: &mut impl AimForwarder,
         pane: u32,
@@ -130,7 +130,8 @@ impl NvimSession {
     }
 
     /// As `type_into`, for a read that came at `at`.
-    pub fn type_into_at(
+    #[cfg(test)]
+    pub(crate) fn type_into_at(
         &mut self,
         panes: &mut impl AimForwarder,
         pane: u32,
@@ -144,7 +145,7 @@ impl NvimSession {
     /// key (see `Forwarder::flush_pending`). False, doing nothing, while a
     /// window switch is in flight: the ESC may still begin a sequence that is
     /// held behind it, so try again later.
-    pub fn flush_pending(
+    pub(crate) fn flush_pending(
         &mut self,
         panes: &mut impl AimForwarder,
         pane: u32,
@@ -161,7 +162,7 @@ impl NvimSession {
     /// Neovim answered request `id`, with error `err` or else `result`: ours
     /// may let held input go on. (See
     /// `FocusGate::answered`.)
-    pub fn answered(
+    pub(crate) fn answered(
         &mut self,
         panes: &mut impl AimForwarder,
         id: u32,
@@ -173,13 +174,13 @@ impl NvimSession {
 
     /// The window switch Neovim hasn't answered yet, if any. Until it does,
     /// what Neovim says about its current window is out of date.
-    pub fn switch_in_flight(&self) -> Option<u32> {
+    pub(crate) fn switch_in_flight(&self) -> Option<u32> {
         self.gate.in_flight()
     }
 
     /// Whether to start the timer for the switch in flight: it's a new one.
     /// Then `recheck_switch` is due after a while.
-    pub fn watch_switch(&mut self) -> bool {
+    pub(crate) fn watch_switch(&mut self) -> bool {
         let Some(id) = self.gate.in_flight() else {
             return false;
         };
@@ -194,7 +195,7 @@ impl NvimSession {
     /// waiting for a key, so asks Neovim whether it is, which a busy one won't
     /// answer. A newer switch than the one watched only starts its wait. True to
     /// start the timer again.
-    pub fn recheck_switch(&mut self) -> io::Result<bool> {
+    pub(crate) fn recheck_switch(&mut self) -> io::Result<bool> {
         let Some(id) = self.gate.in_flight() else {
             return Ok(false);
         };
@@ -207,7 +208,7 @@ impl NvimSession {
     }
 
     /// Attaches as Neovim's UI at `cols` x `rows` and asks for our channel.
-    pub fn attach_ui(&mut self, cols: u32, rows: u32) -> io::Result<()> {
+    pub(crate) fn attach_ui(&mut self, cols: u32, rows: u32) -> io::Result<()> {
         self.client.ui_attach(
             cols,
             rows,
@@ -225,7 +226,7 @@ impl NvimSession {
     /// window still fills the editor, and growing it to the Rex window then
     /// shrinking it to its pane leaves it scrolled, as a dashboard drawn for
     /// the bigger size would be.
-    pub fn fit_ui_to(&mut self, p: &Pane) -> io::Result<()> {
+    pub(crate) fn fit_ui_to(&mut self, p: &Pane) -> io::Result<()> {
         if !self.ready {
             return Ok(());
         }

@@ -14,31 +14,33 @@ use super::render;
 use super::style::{CursorMode, Style};
 
 #[derive(Debug, Clone)]
+#[doc(hidden)]
 pub struct PaneView {
     /// The terminal's size.
     pub cols: u32,
     pub rows: u32,
     /// Draw everything on the next frame.
-    pub full: bool,
+    pub(crate) full: bool,
     /// The grid drawn last, and its size.
-    pub drawn_grid: u32,
-    pub drawn_size: [u32; 2],
+    pub(crate) drawn_grid: u32,
+    pub(crate) drawn_size: [u32; 2],
     /// Message rows drawn over the bottom last frame.
-    pub drawn_msg: u32,
+    pub(crate) drawn_msg: u32,
     /// Tabline rows drawn over the top last frame.
-    pub drawn_tabline: u32,
+    pub(crate) drawn_tabline: u32,
     /// The tabline column the row shown there started at.
-    pub drawn_tabline_col: u32,
-    pub drawn_cursor: Option<render::Cursor>,
+    pub(crate) drawn_tabline_col: u32,
+    pub(crate) drawn_cursor: Option<render::Cursor>,
     /// The cursor's shape and blink as last drawn, with the cursor.
-    pub drawn_cursor_mode: Option<CursorMode>,
+    pub(crate) drawn_cursor_mode: Option<CursorMode>,
     /// The floats drawn last frame.
-    pub drawn_floats: [Rect; MAX_FLOATS],
-    pub drawn_floats_len: u8,
+    pub(crate) drawn_floats: [Rect; MAX_FLOATS],
+    pub(crate) drawn_floats_len: u8,
 }
 
 /// How a pane draws the screen's floats and messages.
 #[derive(Debug, Clone, Copy, Default)]
+#[doc(hidden)]
 pub struct Opts<'a> {
     /// Draws the messages and the screen's floats.
     pub focused: bool,
@@ -61,16 +63,16 @@ pub struct Opts<'a> {
 
 /// A float as drawn, in terminal cells.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Rect {
-    pub grid: u32,
-    pub row: i32,
-    pub col: i32,
-    pub width: u32,
-    pub height: u32,
-    pub on_screen: bool,
-    pub on_msg: bool,
+pub(crate) struct Rect {
+    pub(crate) grid: u32,
+    pub(crate) row: i32,
+    pub(crate) col: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) on_screen: bool,
+    pub(crate) on_msg: bool,
     /// The editor float it hangs from, itself included; 0 if none.
-    pub top: u32,
+    pub(crate) top: u32,
 }
 
 impl Rect {
@@ -105,7 +107,7 @@ impl PaneView {
     }
 
     /// The terminal changed size; its old contents can't be trusted.
-    pub fn resize(&mut self, cols: u32, rows: u32) {
+    pub(crate) fn resize(&mut self, cols: u32, rows: u32) {
         if cols == self.cols && rows == self.rows {
             return;
         }
@@ -424,13 +426,13 @@ impl PaneView {
     }
 
     /// The floats drawn last frame, lowest first.
-    pub fn drawn_floats(&self) -> &[Rect] {
+    pub(crate) fn drawn_floats(&self) -> &[Rect] {
         &self.drawn_floats[0..self.drawn_floats_len as usize]
     }
 
     /// Draws just floats `placed`, moved up and left by `origin`, over a blank
     /// terminal: a group shown in a Rex floating pane. True if it wrote anything.
-    pub fn frame_floats(
+    pub(crate) fn frame_floats(
         &mut self,
         grids: &mut Grids,
         placed: &[Placed],

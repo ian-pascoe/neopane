@@ -9,11 +9,11 @@ use super::pane_helper;
 use super::serve;
 
 /// The launcher is a top layer: any error will do.
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Why the launcher gave up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     NotATerminal,
     NotInRex,
     DaemonFailed,

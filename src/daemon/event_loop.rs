@@ -25,7 +25,8 @@ compile_error!("no event-loop backend for this platform yet");
 
 /// What went wrong with the event loop's backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum Error {
     /// Creating the backend's polling handle failed.
     CreateFailed,
     /// Adding or removing a watch failed.
@@ -46,12 +47,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// The number of signals whose old action is kept.
 const NSIG: usize = 32;
 
-pub struct Loop {
+pub(crate) struct Loop {
     /// Declared before `old`, but dropped after `Loop::drop` restores the
     /// signal actions.
     backend: Backend,
@@ -60,7 +61,7 @@ pub struct Loop {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Event {
+pub(crate) struct Event {
     pub token: usize,
     pub kind: Kind,
     /// The other end hung up. There may still be bytes to read first.
@@ -68,7 +69,7 @@ pub struct Event {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Kind {
+pub(crate) enum Kind {
     #[default]
     Read,
     /// There's room to write.
@@ -89,31 +90,27 @@ impl Default for Event {
 }
 
 impl Loop {
-    pub fn init() -> Result<Loop> {
+    pub(crate) fn init() -> Result<Loop> {
         Ok(Loop {
             backend: Backend::init()?,
             old: [None; NSIG],
         })
     }
 
-    /// Releases the signals, restores their old actions, then closes the
-    /// backend. (Dropping the loop does the same; this just makes it explicit.)
-    pub fn deinit(self) {}
-
     /// Watches `fd` for reading. Adding it again replaces the token.
-    pub fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(crate) fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
         self.backend.add_read(fd, token)
     }
 
     /// Watches `fd`, already watched for reading, for room to write too,
     /// reported under `token`. Adding it again replaces the token.
-    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(crate) fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
         self.backend.add_write(fd, token)
     }
 
     /// Stops watching `fd` for room to write; its read watch stays. Fine if
     /// it wasn't watched for writing.
-    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+    pub(crate) fn remove_write(&self, fd: RawFd) -> Result<()> {
         self.backend.remove_write(fd)
     }
 
@@ -121,7 +118,7 @@ impl Loop {
     /// when its fd closes, but epoll only when every copy of the open file
     /// closes, and a watch left behind reports under the old token, or the
     /// token of whatever gets the fd number next.
-    pub fn remove(&self, fd: RawFd) -> Result<()> {
+    pub(crate) fn remove(&self, fd: RawFd) -> Result<()> {
         self.backend.remove(fd)
     }
 
@@ -131,7 +128,7 @@ impl Loop {
     /// thread that already exists keeps it unblocked and may swallow it. Add
     /// signals before starting other threads, and drop the loop on the thread
     /// that added them.
-    pub fn add_signal(&mut self, sig: libc::c_int, token: usize) -> Result<()> {
+    pub(crate) fn add_signal(&mut self, sig: libc::c_int, token: usize) -> Result<()> {
         let n = sig as usize;
         // only the first time, so a second call can't save our own SIG_IGN
         if self.old[n].is_none() {
@@ -149,12 +146,12 @@ impl Loop {
 
     /// Fires once, `ms` milliseconds from now. Adding timer `id` again
     /// restarts it.
-    pub fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
+    pub(crate) fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
         self.backend.add_timer(id, ms, token)
     }
 
     /// Blocks until something is ready, then fills the start of `buf`.
-    pub fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+    pub(crate) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
         self.backend.wait(buf)
     }
 }
@@ -351,7 +348,7 @@ mod tests {
             loop_.wait(&mut buf).unwrap()
         );
 
-        loop_.deinit();
+        drop(loop_);
         let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
         unsafe { libc::sigaction(libc::SIGUSR1, std::ptr::null(), &mut now) };
         assert_ne!(libc::SIG_IGN, now.sa_sigaction);
@@ -449,7 +446,7 @@ mod tests {
         loop_.add_signal(libc::SIGUSR2, 9).unwrap();
         raise_for_loop(libc::SIGUSR2);
         // SIGUSR2's old action ends the process: it must not arrive now
-        loop_.deinit();
+        drop(loop_);
 
         // SAFETY: a null new action only reads the current one.
         let mut now: libc::sigaction = unsafe { std::mem::zeroed() };

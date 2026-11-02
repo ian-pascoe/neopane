@@ -45,9 +45,9 @@ use crate::screen::pane_view::{Opts, Rect};
 use crate::term::input;
 
 /// The daemon is a top layer: any error will do.
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub struct Daemon {
+pub(crate) struct Daemon {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: String,
     pub sock: String,
@@ -81,7 +81,7 @@ pub struct Daemon {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopReason {
+pub(crate) enum StopReason {
     NvimExited,
     PaneGone,
     Signal,
@@ -89,7 +89,7 @@ pub enum StopReason {
 
 impl StopReason {
     /// The reason's name, as logged.
-    pub fn tag_name(self) -> &'static str {
+    pub(crate) fn tag_name(self) -> &'static str {
         match self {
             StopReason::NvimExited => "nvim_exited",
             StopReason::PaneGone => "pane_gone",
@@ -101,7 +101,7 @@ impl StopReason {
 /// What a loop event's token names; pane tokens are the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
-pub enum Token {
+pub(crate) enum Token {
     Signal,
     NvimSocket,
     HelperListener,
@@ -114,7 +114,7 @@ pub enum Token {
 
 impl Token {
     /// The fixed token `token` is, or None for a pane's.
-    pub fn of(token: usize) -> Option<Token> {
+    pub(crate) fn of(token: usize) -> Option<Token> {
         Some(match token {
             0 => Token::Signal,
             1 => Token::NvimSocket,
@@ -127,13 +127,6 @@ impl Token {
             _ => return None,
         })
     }
-}
-
-/// An event on one of a pane's fds, naming the pane by its id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PaneEvent {
-    pub pane: u32,
-    pub fd: PaneFd,
 }
 
 // the fixed tokens must stay below the pane tokens
@@ -181,7 +174,7 @@ struct Blocks {
 }
 
 /// The panes, as `NvimSession` needs them to send input: borrowed apart from the daemon's `nvim`.
-pub struct PaneForwarders<'a> {
+pub(crate) struct PaneForwarders<'a> {
     pub panes: &'a mut Panes,
     pub grids: &'a Grids,
 }
@@ -213,7 +206,7 @@ impl Drop for Daemon {
 
 impl Daemon {
     /// A daemon on `event_loop`, Neovim and Rex, with no panes yet.
-    pub fn new(
+    pub(crate) fn new(
         event_loop: Loop,
         nvim: NvimSession,
         rex: RexSession,
@@ -241,7 +234,7 @@ impl Daemon {
 
     /// Adds the launcher's pane, already connected, and starts talking to
     /// Neovim and Rex.
-    pub fn start(&mut self, launch_pane: Pane) -> Result<()> {
+    pub(crate) fn start(&mut self, launch_pane: Pane) -> Result<()> {
         // only ever called on startup
         debug_assert!(self.panes.list.is_empty());
 
@@ -255,7 +248,7 @@ impl Daemon {
     }
 
     /// Runs the loop until something calls `stop`, returns why.
-    pub fn run(&mut self, server: &UnixListener) -> Result<StopReason> {
+    pub(crate) fn run(&mut self, server: &UnixListener) -> Result<StopReason> {
         let mut events = [Event::default(); 16];
         while self.stopped.is_none() {
             let mut helper_waiting = false;

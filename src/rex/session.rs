@@ -9,7 +9,7 @@ use super::web_socket::Close;
 
 /// What a request asked for; tags match Rex's methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub(crate) enum Request {
     Attach,
     /// pane
     NewSplit(u32),
@@ -27,7 +27,7 @@ pub enum Request {
 
 impl Request {
     /// The variant's name, as logged.
-    pub fn tag_name(&self) -> &'static str {
+    pub(crate) fn tag_name(&self) -> &'static str {
         match self {
             Request::Attach => "attach",
             Request::NewSplit(_) => "new_split",
@@ -46,21 +46,21 @@ impl Request {
 
 /// Sent, not answered yet.
 #[derive(Debug, Clone, Copy)]
-pub struct Pending {
+pub(crate) struct Pending {
     pub id: u64,
     pub req: Request,
 }
 
 /// Nothing is sent once closed; windows keep working without Rex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Conn {
+pub(crate) enum Conn {
     Attaching,
     Attached,
     Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fetch {
+pub(crate) enum Fetch {
     Idle,
     Running,
     Stale,
@@ -68,7 +68,7 @@ pub enum Fetch {
 
 /// The newest view read, and whether one is on its way.
 #[derive(Debug, Clone, Copy)]
-pub struct View {
+pub(crate) struct View {
     pub rev: i64,
     pub fetch: Fetch,
 }
@@ -84,7 +84,7 @@ impl Default for View {
 
 /// The block Rex has focused, and our change to it still landing.
 #[derive(Debug, Clone, Copy)]
-pub enum FocusedBlock {
+pub(crate) enum FocusedBlock {
     Unknown,
     Settled(ids::Block),
     Requesting {
@@ -94,7 +94,7 @@ pub enum FocusedBlock {
     },
 }
 
-pub struct Session {
+pub(crate) struct Session {
     /// (Owned: the daemon reaches it as `session.client`, e.g. for
     /// `client.fd()`.)
     pub client: Client,
@@ -118,7 +118,7 @@ pub struct Session {
 /// What the daemon has to act on. (Owned, so it outlives the next call to
 /// `next`.)
 #[derive(Debug, Clone, PartialEq)]
-pub enum Update {
+pub(crate) enum Update {
     /// The split asked for `pane` exists, as `block`.
     SplitMade { pane: u32, block: String },
     /// Rex refused the split asked for this pane.
@@ -138,13 +138,13 @@ pub enum Update {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Failed {
+pub(crate) struct Failed {
     pub pane: u32,
 }
 
 /// Which way `focus_direction` moves; Rex's names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
+pub(crate) enum Direction {
     Left,
     Right,
     Up,
@@ -152,7 +152,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    pub fn tag_name(&self) -> &'static str {
+    pub(crate) fn tag_name(&self) -> &'static str {
         match self {
             Direction::Left => "left",
             Direction::Right => "right",
@@ -186,7 +186,7 @@ fn json_f64(v: f64) -> Value {
 
 impl Session {
     /// A session that is attaching; `attach` joins it.
-    pub fn new(client: Client, session_id: String) -> Session {
+    pub(crate) fn new(client: Client, session_id: String) -> Session {
         Session {
             client,
             session_id,
@@ -200,7 +200,7 @@ impl Session {
     }
 
     /// Joins our Rex session, so we hear its events and can split it.
-    pub fn attach(&mut self) -> Result<(), ClientError> {
+    pub(crate) fn attach(&mut self) -> Result<(), ClientError> {
         self.request(
             Request::Attach,
             "session.attach",
@@ -210,7 +210,7 @@ impl Session {
 
     /// One read from Rex. If it hung up or failed, logs it and closes Rex; then
     /// call `next` until None.
-    pub fn read(&mut self) {
+    pub(crate) fn read(&mut self) {
         match self.client.read() {
             Ok(true) => {}
             Ok(false) => self.close_rex("hung up"),
@@ -226,7 +226,7 @@ impl Session {
 
     /// The next update for the daemon, or None when there are none.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Update>, ClientError> {
+    pub(crate) fn next(&mut self) -> Result<Option<Update>, ClientError> {
         if let Some(block) = self.queued_focus.take() {
             return Ok(Some(Update::FocusMoved(block)));
         }
@@ -256,7 +256,7 @@ impl Session {
     }
 
     /// Asks Rex to focus `maybe_block`, unless it already has or will.
-    pub fn focus(&mut self, maybe_block: Option<ids::Block>) -> Result<(), ClientError> {
+    pub(crate) fn focus(&mut self, maybe_block: Option<ids::Block>) -> Result<(), ClientError> {
         if self.conn == Conn::Closed {
             return Ok(());
         }
@@ -296,7 +296,7 @@ impl Session {
 
     /// Asks Rex to focus the nearest block `dir` of the focused one. At an edge
     /// nothing moves. The new focus comes back in the view, as the user's does.
-    pub fn focus_direction(&mut self, dir: Direction) -> Result<(), ClientError> {
+    pub(crate) fn focus_direction(&mut self, dir: Direction) -> Result<(), ClientError> {
         // no wrap: Rex wraps by default on some versions, and an edge must stay put
         self.request(
             Request::FocusDirection,
@@ -310,7 +310,7 @@ impl Session {
     }
 
     /// Rex has focused `maybe_block`, or will once our request lands.
-    pub fn has_focused(&self, maybe_block: Option<ids::Block>) -> bool {
+    pub(crate) fn has_focused(&self, maybe_block: Option<ids::Block>) -> bool {
         let Some(focused_block) = self.current_focus() else {
             return false;
         };
@@ -321,7 +321,7 @@ impl Session {
     }
 
     /// The creator owns a block and sizes it; this lets the app size it instead.
-    pub fn disown(&mut self, block: &str) -> Result<(), ClientError> {
+    pub(crate) fn disown(&mut self, block: &str) -> Result<(), ClientError> {
         self.request(
             Request::DisownBlock,
             "session.disown_block",
@@ -330,7 +330,7 @@ impl Session {
     }
 
     /// Closes a block we made. Its helper, if it ever connects, finds no pane and leaves.
-    pub fn close_block(&mut self, block: &str) -> Result<(), ClientError> {
+    pub(crate) fn close_block(&mut self, block: &str) -> Result<(), ClientError> {
         self.request(
             Request::CloseBlock,
             "block.close",
@@ -340,7 +340,7 @@ impl Session {
 
     /// Moves `block` beside `anchor`, after it (right of it, or below if not `side_by_side`),
     /// leaving `anchor` the fraction `ratio` of the room they share.
-    pub fn move_block(
+    pub(crate) fn move_block(
         &mut self,
         block: &str,
         anchor: &str,
@@ -363,7 +363,7 @@ impl Session {
 
     /// Moves the border between `before` and `after`, which are left of it and right of it
     /// (above and below, if not `side_by_side`), so `before` gets the fraction `ratio` of the room.
-    pub fn resize_pane(
+    pub(crate) fn resize_pane(
         &mut self,
         before: &str,
         after: &str,
@@ -384,7 +384,7 @@ impl Session {
     }
 
     /// Closes a floating layer we made.
-    pub fn close_layer(&mut self, layer: &str) -> Result<(), ClientError> {
+    pub(crate) fn close_layer(&mut self, layer: &str) -> Result<(), ClientError> {
         self.request(
             Request::CloseLayer,
             "session.close_layer",
@@ -394,7 +394,7 @@ impl Session {
 
     /// Asks for a floating layer at `bounds` in our window, holding `layout`.
     /// (`layout` is a JSON value.)
-    pub fn new_layer(
+    pub(crate) fn new_layer(
         &mut self,
         pane_id: u32,
         bounds: [f64; 4],
@@ -421,7 +421,7 @@ impl Session {
     }
 
     /// Send a request to the Rex client, add it to list of pending requests
-    pub fn request(
+    pub(crate) fn request(
         &mut self,
         req: Request,
         method: &str,
@@ -442,7 +442,10 @@ impl Session {
     }
 
     /// Hands an answer to its request's handler.
-    pub fn on_response(&mut self, res: client::Response) -> Result<Option<Update>, ClientError> {
+    pub(crate) fn on_response(
+        &mut self,
+        res: client::Response,
+    ) -> Result<Option<Update>, ClientError> {
         let Some(req) = self.take_pending_request(res.id) else {
             return Ok(None);
         };
@@ -506,7 +509,7 @@ impl Session {
     }
 
     /// Removes and returns the request `id` answers.
-    pub fn take_pending_request(&mut self, id: u64) -> Option<Request> {
+    pub(crate) fn take_pending_request(&mut self, id: u64) -> Option<Request> {
         let i = self.pending_requests.iter().position(|p| p.id == id)?;
         Some(self.pending_requests.swap_remove(i).req)
     }
@@ -665,7 +668,7 @@ impl Session {
 }
 
 /// Always an update: the pane is waiting either way.
-pub fn on_new_split_result(pane_id: u32, result: &client::ResponseResult) -> Update {
+pub(crate) fn on_new_split_result(pane_id: u32, result: &client::ResponseResult) -> Update {
     let ok = match result {
         client::ResponseResult::Ok(val) => val,
         client::ResponseResult::Err(_) => return Update::SplitFailed(Failed { pane: pane_id }),
@@ -726,7 +729,7 @@ fn find_focused_block(snapshot: &Value) -> Option<ids::Block> {
 // Loggers
 
 /// Rex refused a request.
-pub fn log_request_error(req: Request, e: &client::Error) {
+pub(crate) fn log_request_error(req: Request, e: &client::Error) {
     match req {
         Request::NewSplit(pane) => eprintln!(
             "neorex daemon: Rex new_split for pane {pane} failed: {}: {}",

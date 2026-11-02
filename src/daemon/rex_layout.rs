@@ -8,7 +8,7 @@ use crate::rex::client;
 
 /// What a view says, in the order it said it.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LayoutSnapshot {
+pub(crate) struct LayoutSnapshot {
     /// Each block's rect in its window, as fractions: x, y, w, h. A block
     /// named twice is in the list twice, the later one is current.
     pub rects: Vec<(String, [f64; 4])>,
@@ -19,21 +19,21 @@ pub struct LayoutSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LayerBounds {
+pub(crate) struct LayerBounds {
     pub block: String,
     /// x, y, w, h as fractions of the window.
     pub bounds: [f64; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct WindowTiles {
+pub(crate) struct WindowTiles {
     /// None unless the view's id is the length of Rex's.
     pub id: Option<[u8; 43]>,
     /// Its tiled blocks that have a rect.
     pub blocks: Vec<String>,
 }
 
-pub fn read(wins: &[Value]) -> LayoutSnapshot {
+pub(crate) fn read(wins: &[Value]) -> LayoutSnapshot {
     let mut s = LayoutSnapshot::default();
     for w in wins {
         let Some(Value::Array(layers)) = client::get(w, "layers") else {

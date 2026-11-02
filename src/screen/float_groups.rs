@@ -7,11 +7,11 @@
 
 use super::grids::{Grids, MAX_FLOATS, Placed, WinKind, keep_top_floats};
 
-pub const MAX_GROUPS: usize = 4;
+pub(crate) const MAX_GROUPS: usize = 4;
 const MAX_TOPS: usize = MAX_FLOATS;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Group {
+pub(crate) struct Group {
     /// The editor floats in it, by grid.
     pub tops: [u32; MAX_TOPS],
     /// Each top's (zindex, compindex), alongside `tops`.
@@ -33,11 +33,11 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn top_grids(&self) -> &[u32] {
+    pub(crate) fn top_grids(&self) -> &[u32] {
         &self.tops[0..self.tops_len as usize]
     }
 
-    pub fn has_top(&self, top: u32) -> bool {
+    pub(crate) fn has_top(&self, top: u32) -> bool {
         self.top_grids().contains(&top)
     }
 
@@ -109,7 +109,7 @@ impl Group {
 /// The groups to show natively: those with a float in `entered`, the
 /// float windows that have been current. At most `MAX_GROUPS`: past that the
 /// top-most groups (by their highest float) stay. Lowest first, ties in grid order.
-pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
+pub(crate) fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     let mut all: Vec<Group> = Vec::new();
     // each editor float, with the floats hanging from it
     for (&id, w) in &grids.wins {
@@ -177,7 +177,7 @@ pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
 }
 
 /// The floats in group `g`, lowest first. At most `MAX_FLOATS`, the top-most.
-pub fn members(grids: &Grids, g: &Group) -> Vec<Placed> {
+pub(crate) fn members(grids: &Grids, g: &Group) -> Vec<Placed> {
     let mut out: Vec<Placed> = Vec::new();
     for (&id, w) in &grids.wins {
         if w.kind != WinKind::Float {

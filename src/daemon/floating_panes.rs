@@ -21,9 +21,9 @@ use super::nvim_session::NvimSession;
 
 /// About how many cells a Rex floating pane's frame takes, across and down.
 /// Only a first guess: once made, its floats fit whatever size it is.
-pub const LAYER_FRAME: [i32; 2] = [3, 2];
+pub(crate) const LAYER_FRAME: [i32; 2] = [3, 2];
 
-pub struct FloatingPanes<'a> {
+pub(crate) struct FloatingPanes<'a> {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: &'a str,
     pub sock: &'a str,
@@ -37,7 +37,7 @@ pub struct FloatingPanes<'a> {
 impl FloatingPanes<'_> {
     /// A floating layer of ours somewhere else: the user moved it, so its
     /// floats follow.
-    pub fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
+    pub(crate) fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
         let Some(p) = self.panes.by_block(moved.block.as_bytes()) else {
             return false;
         };
@@ -58,7 +58,7 @@ impl FloatingPanes<'_> {
     /// Matches floating panes to groups of floats: new groups get one, and
     /// those whose group closed hang up. A floating pane's size is Rex's: it's
     /// never moved to follow its floats, they follow it.
-    pub fn reconcile_layers(&mut self) -> Result<()> {
+    pub(crate) fn reconcile_layers(&mut self) -> Result<()> {
         let groups = if self.rex.conn != Conn::Closed {
             float_groups::find(self.grids, self.nvim.entered_floats())
         } else {
@@ -115,7 +115,7 @@ impl FloatingPanes<'_> {
 
     /// Fits a floating pane's floats to where it is and the size Rex gave it.
     /// Returns the request's id, if it sent one.
-    pub fn follow_layer(&mut self, id: u32) -> Option<u32> {
+    pub(crate) fn follow_layer(&mut self, id: u32) -> Option<u32> {
         let p = self.panes.by_id(id)?;
         let l = p.layer.as_ref()?;
         let s = p.terminal_surface.as_ref()?;
@@ -157,7 +157,7 @@ impl FloatingPanes<'_> {
 
 /// Bounds for a floating pane around `g`, as fractions of the window,
 /// leaving room for the frame Rex draws around it.
-pub fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
+pub(crate) fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
     let screen = grids.get(1)?;
     if screen.width == 0 || screen.height == 0 {
         return None;
@@ -174,7 +174,7 @@ pub fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
 }
 
 /// Within half a cell of each other on grid 1.
-pub fn same_bounds(grids: &Grids, a: [f64; 4], b: [f64; 4]) -> bool {
+pub(crate) fn same_bounds(grids: &Grids, a: [f64; 4], b: [f64; 4]) -> bool {
     let Some(screen) = grids.get(1) else {
         return true;
     };
@@ -191,7 +191,7 @@ pub fn same_bounds(grids: &Grids, a: [f64; 4], b: [f64; 4]) -> bool {
 }
 
 /// The floating pane showing float `win`, if one does.
-pub fn layer_of_win<'a>(grids: &Grids, panes: &'a Panes, win: i64) -> Option<&'a Pane> {
+pub(crate) fn layer_of_win<'a>(grids: &Grids, panes: &'a Panes, win: i64) -> Option<&'a Pane> {
     let grid = grids.grid_of(win)?;
     let top = grids.place(grid)?.top;
     if top == 0 {
@@ -205,7 +205,7 @@ pub fn layer_of_win<'a>(grids: &Grids, panes: &'a Panes, win: i64) -> Option<&'a
 
 /// A float in group `g` that takes focus: the input of a picker, which
 /// stacks above its box.
-pub fn focusable_in(grids: &Grids, g: &Group) -> Option<i64> {
+pub(crate) fn focusable_in(grids: &Grids, g: &Group) -> Option<i64> {
     let mut best: Option<(i64, u32)> = None;
     for (&id, w) in &grids.wins {
         if w.kind != WinKind::Float || !w.float.focusable {

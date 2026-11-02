@@ -14,7 +14,7 @@ use crate::nvim::windows::{Kind, Layout};
 /// Put `win`'s pane right of (below, if not `side_by_side`) `anchor`'s,
 /// leaving `anchor` the fraction `ratio` of the room they share.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct PaneMove {
+pub(crate) struct PaneMove {
     pub win: i64,
     pub anchor: i64,
     pub side_by_side: bool,
@@ -28,7 +28,7 @@ impl PaneMove {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TabPlacement {
+pub(crate) struct TabPlacement {
     pub moves: [PaneMove; Layout::MAX_NODES],
     pub len: usize,
 }
@@ -50,13 +50,13 @@ impl PartialEq for TabPlacement {
 }
 
 impl TabPlacement {
-    pub fn items(&self) -> &[PaneMove] {
+    pub(crate) fn items(&self) -> &[PaneMove] {
         &self.moves[0..self.len]
     }
 
     /// The moves that arrange the panes of `shown`, the windows that have one,
     /// as `layout` has them. Windows of `layout` not in `shown` are left out.
-    pub fn plan(layout: &Layout, shown: &[i64]) -> TabPlacement {
+    pub(crate) fn plan(layout: &Layout, shown: &[i64]) -> TabPlacement {
         let mut result = TabPlacement::default();
         if layout.len == 0 {
             return result;
@@ -161,7 +161,7 @@ impl Planner<'_> {
 
 /// How far a window of a tab page's layout has got toward having a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowState {
+pub(crate) enum WindowState {
     /// Neovim hasn't drawn it yet, so its pane isn't started.
     Undrawn,
     /// It was drawn and has closed.
@@ -175,7 +175,7 @@ pub enum WindowState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Action {
+pub(crate) enum Action {
     /// Not every window has a pane yet: placing the ones that do would only be moved again.
     Wait,
     /// Its windows are gone.
@@ -191,7 +191,11 @@ pub enum Action {
 /// one for each node of `layout`, given what was `last` done. Sizes only
 /// reach us when Neovim changed them, never from the user resizing panes in
 /// Rex, so a size that changed is applied.
-pub fn decide(layout: &Layout, states: &[WindowState], last: Option<&TabPlacement>) -> Action {
+pub(crate) fn decide(
+    layout: &Layout,
+    states: &[WindowState],
+    last: Option<&TabPlacement>,
+) -> Action {
     let mut shown = [0i64; Layout::MAX_NODES];
     let mut n: usize = 0;
     for (node, state) in layout.items().iter().zip(states) {
@@ -235,17 +239,17 @@ pub fn decide(layout: &Layout, states: &[WindowState], last: Option<&TabPlacemen
 
 /// A set of the nodes of a layout, by index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NodeSet(u64);
+pub(crate) struct NodeSet(u64);
 
 impl NodeSet {
-    pub const EMPTY: NodeSet = NodeSet(0);
+    pub(crate) const EMPTY: NodeSet = NodeSet(0);
 
-    pub fn set(&mut self, at: usize) {
+    pub(crate) fn set(&mut self, at: usize) {
         debug_assert!(at < Layout::MAX_NODES);
         self.0 |= 1 << at;
     }
 
-    pub fn is_set(&self, at: usize) -> bool {
+    pub(crate) fn is_set(&self, at: usize) -> bool {
         debug_assert!(at < Layout::MAX_NODES);
         self.0 & (1 << at) != 0
     }
@@ -253,7 +257,7 @@ impl NodeSet {
 
 /// A tab page's layout as Neovim last said, and how far its panes have got to matching.
 #[derive(Debug, Clone, Copy)]
-pub struct Tab {
+pub(crate) struct Tab {
     pub layout: Layout,
     /// What was done to place its panes, the last time.
     pub placed: Option<TabPlacement>,
@@ -263,7 +267,7 @@ pub struct Tab {
 
 impl Tab {
     /// A tab page with `layout`, whose windows haven't been seen.
-    pub fn new(layout: Layout) -> Tab {
+    pub(crate) fn new(layout: Layout) -> Tab {
         Tab {
             layout,
             placed: None,
@@ -272,7 +276,7 @@ impl Tab {
     }
 
     /// Takes a newer layout, keeping what's known of the windows it still has.
-    pub fn replace(&mut self, layout: Layout) {
+    pub(crate) fn replace(&mut self, layout: Layout) {
         let mut seen = NodeSet::EMPTY;
         for (at, node) in layout.items().iter().enumerate() {
             if node.kind != Kind::Window {

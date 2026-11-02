@@ -12,15 +12,15 @@ use super::event_loop::{self, Loop};
 use super::surface::{Restore, Surface};
 use crate::screen::float_groups::Group;
 
-pub use crate::rex::ids::{block as rex_block, layer as rex_layer};
+pub(crate) use crate::rex::ids::{block as rex_block, layer as rex_layer};
 
 /// Never 0: Neovim's API reads 0 as the current window.
-pub type NeovimWindowHandle = i64;
+pub(crate) type NeovimWindowHandle = i64;
 
-pub type RexBlock = crate::rex::ids::Block;
-pub type RexLayer = crate::rex::ids::Layer;
+pub(crate) type RexBlock = crate::rex::ids::Block;
+pub(crate) type RexLayer = crate::rex::ids::Layer;
 
-pub struct Pane {
+pub(crate) struct Pane {
     /// Matches a helper's hello. 0 is the startup pane.
     pub id: u32,
     pub rex_block: Option<RexBlock>,
@@ -43,14 +43,14 @@ pub struct Pane {
 
 /// What `Pane::last_asked_win_size` holds: the grid, and the window's cols x rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LastAskedWinSize {
+pub(crate) struct LastAskedWinSize {
     pub grid: u32,
     pub cols: u32,
     pub rows: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Fit {
+pub(crate) enum Fit {
     #[default]
     None,
     /// The request's id.
@@ -60,7 +60,7 @@ pub enum Fit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Layer {
+pub(crate) struct Layer {
     pub group: Group,
     /// Rex's id for it, once made.
     pub id: Option<RexLayer>,
@@ -74,7 +74,7 @@ pub struct Layer {
 
 impl Layer {
     /// A layer for `group`, not yet made in Rex.
-    pub fn new(group: Group) -> Layer {
+    pub(crate) fn new(group: Group) -> Layer {
         Layer {
             group,
             id: None,
@@ -85,7 +85,7 @@ impl Layer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Close {
+pub(crate) enum Close {
     /// The terminal is already gone, so it isn't restored.
     RexPaneClosed,
     WindowClosed,
@@ -93,67 +93,26 @@ pub enum Close {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Part {
-    RexBlock,
-    TerminalSurface,
-    NeovimWindow,
-}
-
-/// A set of `Part`s.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Parts(u8);
-
-impl Parts {
-    pub fn empty() -> Parts {
-        Parts(0)
-    }
-
-    pub fn init_one(part: Part) -> Parts {
-        Parts(1 << part as u8)
-    }
-
-    pub fn init_many(parts: &[Part]) -> Parts {
-        let mut set = Parts::empty();
-        for &part in parts {
-            set.insert(part);
-        }
-        set
-    }
-
-    pub fn insert(&mut self, part: Part) {
-        self.0 |= 1 << part as u8;
-    }
-
-    pub fn contains(&self, part: Part) -> bool {
-        self.0 & (1 << part as u8) != 0
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0 == 0
-    }
-}
-
 /// Above Daemon's fixed tokens, so they never clash.
-pub const TOKEN_BASE: usize = 8;
+pub(crate) const TOKEN_BASE: usize = 8;
 
 /// Which of a pane's fds an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum PaneFd {
+pub(crate) enum PaneFd {
     HelperSocket = 0,
     Terminal = 1,
 }
 
 /// What `decode_token` finds in a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodedToken {
+pub(crate) struct DecodedToken {
     pub id: u32,
     pub source_fd: PaneFd,
 }
 
 /// The pane may be gone; look it up by id.
-pub fn decode_token(t: usize) -> DecodedToken {
+pub(crate) fn decode_token(t: usize) -> DecodedToken {
     DecodedToken {
         id: u32::try_from((t - TOKEN_BASE) / 2).expect("pane token out of range"),
         source_fd: if (t - TOKEN_BASE).is_multiple_of(2) {
@@ -167,7 +126,7 @@ pub fn decode_token(t: usize) -> DecodedToken {
 impl Pane {
     /// When the ESC that ended the pane's last read, if one waits, is due to
     /// be the Escape key.
-    pub fn escape_deadline(&self) -> Option<std::time::Instant> {
+    pub(crate) fn escape_deadline(&self) -> Option<std::time::Instant> {
         self.terminal_surface
             .as_ref()
             .and_then(|s| s.forwarder.escape_deadline())
@@ -189,14 +148,8 @@ impl Pane {
         }
     }
 
-    /// A pane that only has `id`, for the tests of other modules.
-    #[cfg(test)]
-    pub fn for_test(id: u32) -> Pane {
-        Pane::blank(id)
-    }
-
     /// e.g. `<C-w>v`.
-    pub fn from_neovim_window(id: u32, window_handle: NeovimWindowHandle) -> Pane {
+    pub(crate) fn from_neovim_window(id: u32, window_handle: NeovimWindowHandle) -> Pane {
         assert!(window_handle != 0);
         Pane {
             neovim_window_handle: Some(window_handle),
@@ -205,24 +158,15 @@ impl Pane {
     }
 
     /// A Rex floating pane for a group of floats.
-    pub fn from_group(id: u32, group: Group) -> Pane {
+    pub(crate) fn from_group(id: u32, group: Group) -> Pane {
         Pane {
             layer: Some(Layer::new(group)),
             ..Pane::blank(id)
         }
     }
 
-    /// e.g. Cmd+D. Not used yet.
-    pub fn from_rex_pane(id: u32, block: RexBlock, surface: Box<Surface>) -> Pane {
-        Pane {
-            rex_block: Some(block),
-            terminal_surface: Some(surface),
-            ..Pane::blank(id)
-        }
-    }
-
     /// The pane `neorex` was run in. `block` is None without REX_BLOCK.
-    pub fn startup(block: Option<RexBlock>, surface: Box<Surface>) -> Pane {
+    pub(crate) fn startup(block: Option<RexBlock>, surface: Box<Surface>) -> Pane {
         Pane {
             rex_block: block,
             terminal_surface: Some(surface),
@@ -230,41 +174,20 @@ impl Pane {
         }
     }
 
-    /// Needs no Rex block: drawing only uses the terminal.
-    pub fn drawable(&self) -> bool {
-        self.neovim_window_handle.is_some()
-            && self.terminal_surface.is_some()
-            && self.closing.is_none()
-    }
-
     /// A floating pane ready to draw its floats.
-    pub fn layer_shown(&self) -> bool {
+    pub(crate) fn layer_shown(&self) -> bool {
         self.layer.is_some_and(|l| l.fit == Fit::None)
             && self.terminal_surface.is_some()
             && self.closing.is_none()
     }
 
     /// A floating pane shown or on its way: its floats stay out of other panes.
-    pub fn layer_hides(&self) -> bool {
+    pub(crate) fn layer_hides(&self) -> bool {
         self.layer.is_some() && self.closing.is_none()
     }
 
-    pub fn missing(&self) -> Parts {
-        let mut set = Parts::empty();
-        if self.rex_block.is_none() {
-            set.insert(Part::RexBlock);
-        }
-        if self.terminal_surface.is_none() {
-            set.insert(Part::TerminalSurface);
-        }
-        if self.neovim_window_handle.is_none() {
-            set.insert(Part::NeovimWindow);
-        }
-        set
-    }
-
     /// Holds the pane id, not a pointer, so a stale event can't reach a freed pane.
-    pub fn token(&self, source_fd: PaneFd) -> usize {
+    pub(crate) fn token(&self, source_fd: PaneFd) -> usize {
         TOKEN_BASE + 2 * self.id as usize + source_fd as usize
     }
 
@@ -272,7 +195,7 @@ impl Pane {
     /// closing while the daemon runs is restored without waiting for its
     /// terminal; one the daemon leaves as it ends (`closing` is `Shutdown`, or
     /// None before the pane was set up) waits a moment for it.
-    pub fn deinit(self) {
+    pub(crate) fn deinit(self) {
         let restore = match self.closing {
             Some(Close::RexPaneClosed) => Restore::No,
             Some(Close::WindowClosed | Close::RequestFailed) => Restore::Now,
@@ -285,14 +208,14 @@ impl Pane {
 
     /// `deinit` as the daemon gives up, leaving `message` on the restored
     /// terminal.
-    pub fn deinit_with_message(self, message: &[u8]) {
+    pub(crate) fn deinit_with_message(self, message: &[u8]) {
         if let Some(surface) = self.terminal_surface {
             surface.destroy(Restore::Waiting, Some(message));
         }
     }
 
     /// Give helper and terminal fds to the loop
-    pub fn register_with(&self, event_loop: &Loop) -> event_loop::Result<()> {
+    pub(crate) fn register_with(&self, event_loop: &Loop) -> event_loop::Result<()> {
         let surface = self.terminal_surface.as_ref().expect("no terminal surface");
         event_loop.add_read(surface.helper_fd(), self.token(PaneFd::HelperSocket))?;
         let terminal_fd: RawFd = surface.terminal.fd;
@@ -303,7 +226,7 @@ impl Pane {
     /// is hung up: closing the terminal's fd doesn't take it off the loop on
     /// Linux, as the helper and Rex's shell hold copies of it. A pane that was
     /// never registered is fine.
-    pub fn unregister_from(&self, event_loop: &Loop) {
+    pub(crate) fn unregister_from(&self, event_loop: &Loop) {
         if let Some(surface) = &self.terminal_surface {
             let _ = event_loop.remove(surface.helper_fd());
             let _ = event_loop.remove(surface.terminal.fd);
@@ -329,75 +252,15 @@ mod tests {
         let from_window = Pane::from_neovim_window(3, 1000);
         assert_eq!(3, from_window.id);
         assert_eq!(1000, from_window.neovim_window_handle.unwrap());
-        assert_eq!(
-            Parts::init_many(&[Part::RexBlock, Part::TerminalSurface]),
-            from_window.missing()
-        );
-
-        let from_rex = Pane::from_rex_pane(4, test_block(), Surface::for_test(80, 24));
-        assert_eq!(4, from_rex.id);
-        assert_eq!(Parts::init_one(Part::NeovimWindow), from_rex.missing());
+        assert!(from_window.rex_block.is_none() && from_window.terminal_surface.is_none());
 
         let at_startup = Pane::startup(Some(test_block()), Surface::for_test(80, 24));
         assert_eq!(0, at_startup.id);
-        assert_eq!(Parts::init_one(Part::NeovimWindow), at_startup.missing());
+        assert!(at_startup.rex_block.is_some() && at_startup.terminal_surface.is_some());
+        assert!(at_startup.neovim_window_handle.is_none());
 
         let without_block = Pane::startup(None, Surface::for_test(80, 24));
-        assert_eq!(
-            Parts::init_many(&[Part::RexBlock, Part::NeovimWindow]),
-            without_block.missing()
-        );
-    }
-
-    #[test]
-    fn missing_and_drawable_for_every_mix_of_parts() {
-        for bits in 0..8 {
-            let has_block = (bits & 1) != 0;
-            let has_surface = (bits & 2) != 0;
-            let has_window = (bits & 4) != 0;
-            let pane = Pane {
-                id: 1,
-                rex_block: has_block.then(test_block),
-                terminal_surface: has_surface.then(|| Surface::for_test(80, 24)),
-                neovim_window_handle: has_window.then_some(1000),
-                ..Pane::blank(1)
-            };
-
-            let mut want = Parts::empty();
-            if !has_block {
-                want.insert(Part::RexBlock);
-            }
-            if !has_surface {
-                want.insert(Part::TerminalSurface);
-            }
-            if !has_window {
-                want.insert(Part::NeovimWindow);
-            }
-            assert_eq!(want, pane.missing());
-
-            // the block doesn't matter
-            assert_eq!(has_surface && has_window, pane.drawable());
-        }
-    }
-
-    #[test]
-    fn a_closing_pane_isnt_drawable_whatever_the_reason() {
-        for reason in [
-            Close::RexPaneClosed,
-            Close::WindowClosed,
-            Close::RequestFailed,
-            Close::Shutdown,
-        ] {
-            let pane = Pane {
-                id: 1,
-                rex_block: Some(test_block()),
-                terminal_surface: Some(Surface::for_test(80, 24)),
-                neovim_window_handle: Some(1000),
-                closing: Some(reason),
-                ..Pane::blank(1)
-            };
-            assert!(!pane.drawable());
-        }
+        assert!(without_block.rex_block.is_none() && without_block.terminal_surface.is_some());
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! neorex: a Rex-native Neovim frontend.
 
+#![warn(unreachable_pub)]
+
 pub mod daemon;
 pub mod debug;
 pub mod nvim;
-pub mod rex;
+pub(crate) mod rex;
 pub mod screen;
-pub mod term;
+pub(crate) mod term;
