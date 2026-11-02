@@ -40,6 +40,9 @@ pub struct Forwarder {
     pub parser: input::Parser,
     /// The next `nvim_paste` phase: 1 starts a paste, 2 continues it.
     pub paste_phase: i64,
+    /// The last paste chunk ended in CR: an LF starting the next chunk is the
+    /// other half of that CRLF, not a second line break.
+    pub paste_ended_in_cr: bool,
     /// For the debug commands; the real editor gives Ctrl+Q to Neovim.
     pub ctrl_q_quits: bool,
     /// The grid mouse events land on; 0 without ext_multigrid.
@@ -65,6 +68,7 @@ impl Default for Forwarder {
         Forwarder {
             parser: input::Parser::default(),
             paste_phase: 1,
+            paste_ended_in_cr: false,
             ctrl_q_quits: true,
             grid: 0,
             tabline_rows: 0,
@@ -172,6 +176,12 @@ impl Forwarder {
         Ok(self.read(nvim, bytes, false)?.more)
     }
 
+    /// Begins a paste: the next chunk starts it.
+    fn start_paste(&mut self) {
+        self.paste_phase = 1;
+        self.paste_ended_in_cr = false;
+    }
+
     /// Like `feed`, but stops after the first key: what follows it is left for
     /// a later `feed`. Doesn't quit.
     pub fn feed_key(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<Fed> {
@@ -186,7 +196,7 @@ impl Forwarder {
         while let Some(event) = self.parser.next() {
             match event {
                 Event::Focus(focused) => self.focused = Some(focused),
-                Event::PasteStart => self.paste_phase = 1,
+                Event::PasteStart => self.start_paste(),
                 Event::PasteEnd if self.paste_phase == 2 => paste(nvim, b"", 3)?,
                 _ => {}
             }
@@ -265,11 +275,24 @@ impl Forwarder {
                         break;
                     }
                 }
-                Event::PasteStart => self.paste_phase = 1,
+                Event::PasteStart => self.start_paste(),
                 Event::Paste(text) => {
-                    send_keys(nvim, &mut keys)?;
-                    paste(nvim, text, self.paste_phase)?;
-                    self.paste_phase = 2;
+                    // the LF of a CRLF cut between chunks
+                    let text = match text {
+                        [b'\n', rest @ ..] if self.paste_ended_in_cr => {
+                            self.paste_ended_in_cr = false;
+                            rest
+                        }
+                        _ => text,
+                    };
+                    if let Some(&last) = text.last() {
+                        self.paste_ended_in_cr = last == b'\r';
+                    }
+                    if !text.is_empty() {
+                        send_keys(nvim, &mut keys)?;
+                        paste(nvim, text, self.paste_phase)?;
+                        self.paste_phase = 2;
+                    }
                 }
                 Event::PasteEnd if self.paste_phase == 2 => paste(nvim, b"", 3)?,
                 Event::PasteEnd => {}
@@ -310,14 +333,15 @@ fn send_keys(nvim: &mut Nvim, keys: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-/// One piece of a streamed `nvim_paste`. Terminals send newlines as CR.
+/// One piece of a streamed `nvim_paste`. Terminals send newlines as CR, and
+/// `crlf` makes Neovim break lines at CR, LF and CRLF alike.
 fn paste(nvim: &mut Nvim, text: &[u8], phase: i64) -> Result<()> {
     nvim.request("nvim_paste", 3);
     let len = u32::try_from(text.len()).map_err(|_| Error::TooLong)?;
     let w = nvim.writer();
     msgpack::write_str_header(w, len);
-    w.extend(text.iter().map(|&c| if c == b'\r' { b'\n' } else { c }));
-    msgpack::write_bool(w, true); // crlf: drop any \r\n's \r
+    w.extend_from_slice(text);
+    msgpack::write_bool(w, true); // crlf
     msgpack::write_int(w, phase);
     Ok(())
 }
@@ -579,47 +603,85 @@ mod tests {
         assert!(!f.at_boundary());
     }
 
+    /// The current buffer's lines.
+    fn buffer_lines(nvim: &mut Nvim) -> Vec<Vec<u8>> {
+        use crate::nvim::nvim::wait_response;
+        use crate::nvim::rpc;
+        let id = nvim.request("nvim_buf_get_lines", 4);
+        let w = nvim.writer();
+        msgpack::write_int(w, 0);
+        msgpack::write_int(w, 0);
+        msgpack::write_int(w, -1);
+        msgpack::write_bool(w, false);
+        nvim.flush().unwrap();
+        let frame = wait_response(nvim, id);
+        let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
+            panic!("not a response");
+        };
+        let n = rpc::expect_array(&mut result).unwrap();
+        (0..n)
+            .map(|_| rpc::expect_str(&mut result).unwrap().to_vec())
+            .collect()
+    }
+
+    /// Pastes each of `chunks` as its own read of one bracketed paste into an
+    /// empty buffer of a live Neovim, and returns the buffer's lines.
+    fn paste_chunks(chunks: &[&[u8]]) -> Option<Vec<Vec<u8>>> {
+        let mut nvim = crate::nvim::nvim::spawn_for_test()?;
+        nvim.ui_attach(80, 24, Default::default()).unwrap();
+        let mut f = Forwarder::default();
+        f.feed(&mut nvim, b"\x1b[200~").unwrap();
+        for chunk in chunks {
+            f.feed(&mut nvim, chunk).unwrap();
+        }
+        f.feed(&mut nvim, b"\x1b[201~").unwrap();
+        Some(buffer_lines(&mut nvim))
+    }
+
+    #[test]
+    fn pasted_line_breaks_each_give_one_line_in_neovim() {
+        let ab = vec![b"a".to_vec(), b"b".to_vec()];
+        for text in [&b"a\r\nb"[..], b"a\rb", b"a\nb"] {
+            let Some(got) = paste_chunks(&[text]) else {
+                return;
+            };
+            assert_eq!(ab, got, "{:?}", String::from_utf8_lossy(text));
+        }
+        // a CRLF cut between two chunks
+        assert_eq!(Some(ab), paste_chunks(&[b"a\r", b"\nb"]));
+        // the LF alone in a chunk finishes that CRLF; the next LF is a break
+        assert_eq!(
+            Some(vec![b"a".to_vec(), b"".to_vec(), b"b".to_vec()]),
+            paste_chunks(&[b"a\r", b"\n", b"\nb"])
+        );
+    }
+
     /// Feeds a live Neovim keys and a paste.
     #[test]
     fn keys_and_pastes_reach_neovim() {
-        use crate::nvim::nvim::{spawn_for_test, wait_response};
-        use crate::nvim::rpc;
+        use crate::nvim::nvim::spawn_for_test;
         let Some(mut nvim) = spawn_for_test() else {
             return;
         };
         // an embedded Neovim starts up once a UI attaches
         nvim.ui_attach(80, 24, Default::default()).unwrap();
-        let lines = |nvim: &mut Nvim| -> Vec<Vec<u8>> {
-            let id = nvim.request("nvim_buf_get_lines", 4);
-            let w = nvim.writer();
-            msgpack::write_int(w, 0);
-            msgpack::write_int(w, 0);
-            msgpack::write_int(w, -1);
-            msgpack::write_bool(w, false);
-            nvim.flush().unwrap();
-            let frame = wait_response(nvim, id);
-            let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
-                panic!("not a response");
-            };
-            let n = rpc::expect_array(&mut result).unwrap();
-            (0..n)
-                .map(|_| rpc::expect_str(&mut result).unwrap().to_vec())
-                .collect()
-        };
         let mut f = Forwarder::default();
         assert!(f.feed(&mut nvim, b"ihi").unwrap());
         // nvim_input is queued; wait for Neovim to type it
-        let mut got = lines(&mut nvim);
+        let mut got = buffer_lines(&mut nvim);
         for _ in 0..200 {
             if got == [b"hi".to_vec()] {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
-            got = lines(&mut nvim);
+            got = buffer_lines(&mut nvim);
         }
         assert_eq!(vec![b"hi".to_vec()], got);
         assert!(f.feed(&mut nvim, b"\x1b[200~a\rb\x1b[201~").unwrap());
-        assert_eq!(vec![b"hia".to_vec(), b"b".to_vec()], lines(&mut nvim));
+        assert_eq!(
+            vec![b"hia".to_vec(), b"b".to_vec()],
+            buffer_lines(&mut nvim)
+        );
         // Ctrl+Q quits
         assert!(!f.feed(&mut nvim, b"\x11").unwrap());
     }
