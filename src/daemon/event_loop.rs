@@ -1,22 +1,39 @@
-//! An event loop on kqueue: register fds and signals once, then wait for
+//! An event loop: register fds, signals and timers once, then wait for
 //! whichever is ready. Each watch carries a token that comes back with its
 //! events.
+//!
+//! The platform-neutral part lives here. A backend (`kqueue` for macOS and
+//! FreeBSD) supplies `Backend`, which this file drives; to add a platform,
+//! write a module with the same `Backend` methods and select it below.
 
 use std::fmt;
 use std::os::unix::io::RawFd;
 
-/// What went wrong with the kqueue.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+mod kqueue;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+use kqueue::Backend;
+
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+compile_error!("no event-loop backend for this platform yet");
+
+/// What went wrong with the event loop's backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    KqueueFailed,
-    KeventFailed,
+    /// Creating the backend's polling handle failed.
+    CreateFailed,
+    /// Adding or removing a watch failed.
+    WatchFailed,
+    /// Waiting for events failed.
+    WaitFailed,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::KqueueFailed => f.write_str("KqueueFailed"),
-            Error::KeventFailed => f.write_str("KeventFailed"),
+            Error::CreateFailed => f.write_str("CreateFailed"),
+            Error::WatchFailed => f.write_str("WatchFailed"),
+            Error::WaitFailed => f.write_str("WaitFailed"),
         }
     }
 }
@@ -29,7 +46,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 const NSIG: usize = 32;
 
 pub struct Loop {
-    kq: RawFd,
+    /// Declared before `old`, but dropped after `Loop::drop` restores the
+    /// signal actions.
+    backend: Backend,
     /// Signal actions before add_signal, restored on deinit.
     old: [Option<libc::sigaction>; NSIG],
 }
@@ -63,31 +82,24 @@ impl Default for Event {
 
 impl Loop {
     pub fn init() -> Result<Loop> {
-        // SAFETY: plain syscalls.
-        let kq = unsafe { libc::kqueue() };
-        if kq < 0 {
-            return Err(Error::KqueueFailed);
-        }
-        // not inherited by children such as Neovim
-        unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) };
         Ok(Loop {
-            kq,
+            backend: Backend::init()?,
             old: [None; NSIG],
         })
     }
 
-    /// Restores the old signal actions, then closes the kqueue.
+    /// Restores the old signal actions, then closes the backend.
     /// (Dropping the loop does the same; this just makes it explicit.)
     pub fn deinit(self) {}
 
     /// Watches `fd` for reading. Adding it again replaces the token.
     pub fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
-        self.change(fd as usize, libc::EVFILT_READ, libc::EV_ADD, token)
+        self.backend.add_read(fd, token)
     }
 
     /// Stops watching `fd`. Not needed before closing it.
     pub fn remove(&self, fd: RawFd) -> Result<()> {
-        self.change(fd as usize, libc::EVFILT_READ, libc::EV_DELETE, 0)
+        self.backend.remove(fd)
     }
 
     /// Watches `sig`, and ignores it so its default action never runs.
@@ -104,105 +116,23 @@ impl Loop {
         let mut ignore: libc::sigaction = unsafe { std::mem::zeroed() };
         ignore.sa_sigaction = libc::SIG_IGN;
         unsafe { libc::sigaction(sig, &ignore, std::ptr::null_mut()) };
-        self.change(n, libc::EVFILT_SIGNAL, libc::EV_ADD, token)
+        self.backend.add_signal(sig, token)
     }
 
     /// Fires once, `ms` milliseconds from now. Adding timer `id` again
     /// restarts it.
     pub fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
-        self.change_data(
-            id,
-            libc::EVFILT_TIMER,
-            libc::EV_ADD | libc::EV_ONESHOT,
-            token,
-            ms as isize,
-        )
+        self.backend.add_timer(id, ms, token)
     }
 
     /// Blocks until something is ready, then fills the start of `buf`.
     pub fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
-        // SAFETY: an all-zero kevent is a valid value.
-        let mut raw: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
-        let max = buf.len().min(raw.len()) as libc::c_int;
-        let n: usize = loop {
-            // SAFETY: no changes in, and `raw` has room for `max` events out.
-            let rc = unsafe {
-                libc::kevent(
-                    self.kq,
-                    std::ptr::null(),
-                    0,
-                    raw.as_mut_ptr(),
-                    max,
-                    std::ptr::null(),
-                )
-            };
-            if rc >= 0 {
-                break rc as usize;
-            }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                return Err(Error::KeventFailed);
-            }
-        };
-
-        for (e, out) in raw[..n].iter().zip(buf[..n].iter_mut()) {
-            if e.flags & libc::EV_ERROR != 0 {
-                return Err(Error::KeventFailed);
-            }
-            *out = Event {
-                token: e.udata as usize,
-                kind: match e.filter {
-                    libc::EVFILT_READ => Kind::Read,
-                    libc::EVFILT_SIGNAL => Kind::Signal,
-                    libc::EVFILT_TIMER => Kind::Timer,
-                    _ => unreachable!(), // only these are registered
-                },
-                eof: e.flags & libc::EV_EOF != 0,
-            };
-        }
-        Ok(&buf[..n])
-    }
-
-    /// Registers one change with the kqueue.
-    fn change(&self, ident: usize, filter: i16, flags: u16, token: usize) -> Result<()> {
-        self.change_data(ident, filter, flags, token, 0)
-    }
-
-    fn change_data(
-        &self,
-        ident: usize,
-        filter: i16,
-        flags: u16,
-        token: usize,
-        data: isize,
-    ) -> Result<()> {
-        // SAFETY: an all-zero kevent is a valid value.
-        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
-        change.ident = ident;
-        change.filter = filter;
-        change.flags = flags;
-        change.fflags = 0;
-        change.data = data;
-        change.udata = token as *mut libc::c_void;
-        // SAFETY: one change in, no events out.
-        let rc = unsafe {
-            libc::kevent(
-                self.kq,
-                &change,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        };
-        if rc < 0 {
-            return Err(Error::KeventFailed);
-        }
-        Ok(())
+        self.backend.wait(buf)
     }
 }
 
 impl Drop for Loop {
-    /// Restores the old signal actions, then closes the kqueue.
+    /// Restores the old signal actions; the backend closes itself after.
     fn drop(&mut self) {
         // restore first, so no signal is ignored once nothing watches it
         for (n, maybe_old_action) in self.old.iter().enumerate() {
@@ -211,7 +141,6 @@ impl Drop for Loop {
                 unsafe { libc::sigaction(n as libc::c_int, old_action, std::ptr::null_mut()) };
             }
         }
-        unsafe { libc::close(self.kq) };
     }
 }
 
