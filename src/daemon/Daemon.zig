@@ -26,6 +26,7 @@ const NvimSession = @import("NvimSession.zig");
 const WindowChanges = @import("WindowChanges.zig");
 const Surface = @import("Surface.zig");
 const pane_helper = @import("pane_helper.zig");
+const TabPlacement = @import("TabPlacement.zig");
 
 const Daemon = @This();
 
@@ -43,6 +44,9 @@ changes: WindowChanges = .{},
 /// Rows the screen's tabline takes, as Neovim last said. Drawn over the
 /// panes along the top of the Rex window, as it would be over the screen.
 tabline_rows: u32 = 0,
+/// Where Neovim has the windows of each tab page made after setup, as it
+/// last said, and what was done to place their panes to match.
+tab_layouts: std.AutoArrayHashMapUnmanaged(i64, TabPlacement.Tab) = .empty,
 /// Set by `stop`; `run` returns it.
 stopped: ?StopReason = null,
 
@@ -87,6 +91,7 @@ pub fn deinit(self: *Daemon) void {
     self.panes.deinit(self.gpa, self.io);
     self.grids.deinit(self.gpa);
     self.changes.deinit(self.gpa);
+    self.tab_layouts.deinit(self.gpa);
     self.rex.deinit();
     self.* = undefined;
 }
@@ -387,7 +392,7 @@ fn onNvim(self: *Daemon) !void {
                     try self.reconcile();
                     try self.draw();
                 }
-            } else if (try windows.parseNote(n.method, &params)) |note| switch (note) {
+            } else if (parseNoteOrLog(n.method, &params)) |note| switch (note) {
                 .current => |win| try self.onCurrent(win),
                 .float => |win| try self.onCurrentFloat(win),
                 .entered => |win| try self.onEnteredFloat(win),
@@ -396,6 +401,7 @@ fn onNvim(self: *Daemon) !void {
                 .reopen => |win| if (self.panes.byWin(win) != null) try self.changes.markReopening(self.gpa, win),
                 .reopened => |r| self.onReopened(r.old, r.new),
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
+                .layout => |l| try self.onTabLayout(l),
             };
         },
         .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
@@ -427,6 +433,15 @@ fn onNvim(self: *Daemon) !void {
                 try self.draw();
             }
         },
+    };
+}
+
+/// A note, or null for one that's no note of ours or we can't read: a
+/// message we don't understand shouldn't end the daemon.
+fn parseNoteOrLog(method: []const u8, params: *msgpack.Decoder) ?windows.Note {
+    return windows.parseNote(method, params) catch |err| {
+        std.debug.print("neorex daemon: unreadable {s} note: {t}\n", .{ method, err });
+        return null;
     };
 }
 
@@ -518,7 +533,77 @@ fn reconcile(self: *Daemon) !void {
     };
     for (self.panes.list.items) |*p| try self.sizeWindow(p);
     try self.reconcileLayers();
+    try self.placeTabs();
     try self.nvim.client.flush();
+}
+
+/// Neovim has a new layout for a tab page's windows, or none.
+fn onTabLayout(self: *Daemon, layout: windows.Layout) !void {
+    if (layout.len == 0) {
+        _ = self.tab_layouts.swapRemove(layout.tab);
+        return;
+    }
+    const entry = try self.tab_layouts.getOrPut(self.gpa, layout.tab);
+    if (entry.found_existing) {
+        entry.value_ptr.replace(layout);
+    } else entry.value_ptr.* = .{ .layout = layout };
+    try self.placeTabs();
+}
+
+/// Puts the panes of each tab page's windows where its layout has them,
+/// once they all have a Rex block, and again when the windows, their order
+/// or their sizes change. Rex has them in the order their windows were made,
+/// which isn't where Neovim ends up putting them.
+fn placeTabs(self: *Daemon) !void {
+    if (self.rex.conn == .closed) return;
+    var i = self.tab_layouts.count();
+    while (i > 0) {
+        i -= 1;
+        const tab = &self.tab_layouts.values()[i];
+        var states: [windows.Layout.max_nodes]TabPlacement.WindowState = undefined;
+        for (tab.layout.items(), 0..) |node, at| {
+            states[at] = if (node.kind == .window) self.observeWindow(tab, at, node.win) else .skipped;
+        }
+        switch (TabPlacement.decide(&tab.layout, states[0..tab.layout.len], if (tab.placed) |*p| p else null)) {
+            .wait, .nothing => {},
+            .forget => self.tab_layouts.swapRemoveAt(i),
+            .rearrange => |plan| {
+                tab.placed = plan;
+                for (plan.items()) |m| {
+                    const blocks = self.blocksOf(m) orelse continue;
+                    try self.rex.moveBlock(&blocks.moved, &blocks.anchor, m.side_by_side, m.ratio);
+                }
+            },
+            .resize => |plan| {
+                tab.placed = plan;
+                for (plan.items()) |m| {
+                    const blocks = self.blocksOf(m) orelse continue;
+                    try self.rex.resizePane(&blocks.anchor, &blocks.moved, m.side_by_side, m.ratio);
+                }
+            },
+        }
+    }
+}
+
+/// How far window `win`, node `at` of `tab`'s layout, has got toward a pane;
+/// notes down in `tab` that it was drawn. A window that's undrawn keeps its
+/// tab page waiting, with no time limit: Neovim draws a window it made, or
+/// tells us the layout without it once it's gone.
+fn observeWindow(self: *const Daemon, tab: *TabPlacement.Tab, at: usize, win: i64) TabPlacement.WindowState {
+    if (self.grids.gridOf(win) == null) return if (tab.seen.isSet(at)) .gone else .undrawn;
+    tab.seen.set(at);
+    const p = self.panes.byWin(win) orelse {
+        return if (self.changes.isClosing(win) or self.changes.isReopening(win)) .skipped else .pending;
+    };
+    if (p.closing != null) return .skipped;
+    return if (p.rex_block == null) .pending else .ready;
+}
+
+/// The Rex blocks of the panes a move is between, if both have one.
+fn blocksOf(self: *const Daemon, m: TabPlacement.PaneMove) ?struct { moved: Pane.RexBlock, anchor: Pane.RexBlock } {
+    const moved = (self.panes.byWin(m.win) orelse return null).rex_block orelse return null;
+    const anchor = (self.panes.byWin(m.anchor) orelse return null).rex_block orelse return null;
+    return .{ .moved = moved, .anchor = anchor };
 }
 
 /// Window `new` reopened `old`, closing: it takes `old`'s pane. The next
@@ -590,6 +675,7 @@ fn onSplitMade(self: *Daemon, pane_id: u32, block: []const u8) !void {
     };
     try self.rex.disown(block);
     if (p.neovim_window_handle == self.nvim.current_win) try self.rex.focus(p.rex_block);
+    try self.placeTabs();
 }
 
 /// Rex made the floating pane's layer: link it, and focus it if its float is current.
@@ -1141,8 +1227,9 @@ fn clientFrames(gpa: Allocator, bytes: []const u8) !std.ArrayList([]const u8) {
     return frames;
 }
 
-/// What `onDirection` asks Rex for with `move`: the requests Rex reads.
-fn directionRequests(gpa: Allocator, move: windows.Move) !std.ArrayList([]const u8) {
+/// The requests a daemon with a Rex connection to nothing but a socket sends
+/// while `body` does something with it, as Rex reads them.
+fn fakeRexRequests(gpa: Allocator, comptime Ctx: type, ctx: Ctx, comptime body: fn (*Daemon, Ctx) anyerror!void) !std.ArrayList([]const u8) {
     var fds: [2]std.c.fd_t = undefined;
     if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
     const ours: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
@@ -1153,7 +1240,10 @@ fn directionRequests(gpa: Allocator, move: windows.Move) !std.ArrayList([]const 
     defer client.out.deinit(gpa);
     var d: Daemon = .{ .gpa = gpa, .io = std.testing.io, .loop = undefined, .exe = "", .sock = "", .rex = .{ .gpa = gpa, .client = &client, .session_id = "session:s", .conn = .attached }, .nvim = undefined };
     defer d.rex.deinit();
-    try d.onDirection(move);
+    defer d.panes.list.deinit(gpa);
+    defer d.grids.deinit(gpa);
+    defer d.tab_layouts.deinit(gpa);
+    try body(&d, ctx);
     ours.close(std.testing.io); // the end of what it sent
 
     var all: std.ArrayList(u8) = .empty;
@@ -1165,6 +1255,15 @@ fn directionRequests(gpa: Allocator, move: windows.Move) !std.ArrayList([]const 
         try all.appendSlice(gpa, buf[0..@intCast(n)]);
     }
     return clientFrames(gpa, all.items);
+}
+
+/// What `onDirection` asks Rex for with `move`: the requests Rex reads.
+fn directionRequests(gpa: Allocator, move: windows.Move) !std.ArrayList([]const u8) {
+    return fakeRexRequests(gpa, windows.Move, move, struct {
+        fn f(d: *Daemon, m: windows.Move) anyerror!void {
+            try d.onDirection(m);
+        }
+    }.f);
 }
 
 fn freeFrames(gpa: Allocator, frames: *std.ArrayList([]const u8)) void {
@@ -1198,4 +1297,72 @@ test "a directional move asks Rex to focus that way without wrapping, once per c
     var many = try directionRequests(gpa, .{ .dir = .left, .count = 9999 });
     defer freeFrames(gpa, &many);
     try std.testing.expectEqual(@as(usize, 20), many.items.len);
+}
+
+/// A layout of one row of windows 1 to `n`, `widths` wide, in tab page 2.
+fn windowRow(widths: []const u32) windows.Layout {
+    var layout: windows.Layout = .{ .tab = 2 };
+    var total: u32 = 0;
+    for (widths) |w| total += w;
+    layout.nodes[0] = .{ .kind = .row, .w = total, .h = 10 };
+    for (widths, 1..) |w, at| layout.nodes[at] = .{ .kind = .window, .win = @intCast(at), .w = w, .h = 10, .end = at + 1 };
+    layout.len = widths.len + 1;
+    layout.nodes[0].end = layout.len;
+    return layout;
+}
+
+fn methodsOf(gpa: Allocator, frames: []const []const u8) !std.ArrayList([]const u8) {
+    var methods: std.ArrayList([]const u8) = .empty;
+    for (frames) |f| {
+        const key = "\"method\":\"";
+        const at = std.mem.indexOf(u8, f, key).? + key.len;
+        try methods.append(gpa, f[at..][0..std.mem.indexOfScalar(u8, f[at..], '"').?]);
+    }
+    return methods;
+}
+
+test "a tab page's panes are moved once they all have blocks, and only resized when its sizes change" {
+    const gpa = std.testing.allocator;
+    var frames = try fakeRexRequests(gpa, void, {}, struct {
+        fn f(d: *Daemon, _: void) anyerror!void {
+            // windows 1, 2 and 3 are drawn; the layout puts 3, made last, first
+            for ([_]u32{ 1, 2, 3 }) |n| {
+                try d.grids.wins.put(gpa, n + 10, .{ .win = n, .kind = .external });
+                const p = try d.panes.add(gpa, Pane.fromNeovimWindow(n, n));
+                p.tab = 2;
+                // the layout comes before the last block does
+                if (n < 3) p.rex_block = try Pane.rexBlock(&blockId(n));
+            }
+            var layout = windowRow(&.{ 20, 40, 40 });
+            layout.nodes[1].win = 3;
+            layout.nodes[3].win = 1;
+            try d.onTabLayout(layout);
+            // 1 request would be a subset placed, to be moved again
+            try d.placeTabs();
+            d.panes.byWin(3).?.rex_block = try Pane.rexBlock(&blockId(3));
+            try d.placeTabs();
+            // nothing changed: nothing sent
+            try d.placeTabs();
+            // sizes only
+            layout.nodes[1].w = 30;
+            try d.onTabLayout(layout);
+        }
+    }.f);
+    defer freeFrames(gpa, &frames);
+    var methods = try methodsOf(gpa, frames.items);
+    defer methods.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 4), methods.items.len);
+    try std.testing.expectEqualStrings("session.move_block", methods.items[0]);
+    try std.testing.expectEqualStrings("session.move_block", methods.items[1]);
+    try std.testing.expectEqualStrings("session.resize_pane", methods.items[2]);
+    try std.testing.expectEqualStrings("session.resize_pane", methods.items[3]);
+    // the last pane of the layout goes after the first one's, then the middle one
+    try std.testing.expect(std.mem.indexOf(u8, frames.items[0], "\"block_id\":\"" ++ blockId(1) ++ "\",\"anchor_block_id\":\"" ++ blockId(3) ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frames.items[1], "\"block_id\":\"" ++ blockId(2) ++ "\",\"anchor_block_id\":\"" ++ blockId(3) ++ "\"") != null);
+}
+
+fn blockId(n: u32) [42]u8 {
+    var id: [42]u8 = undefined;
+    _ = std.fmt.bufPrint(&id, "block:00000000-0000-0000-0000-{d:0>12}", .{n}) catch unreachable;
+    return id;
 }

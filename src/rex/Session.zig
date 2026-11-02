@@ -20,6 +20,8 @@ const Request = union(enum) {
     disown_block,
     close_block,
     close_layer,
+    move_block,
+    resize_pane,
 };
 
 /// Sent, not answered yet.
@@ -154,6 +156,31 @@ pub fn closeBlock(self: *Session, block: []const u8) !void {
     try self.request(.close_block, "block.close", .{ .session_id = self.session_id, .block_id = block });
 }
 
+/// Moves `block` beside `anchor`, after it (right of it, or below if not `side_by_side`),
+/// leaving `anchor` the fraction `ratio` of the room they share.
+pub fn moveBlock(self: *Session, block: []const u8, anchor: []const u8, side_by_side: bool, ratio: f64) !void {
+    try self.request(.move_block, "session.move_block", .{
+        .session_id = self.session_id,
+        .block_id = block,
+        .anchor_block_id = anchor,
+        .direction = if (side_by_side) "horizontal" else "vertical",
+        .side = "after",
+        .ratio = ratio,
+    });
+}
+
+/// Moves the border between `before` and `after`, which are left of it and right of it
+/// (above and below, if not `side_by_side`), so `before` gets the fraction `ratio` of the room.
+pub fn resizePane(self: *Session, before: []const u8, after: []const u8, side_by_side: bool, ratio: f64) !void {
+    try self.request(.resize_pane, "session.resize_pane", .{
+        .session_id = self.session_id,
+        .before_block_id = before,
+        .after_block_id = after,
+        .direction = if (side_by_side) "horizontal" else "vertical",
+        .ratio = ratio,
+    });
+}
+
 /// Closes a floating layer we made.
 pub fn closeLayer(self: *Session, layer: []const u8) !void {
     try self.request(.close_layer, "session.close_layer", .{ .session_id = self.session_id, .layer_id = layer });
@@ -190,7 +217,7 @@ pub fn onResponse(self: *Session, res: Client.Response) !?Update {
         .view => return try self.onViewResult(res.result),
         .focus_block => try self.onFocusBlockResult(res.result),
         .attach => try self.onAttachResult(res.result),
-        .focus_direction, .disown_block, .close_block, .close_layer => {},
+        .focus_direction, .disown_block, .close_block, .close_layer, .move_block, .resize_pane => {},
     }
     return null;
 }

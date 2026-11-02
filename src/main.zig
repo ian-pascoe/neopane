@@ -78,6 +78,7 @@ test {
     _ = @import("screen/FloatGroups.zig");
     _ = @import("screen/render.zig");
     _ = @import("daemon/Loop.zig");
+    _ = @import("daemon/TabPlacement.zig");
     _ = @import("daemon/fdpass.zig");
     _ = @import("daemon/pane_helper.zig");
     _ = @import("daemon/Pane.zig");

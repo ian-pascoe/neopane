@@ -12,6 +12,7 @@ local anchors = {}
 local last
 -- tab page made after setup -> { back = the window current before it }.
 -- Its windows show in a Rex floating pane, and it closes with the last.
+-- The record also holds its window layout, as the daemon is told of it.
 local floating = {}
 -- window -> the tab page it belongs to: the one it was made in, or its
 -- origin's for a split. External windows follow the current tab page, so
@@ -187,11 +188,194 @@ local function request_refit()
   end)
 end
 
+-- Most nodes a layout can have for the daemon to read, a row, a column or a
+-- window each. The same as `Layout.max_nodes` in windows.zig.
+local MAX_LAYOUT_NODES = 63
+
+-- A floating tab page's `layout`: nested windows { win, w, h } and rows and
+-- columns { dir, kids, w, h }, in cells. Once a window is external it's out
+-- of winlayout(), so the layout is kept here, and told to the daemon as it
+-- changes. `told` is what it last heard, flattened.
+
+-- the width and height of a row or column `dir` of `kids`
+local function extent(dir, kids)
+  local w, h = 0, 0
+  for _, kid in ipairs(kids) do
+    if dir == 'row' then
+      w, h = w + kid.w, math.max(h, kid.h)
+    else
+      w, h = math.max(w, kid.w), h + kid.h
+    end
+  end
+  return w, h
+end
+
+-- Scales `node` to `w` x `h`, keeping the shares of what's in it. Every kid
+-- keeps a cell, so a row of many in one column gets wider than `w`.
+local function fit_node(node, w, h)
+  local old_w, old_h = math.max(node.w, 1), math.max(node.h, 1)
+  node.w, node.h = w, h
+  if not node.kids then return end
+  local row = node.dir == 'row'
+  local total, old_total = row and w or h, row and old_w or old_h
+  local used = 0
+  for i, kid in ipairs(node.kids) do
+    local size = i == #node.kids and total - used or math.floor((row and kid.w or kid.h) * total / old_total + 0.5)
+    size = math.max(size, 1)
+    used = used + size
+    if row then fit_node(kid, size, h) else fit_node(kid, w, size) end
+  end
+  node.w, node.h = extent(node.dir, node.kids)
+end
+
+-- `node` of an earlier layout without the windows in `drop` and any gone
+local function prune(node, tab, drop)
+  if not node.kids then
+    if not drop[node.win] and shown(node.win) and home[node.win] == tab then return node end
+    return
+  end
+  local kids = {}
+  for _, kid in ipairs(node.kids) do
+    kid = prune(kid, tab, drop)
+    if kid then kids[#kids + 1] = kid end
+  end
+  if #kids <= 1 then return kids[1] end
+  node.kids = kids
+  node.w, node.h = extent(node.dir, kids)
+  return node
+end
+
+-- Whether Neovim sized external `win`, not us fitting it to its pane
+local function sized_by_neovim(win)
+  local p = panes[win]
+  -- one waiting to be put back isn't fitted to its pane, whatever size it has
+  if not p or not p.w or waiting(win) then return false end
+  -- the pane's rows are the text and a statusline
+  return api.nvim_win_get_width(win) ~= p.w or math.abs(api.nvim_win_get_height(win) - text_height(win, p.h)) > 1
+end
+
+-- Takes the sizes Neovim gave the external windows in `node` since
+local function take_sizes(node)
+  if not node.kids then
+    if api.nvim_win_get_config(node.win).external and sized_by_neovim(node.win) then
+      node.w, node.h = api.nvim_win_get_width(node.win), api.nvim_win_get_height(node.win)
+    end
+    return
+  end
+  for _, kid in ipairs(node.kids) do take_sizes(kid) end
+  node.w, node.h = extent(node.dir, node.kids)
+end
+
+-- `node` of winlayout() as one of ours. The anchor stands for the windows
+-- already external, which are `external`.
+local function layout_from_winlayout(node, anchor, external)
+  if node[1] == 'leaf' then
+    local win = node[2]
+    local w, h = api.nvim_win_get_width(win), api.nvim_win_get_height(win)
+    if win ~= anchor then return { win = win, w = w, h = h } end
+    if external then fit_node(external, w, h) end
+    return external
+  end
+  local kids = {}
+  for _, child in ipairs(node[2]) do
+    local kid = layout_from_winlayout(child, anchor, external)
+    if kid and kid.dir == node[1] then
+      vim.list_extend(kids, kid.kids)
+    elseif kid then
+      kids[#kids + 1] = kid
+    end
+  end
+  if #kids <= 1 then return kids[1] end
+  local w, h = extent(node[1], kids)
+  return { dir = node[1], kids = kids, w = w, h = h }
+end
+
+-- the windows in winlayout() `node`, added to `set`
+local function winlayout_windows(node, set)
+  if node[1] == 'leaf' then
+    set[node[2]] = true
+  else
+    for _, kid in ipairs(node[2]) do winlayout_windows(kid, set) end
+  end
+  return set
+end
+
+-- the windows in one of our layouts, added to `set`
+local function layout_windows(node, set)
+  if node.kids then
+    for _, kid in ipairs(node.kids) do layout_windows(kid, set) end
+  else
+    set[node.win] = true
+  end
+  return set
+end
+
+-- node kind (0 window, 1 row, 2 column), then its window or kid count, its
+-- width and height, then its kids
+local function flatten(node, out)
+  if node.kids then
+    vim.list_extend(out, { node.dir == 'row' and 1 or 2, #node.kids, node.w, node.h })
+    for _, kid in ipairs(node.kids) do flatten(kid, out) end
+  else
+    vim.list_extend(out, { 0, node.win, node.w, node.h })
+  end
+  return out
+end
+
+-- Takes floating tab page `tab`'s layout from winlayout(), while its windows
+-- aren't external, and from what it was and the sizes Neovim has since given
+-- external ones; tells the daemon if it changed.
+local function refresh_layout(tab)
+  local t = floating[tab]
+  if not t or not api.nvim_tabpage_is_valid(tab) then return end
+  local anchor = anchor_of(tab)
+  local node = vim.fn.winlayout(api.nvim_tabpage_get_number(tab))
+  local ordinary = winlayout_windows(node, {})
+  ordinary[anchor or 0] = nil
+  local earlier = t.layout
+  local known = earlier and layout_windows(earlier, {}) or {}
+  local any_new = false
+  for win in pairs(ordinary) do any_new = any_new or not known[win] end
+  local latest
+  if earlier and anchor and not any_new then
+    -- making windows external moves the others about, so their sizes in
+    -- winlayout() aren't the ones they were given
+    latest = prune(earlier, tab, {})
+    if latest then take_sizes(latest) end
+  else
+    -- without an anchor, nothing is external: winlayout() has it all
+    earlier = anchor and earlier and prune(earlier, tab, ordinary)
+    if earlier then take_sizes(earlier) end
+    latest = layout_from_winlayout(node, anchor, earlier or nil)
+  end
+  t.layout = latest
+  local flat = latest and flatten(latest, {}) or {}
+  -- more than the daemon reads: it's told there's none, and places nothing
+  if #flat > 4 * MAX_LAYOUT_NODES then flat = {} end
+  local key = table.concat(flat, ',')
+  if t.told == key or (t.told == nil and #flat == 0) then return end
+  t.told = key
+  vim.rpcnotify(chan, 'neorex_layout', tab, flat)
+end
+
+-- after the command that changed it, which may change it more
+local function schedule_layout(tab)
+  local t = floating[tab]
+  if not t or t.pending then return end
+  t.pending = true
+  vim.schedule(function()
+    t.pending = false
+    if floating[tab] == t then refresh_layout(tab) end
+  end)
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or waiting(win) or api.nvim_win_get_config(win).external then return end
   keep_edgy_out(win)
   local tab = api.nvim_win_get_tabpage(win)
+  -- before it leaves winlayout()
+  refresh_layout(tab)
   if not anchor_of(tab) then
     local buf = api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = 'wipe'
@@ -362,6 +546,7 @@ api.nvim_create_autocmd('WinNew', {
         floating[tab] = floating[tab] or { back = last }
         home[win] = tab
         vim.rpcnotify(chan, 'neorex_split', win, false, false, 0, tab)
+        schedule_layout(tab)
       end
       return
     end
@@ -374,6 +559,7 @@ api.nvim_create_autocmd('WinNew', {
       vim.fn.winrestview(view)
     end
     vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0, floating[tab] and tab or 0)
+    if floating[tab] then schedule_layout(tab) end
   end,
 })
 
@@ -459,10 +645,20 @@ local function report_tabline()
   vim.rpcnotify(chan, 'neorex_tabline', n)
 end
 -- whenever Neovim waits for input: plugins such as bufferline set
--- 'showtabline' in their own autocommands, which fire no OptionSet
-api.nvim_create_autocmd({ 'SafeState', 'TabNew', 'TabClosed' }, {
+-- 'showtabline' in their own autocommands, which fire no OptionSet. Not
+-- scheduled: SafeState fires again after every scheduled callback.
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_tabline })
+api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
   group = group,
   callback = function() vim.schedule(report_tabline) end,
+})
+
+-- A floating tab page's windows may have been resized or moved, with nothing
+-- to say so but this. Looked at here, not scheduled: SafeState fires again
+-- after every scheduled callback.
+api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function() refresh_layout(api.nvim_get_current_tabpage()) end,
 })
 
 -- Neovim draws no statusline in an external window when laststatus=3, but each
@@ -544,6 +740,8 @@ local function close_tab(tab)
     if h == tab and shown(w) then return end
   end
   floating[tab] = nil
+  -- the daemon forgets its layout, if it has one
+  if t.told and t.told ~= '' then vim.rpcnotify(chan, 'neorex_layout', tab, {}) end
   -- back to the window it opened over
   if not (last and api.nvim_win_is_valid(last)) then last = t.back end
   if not api.nvim_tabpage_is_valid(tab) or #api.nvim_list_tabpages() == 1 then return end
@@ -589,7 +787,10 @@ api.nvim_create_autocmd('WinClosed', {
     if vim.v.exiting ~= vim.NIL then return end
     if from and floating[from] then
       -- after the command, which may open more windows in it
-      vim.schedule(function() close_tab(from) end)
+      vim.schedule(function()
+        close_tab(from)
+        refresh_layout(from)
+      end)
       return
     end
     if not shown(win) or not api.nvim_win_get_config(win).external then return end
