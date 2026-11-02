@@ -20,8 +20,7 @@ commands:
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// As a Zig `main` that returns an error: its name on stderr, and status 1.
-/// (The Zig also printed the error's return trace.)
+/// Runs, and on an error prints its name on stderr and exits with status 1.
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -87,7 +86,7 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
-/// `s` as a decimal `u32`, as Zig's `std.fmt.parseInt(u32, s, 10)` reads it:
+/// `s` as a decimal `u32`, read the way `parseInt` does:
 /// a leading `+` or `-` (only zero is negative and fits), and `_` between
 /// digits.
 fn parse_u32(s: &[u8]) -> Option<u32> {
@@ -120,9 +119,8 @@ fn parse_u32(s: &[u8]) -> Option<u32> {
 mod tests {
     use super::parse_u32;
 
-    // Not in the Zig, whose parseInt this follows.
     #[test]
-    fn pane_ids_parse_as_zigs_parse_int_reads_them() {
+    fn pane_ids_parse_like_parse_int() {
         assert_eq!(Some(10), parse_u32(b"10"));
         assert_eq!(Some(10), parse_u32(b"+10"));
         assert_eq!(Some(1000), parse_u32(b"1_000"));

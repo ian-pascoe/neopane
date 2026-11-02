@@ -173,7 +173,7 @@ fn print_value(d: &mut Decoder, out: &mut Vec<u8>) -> rpc::Result<()> {
         Token::Int(n) => write!(out, "{n}").expect("writing to a Vec"),
         Token::Uint(n) => write!(out, "{n}").expect("writing to a Vec"),
         Token::Float(f) => {
-            // Zig prints non-finite floats as nan, inf and -inf
+            // non-finite floats print as nan, inf and -inf
             if f.is_nan() {
                 out.extend_from_slice(b"nan");
             } else {

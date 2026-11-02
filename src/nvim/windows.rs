@@ -82,7 +82,7 @@ pub fn ask_channel(nvim: &mut Nvim) -> u32 {
 }
 
 /// What the Lua tells the daemon.
-// A layout is held inline, as in the Zig; see `Layout`.
+// A layout is held inline; see `Layout`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Note {

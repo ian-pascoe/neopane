@@ -128,8 +128,7 @@ impl PaneView {
         let focused = opts.focused;
         grids.style.clear_blends();
         let id = grid_id.unwrap_or(0);
-        // (Zig keeps `*Grid` pointers into `grids`; Rust keeps their ids and
-        // looks them up where they're used.)
+        // (keeps grid ids and looks them up where they're used)
         let gid: Option<u32> = grid_id.filter(|i| grids.grids.contains_key(i));
         let size: [u32; 2] = match gid.and_then(|i| grids.get(i)) {
             Some(gr) => [gr.width, gr.height],

@@ -45,8 +45,8 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// What a helper sends the daemon, one byte each. Zig's `enum(u8)` is
-/// non-exhaustive: any other byte is `Other`.
+/// What a helper sends the daemon, one byte each. Any other byte is
+/// `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
     /// First, with the terminal's fd attached, then the ID in decimal if any.
@@ -211,7 +211,7 @@ mod tests {
         assert!(matches!(parse_hello(b"px"), Err(Error::BadHello)));
     }
 
-    /// Not a Zig test: a hello over a real socket, with a terminal fd.
+    /// A hello over a real socket, with a terminal fd.
     #[test]
     fn accept_hello_takes_the_terminal_and_the_id() {
         let path = std::env::temp_dir().join(format!("neorex-ph-{}.sock", std::process::id()));

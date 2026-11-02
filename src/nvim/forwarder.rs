@@ -33,7 +33,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Room for the keys of one read, as the Zig's fixed buffer had.
+/// Room for the keys of one read.
 const KEYS_CAPACITY: usize = 4096;
 
 pub struct Forwarder {
@@ -250,8 +250,8 @@ impl Forwarder {
                             sent_key: false,
                         });
                     }
-                    // room for the longest key name (the Zig's buffer was
-                    // fixed: a flush here keeps the same chunking)
+                    // room for the longest key name: flush before the buffer
+                    // can't hold it
                     if KEYS_CAPACITY - keys.len() < 32 {
                         send_keys(nvim, &mut keys)?;
                     }
@@ -579,7 +579,7 @@ mod tests {
         assert!(!f.at_boundary());
     }
 
-    /// Not a Zig test: feeds a live Neovim keys and a paste.
+    /// Feeds a live Neovim keys and a paste.
     #[test]
     fn keys_and_pastes_reach_neovim() {
         use crate::nvim::nvim::{spawn_for_test, wait_response};

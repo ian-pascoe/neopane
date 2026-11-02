@@ -18,7 +18,7 @@ use neorex::screen::style::{Attr, Shape, Style, Underline};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// Ghostty's terminal, as golden.zig reads it.
+/// Ghostty's terminal, as the golden tests read it.
 mod vt {
     use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
     use ghostty_vt::render::{CursorVisualStyle, RenderState};
@@ -41,7 +41,7 @@ mod vt {
     #[derive(Debug, Clone)]
     pub struct CellInfo {
         /// The first codepoint, then the rest of the grapheme cluster. Empty
-        /// for a cell with no text: Zig's codepoint 0.
+        /// for a cell with no text.
         pub text: Vec<char>,
         pub spacer_tail: bool,
         /// Its look, or the error `termLook` returns (`PaletteColor`).
@@ -387,7 +387,7 @@ fn test_terminal(cols: u16, rows: u16) -> Result<Vt> {
 }
 
 /// Starts Neovim for a test, or None (after a note) if it isn't installed,
-/// where Zig skipped the test.
+/// so the test is skipped.
 fn spawn_nvim(argv: &[&str]) -> Option<Nvim> {
     match Nvim::spawn(argv) {
         Ok(nvim) => Some(nvim),

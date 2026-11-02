@@ -4,8 +4,8 @@
 use crate::nvim::msgpack::Decoder;
 use crate::nvim::rpc;
 
-/// Rows changed since the renderer last cleared this. Zig's
-/// `std.DynamicBitSetUnmanaged`, with the operations `Grid` and its users need.
+/// Rows changed since the renderer last cleared this: a bit set with the
+/// operations `Grid` and its users need.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirtyRows {
     words: Vec<u64>,

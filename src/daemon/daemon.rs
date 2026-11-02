@@ -4,16 +4,14 @@
 //! and hangs up panes whose windows closed; then every pane is drawn.
 // TODO: Needs a pretty major rewrite
 //
-// Rust port notes:
-// - The Zig held pointers to the loop and to the Neovim and Rex clients,
-//   all owned by `serve`; here the daemon owns them (`event_loop`,
-//   `nvim.client`, `rex.client`), and drops them after its panes, in the
-//   order `serve`'s defers ran (see `Drop`).
-// - A `*Pane` parameter becomes the pane's id, looked up again after anything
-//   that may add or remove panes (see `Panes`).
-// - The Zig daemon was itself the `panes` its `NvimSession` aims forwarders
-//   through. That would borrow all of `self` while `self.nvim` is borrowed, so
-//   `PaneForwarders` borrows just the panes and grids instead.
+// Ownership notes:
+// - The daemon owns the loop and the Neovim and Rex clients (`event_loop`,
+//   `nvim.client`, `rex.client`), and drops them after its panes (see `Drop`).
+// - A pane is passed around by its id, looked up again after anything that
+//   may add or remove panes (see `Panes`).
+// - `NvimSession` aims forwarders through `PaneForwarders`, which borrows just
+//   the panes and grids: the daemon itself can't be borrowed whole while
+//   `self.nvim` is.
 
 use std::borrow::Cow;
 use std::os::fd::RawFd;
@@ -66,7 +64,7 @@ pub struct Daemon {
     pub tab_layouts: IndexMap<i64, Tab>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
-    // Last, in the order `serve`'s defers ended them: the loop, then Rex, then Neovim.
+    // Dropped last, in this order: the loop, then Rex, then Neovim.
     pub event_loop: Loop,
     pub rex: RexSession,
     pub nvim: NvimSession,
@@ -80,7 +78,7 @@ pub enum StopReason {
 }
 
 impl StopReason {
-    /// The name the Zig printed (`@tagName`).
+    /// The reason's name, as logged.
     pub fn tag_name(self) -> &'static str {
         match self {
             StopReason::NvimExited => "nvim_exited",
@@ -90,7 +88,7 @@ impl StopReason {
     }
 }
 
-/// What a loop event's token names; pane tokens are the rest (Zig's `_`).
+/// What a loop event's token names; pane tokens are the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Token {
@@ -119,7 +117,7 @@ impl Token {
     }
 }
 
-/// An event on one of a pane's fds. (The Zig held a `*Pane`; here its id.)
+/// An event on one of a pane's fds, naming the pane by its id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneEvent {
     pub pane: u32,
@@ -162,10 +160,10 @@ const MAX_DIRECTION_COUNT: u32 = 20;
 /// More rows than any terminal has: a 'cmdheight' past it is as good.
 const MAX_MSG_ROWS: u32 = 1000;
 
-/// Most cells of the tabline one pane draws (the Zig's buffer).
+/// Most cells of the tabline one pane draws.
 const TABLINE_MAX: usize = 256;
 
-/// Most grids kept out of the panes that aren't floating panes (the Zig's buffer).
+/// Most grids kept out of the panes that aren't floating panes.
 const SKIP_MAX: usize = float_groups::MAX_GROUPS * 16;
 
 /// What a pane draws of the screen's tabline, and the column it starts at.
@@ -180,8 +178,7 @@ struct Blocks {
     anchor: RexBlock,
 }
 
-/// The panes, as `NvimSession` needs them to send input (the Zig daemon's
-/// `aimForwarder`): borrowed apart from the daemon's `nvim`.
+/// The panes, as `NvimSession` needs them to send input: borrowed apart from the daemon's `nvim`.
 pub struct PaneForwarders<'a> {
     pub panes: &'a mut Panes,
     pub grids: &'a Grids,
@@ -203,8 +200,8 @@ impl AimForwarder for PaneForwarders<'_> {
     }
 }
 
-/// Hangs up the panes first, as the Zig's `deinit` did; the loop and the
-/// clients go after, as their fields drop.
+/// Hangs up the panes first; the loop and the clients go after, as their
+/// fields drop.
 impl Drop for Daemon {
     fn drop(&mut self) {
         self.panes.deinit();
@@ -212,8 +209,7 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
-    /// A daemon on `event_loop`, Neovim and Rex, with no panes yet. (The Zig
-    /// built it with a struct literal and its field defaults.)
+    /// A daemon on `event_loop`, Neovim and Rex, with no panes yet.
     pub fn new(
         event_loop: Loop,
         nvim: NvimSession,
@@ -360,8 +356,8 @@ impl Daemon {
             hello.close();
             return Ok(());
         };
-        // (unlike the Zig's, a failing `Surface::create` closes the helper's
-        // socket and terminal itself)
+        // (a failing `Surface::create` closes the helper's socket and terminal
+        // itself)
         let surface = Surface::create(hello.stream, hello.tty)?;
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.terminal_surface = Some(surface);
@@ -657,7 +653,7 @@ impl Daemon {
         Ok(())
     }
 
-    /// One of the Lua's notes. (Inline in the Zig's `onNvim`.)
+    /// One of the Lua's notes.
     fn on_note(&mut self, note: windows::Note) -> Result<()> {
         match note {
             windows::Note::Current(win) => self.on_current(win)?,
@@ -684,7 +680,7 @@ impl Daemon {
         Ok(())
     }
 
-    /// Neovim answered request `id`. (Inline in the Zig's `onNvim`.)
+    /// Neovim answered request `id`.
     fn on_response(&mut self, id: u32, err: Option<&[u8]>, result: Decoder<'_>) -> Result<()> {
         let mut fwds = PaneForwarders {
             panes: &mut self.panes,
@@ -1535,7 +1531,7 @@ impl Daemon {
         windows::size(&mut self.nvim.client, win, size[0], size[1]);
     }
 
-    /// `size_window` for every pane. (A loop in each of the Zig's callers.)
+    /// `size_window` for every pane.
     fn size_windows(&mut self) {
         for i in 0..self.panes.list.len() {
             let id = self.panes.list[i].id;
@@ -1621,7 +1617,6 @@ impl Daemon {
         let mut col: u32 = 0;
         let mut listed_before = true;
         for q in &self.panes.list {
-            // (the Zig compared pointers; ids are as unique)
             if q.id == p.id {
                 listed_before = false;
                 continue;
@@ -1639,8 +1634,7 @@ impl Daemon {
 
     /// What pane `id` draws of the screen's tabline: its slice of grid 1's top
     /// row, and the column it starts at. Also points the pane's mouse events on
-    /// that row at the same cells. (The Zig took the pane, grid 1 and a buffer
-    /// for the cells; here it looks up the first two, and the cells are owned.)
+    /// that row at the same cells.
     fn prepare_tabline(&mut self, id: u32) -> Tabline {
         let Some(p) = self.panes.by_id(id) else {
             return Tabline {
@@ -1705,8 +1699,8 @@ impl Daemon {
 /// How far window `win`, node `at` of `tab`'s layout, has got toward a pane;
 /// notes down in `tab` that it was drawn. A window that's undrawn keeps its
 /// tab page waiting, with no time limit: Neovim draws a window it made, or
-/// tells us the layout without it once it's gone. (A method in the Zig; here
-/// it takes the daemon's fields it reads, since `tab` is borrowed from it.)
+/// tells us the layout without it once it's gone. (It takes the daemon's fields
+/// it reads, since `tab` is borrowed from it.)
 fn observe_window(
     grids: &Grids,
     panes: &Panes,
@@ -1772,7 +1766,7 @@ fn parse_block(block: &str) -> Option<RexBlock> {
     }
 }
 
-/// A Rex id as the string Rex knows it by. (The Zig passed the bytes.)
+/// A Rex id as the string Rex knows it by.
 fn block_str(id: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(id)
 }
@@ -1857,8 +1851,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     /// A daemon with no Neovim or Rex behind it, only sockets that nothing
-    /// answers: the Zig tests left those `undefined`. `rex_end` reads what it
-    /// sends Rex.
+    /// answers. `rex_end` reads what it sends Rex.
     struct Fixture {
         d: Daemon,
         rex_end: UnixStream,
@@ -2011,7 +2004,7 @@ mod tests {
     }
 
     /// The JSON of each text frame in `bytes`, as a Client wrote them: masked
-    /// frames with 7-bit or 16-bit lengths. (Dropping a Rust `Client` also
+    /// frames with 7-bit or 16-bit lengths. (Dropping a `Client` also
     /// sends a close frame, which isn't text.)
     fn client_frames(bytes: &[u8]) -> Vec<String> {
         let mut frames = Vec::new();

@@ -1,11 +1,10 @@
 //! Links a Rex pane to a Neovim window. The three parts arrive in any
 //! order.
 //!
-//! Rust port note: Zig said "A plain value: only the Surface needs a stable
-//! address". Here a `Pane` is a plain value whose Surface is boxed, and
-//! the rest of the daemon refers to a pane by its `id` (the Zig `*Pane`
-//! becomes a `u32` looked up in `Panes`, which a borrow of `Panes` couldn't
-//! outlive anyway).
+//! A `Pane` is a plain value whose Surface is boxed (only the Surface needs a
+//! stable address), and the rest of the daemon refers to a pane by its `id`,
+//! a `u32` looked up in `Panes`, which a borrow of `Panes` couldn't outlive
+//! anyway.
 
 use std::os::fd::RawFd;
 
@@ -101,7 +100,7 @@ pub enum Part {
     NeovimWindow,
 }
 
-/// A set of `Part`s (Zig's `std.EnumSet(Part)`).
+/// A set of `Part`s.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Parts(u8);
 
@@ -182,8 +181,7 @@ impl Pane {
         }
     }
 
-    /// A pane that only has `id`, for the tests of other modules (the Zig
-    /// tests wrote `.{ .id = id }` and filled in what they needed).
+    /// A pane that only has `id`, for the tests of other modules.
     #[cfg(test)]
     pub fn for_test(id: u32) -> Pane {
         Pane::blank(id)
@@ -295,8 +293,7 @@ mod tests {
         TEST_ID.as_bytes()[..42].try_into().unwrap()
     }
 
-    // The Zig panes pointed at a Surface that was never touched, so were never
-    // deinit'd; here a Surface is a real one over a pty, closed as it drops.
+    // A Surface here is a real one over a pty, closed as it drops.
 
     #[test]
     fn each_constructor_starts_with_the_parts_it_was_given() {
@@ -410,7 +407,7 @@ mod tests {
         }
     }
 
-    // Not in the Zig: the pane's fds go to the loop under its tokens.
+    // The pane's fds go to the loop under its tokens.
     #[test]
     fn register_with_watches_both_fds_under_the_panes_tokens() {
         use super::super::event_loop::{Event, Kind};

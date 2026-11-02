@@ -1,7 +1,7 @@
 //! Editor-wide drawing state that every grid shares: highlights, default
 //! colors and how the cursor looks.
 //!
-//! Colors are Zig's `u24`: a `u32` below `1 << 24`.
+//! Colors are 24-bit: a `u32` below `1 << 24`.
 
 use crate::nvim::msgpack::Decoder;
 use crate::nvim::rpc;
@@ -23,8 +23,7 @@ pub struct Style {
     pub busy: bool,
     /// Highlights made by blending a float over what's under it, with ids
     /// from `BLEND_BASE`. Good for one frame: cleared by `clear_blends`. At
-    /// most `MAX_BLENDED` (Zig's fixed array and `blended_len` are this Vec
-    /// and its length).
+    /// most `MAX_BLENDED`.
     pub blended: Vec<Blended>,
 }
 

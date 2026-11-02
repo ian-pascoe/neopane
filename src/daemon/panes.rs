@@ -1,11 +1,9 @@
 //! The daemon's panes, found by id, Neovim window, Rex block or float group.
 //!
-//! Rust port note: Zig's pointers into the list were "only good until a pane is
-//! added or removed"; here that is a borrow of `Panes`. What outlives one is the
-//! pane's `id` (never reused), so code that must call other `&mut` methods in
+//! A pane found here is only good until a pane is added or removed: it is a
+//! borrow of `Panes`. What outlives one is the pane's `id` (never reused), so code that must call other `&mut` methods in
 //! between holds the id and looks the pane up again (`by_id`/`by_id_mut`).
-//! Each lookup has a `_mut` twin, since Zig's `*const Panes` still gave out
-//! `*Pane`.
+//! Each lookup has a `_mut` twin.
 
 use super::pane::{NeovimWindowHandle, Pane};
 use crate::screen::float_groups::Group;
@@ -152,7 +150,7 @@ mod tests {
         assert!(panes.by_win(1001).is_none());
     }
 
-    // Not in the Zig: the group lookup, and hanging up what's still open.
+    // The group lookup, and hanging up what's still open.
     #[test]
     fn finds_a_floating_pane_by_group_key() {
         let mut panes = Panes::default();
@@ -189,8 +187,8 @@ mod tests {
         assert_eq!(0, helper.read(&mut byte).unwrap());
     }
 
-    // Not in the Zig: dropping Panes hangs up too, as its `defer deinit` did,
-    // and doesn't wait on a terminal nobody reads.
+    // Dropping Panes hangs up too, and doesn't wait on a terminal nobody
+    // reads.
     #[test]
     fn dropping_panes_hangs_up_their_terminals() {
         let mut panes = Panes::default();

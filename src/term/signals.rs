@@ -129,7 +129,7 @@ impl Signals {
             libc::close(self.read_fd);
             libc::close(self.write_fd);
         }
-        // Zig sets `self.* = undefined`; here, mark it closed.
+        // Mark it closed.
         self.read_fd = -1;
         self.write_fd = -1;
         self.old = [None; 32];
@@ -172,7 +172,6 @@ impl Drop for Signals {
 }
 
 /// Which signals fired since the last drain.
-// Zig: `std.bit_set.IntegerBitSet(32)`, the `std.EnumSet` TODO included.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Set {
     pub bits: u32,

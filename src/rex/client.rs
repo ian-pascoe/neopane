@@ -15,8 +15,7 @@ use super::web_socket::{self, Close, Opcode, WebSocket};
 pub const PROTOCOL: &str = "rex.control.v1";
 pub const API_REVISION: i64 = 7;
 
-/// What can go wrong on the connection. Names are the Zig `error.X` names.
-/// (The Zig used inferred error sets; this one is the union of them.)
+/// What can go wrong on the connection.
 #[derive(Debug)]
 pub enum ClientError {
     NotUnixUrl,
@@ -74,17 +73,14 @@ pub struct Client {
     pub max_message: usize,
     /// Scratch for building outgoing JSON.
     pub out: Vec<u8>,
-    /// Scratch for building outgoing frames. (Rust: the Zig buffered frames
-    /// in its stream writer.)
+    /// Scratch for building outgoing frames.
     pub frame: Vec<u8>,
     /// Upgraded, and no close frame sent yet.
     pub open: bool,
-    // (Rust: no `parsed` field. Messages are owned, so they don't borrow the
-    // last parsed JSON.)
 }
 
-/// A message from the server. (Owned, not slices of the parsed JSON as in the
-/// Zig, so the caller can keep using the client while it handles one.)
+/// A message from the server. (Owned, not slices of the parsed JSON, so the
+/// caller can keep using the client while it handles one.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Response(Response),
@@ -93,7 +89,8 @@ pub enum Message {
     Closed(Close),
 }
 
-/// (Zig's `Result`, renamed so it doesn't hide `std::result::Result`.)
+/// A response's outcome: the value, or the error. (Not named `Result`, so it
+/// doesn't hide `std::result::Result`.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseResult {
     Ok(Value),
@@ -177,8 +174,7 @@ impl Client {
     }
 
     /// Connects to `server_url` (`REX_SERVER`), then exchanges hello and welcome.
-    /// Blocks until welcomed. (No write buffer argument: the Zig took one for
-    /// its stream writer.)
+    /// Blocks until welcomed.
     pub fn connect(server_url: &str) -> Result<Client, ClientError> {
         let mut path_buf = [0u8; 256];
         let path = socket_path(server_url, &mut path_buf)?;
@@ -630,7 +626,7 @@ mod tests {
         assert_eq!(404, e.status);
     }
 
-    // Not in the Zig: the bytes a request puts on the wire.
+    // The bytes a request puts on the wire.
     #[test]
     fn request_wire_format() {
         let (ours, mut theirs) = UnixStream::pair().unwrap();

@@ -10,14 +10,13 @@ pub struct Terminal {
     original: libc::termios,
     /// Buffered output. Write a frame, then flush.
     ///
-    /// Rust port note: Zig's `std.Io.Writer` over a caller-supplied buffer
-    /// drained itself when full; this is a growable `Vec` instead, written to
-    /// the fd only by `flush` (so `init` takes no buffer).
+    /// A growable `Vec`, written to the fd only by `flush` (so `init` takes no
+    /// buffer).
     pub writer: Vec<u8>,
 }
 
-/// Calls `f` until it isn't interrupted by a signal, as Zig's
-/// `std.posix.tcgetattr`/`tcsetattr` do.
+/// Calls `f` until it isn't interrupted by a signal, as `tcgetattr` and
+/// `tcsetattr` need.
 fn retry(mut f: impl FnMut() -> libc::c_int) -> io::Result<()> {
     loop {
         if f() == 0 {
@@ -103,8 +102,7 @@ fn write_all(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    // The Zig had no tests here; this runs init, size, flush and deinit over a
-    // pty.
+    // Runs init, size, flush and deinit over a pty.
     #[test]
     fn raw_mode_over_a_pty() {
         let (mut master, mut slave) = (-1, -1);

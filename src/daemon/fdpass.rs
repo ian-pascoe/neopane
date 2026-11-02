@@ -21,8 +21,7 @@ const SEND_CONTROL: usize = unsafe { libc::CMSG_SPACE(FD_SIZE) } as usize;
 /// Sends `bytes` with a copy of `fd` attached, on the Unix socket `sock`.
 /// The fd rides with the first byte sent, so anything the caller buffers for
 /// this socket must be written out before calling this. Writes all of
-/// `bytes` (the Zig flushed its buffered writer here; there is no buffer
-/// in Rust, so nothing is left to flush).
+/// `bytes`.
 pub fn send(sock: &impl AsRawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
     assert!(!bytes.is_empty());
     let sock = sock.as_raw_fd();

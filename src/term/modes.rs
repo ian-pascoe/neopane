@@ -21,7 +21,7 @@ mod tests {
     use super::*;
     use crate::term::input;
 
-    // The Zig had no tests here; this checks the literals match input's consts.
+    // Checks the literals match input's consts.
     #[test]
     fn editor_modes_wrap_the_kitty_flags() {
         assert!(EDITOR_ON.ends_with(input::KITTY_PUSH));

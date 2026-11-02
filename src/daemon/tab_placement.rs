@@ -233,7 +233,7 @@ pub fn decide(layout: &Layout, states: &[WindowState], last: Option<&TabPlacemen
     }
 }
 
-/// A set of the nodes of a layout, by index (Zig's `std.StaticBitSet(Layout.max_nodes)`).
+/// A set of the nodes of a layout, by index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeSet(u64);
 

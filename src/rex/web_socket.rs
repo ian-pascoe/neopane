@@ -4,8 +4,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
-/// What can go wrong in the handshake or in framing. Names are the Zig
-/// `error.X` names.
+/// What can go wrong in the handshake or in framing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     NotUpgraded,
@@ -99,8 +98,8 @@ pub enum Message<'a> {
     Close(Close),
 }
 
-/// A close frame. (`reason` is owned, not a slice of the buffer as in the
-/// Zig, so a close can outlive the next `feed`.)
+/// A close frame. (`reason` is owned, not a slice of the buffer, so a close
+/// can outlive the next `feed`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Close {
     /// None when the frame had no body.
@@ -136,8 +135,8 @@ impl WebSocket {
     /// The next whole message, or None until more is fed. Valid until `next` or `feed`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Message<'_>>, Error> {
-        // (Rust: the parsing loop yields ranges, so the borrow handed out
-        // starts only after it.)
+        // (the parsing loop yields ranges, so the borrow handed out starts
+        // only after it)
         let Some(parsed) = self.parse()? else {
             return Ok(None);
         };

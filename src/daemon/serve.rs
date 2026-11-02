@@ -3,11 +3,10 @@
 //! each of its windows in a Rex pane (see `Daemon`). Exits when Neovim does
 //! or the last pane goes away.
 //!
-//! Rust port note: the Zig's `defer`s become values whose `Drop` does the
-//! same, declared in the same order so they end in the same order: the
-//! daemon (its panes, then the loop, Rex and Neovim), Neovim's process, the
-//! launcher's pane if the daemon never took it, the socket files, the
-//! helpers' socket.
+//! Teardown is by values whose `Drop` does it, declared in the order they
+//! must end: the daemon (its panes, then the loop, Rex and Neovim), Neovim's
+//! process, the launcher's pane if the daemon never took it, the socket files,
+//! the helpers' socket.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -29,7 +28,7 @@ use crate::rex::session::Session as RexSession;
 /// `serve` is a top layer: any error will do.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Why the daemon couldn't start, with the Zig's error names.
+/// Why the daemon couldn't start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     NameTooLong,
@@ -68,8 +67,7 @@ pub fn path(base: &str, suffix: &str) -> String {
 }
 
 /// What `serve` runs against. `run` uses the defaults (`Config::new`); tests
-/// swap the seams. (The Zig's `ready` was a function and a context pointer;
-/// here it's a closure.)
+/// swap the seams.
 pub struct Config<'a> {
     pub rex_url: &'a str,
     pub session_id: &'a str,
@@ -137,7 +135,7 @@ impl Drop for RemoveFiles {
 
 /// Neovim's process. As it drops, after the terminals are restored: SIGHUP
 /// makes Neovim save swap files and exit, and it's waited for. Not one that
-/// has already ended (the Zig's `child.id` was cleared once it was reaped).
+/// has already ended.
 struct NvimChild(Child);
 
 impl Drop for NvimChild {
@@ -154,8 +152,8 @@ pub fn serve<S: AsRef<OsStr>>(base: &str, nvim_args: &[S], mut config: Config<'_
     let sock = path(base, ".sock");
     let nvim_sock = path(base, ".nvim.sock");
     let log = path(base, ".log");
-    // resolved, symlinks and all, as Zig's executablePath was: the `nrex` link
-    // shouldn't end up in every pane's command
+    // resolved, symlinks and all: the `nrex` link shouldn't end up in every
+    // pane's command
     let exe = std::env::current_exe()?
         .canonicalize()?
         .to_string_lossy()
@@ -259,8 +257,7 @@ enum NvimExit {
 }
 
 /// The launcher's pane, owned until the daemon takes it over, and what's
-/// needed to tell its user why a start failed. (Zig's `owned` is whether
-/// `launch` is still here; its `nvim_child` is passed to `give_up`.)
+/// needed to tell its user why a start failed.
 struct Startup<'a> {
     log: &'a str,
     launch: Option<Pane>,
@@ -308,8 +305,8 @@ fn nvim_exit(child: Option<&mut Child>) -> Option<NvimExit> {
     status.signal().map(|sig| NvimExit::Signal(sig as u32))
 }
 
-/// A line for the user: what failed, and where the log is. At most as long
-/// as the Zig's buffer held.
+/// A line for the user: what failed, and where the log is. At most 256 bytes
+/// plus a path.
 fn failure_message(
     step: StartStep,
     err: &(dyn std::error::Error + 'static),
@@ -377,8 +374,8 @@ fn take_pane(server: &UnixListener) -> Result<Box<Surface>> {
         return Err(Error::NoPane.into());
     }
     let hello = pane_helper::accept_hello(server)?;
-    // (unlike the Zig's, a failing `Surface::create` closes the hello's
-    // socket and terminal itself)
+    // (a failing `Surface::create` closes the hello's socket and terminal
+    // itself)
     Ok(Surface::create(hello.stream, hello.tty)?)
 }
 

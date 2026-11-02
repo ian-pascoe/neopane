@@ -40,8 +40,8 @@
 //! while let Some(event) = parser.next() { ... }
 //! ```
 //!
-//! Rust port note: `Event::Paste` and `Event::Unknown` borrow from the parser
-//! (the borrow checker enforces "only valid until the next `next` or `feed`"),
+//! `Event::Paste` and `Event::Unknown` borrow from the parser (the borrow
+//! checker enforces "only valid until the next `next` or `feed`"),
 //! so `feed` copies the bytes into the parser's own buffer, and `take_rest`
 //! returns an owned `Vec`.
 
@@ -135,8 +135,8 @@ pub enum Named {
 /// Which key: a character, or a named key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    /// A character, as a Unicode codepoint (Zig's `u21`; a `u32` here, since a
-    /// terminal can send a surrogate, which `char` can't hold). Ctrl+A is
+    /// A character, as a Unicode codepoint (a `u32`, since a terminal can send
+    /// a surrogate, which `char` can't hold). Ctrl+A is
     /// `'a'` with `ctrl` set.
     Codepoint(u32),
     Named(Named),
@@ -149,7 +149,7 @@ pub struct KeyEvent {
 }
 
 impl KeyEvent {
-    /// A key with no modifiers (Zig's default for `mods`).
+    /// A key with no modifiers.
     pub fn new(key: Key) -> KeyEvent {
         KeyEvent {
             key,
@@ -158,7 +158,7 @@ impl KeyEvent {
     }
 }
 
-/// `Mouse.Button` in the Zig.
+/// Which mouse button an event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
@@ -172,7 +172,7 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
-    /// The name Zig's `@tagName` gives.
+    /// The variant's name, as logged.
     pub fn tag_name(self) -> &'static str {
         match self {
             MouseButton::Left => "left",
@@ -187,7 +187,7 @@ impl MouseButton {
     }
 }
 
-/// `Mouse.Action` in the Zig.
+/// What a mouse event did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseAction {
     Press,
@@ -197,7 +197,7 @@ pub enum MouseAction {
 }
 
 impl MouseAction {
-    /// The name Zig's `@tagName` gives.
+    /// The variant's name, as logged.
     pub fn tag_name(self) -> &'static str {
         match self {
             MouseAction::Press => "press",
@@ -236,8 +236,8 @@ pub enum Event<'a> {
     Unknown(&'a [u8]),
 }
 
-/// Zig's `std.ascii.hexEscape(bytes, .lower)`: printable ASCII as is, the
-/// rest as `\xNN`.
+/// Writes `bytes` with printable ASCII as is and the rest as lowercase
+/// `\xNN`.
 fn write_hex_escape(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for &c in bytes {
         if (0x20..=0x7e).contains(&c) {
@@ -443,7 +443,7 @@ enum Raw {
     UnknownSequence,
 }
 
-// Clone: `Forwarder::takes_focus` reads from a copy (the Zig copies the struct).
+// Clone: `Forwarder::takes_focus` reads from a copy.
 #[derive(Clone)]
 pub struct Parser {
     state: State,
@@ -534,13 +534,13 @@ impl Parser {
     }
 
     /// Whether the parser is between inputs: not partway through an escape
-    /// sequence or character (the Zig reads `parser.state == .ground`).
+    /// sequence or character.
     pub fn at_ground(&self) -> bool {
         self.state == State::Ground
     }
 
     /// Puts the parser partway through a CSI sequence, or back between keys:
-    /// the Zig tests set `parser.state` directly, which is private here.
+    /// the tests can't set `state` directly, which is private.
     #[cfg(test)]
     pub fn set_partway_for_test(&mut self, partway: bool) {
         self.state = if partway { State::Csi } else { State::Ground };
@@ -771,7 +771,7 @@ impl Parser {
             0x20..=0x7e => Some(self.key_event(Key::Codepoint(u32::from(byte)), none)),
             // The first byte of a multi-byte UTF-8 character says its length.
             0xc0..=0xff => {
-                // Zig's `std.unicode.utf8ByteSequenceLength`.
+                // The length is the number of leading one bits.
                 let len = match byte.leading_ones() {
                     2 => 2,
                     3 => 3,

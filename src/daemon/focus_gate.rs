@@ -33,7 +33,7 @@ use crate::nvim::rpc;
 use crate::nvim::windows;
 use crate::term::input;
 
-/// What the gate needs of the panes (Zig's `panes: anytype`): the
+/// What the gate needs of the panes: the
 /// `Forwarder` that parses the input typed into a pane, if it has one.
 pub trait AimForwarder {
     /// The pane `pane`'s forwarder, with its targets aimed, or None if the
@@ -135,8 +135,8 @@ impl FocusGate {
 
     /// Neovim answered request `id`, with error `err` or else `result`: if it
     /// was ours, goes on with what waited for it. `panes` is as for `send`.
-    /// (The Zig takes the `rpc.Message.Response`; a Rust message's variant
-    /// has no type of its own, so its fields come one by one.)
+    /// (A message's response variant has no type of its own, so its fields
+    /// come one by one.)
     pub fn answered(
         &mut self,
         nvim: &mut Nvim,
@@ -257,8 +257,8 @@ pub fn is_blocking(result: &mut Decoder<'_>) -> rpc::Result<bool> {
     Ok(false)
 }
 
-// The Zig FocusGate has no tests of its own (`NvimSession.zig`'s drive it);
-// these cover its queue and `is_blocking` directly.
+// `NvimSession`'s tests drive the gate; these cover its queue and
+// `is_blocking` directly.
 #[cfg(test)]
 mod tests {
     use super::*;

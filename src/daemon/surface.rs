@@ -1,9 +1,7 @@
 //! One pane's terminal.
 //!
-//! Rust port note: Zig's Surface was always heap-allocated and used through
-//! `*Surface`, since `terminal.writer` pointed into `out_buf`. Here the
-//! terminal's buffer is a `Vec`, so nothing points into a Surface; it is still
-//! handed around as a `Box<Surface>` (what `create` returns and a `Pane`
+//! The terminal's buffer is a `Vec`, so nothing points into a Surface. It is
+//! still handed around as a `Box<Surface>` (what `create` returns and a `Pane`
 //! owns), which keeps a `Pane` small to move around in the `Panes` list.
 
 use std::os::fd::{AsRawFd, RawFd};
@@ -24,7 +22,7 @@ pub struct Surface {
 
 impl Surface {
     /// Takes over `helper_socket` and the terminal `tty`. If it fails, both
-    /// are closed (the Zig caller closed them with the helper's hello).
+    /// are closed.
     pub fn create(helper_socket: UnixStream, tty: RawFd) -> std::io::Result<Box<Surface>> {
         let mut terminal = match Terminal::init(tty) {
             Ok(terminal) => terminal,
@@ -130,8 +128,7 @@ pub fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
 #[cfg(test)]
 impl Surface {
     /// A surface over a throwaway pty of `cols` x `rows`, for tests of what
-    /// holds one (the Zig tests used an `undefined` Surface, which Rust has
-    /// no equivalent of). Nothing reads what it draws.
+    /// holds one. Nothing reads what it draws.
     pub fn for_test(cols: u32, rows: u32) -> Box<Surface> {
         let (master, slave) = open_pty(cols as u16, rows as u16);
         let (socket, _other) = UnixStream::pair().unwrap();
@@ -167,7 +164,7 @@ mod tests {
         assert_eq!([10, 1], surface.window_size(0));
     }
 
-    // The Zig had no test of create and destroy; this runs them over a pty.
+    // Runs create and destroy over a pty.
     #[test]
     fn create_takes_the_ptys_size_and_destroy_restores_it() {
         let (master, slave) = open_pty(90, 30);

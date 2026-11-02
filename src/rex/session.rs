@@ -26,7 +26,7 @@ pub enum Request {
 }
 
 impl Request {
-    /// The variant's name as the Zig tag spells it (`@tagName`).
+    /// The variant's name, as logged.
     pub fn tag_name(&self) -> &'static str {
         match self {
             Request::Attach => "attach",
@@ -95,8 +95,8 @@ pub enum FocusedBlock {
 }
 
 pub struct Session {
-    /// (Owned here, where the Zig held a pointer to it: the daemon reaches
-    /// it as `session.client`, e.g. for `client.fd()`.)
+    /// (Owned: the daemon reaches it as `session.client`, e.g. for
+    /// `client.fd()`.)
     pub client: Client,
     pub session_id: String,
 
@@ -115,8 +115,8 @@ pub struct Session {
     pub queued_focus: Option<String>,
 }
 
-/// What the daemon has to act on. (Owned, where the Zig's slices were only
-/// good until the next call to `next`.)
+/// What the daemon has to act on. (Owned, so it outlives the next call to
+/// `next`.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
     /// The split asked for `pane` exists, as `block`.
@@ -167,11 +167,11 @@ fn block_json(block: &ids::Block) -> Value {
     Value::String(String::from_utf8_lossy(block).into_owned())
 }
 
-/// `v` as Zig's `std.json.Stringify` wrote an `f64`: a whole number without a
-/// fraction (`1`, not `1.0`), so Rex reads it the same wherever it wants an integer.
+/// `v` as JSON: a whole number without a fraction (`1`, not `1.0`), so Rex
+/// reads it the same wherever it wants an integer.
 fn json_f64(v: f64) -> Value {
     if !v.is_finite() {
-        // the Zig wrote these as strings
+        // JSON has no non-finite numbers: write them as strings
         return Value::String(if v.is_nan() {
             "nan".into()
         } else {
@@ -185,8 +185,7 @@ fn json_f64(v: f64) -> Value {
 }
 
 impl Session {
-    /// A session that is attaching; `attach` joins it. (The Zig built this
-    /// with a struct literal.)
+    /// A session that is attaching; `attach` joins it.
     pub fn new(client: Client, session_id: String) -> Session {
         Session {
             client,
@@ -380,7 +379,7 @@ impl Session {
     }
 
     /// Asks for a floating layer at `bounds` in our window, holding `layout`.
-    /// (`layout` is a JSON value, where the Zig took any serializable value.)
+    /// (`layout` is a JSON value.)
     pub fn new_layer(
         &mut self,
         pane_id: u32,
@@ -727,8 +726,7 @@ fn log_unexpected_response(req: Request, what: &str) {
     eprintln!("neorex daemon: Rex {} answer has no {what}", req.tag_name());
 }
 
-// The Zig has no tests for this file; these check the JSON written to Rex and
-// the view/focus flow.
+// These check the JSON written to Rex and the view/focus flow.
 #[cfg(test)]
 mod tests {
     use super::*;

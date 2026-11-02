@@ -126,8 +126,7 @@ pub struct Place {
 pub const MAX_FLOATS: usize = 16;
 
 impl Grids {
-    /// Grid `id`, if it exists. (Zig's `get` hands out a mutable pointer from
-    /// a const `self`; Rust splits it into `get` and `get_mut`.)
+    /// Grid `id`, if it exists. (`get_mut` is the mutable twin.)
     pub fn get(&self, id: u32) -> Option<&Grid> {
         self.grids.get(&id)
     }

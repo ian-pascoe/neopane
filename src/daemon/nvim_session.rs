@@ -1,8 +1,7 @@
 //! Our side of the Neovim connection: setup requests, the current window,
 //! and what Neovim was last told about focus.
 //!
-//! Rust port note: the Zig held `client: *Nvim`, owned by `serve`; here the
-//! session owns its `Nvim` (as `rex::session::Session` owns its `Client`),
+//! The session owns its `Nvim` (as `rex::session::Session` owns its `Client`),
 //! and the daemon reaches it as `session.client`.
 
 use std::io;
@@ -42,8 +41,7 @@ pub struct NvimSession {
 }
 
 impl NvimSession {
-    /// A session on `client`, before setup. (The Zig built it with a struct
-    /// literal and its field defaults.)
+    /// A session on `client`, before setup.
     pub fn new(client: Nvim) -> NvimSession {
         NvimSession {
             client,
@@ -132,7 +130,7 @@ impl NvimSession {
     }
 
     /// Neovim answered request `id`, with error `err` or else `result`: ours
-    /// may let held input go on. (The Zig took the response; see
+    /// may let held input go on. (See
     /// `FocusGate::answered`.)
     pub fn answered(
         &mut self,
@@ -242,7 +240,7 @@ mod tests {
 
     #[test]
     fn entered_floats_are_kept_once_and_the_oldest_drop_off() {
-        // the Zig's client was `undefined`: nothing here talks to Neovim
+        // nothing here talks to Neovim
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut s = NvimSession::new(for_test_on(ours));
         s.note_entered(1000);
@@ -257,8 +255,8 @@ mod tests {
     }
 
     /// The rig's two forwarders, the panes' with ids 0, for the first window,
-    /// and 1. (The Zig rig was its own `panes`; here they're a field of their
-    /// own, so the session can be borrowed beside them.)
+    /// and 1. (A field of their own, so the session can be borrowed beside
+    /// them.)
     struct Fwds([Forwarder; 2]);
 
     impl AimForwarder for Fwds {

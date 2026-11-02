@@ -15,8 +15,7 @@ use crate::term::terminal::Terminal;
 
 pub const MAX_PANES: usize = 8;
 
-/// Fixed slots. (The Zig kept each Terminal's output buffer in a caller-owned
-/// `OutBufs` array; a `Terminal` owns its buffer here, so there is none.)
+/// Fixed slots. (Each `Terminal` owns its output buffer.)
 pub struct PaneHost {
     pub panes: [Option<Pane>; MAX_PANES],
     /// Loop tokens from here up, two per slot.
@@ -141,7 +140,7 @@ impl PaneHost {
         });
         self.next_id += 1;
 
-        // (the Zig left a failed slot half-closed; here it's emptied again)
+        // (a failed slot is emptied again)
         match self.greet(i, event_loop) {
             Ok(()) => Ok(()),
             Err(e) => {
