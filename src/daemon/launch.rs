@@ -2,7 +2,6 @@
 //! background, then hands it this terminal and waits as its pane helper.
 
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
@@ -39,16 +38,16 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
         return Err(Error::NotInRex.into());
     }
 
-    let base = serve::base_path()?;
-    let sock = serve::path(&base, ".sock");
-    let log_path = serve::path(&base, ".log");
+    let dir = serve::private_dir()?;
+    let sock = serve::path(&dir, "sock");
+    let log_path = serve::path(&dir, "log");
 
     let exe = std::env::current_exe()?.canonicalize()?;
-    let log = File::create(&log_path)?;
+    let log = serve::create_log(&log_path)?;
     // (the log is closed here once the command, which holds it, is dropped)
     let mut daemon = Command::new(&exe)
         .arg("daemon")
-        .arg(&base)
+        .arg(&dir)
         .args(nvim_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
