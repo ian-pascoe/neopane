@@ -428,11 +428,20 @@ mod tests {
         assert_eq!(pane.token(PaneFd::HelperSocket), got[0].token);
         assert_eq!(Kind::Read, got[0].kind);
 
+        // take the helper's byte, so only the terminal is left to report
+        let helper_fd = pane.terminal_surface.as_ref().unwrap().helper_fd();
+        let mut byte = [0u8; 1];
+        // SAFETY: `byte` is valid for one byte.
+        assert_eq!(1, unsafe {
+            libc::read(helper_fd, byte.as_mut_ptr().cast(), 1)
+        });
+
         // SAFETY: writing to the pty's master, so the terminal has input.
         assert_eq!(1, unsafe { libc::write(master, b"x".as_ptr().cast(), 1) });
-        let mut events = [Event::default(); 4];
         let got = event_loop.wait(&mut events).unwrap();
-        assert!(got.iter().any(|e| e.token == pane.token(PaneFd::Terminal)));
+        assert_eq!(1, got.len());
+        assert_eq!(pane.token(PaneFd::Terminal), got[0].token);
+        assert_eq!(Kind::Read, got[0].kind);
 
         // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
         unsafe { libc::close(master) };

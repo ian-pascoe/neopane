@@ -118,7 +118,7 @@ pub fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut ws,
+            &raw mut ws,
         )
     };
     assert_eq!(0, rc);
