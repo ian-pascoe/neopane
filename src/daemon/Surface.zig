@@ -48,6 +48,15 @@ pub fn destroy(self: *Surface, gpa: std.mem.Allocator, io: std.Io, restore: bool
     gpa.destroy(self);
 }
 
+/// Restores the terminal, then leaves `message` on it: how a daemon that
+/// gives up tells the pane's user why.
+pub fn destroyWithMessage(self: *Surface, gpa: std.mem.Allocator, io: std.Io, message: []const u8) void {
+    self.terminal.writer.writeAll(modes.editor_off) catch {};
+    self.terminal.deinit();
+    _ = std.c.write(self.terminal.fd, message.ptr, message.len);
+    self.destroy(gpa, io, false);
+}
+
 pub fn windowSize(self: *const Surface) [2]u32 {
     return .{ @max(self.view.cols, 1), @max(self.view.rows -| 1, 1) };
 }

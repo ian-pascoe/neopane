@@ -270,6 +270,30 @@ pub fn connectRetry(io: Io, path: []const u8, buffer: []u8) !Nvim {
     return error.Timeout;
 }
 
+/// A listener that starts after `delay_ms`, as Neovim's does behind a slow start.
+fn listenLater(io: Io, path: []const u8, delay_ms: i64, done: *std.atomic.Value(bool)) void {
+    io.sleep(.fromMilliseconds(delay_ms), .awake) catch return;
+    const addr = std.Io.net.UnixAddress.init(path) catch return;
+    var server = addr.listen(io, .{}) catch return;
+    while (!done.load(.acquire)) io.sleep(.fromMilliseconds(10), .awake) catch break;
+    server.deinit(io);
+    Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "connectRetry waits for a socket that appears late" {
+    const io = std.testing.io;
+    const path = "/tmp/neorex-test-slow-start.sock";
+    Io.Dir.cwd().deleteFile(io, path) catch {};
+    var done: std.atomic.Value(bool) = .init(false);
+    const listener = try std.Thread.spawn(.{}, listenLater, .{ io, path, 500, &done });
+    defer listener.join();
+    defer done.store(true, .release);
+
+    var buf: [256]u8 = undefined;
+    const nvim = try connectRetry(io, path, &buf);
+    _ = std.c.close(nvim.read_fd);
+}
+
 test "large reply over several reads" {
     const gpa = std.testing.allocator;
     var buf: [256]u8 = undefined;
