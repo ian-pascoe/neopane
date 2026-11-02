@@ -22,8 +22,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::event_loop::{Event, Loop};
-use super::floating_panes::{self, FloatingPanes, LAYER_FRAME};
+use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
+use super::geometry::{self, Geometry, REX_DEFAULT_SIZE, TAB_LAYER_BOUNDS};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
 use super::pane_helper;
@@ -153,12 +154,6 @@ const SWITCH_RECHECK_MS: u32 = 100;
 /// How long a new split waits for the app to size it before trusting its terminal's size.
 const LAYOUT_WAIT_MS: u32 = 1000;
 
-/// A new Rex terminal's size, cols x rows, until the app lays it out.
-const REX_DEFAULT_SIZE: [u32; 2] = [80, 24];
-
-/// Where a new tab page's floating pane sits, as fractions of the window: x, y, w, h.
-const TAB_LAYER_BOUNDS: [f64; 4] = [0.05, 0.05, 0.9, 0.9];
-
 /// A count on a directional window command repeats the move this many times
 /// at most: a window has few panes to cross, and a stray `9999<C-w>l` must not
 /// send Rex thousands of requests.
@@ -196,7 +191,7 @@ impl AimForwarder for PaneForwarders<'_> {
     /// pane is gone.
     fn aim_forwarder(&mut self, id: u32) -> Option<&mut Forwarder> {
         let pane = self.panes.by_id_mut(id)?;
-        let grid = grid_of_pane(self.grids, pane);
+        let grid = geometry::grid_of_pane(self.grids, pane);
         let floating = pane.layer.is_some();
         let surface = pane.terminal_surface.as_mut()?;
         // a floating pane's default grid is set as it draws
@@ -788,7 +783,9 @@ impl Daemon {
         if let Some(e) = err {
             eprintln!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
-            let size = self.window_size(self.panes.by_id(STARTUP_PANE_ID).unwrap());
+            let size = self
+                .geometry()
+                .window_size(self.panes.by_id(STARTUP_PANE_ID).unwrap());
             let mut result = result;
             let chan = windows::parse_channel(&mut result)?;
             self.nvim.setup_req = windows::setup(&mut self.nvim.client, chan, size[0], size[1]);
@@ -923,7 +920,7 @@ impl Daemon {
                         continue;
                     }
                     let size = match self.panes.by_win(w.win) {
-                        Some(p) => self.window_size(p),
+                        Some(p) => self.geometry().window_size(p),
                         None => self.new_window_size(w.win),
                     };
                     windows::adopt(&mut self.nvim.client, w.win, size[0], size[1]);
@@ -1054,34 +1051,9 @@ impl Daemon {
     fn new_pane_size(&self, win: i64) -> [u32; 2] {
         let sp = self.changes.split_of(win);
         // a tab page's first: its floating pane's size
-        if sp.tab != 0 && self.tab_anchor(sp).is_none() {
-            return self.tab_pane_size();
-        }
-        let Some(p) = self.split_from(sp) else {
-            return REX_DEFAULT_SIZE;
-        };
-        let Some(s) = &p.terminal_surface else {
-            return REX_DEFAULT_SIZE;
-        };
-        let cols = s.view.cols.max(1);
-        let rows = s.view.rows.max(2);
-        if sp.side_by_side {
-            return [(cols / 2).max(1), rows];
-        }
-        [cols, (rows / 2).max(2)]
-    }
-
-    /// A guess at a new tab page's floating pane's terminal size, cols x rows.
-    fn tab_pane_size(&self) -> [u32; 2] {
-        let Some(screen) = self.grids.get(1) else {
-            return REX_DEFAULT_SIZE;
-        };
-        let w = (f64::from(screen.width) * TAB_LAYER_BOUNDS[2]) as i64;
-        let h = (f64::from(screen.height) * TAB_LAYER_BOUNDS[3]) as i64;
-        [
-            (w - i64::from(LAYER_FRAME[0])).max(1) as u32,
-            (h - i64::from(LAYER_FRAME[1])).max(2) as u32,
-        ]
+        let first_of_tab = sp.tab != 0 && self.tab_anchor(sp).is_none();
+        self.geometry()
+            .new_pane_size(sp, self.split_from(sp), first_of_tab)
     }
 
     /// The pane a new window splits: its origin's, else the focused one.
@@ -1343,8 +1315,8 @@ impl Daemon {
                     &mut s.terminal.writer,
                 )
             } else {
-                let grid = self.grid_of_pane(p);
-                let origin = self.pane_origin(p);
+                let grid = geometry::grid_of_pane(&self.grids, p);
+                let origin = self.geometry().pane_origin(p);
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
                 s.view.frame(
                     &mut self.grids,
@@ -1389,20 +1361,6 @@ impl Daemon {
         Ok(())
     }
 
-    /// Where pane `p`'s top left sits on grid 1: row, col.
-    fn pane_origin(&self, p: &Pane) -> [i32; 2] {
-        let Some(r) = p.rect else {
-            return [0, 0];
-        };
-        let Some(screen) = self.grids.get(1) else {
-            return [0, 0];
-        };
-        [
-            (r[1] * f64::from(screen.height)).round() as i32,
-            (r[0] * f64::from(screen.width)).round() as i32,
-        ]
-    }
-
     /// Asks Neovim for the window to fit the pane, unless it already was.
     fn size_window(&mut self, id: u32) {
         let Some(p) = self.panes.by_id(id) else {
@@ -1417,7 +1375,7 @@ impl Daemon {
         let Some(grid) = self.grids.grid_of(win) else {
             return;
         };
-        let size = self.window_size(p);
+        let size = self.geometry().window_size(p);
         let last = p.last_asked_win_size;
         if last.grid == grid && last.cols == size[0] && last.rows == size[1] {
             return;
@@ -1446,6 +1404,16 @@ impl Daemon {
         Ok(())
     }
 
+    /// The screen and pane geometry, read off the daemon's parts.
+    fn geometry(&self) -> Geometry<'_> {
+        Geometry {
+            grids: &self.grids,
+            panes: &self.panes,
+            tabline_rows: self.tabline_rows,
+            msg_rows: self.msg_rows,
+        }
+    }
+
     /// The pane showing Neovim's current window; before setup, the launcher's.
     fn focused_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
@@ -1456,79 +1424,6 @@ impl Daemon {
 
     fn focused_pane_id(&self) -> Option<u32> {
         self.focused_pane().map(|p| p.id)
-    }
-
-    /// The grid showing the pane's window, if it has one yet.
-    fn grid_of_pane(&self, pane: &Pane) -> Option<u32> {
-        grid_of_pane(&self.grids, pane)
-    }
-
-    /// No terminal yet: the smallest window, as Neovim allows.
-    fn window_size(&self, p: &Pane) -> [u32; 2] {
-        let Some(s) = &p.terminal_surface else {
-            return [1, 1];
-        };
-        let size = s.window_size(self.msg_rows);
-        [
-            size[0],
-            size[1].saturating_sub(self.tabline_rows_of(p)).max(1),
-        ]
-    }
-
-    /// The tabline's rows over pane `p`: those of a window's pane along the top
-    /// of the Rex window, which shows its share of the screen's tabline.
-    /// A pane Rex hasn't placed yet counts only while none has been: it would
-    /// otherwise take the top left from the panes already there, until the
-    /// layout arrives. Without Rex's layout at all, the one pane is the window.
-    fn tabline_rows_of(&self, p: &Pane) -> u32 {
-        if self.tabline_rows == 0 || p.layer.is_some() || p.tab != 0 {
-            return 0;
-        }
-        if p.rect.is_none() && self.panes.list.iter().any(|q| q.rect.is_some()) {
-            return 0;
-        }
-        if self.pane_origin(p)[0] == 0 {
-            self.tabline_rows
-        } else {
-            0
-        }
-    }
-
-    /// Whether pane `p` draws part of the screen's tabline. It needs its
-    /// terminal: its width is what the panes right of it start after, and
-    /// without one it draws nothing.
-    fn shows_tabline(&self, p: &Pane) -> bool {
-        p.terminal_surface.is_some() && self.tabline_rows_of(p) > 0
-    }
-
-    /// The column of the screen's tabline pane `p` starts at, if it shows any.
-    /// The panes along the top that show it lay it out left to right from
-    /// column 0, whatever else is in the Rex window, so each tab shows in
-    /// exactly one of them. Panes at the same column go in list order.
-    /// A pane closing in the middle of `draw` leaves the panes drawn before it
-    /// on their old columns for that frame; the next draw sees their start
-    /// move and `PaneView` redraws the row.
-    fn tabline_start(&self, p: &Pane) -> Option<u32> {
-        if !self.shows_tabline(p) {
-            return None;
-        }
-        let mine = self.pane_origin(p)[1];
-        let mut col: u32 = 0;
-        let mut listed_before = true;
-        for q in &self.panes.list {
-            if q.id == p.id {
-                listed_before = false;
-                continue;
-            }
-            if !self.shows_tabline(q) {
-                continue;
-            }
-            let theirs = self.pane_origin(q)[1];
-            if theirs < mine || (theirs == mine && listed_before) {
-                col += q.terminal_surface.as_ref().unwrap().view.cols;
-            }
-        }
-        Some(col)
     }
 
     /// What pane `id` draws of the screen's tabline: its slice of grid 1's top
@@ -1547,7 +1442,7 @@ impl Daemon {
                 col: 0,
             };
         };
-        let found = self.tabline_start(p);
+        let found = self.geometry().tabline_start(p);
         let col = found.unwrap_or(0);
         let cells = match found {
             Some(_) => self
@@ -1631,12 +1526,6 @@ fn observe_window(
     } else {
         WindowState::Ready
     }
-}
-
-/// The grid showing the pane's window, if it has one yet.
-fn grid_of_pane(grids: &Grids, pane: &Pane) -> Option<u32> {
-    let win = pane.neovim_window_handle?;
-    grids.grid_of(win)
 }
 
 /// A note, or None for one that's no note of ours or we can't read: a
@@ -1836,7 +1725,10 @@ mod tests {
         }
 
         fn start(&self, at: usize) -> Option<u32> {
-            self.fx.d.tabline_start(&self.fx.d.panes.list[at])
+            self.fx
+                .d
+                .geometry()
+                .tabline_start(&self.fx.d.panes.list[at])
         }
     }
 
@@ -2274,7 +2166,7 @@ mod tests {
         let id = fx.add(0, 60, None);
         let size = |fx: &mut TablineFixture| {
             let d = fx.d();
-            d.window_size(d.panes.by_id(id).unwrap())
+            d.geometry().window_size(d.panes.by_id(id).unwrap())
         };
 
         // before Neovim says, one row, as the default 'cmdheight'

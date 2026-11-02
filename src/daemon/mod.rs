@@ -4,6 +4,7 @@ pub mod event_loop;
 pub mod fdpass;
 pub mod floating_panes;
 pub mod focus_gate;
+pub mod geometry;
 pub mod launch;
 pub mod nvim_session;
 pub mod pane;
