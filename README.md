@@ -90,15 +90,17 @@ Rex sets in every pane:
 - `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
   uses it as the first window's pane, and logs a note if it isn't a block id.
 
-Without `REX_SERVER` or `REX_SESSION`, or without a terminal on stdin, `neorex`
-prints "run it in a Rex pane" (or fails) and exits. The `debug-rex` command
+Without a terminal on stdin, `neorex` prints `error: NotATerminal`. In a
+terminal but without `REX_SERVER` or `REX_SESSION`, it prints "run it in a Rex
+pane". Either way it exits. The `debug-rex` command
 reads the same three variables.
 
 The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
 private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
 `$TMPDIR`, else `/tmp`. It logs to the file `log` there. A clean exit removes
-the log and the directory; after a failure the log stays, and neorex prints
-its path. `neorex help` says the same.
+the log and the directory. A daemon that fails to start is named in what
+neorex prints; after any failure the log and directory stay. `neorex help`
+says the same.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it

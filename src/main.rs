@@ -134,8 +134,7 @@ mod tests {
             "REX_BLOCK",
             "XDG_RUNTIME_DIR",
             "TMPDIR",
-            "neorex-<launcher pid>",
-            "log",
+            "`log` in its private directory, neorex-<launcher pid>.XXXXXX",
         ] {
             assert!(USAGE.contains(want), "{want}");
         }
