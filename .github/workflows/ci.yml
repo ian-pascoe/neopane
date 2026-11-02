@@ -33,6 +33,35 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  linux:
+    name: fmt, clippy, test (Linux)
+    runs-on: ubuntu-latest
+    env:
+      # Neovim's release tarball: apt's Neovim is too old
+      NVIM_VERSION: v0.12.6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Neovim
+        run: |
+          curl -fsSL --retry 3 -o nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          mkdir -p "$HOME/nvim"
+          tar -xzf nvim.tar.gz -C "$HOME/nvim" --strip-components=1
+          echo "$HOME/nvim/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/nvim/bin:$PATH"
+          nvim --version
+          nvim --headless -u NONE '+lua if vim.fn.has("nvim-0.12") == 0 then vim.cmd("cquit 1") end' +qa || {
+            echo "::error::Neovim 0.12 or newer is required"
+            exit 1
+          }
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   msrv:
     name: test (MSRV 1.88)
     runs-on: macos-latest

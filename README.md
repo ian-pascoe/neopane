@@ -22,7 +22,7 @@ incrementally. Contributions are welcome.
 
 ## Requirements
 
-- macOS (it uses kqueue)
+- macOS, or Linux: it builds and passes its tests there, but hasn't been tried live yet (#43)
 - [Rex](https://www.superlogical.com/rex)
 - A recent Neovim, 0.12 or later.
 - Rust (stable, 2024 edition) to build
