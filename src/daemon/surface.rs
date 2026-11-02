@@ -7,6 +7,7 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 
+use super::backlog::Backlog;
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -18,6 +19,8 @@ pub struct Surface {
     pub terminal: Terminal,
     pub view: PaneView,
     pub forwarder: Forwarder,
+    /// Output the terminal hasn't taken yet.
+    pub backlog: Backlog,
 }
 
 impl Surface {
@@ -54,6 +57,7 @@ impl Surface {
                 send_focus: false,
                 ..Forwarder::default()
             },
+            backlog: Backlog::default(),
         }))
     }
 
@@ -62,6 +66,10 @@ impl Surface {
     /// user why.
     pub fn destroy(mut self: Box<Surface>, restore: bool, message: Option<&[u8]>) {
         if restore {
+            // the frame being written is finished, so the modes' undoing isn't
+            // read as part of an escape sequence
+            let unfinished = self.backlog.take_unfinished();
+            self.terminal.writer.splice(0..0, unfinished);
             self.terminal
                 .writer
                 .extend_from_slice(modes::EDITOR_OFF.as_bytes());
@@ -78,6 +86,15 @@ impl Surface {
     /// Neovim's messages and command line ('cmdheight'). Never empty.
     pub fn window_size(&self, msg_rows: u32) -> [u32; 2] {
         window_fitting(self.view.cols, self.view.rows, msg_rows)
+    }
+
+    /// Sends the frame drawn into the terminal's writer, without waiting for
+    /// the terminal to take it. True if output waits for room. An error means
+    /// the terminal is gone.
+    pub fn send_frame(&mut self) -> std::io::Result<bool> {
+        self.backlog
+            .send(self.terminal.fd, &mut self.terminal.writer)?;
+        Ok(!self.backlog.is_empty())
     }
 
     /// The helper socket's fd, for the event loop.
