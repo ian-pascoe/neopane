@@ -70,6 +70,7 @@ test {
     _ = @import("nvim/rpc.zig");
     _ = @import("nvim/Nvim.zig");
     _ = @import("nvim/Forwarder.zig");
+    _ = @import("nvim/InputGate.zig");
     _ = @import("nvim/windows.zig");
     _ = @import("screen/Grid.zig");
     _ = @import("screen/Grids.zig");

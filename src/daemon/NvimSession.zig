@@ -4,6 +4,7 @@
 const std = @import("std");
 const Nvim = @import("../nvim/Nvim.zig");
 const windows = @import("../nvim/windows.zig");
+const InputGate = @import("../nvim/InputGate.zig");
 const Pane = @import("Pane.zig");
 
 const NvimSession = @This();
@@ -11,9 +12,8 @@ const NvimSession = @This();
 client: *Nvim,
 /// Neovim's current window, as the Lua last said; 0 before setup.
 current_win: i64 = 0,
-/// A `nvim_set_current_win` of ours not answered yet. Reports sent before
-/// it ran are stale.
-current_win_req: ?u32 = null,
+/// Our window switches, and the input typed after them.
+input: InputGate = .{},
 channel_req: u32 = 0,
 setup_req: u32 = 0,
 /// Setup answered: windows can be adopted and given panes.
