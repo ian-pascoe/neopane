@@ -361,6 +361,8 @@ impl Daemon {
         // itself)
         let surface = Surface::create(hello.stream, hello.tty)?;
         let pane = self.panes.by_id_mut(id).unwrap();
+        // a pane that already has a surface drops it below: off the loop first
+        pane.unregister_from(&self.event_loop);
         pane.terminal_surface = Some(surface);
         pane.register_with(&self.event_loop)?;
         if pane.awaiting_layout {
