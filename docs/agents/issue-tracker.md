@@ -16,7 +16,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
-File issues only into `ian-pascoe/neorex`. This clone's `gh` default repo is set to it (`gh repo set-default`); upstream `alexrlocke/neorex` is not ours. Before the first `gh issue create` of a session, confirm `gh repo set-default --view` prints `ian-pascoe/neorex`.
+File issues only into `ian-pascoe/neorex`. This clone's `gh` default repo is set to it (`gh repo set-default`); the original `alexrlocke/neorex` is a separate project. Before the first `gh issue create` of a session, confirm `gh repo set-default --view` prints `ian-pascoe/neorex`.
 
 ## Pull requests as a triage surface
 

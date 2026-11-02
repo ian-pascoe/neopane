@@ -32,7 +32,7 @@ Install with `just install`. On macOS, a binary overwritten in place is killed a
 
 ### Issue tracker
 
-GitHub Issues on the fork `ian-pascoe/neorex`, through `gh`. See `docs/agents/issue-tracker.md`.
+GitHub Issues on `ian-pascoe/neorex`, through `gh`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
