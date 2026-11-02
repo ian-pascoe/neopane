@@ -176,6 +176,12 @@ impl Forwarder {
         Ok(self.read(nvim, bytes, false)?.more)
     }
 
+    /// Begins a paste: the next chunk starts it.
+    fn start_paste(&mut self) {
+        self.paste_phase = 1;
+        self.paste_ended_in_cr = false;
+    }
+
     /// Like `feed`, but stops after the first key: what follows it is left for
     /// a later `feed`. Doesn't quit.
     pub fn feed_key(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<Fed> {
@@ -190,10 +196,7 @@ impl Forwarder {
         while let Some(event) = self.parser.next() {
             match event {
                 Event::Focus(focused) => self.focused = Some(focused),
-                Event::PasteStart => {
-                    self.paste_phase = 1;
-                    self.paste_ended_in_cr = false;
-                }
+                Event::PasteStart => self.start_paste(),
                 Event::PasteEnd if self.paste_phase == 2 => paste(nvim, b"", 3)?,
                 _ => {}
             }
@@ -272,14 +275,14 @@ impl Forwarder {
                         break;
                     }
                 }
-                Event::PasteStart => {
-                    self.paste_phase = 1;
-                    self.paste_ended_in_cr = false;
-                }
+                Event::PasteStart => self.start_paste(),
                 Event::Paste(text) => {
                     // the LF of a CRLF cut between chunks
                     let text = match text {
-                        [b'\n', rest @ ..] if self.paste_ended_in_cr => rest,
+                        [b'\n', rest @ ..] if self.paste_ended_in_cr => {
+                            self.paste_ended_in_cr = false;
+                            rest
+                        }
                         _ => text,
                     };
                     if let Some(&last) = text.last() {
@@ -627,11 +630,9 @@ mod tests {
         let mut nvim = crate::nvim::nvim::spawn_for_test()?;
         nvim.ui_attach(80, 24, Default::default()).unwrap();
         let mut f = Forwarder::default();
-        let mut bytes = b"\x1b[200~".to_vec();
-        f.feed(&mut nvim, &bytes).unwrap();
+        f.feed(&mut nvim, b"\x1b[200~").unwrap();
         for chunk in chunks {
-            bytes = chunk.to_vec();
-            f.feed(&mut nvim, &bytes).unwrap();
+            f.feed(&mut nvim, chunk).unwrap();
         }
         f.feed(&mut nvim, b"\x1b[201~").unwrap();
         Some(buffer_lines(&mut nvim))
@@ -648,6 +649,11 @@ mod tests {
         }
         // a CRLF cut between two chunks
         assert_eq!(Some(ab), paste_chunks(&[b"a\r", b"\nb"]));
+        // the LF alone in a chunk finishes that CRLF; the next LF is a break
+        assert_eq!(
+            Some(vec![b"a".to_vec(), b"".to_vec(), b"b".to_vec()]),
+            paste_chunks(&[b"a\r", b"\n", b"\nb"])
+        );
     }
 
     /// Feeds a live Neovim keys and a paste.
