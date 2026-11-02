@@ -152,11 +152,12 @@ impl Grids {
 
     /// The floats over grid `base`, and over the screen too if `screen`
     /// (floats on grid 1 and the message grid), lowest first. Floats hanging
-    /// from an editor float in `skip` are left out. At most `MAX_FLOATS`.
+    /// from an editor float in `skip` are left out. At most `MAX_FLOATS`: the
+    /// top-most ones.
     pub fn floats_over(&self, base: u32, screen: bool, skip: &[u32]) -> Vec<Placed> {
         let mut out: Vec<Placed> = Vec::new();
         for (&id, w) in &self.wins {
-            if w.kind != WinKind::Float || out.len() == MAX_FLOATS {
+            if w.kind != WinKind::Float {
                 continue;
             }
             let Some(p) = self.place(id) else { continue };
@@ -178,7 +179,7 @@ impl Grids {
                 top: p.top,
             });
         }
-        sort_placed(&mut out);
+        keep_top_floats(&mut out);
         out
     }
 
@@ -469,9 +470,12 @@ impl Grids {
     }
 }
 
-/// Lowest first, as Neovim stacks them.
-pub fn sort_placed(placed: &mut [Placed]) {
+/// Sorts lowest first, as Neovim stacks them, and keeps the top-most
+/// `MAX_FLOATS`: with more floats than that, it's the lowest that go.
+pub fn keep_top_floats(placed: &mut Vec<Placed>) {
     placed.sort_by_key(|p| (p.zindex, p.compindex));
+    let extra = placed.len().saturating_sub(MAX_FLOATS);
+    placed.drain(..extra);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,6 +999,23 @@ mod tests {
         );
         // left out with the editor float it hangs from
         assert_eq!(2, gs.floats_over(2, true, &[5]).len());
+    }
+
+    #[test]
+    fn past_the_cap_floats_over_a_pane_keep_the_top_most() {
+        let mut gs = Grids::default();
+        apply_test(&mut gs, |w| {
+            write_array_header(w, 40);
+            for i in 0..20i64 {
+                ev(w, "grid_resize", &[3 + i, 4, 1]);
+                float_event(w, 3 + i, "NW", 1, i as f64, 0.0, 50 + i, None);
+            }
+        });
+        let fs = gs.floats_over(1, true, &[]);
+        assert_eq!(MAX_FLOATS, fs.len());
+        assert_eq!(7, fs[0].grid);
+        assert_eq!(22, fs.last().unwrap().grid);
+        assert!(fs.windows(2).all(|w| w[0].zindex <= w[1].zindex));
     }
 
     #[test]

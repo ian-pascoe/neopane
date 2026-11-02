@@ -5,18 +5,23 @@
 //! being focusable isn't enough, since completion menus are and are never
 //! entered. Those stay drawn in their pane, beside what they complete.
 
-use super::grids::{Grids, MAX_FLOATS, Placed, WinKind, sort_placed};
+use super::grids::{Grids, MAX_FLOATS, Placed, WinKind, keep_top_floats};
 
 pub const MAX_GROUPS: usize = 4;
-const MAX_TOPS: usize = 16;
+const MAX_TOPS: usize = MAX_FLOATS;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Group {
     /// The editor floats in it, by grid.
     pub tops: [u32; MAX_TOPS],
+    /// Each top's (zindex, compindex), alongside `tops`.
+    pub tops_z: [(u32, u32); MAX_TOPS],
     pub tops_len: u8,
     /// Names the group while it's open: its lowest window handle.
     pub key: i64,
+    /// The z, (zindex, compindex), of the group's highest editor float: what
+    /// groups are ranked by.
+    pub z: (u32, u32),
     /// Where it sits on grid 1.
     pub row: i32,
     pub col: i32,
@@ -57,12 +62,21 @@ impl Group {
         self.focusable = self.focusable || b.focusable;
         self.entered = self.entered || b.entered;
         self.key = self.key.min(b.key);
-        for &t in b.top_grids() {
-            if (self.tops_len as usize) < MAX_TOPS {
-                self.tops[self.tops_len as usize] = t;
-                self.tops_len += 1;
+        self.z = self.z.max(b.z);
+        // keep the top-most editor floats, lowest first
+        let mut all: Vec<((u32, u32), u32)> = Vec::new();
+        for g in [&*self, &b] {
+            for i in 0..g.tops_len as usize {
+                all.push((g.tops_z[i], g.tops[i]));
             }
         }
+        all.sort_by_key(|t| t.0);
+        let extra = all.len().saturating_sub(MAX_TOPS);
+        for (i, &(z, t)) in all[extra..].iter().enumerate() {
+            self.tops[i] = t;
+            self.tops_z[i] = z;
+        }
+        self.tops_len = (all.len() - extra) as u8;
     }
 
     /// Grows to cover the rect too.
@@ -70,8 +84,10 @@ impl Group {
         if self.width == 0 {
             *self = Group {
                 tops: self.tops,
+                tops_z: self.tops_z,
                 tops_len: self.tops_len,
                 key: self.key,
+                z: self.z,
                 focusable: self.focusable,
                 entered: self.entered,
                 row,
@@ -91,12 +107,13 @@ impl Group {
 }
 
 /// The groups to show natively: those with a float in `entered`, the
-/// float windows that have been current. At most `MAX_GROUPS`.
+/// float windows that have been current. At most `MAX_GROUPS`: past that the
+/// top-most groups (by their highest float) stay. Lowest first, ties in grid order.
 pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     let mut all: Vec<Group> = Vec::new();
     // each editor float, with the floats hanging from it
     for (&id, w) in &grids.wins {
-        if w.kind != WinKind::Float || w.win < 0 || all.len() == MAX_TOPS {
+        if w.kind != WinKind::Float || w.win < 0 {
             continue;
         }
         let Some(p) = grids.place(id) else { continue };
@@ -105,9 +122,11 @@ pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
         }
         let mut g = Group {
             key: w.win,
+            z: (w.float.zindex, w.float.compindex),
             ..Group::default()
         };
         g.tops[0] = id;
+        g.tops_z[0] = g.z;
         g.tops_len = 1;
         for (&mid, m) in &grids.wins {
             if m.kind != WinKind::Float {
@@ -130,6 +149,8 @@ pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
         }
         all.push(g);
     }
+    // lowest first, so a merge keeps the lower group's tops first
+    all.sort_by_key(|g| g.z);
     // focusable groups that touch become one
     let mut merged = true;
     while merged {
@@ -142,27 +163,24 @@ pub fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
                 }
                 let b = all[j];
                 all[i].merge(b);
-                all.swap_remove(j);
+                all.remove(j);
                 merged = true;
                 break 'outer;
             }
         }
     }
-    let mut out = Vec::new();
-    for g in all {
-        if !g.entered || out.len() == MAX_GROUPS {
-            continue;
-        }
-        out.push(g);
-    }
-    out
+    all.retain(|g| g.entered);
+    all.sort_by_key(|g| g.z);
+    let extra = all.len().saturating_sub(MAX_GROUPS);
+    all.drain(..extra);
+    all
 }
 
-/// The floats in group `g`, lowest first. At most `MAX_FLOATS`.
+/// The floats in group `g`, lowest first. At most `MAX_FLOATS`, the top-most.
 pub fn members(grids: &Grids, g: &Group) -> Vec<Placed> {
     let mut out: Vec<Placed> = Vec::new();
     for (&id, w) in &grids.wins {
-        if w.kind != WinKind::Float || out.len() == MAX_FLOATS {
+        if w.kind != WinKind::Float {
             continue;
         }
         let Some(p) = grids.place(id) else { continue };
@@ -180,7 +198,7 @@ pub fn members(grids: &Grids, g: &Group) -> Vec<Placed> {
             ..Placed::default()
         });
     }
-    sort_placed(&mut out);
+    keep_top_floats(&mut out);
     out
 }
 
@@ -400,5 +418,138 @@ mod tests {
         assert_eq!(0, find(&gs, &[]).len());
         // a float elsewhere was entered: still not these
         assert_eq!(0, find(&gs, &[1000]).len());
+    }
+
+    #[test]
+    fn past_the_cap_the_top_most_floats_are_kept() {
+        let mut gs = Grids::default();
+        // 20 floats hanging from one editor float, the last made the top-most
+        add_float(
+            &mut gs,
+            3,
+            1000,
+            10,
+            10,
+            Float {
+                screen: Some([0, 0]),
+                ..Float::default()
+            },
+        );
+        for i in 0..19u32 {
+            add_float(
+                &mut gs,
+                4 + i,
+                1001 + i as i64,
+                2,
+                2,
+                Float {
+                    anchor_grid: 3,
+                    zindex: 50 + i,
+                    ..Float::default()
+                },
+            );
+        }
+        let g = find(&gs, &[1000])[0];
+        let ms = members(&gs, &g);
+        assert_eq!(MAX_FLOATS, ms.len());
+        // lowest first, and the newest (top-most) is last
+        assert_eq!(3 + 19, ms.last().unwrap().grid);
+        assert_eq!(3 + 19 - (MAX_FLOATS as u32 - 1), ms[0].grid);
+        assert!(ms.windows(2).all(|w| w[0].zindex <= w[1].zindex));
+    }
+
+    #[test]
+    fn higher_floats_nobody_entered_dont_push_out_an_entered_group() {
+        let mut gs = Grids::default();
+        // the entered one, lowest
+        add_float(
+            &mut gs,
+            3,
+            1000,
+            4,
+            4,
+            Float {
+                screen: Some([0, 0]),
+                zindex: 10,
+                ..Float::default()
+            },
+        );
+        for i in 0..20u32 {
+            add_float(
+                &mut gs,
+                4 + i,
+                1001 + i as i64,
+                2,
+                2,
+                Float {
+                    screen: Some([10, 10 * i as i32]),
+                    zindex: 50 + i,
+                    ..Float::default()
+                },
+            );
+        }
+        let groups = find(&gs, &[1000]);
+        assert_eq!(1, groups.len());
+        assert_eq!(&[3][..], groups[0].top_grids());
+    }
+
+    #[test]
+    fn past_max_groups_the_top_most_entered_groups_stay_lowest_first() {
+        let mut gs = Grids::default();
+        for i in 0..20u32 {
+            add_float(
+                &mut gs,
+                3 + i,
+                1000 + i as i64,
+                2,
+                2,
+                Float {
+                    screen: Some([0, 10 * i as i32]),
+                    zindex: 50 + i,
+                    ..Float::default()
+                },
+            );
+        }
+        let entered: Vec<i64> = (1000..1020).collect();
+        let groups = find(&gs, &entered);
+        let first = 3 + 20 - MAX_GROUPS as u32;
+        let grids: Vec<u32> = groups.iter().map(|g| g.tops[0]).collect();
+        assert_eq!(
+            (first..first + MAX_GROUPS as u32).collect::<Vec<_>>(),
+            grids
+        );
+    }
+
+    #[test]
+    fn a_merged_group_past_the_cap_keeps_its_top_most_editor_floats() {
+        let mut gs = Grids::default();
+        // 20 focusable editor floats in a row, each a cell from the next, the last top-most
+        for i in 0..20u32 {
+            add_float(
+                &mut gs,
+                3 + i,
+                1000 + i as i64,
+                2,
+                2,
+                Float {
+                    screen: Some([0, 3 * i as i32]),
+                    zindex: 50 + i,
+                    ..Float::default()
+                },
+            );
+        }
+        let groups = find(&gs, &[1000]);
+        assert_eq!(1, groups.len());
+        let g = groups[0];
+        assert_eq!(MAX_TOPS, g.tops_len as usize);
+        let first = 3 + 20 - MAX_TOPS as u32;
+        assert_eq!(
+            (first..first + MAX_TOPS as u32).collect::<Vec<_>>(),
+            g.top_grids()
+        );
+        assert_eq!((50 + 19, 0), g.z);
+        let ms = members(&gs, &g);
+        assert_eq!(MAX_TOPS, ms.len());
+        assert_eq!(3 + 19, ms.last().unwrap().grid);
     }
 }
