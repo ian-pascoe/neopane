@@ -71,6 +71,8 @@ pub struct Event {
 pub enum Kind {
     #[default]
     Read,
+    /// There's room to write.
+    Write,
     Signal,
     Timer,
 }
@@ -103,7 +105,19 @@ impl Loop {
         self.backend.add_read(fd, token)
     }
 
-    /// Stops watching `fd`. Call it before closing `fd`: kqueue drops a watch
+    /// Watches `fd`, already watched for reading, for room to write too,
+    /// reported under `token`. Adding it again replaces the token.
+    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+        self.backend.add_write(fd, token)
+    }
+
+    /// Stops watching `fd` for room to write; its read watch stays. Fine if
+    /// it wasn't watched for writing.
+    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+        self.backend.remove_write(fd)
+    }
+
+    /// Stops watching `fd`, for reading and writing. Call it before closing `fd`: kqueue drops a watch
     /// when its fd closes, but epoll only when every copy of the open file
     /// closes, and a watch left behind reports under the old token, or the
     /// token of whatever gets the fd number next.
@@ -228,6 +242,73 @@ mod tests {
             loop_.wait(&mut buf).unwrap()
         );
         close(p[0]);
+    }
+
+    // What a pane's terminal gets while output waits for it: a write watch
+    // beside its read watch, under its own token, taken off once drained.
+    #[test]
+    fn a_write_watch_reports_room_beside_the_read_watch_until_removed() {
+        let loop_ = Loop::init().unwrap();
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        loop_.add_read(slave, 1).unwrap();
+        loop_.add_write(slave, 2).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert_eq!(
+            &[Event {
+                token: 2,
+                kind: Kind::Write,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+
+        // both at once: input waiting (a line, as the pty is in cooked
+        // mode), and room to write
+        // SAFETY: two bytes from a static buffer.
+        unsafe { libc::write(master, b"x\n".as_ptr().cast(), 2) };
+        let mut got = loop_.wait(&mut buf).unwrap().to_vec();
+        got.sort_by_key(|e| e.token);
+        assert_eq!(
+            vec![
+                Event {
+                    token: 1,
+                    kind: Kind::Read,
+                    eof: false
+                },
+                Event {
+                    token: 2,
+                    kind: Kind::Write,
+                    eof: false
+                }
+            ],
+            got
+        );
+
+        // off again, the read watch stays
+        loop_.remove_write(slave).unwrap();
+        assert_eq!(
+            &[Event {
+                token: 1,
+                kind: Kind::Read,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+
+        // and `remove` takes both off
+        loop_.add_write(slave, 2).unwrap();
+        loop_.remove(slave).unwrap();
+        loop_.add_timer(1, 50, 3).unwrap();
+        assert_eq!(
+            &[Event {
+                token: 3,
+                kind: Kind::Timer,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        close(master);
+        close(slave);
     }
 
     #[test]

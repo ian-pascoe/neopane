@@ -9,7 +9,7 @@
 use std::os::fd::RawFd;
 
 use super::event_loop::{self, Loop};
-use super::surface::Surface;
+use super::surface::{Restore, Surface};
 use crate::screen::float_groups::Group;
 
 pub use crate::rex::ids::{block as rex_block, layer as rex_layer};
@@ -268,17 +268,26 @@ impl Pane {
         TOKEN_BASE + 2 * self.id as usize + source_fd as usize
     }
 
-    /// Hanging up makes the helper exit, and Rex closes the pane.
+    /// Hanging up makes the helper exit, and Rex closes the pane. A pane
+    /// closing while the daemon runs is restored without waiting for its
+    /// terminal; one the daemon leaves as it ends (`closing` is `Shutdown`, or
+    /// None before the pane was set up) waits a moment for it.
     pub fn deinit(self) {
+        let restore = match self.closing {
+            Some(Close::RexPaneClosed) => Restore::No,
+            Some(Close::WindowClosed | Close::RequestFailed) => Restore::Now,
+            Some(Close::Shutdown) | None => Restore::Waiting,
+        };
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(self.closing != Some(Close::RexPaneClosed), None);
+            surface.destroy(restore, None);
         }
     }
 
-    /// `deinit`, leaving `message` on the restored terminal.
+    /// `deinit` as the daemon gives up, leaving `message` on the restored
+    /// terminal.
     pub fn deinit_with_message(self, message: &[u8]) {
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(true, Some(message));
+            surface.destroy(Restore::Waiting, Some(message));
         }
     }
 

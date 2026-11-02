@@ -7,10 +7,40 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 
+use std::time::{Duration, Instant};
+
+use super::backlog::{self, Backlog};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
 use crate::term::terminal::Terminal;
+
+/// How long a pane going back to its shell waits for its terminal to take
+/// the modes' undoing.
+const RESTORE_WAIT: Duration = Duration::from_secs(1);
+
+/// How `Surface::destroy` leaves the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restore {
+    /// Not at all: the terminal is already gone.
+    No,
+    /// Without waiting: a pane closing while the daemon runs, which Rex closes
+    /// next. Its terminal may not be read, and what it can't take at once is
+    /// dropped.
+    Now,
+    /// Waiting up to `RESTORE_WAIT` for the terminal to take it all: the
+    /// daemon is ending, and the launcher's pane goes back to its shell.
+    Waiting,
+}
+
+/// What a frame drawn into the terminal's writer did, sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// The terminal took it all.
+    All,
+    /// Some waits for room in the terminal.
+    Waiting,
+}
 
 pub struct Surface {
     /// Closing it makes the helper exit, and Rex close the pane.
@@ -18,6 +48,8 @@ pub struct Surface {
     pub terminal: Terminal,
     pub view: PaneView,
     pub forwarder: Forwarder,
+    /// Output the terminal hasn't taken yet.
+    pub backlog: Backlog,
 }
 
 impl Surface {
@@ -54,22 +86,30 @@ impl Surface {
                 send_focus: false,
                 ..Forwarder::default()
             },
+            backlog: Backlog::default(),
         }))
     }
 
-    /// `restore` is false when the terminal is already gone. A `message` is
-    /// left on the restored terminal: how a daemon that gives up tells the pane's
-    /// user why.
-    pub fn destroy(mut self: Box<Surface>, restore: bool, message: Option<&[u8]>) {
-        if restore {
-            self.terminal
-                .writer
-                .extend_from_slice(modes::EDITOR_OFF.as_bytes());
-            self.terminal.deinit();
-            if let Some(m) = message {
-                // SAFETY: `m` is valid for `m.len()` bytes.
-                unsafe { libc::write(self.terminal.fd, m.as_ptr().cast(), m.len()) };
-            }
+    /// Restores the terminal as `restore` says. A `message` is left on the
+    /// restored terminal: how a daemon that gives up tells the pane's user why.
+    pub fn destroy(mut self: Box<Surface>, restore: Restore, message: Option<&[u8]>) {
+        let wait = match restore {
+            Restore::No => return, // the fds close as `self` drops
+            Restore::Now => Duration::ZERO,
+            Restore::Waiting => RESTORE_WAIT,
+        };
+        let deadline = Instant::now() + wait;
+        let left = || deadline.saturating_duration_since(Instant::now());
+        // the frame being written is finished first, so the modes' undoing
+        // isn't read as part of an escape sequence
+        let mut out = self.backlog.take_unfinished();
+        out.append(&mut self.terminal.writer);
+        out.extend_from_slice(modes::EDITOR_OFF.as_bytes());
+        let fd = self.terminal.fd;
+        backlog::write_within(fd, &out, left());
+        self.terminal.restore_now();
+        if let Some(m) = message {
+            backlog::write_within(fd, m, left());
         }
         // the terminal's fd and the helper socket are closed as `self` drops
     }
@@ -78,6 +118,18 @@ impl Surface {
     /// Neovim's messages and command line ('cmdheight'). Never empty.
     pub fn window_size(&self, msg_rows: u32) -> [u32; 2] {
         window_fitting(self.view.cols, self.view.rows, msg_rows)
+    }
+
+    /// Sends the frame drawn into the terminal's writer, without waiting for
+    /// the terminal to take it. An error means the terminal is gone.
+    pub fn send_frame(&mut self) -> std::io::Result<Sent> {
+        self.backlog
+            .send(self.terminal.fd, &mut self.terminal.writer)?;
+        Ok(if self.backlog.is_empty() {
+            Sent::All
+        } else {
+            Sent::Waiting
+        })
     }
 
     /// The helper socket's fd, for the event loop.
@@ -191,7 +243,7 @@ mod tests {
             }
             got
         });
-        surface.destroy(true, Some(b"bye"));
+        surface.destroy(Restore::Waiting, Some(b"bye"));
         let got = reader.join().unwrap();
         let got = String::from_utf8_lossy(&got);
         assert!(got.contains(modes::EDITOR_ON), "{got:?}");

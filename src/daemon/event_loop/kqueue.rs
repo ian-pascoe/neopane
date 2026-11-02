@@ -1,5 +1,5 @@
-//! The kqueue backend, for macOS and FreeBSD. Uses three filters: fd
-//! readable, signals and timers.
+//! The kqueue backend, for macOS and FreeBSD. Uses four filters: fd
+//! readable, fd writable, signals and timers.
 
 use std::os::unix::io::RawFd;
 
@@ -26,7 +26,22 @@ impl Backend {
         self.change(fd as usize, libc::EVFILT_READ, libc::EV_ADD, token)
     }
 
+    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+        self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_ADD, token)
+    }
+
+    /// Fails only if a write watch was there and couldn't be removed.
+    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+        match self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_DELETE, 0) {
+            Err(_) if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) => {
+                Err(Error::WatchFailed)
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn remove(&self, fd: RawFd) -> Result<()> {
+        self.remove_write(fd)?;
         self.change(fd as usize, libc::EVFILT_READ, libc::EV_DELETE, 0)
     }
 
@@ -81,6 +96,7 @@ impl Backend {
                 token: e.udata as usize,
                 kind: match e.filter {
                     libc::EVFILT_READ => Kind::Read,
+                    libc::EVFILT_WRITE => Kind::Write,
                     libc::EVFILT_SIGNAL => Kind::Signal,
                     libc::EVFILT_TIMER => Kind::Timer,
                     _ => unreachable!(), // only these are registered

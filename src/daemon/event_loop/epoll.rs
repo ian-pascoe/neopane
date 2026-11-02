@@ -1,4 +1,5 @@
-//! The epoll backend, for Linux. Plain fds go on the epoll as they are.
+//! The epoll backend, for Linux. Plain fds go on the epoll as they are, an
+//! fd watched for writing too under one entry with both flags.
 //! Signals arrive through one signalfd and each timer is a timerfd, so the
 //! epoll sees all three as readable fds, and `wait` turns them back into
 //! events.
@@ -26,7 +27,12 @@ struct Watch {
     kind: Kind,
     /// Unused for the signalfd: each signal has its own token.
     token: usize,
+    /// For an fd watched for reading, the token of its write watch, if any.
+    write_token: Option<usize>,
 }
+
+/// The flags an fd is watched for reading with.
+const READ: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP) as u32;
 
 struct Signals {
     /// The signalfd, made with the first signal.
@@ -83,8 +89,44 @@ impl Backend {
             Watch {
                 kind: Kind::Read,
                 token,
+                write_token: None,
             },
         )
+    }
+
+    /// `fd` must be watched for reading already.
+    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+        self.set_write(fd, Some(token))
+    }
+
+    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+        if !self.watches.borrow().contains_key(&fd) {
+            return Ok(());
+        }
+        self.set_write(fd, None)
+    }
+
+    /// Changes the write watch of `fd`, watched for reading.
+    fn set_write(&self, fd: RawFd, write_token: Option<usize>) -> Result<()> {
+        let mut watches = self.watches.borrow_mut();
+        let Some(watch) = watches.get_mut(&fd).filter(|w| w.kind == Kind::Read) else {
+            return Err(Error::WatchFailed);
+        };
+        let mut event = libc::epoll_event {
+            events: READ
+                | if write_token.is_some() {
+                    libc::EPOLLOUT as u32
+                } else {
+                    0
+                },
+            u64: fd as u64,
+        };
+        // SAFETY: `event` is valid.
+        if unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_MOD, fd, &mut event) } < 0 {
+            return Err(Error::WatchFailed);
+        }
+        watch.write_token = write_token;
+        Ok(())
     }
 
     pub fn remove(&self, fd: RawFd) -> Result<()> {
@@ -135,6 +177,7 @@ impl Backend {
                 let watch = Watch {
                     kind: Kind::Signal,
                     token: 0,
+                    write_token: None,
                 };
                 signals.fd = Some(self.adopt(fd, watch)?);
             }
@@ -165,6 +208,7 @@ impl Backend {
                     Watch {
                         kind: Kind::Timer,
                         token,
+                        write_token: None,
                     },
                 );
                 fd
@@ -180,6 +224,7 @@ impl Backend {
                 let watch = Watch {
                     kind: Kind::Timer,
                     token,
+                    write_token: None,
                 };
                 let fd = self.adopt(fd, watch)?;
                 self.timers.borrow_mut().insert(id, fd);
@@ -209,7 +254,8 @@ impl Backend {
         }
         // SAFETY: an all-zero epoll_event is a valid value.
         let mut raw: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
-        let max = buf.len().min(raw.len()) as libc::c_int;
+        // an fd watched for reading and writing can give two events
+        let max = (buf.len() / 2).clamp(1, raw.len()) as libc::c_int;
         loop {
             let ready: usize = loop {
                 // SAFETY: `raw` has room for `max` events.
@@ -230,11 +276,27 @@ impl Backend {
                     continue; // removed since
                 };
                 let event = match watch.kind {
-                    Kind::Read => Some(Event {
-                        token: watch.token,
-                        kind: Kind::Read,
-                        eof: flags & EOF != 0,
-                    }),
+                    Kind::Read => {
+                        // room to write; a hang-up or error shows as the write failing
+                        if let Some(token) = watch.write_token
+                            && flags & (libc::EPOLLOUT | libc::EPOLLHUP | libc::EPOLLERR) as u32
+                                != 0
+                            && n < buf.len()
+                        {
+                            buf[n] = Event {
+                                token,
+                                kind: Kind::Write,
+                                eof: flags & EOF != 0,
+                            };
+                            n += 1;
+                        }
+                        (flags & (libc::EPOLLIN as u32 | EOF) != 0).then_some(Event {
+                            token: watch.token,
+                            kind: Kind::Read,
+                            eof: flags & EOF != 0,
+                        })
+                    }
+                    Kind::Write => unreachable!(), // a write watch rides on a read watch
                     Kind::Signal => self.take_signal(fd),
                     Kind::Timer => take_timer(fd).then_some(Event {
                         token: watch.token,
@@ -242,7 +304,9 @@ impl Backend {
                         eof: false,
                     }),
                 };
-                if let Some(event) = event {
+                if let Some(event) = event
+                    && n < buf.len()
+                {
                     buf[n] = event;
                     n += 1;
                 }
@@ -303,7 +367,7 @@ impl Backend {
             unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut()) };
         }
         let mut event = libc::epoll_event {
-            events: (libc::EPOLLIN | libc::EPOLLRDHUP) as u32,
+            events: READ,
             u64: fd as u64,
         };
         // SAFETY: `event` is valid.

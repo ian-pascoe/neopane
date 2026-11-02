@@ -1,3 +1,4 @@
+pub mod backlog;
 #[allow(clippy::module_inception)]
 pub mod daemon;
 pub mod event_loop;
