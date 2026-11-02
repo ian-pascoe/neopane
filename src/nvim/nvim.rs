@@ -289,6 +289,14 @@ pub fn spawn_for_test_with<S: AsRef<OsStr>>(argv: &[S]) -> Option<Nvim> {
     }
 }
 
+/// A connection over `stream`, for tests that need an `Nvim` but no Neovim
+/// (the Zig tests left such a client `undefined`).
+#[cfg(test)]
+pub fn for_test_on(stream: UnixStream) -> Nvim {
+    let writer = OwnedFd::from(stream.try_clone().unwrap());
+    Nvim::new(None, File::from(OwnedFd::from(stream)), File::from(writer))
+}
+
 /// Starts `nvim --clean --embed` for a test, or None if it isn't installed.
 #[cfg(test)]
 pub fn spawn_for_test() -> Option<Nvim> {

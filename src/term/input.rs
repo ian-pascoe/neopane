@@ -34,9 +34,11 @@
 //!
 //! Usage:
 //!
-//!     let mut parser = Parser::default();
-//!     parser.feed(bytes_from_read);
-//!     while let Some(event) = parser.next() { ... }
+//! ```text
+//! let mut parser = Parser::default();
+//! parser.feed(bytes_from_read);
+//! while let Some(event) = parser.next() { ... }
+//! ```
 //!
 //! Rust port note: `Event::Paste` and `Event::Unknown` borrow from the parser
 //! (the borrow checker enforces "only valid until the next `next` or `feed`"),
@@ -535,6 +537,13 @@ impl Parser {
     /// sequence or character (the Zig reads `parser.state == .ground`).
     pub fn at_ground(&self) -> bool {
         self.state == State::Ground
+    }
+
+    /// Puts the parser partway through a CSI sequence, or back between keys:
+    /// the Zig tests set `parser.state` directly, which is private here.
+    #[cfg(test)]
+    pub fn set_partway_for_test(&mut self, partway: bool) {
+        self.state = if partway { State::Csi } else { State::Ground };
     }
 
     /// The next event from the fed bytes, or `None` when they are used up.
