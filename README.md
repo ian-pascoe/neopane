@@ -28,20 +28,49 @@ AI has been used heavily in building neorex due to limits on my available time. 
 
 ## Build and run
 
+With [just](https://github.com/casey/just) (`just` lists the recipes):
+
+```sh
+just build
+just test
+just golden   # also the golden tests; downloads Ghostty once
+```
+
+or with Zig alone:
+
 ```sh
 zig build
 zig build test
-zig build test -Dgolden   # also the golden tests; downloads Ghostty once
+zig build test -Dgolden
 ```
 
 The golden tests check every frame neorex draws against
 [Ghostty](https://github.com/ghostty-org/ghostty)'s terminal emulator, pinned
 to one commit.
 
+To install it, optimized, as `~/.local/bin/neorex`, with `nrex` linked to
+it as a shorthand:
+
+```sh
+just install
+just prefix=/usr/local optimize=ReleaseFast install
+```
+
+It replaces the binary rather than writing over it, which on macOS gets a
+new build killed at launch. `zig build -Doptimize=ReleaseSafe --prefix ~/.local`
+does the same.
+
 Run it in a Rex pane, with any Neovim arguments:
 
 ```sh
 zig-out/bin/neorex some/file.txt
+```
+
+Neovim starts with `g:neorex` set, before your config loads, so the config
+can tell it's running under neorex:
+
+```lua
+{ 'sphamba/smear-cursor.nvim', cond = vim.g.neorex == nil },
 ```
 
 `neorex help` lists the debug commands, which run each layer on its own:
@@ -53,7 +82,12 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   controls instead.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
   placement they expect.
-- Only one tab page: Neovim tab pages aren't Rex tabs.
+- Neovim tab pages aren't Rex tabs. A tab page opened after startup, as
+  `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane, its
+  windows split inside it, and closes with its last window.
+- Plugins that draw cursor effects with editor floats, such as
+  smear-cursor.nvim, draw them in the wrong place: Neovim can't tell them
+  where a pane's window is.
 - No external command line or messages: long messages still show
   "Press ENTER".
 - No global statusline: with `laststatus=3`, each pane still shows its own
