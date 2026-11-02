@@ -31,9 +31,29 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Fills `buf` with random bytes.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn random(buf: &mut [u8]) {
     // SAFETY: `buf` is valid for writes of its length.
     unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn random(buf: &mut [u8]) {
+    let mut filled = 0;
+    while filled < buf.len() {
+        // SAFETY: `buf[filled..]` is valid for writes, and getrandom writes at most
+        // `buf.len() - filled` bytes starting inside `buf`.
+        let n =
+            unsafe { libc::getrandom(buf[filled..].as_mut_ptr().cast(), buf.len() - filled, 0) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            // only a bad pointer or flags fail, which is a bug here
+            panic!("getrandom failed");
+        }
+        filled += n as usize;
+    }
 }
 
 pub struct WebSocket {
