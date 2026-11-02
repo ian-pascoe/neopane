@@ -154,7 +154,12 @@ pub fn serve<S: AsRef<OsStr>>(base: &str, nvim_args: &[S], mut config: Config<'_
     let sock = path(base, ".sock");
     let nvim_sock = path(base, ".nvim.sock");
     let log = path(base, ".log");
-    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    // resolved, symlinks and all, as Zig's executablePath was: the `nrex` link
+    // shouldn't end up in every pane's command
+    let exe = std::env::current_exe()?
+        .canonicalize()?
+        .to_string_lossy()
+        .into_owned();
 
     let _ = fs::remove_file(&sock);
     // open until we exit: every new pane's helper connects here
@@ -362,7 +367,13 @@ fn take_pane(server: &UnixListener) -> Result<Box<Surface>> {
         revents: 0,
     }];
     // SAFETY: one valid pollfd.
-    if unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) } <= 0 {
+    let ready = loop {
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) };
+        if n >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            break n;
+        }
+    };
+    if ready <= 0 {
         return Err(Error::NoPane.into());
     }
     let hello = pane_helper::accept_hello(server)?;

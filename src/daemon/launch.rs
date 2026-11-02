@@ -43,7 +43,7 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
     let sock = serve::path(&base, ".sock");
     let log_path = serve::path(&base, ".log");
 
-    let exe = std::env::current_exe()?;
+    let exe = std::env::current_exe()?.canonicalize()?;
     let log = File::create(&log_path)?;
     // (the log is closed here once the command, which holds it, is dropped)
     let mut daemon = Command::new(&exe)
