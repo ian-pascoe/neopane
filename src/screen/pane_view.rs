@@ -8,7 +8,7 @@
 
 use indexmap::IndexMap;
 
-use super::grid::{Cell, DirtyRows, Grid, Scroll};
+use super::grid::{Cell, DirtyRows, Grid, Scroll, blank_cut_wide};
 use super::grids::{Grids, MAX_FLOATS, Placed};
 use super::render;
 use super::style::{CursorMode, Style};
@@ -706,6 +706,7 @@ fn compose<'a>(
     let base = &row[0..row.len().min(width)];
     line[0..base.len()].copy_from_slice(base);
     line[base.len()..width].fill(Cell::default());
+    blank_cut_wide(&mut line[0..base.len()], row.get(base.len()));
     for f in rects {
         if (r as i64) < f.row as i64 || r as i64 >= f.row as i64 + f.height as i64 {
             continue;
@@ -734,6 +735,7 @@ fn compose<'a>(
             let i = left + k;
             line[i] = blend_cell(style, cell, &line[0..width], i);
         }
+        blank_cut_wide(&mut line[left..left + n], src.get(skip + n));
         if line[left].len == 0 {
             line[left] = Cell {
                 hl: line[left].hl,
@@ -977,6 +979,40 @@ mod tests {
         gs.grids.get_mut(&3).unwrap().dirty.unset_all();
         gs.grids.get_mut(&4).unwrap().dirty.unset_all();
         assert!(!view.frame_floats(&mut gs, &placed, [10, 20], &mut out));
+    }
+
+    #[test]
+    fn a_wide_char_starting_in_the_last_column_is_a_blank_there_and_does_not_wrap() {
+        let mut gs = Grids::default();
+        add_grid(&mut gs, 3, 4, 1);
+        {
+            let g = gs.grids.get_mut(&3).unwrap();
+            g.cells[0] = Cell::init("a", 0);
+            g.cells[1] = Cell::init("b", 0);
+            g.cells[2] = Cell::init("\u{3042}", 0);
+            g.cells[3] = Cell {
+                len: 0,
+                ..Cell::default()
+            };
+        }
+        // the float covers columns 7 to 10 of a 10-column pane: the wide
+        // char starts at column 9 and its right half would be column 10
+        let rects = [Rect {
+            grid: 3,
+            row: 0,
+            col: 7,
+            width: 4,
+            height: 1,
+            ..Rect::default()
+        }];
+        let base = [Cell::init("w", 0); 10];
+        let mut line = [Cell::default(); MAX_COLS];
+        let mut style = Style::default();
+        let out = compose(&gs.grids, &mut style, &base, &rects, 0, 10, &mut line);
+        assert_eq!(10, out.len());
+        assert_eq!("a".as_bytes(), out[7].str());
+        assert_eq!("b".as_bytes(), out[8].str());
+        assert_eq!(" ".as_bytes(), out[9].str());
     }
 
     #[test]

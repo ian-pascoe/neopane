@@ -38,7 +38,7 @@ use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
 use crate::rex::session::{self as rex_session, Conn, Request, Session as RexSession};
 use crate::screen::float_groups;
-use crate::screen::grid::{Cell, Grid};
+use crate::screen::grid::{Cell, Grid, blank_cut_wide};
 use crate::screen::grids::{Grids, WinKind};
 use crate::screen::pane_view::{Opts, Rect};
 use crate::term::input;
@@ -1685,12 +1685,13 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> usize {
 }
 
 /// Grid 1's top row from column `col`, `cols` wide. A wide character cut at
-/// the left edge leaves a blank.
+/// either edge leaves a blank.
 fn tabline_slice(screen: &Grid, col: u32, cols: u32) -> Vec<Cell> {
     let row = screen.row(0);
     let from = (col as usize).min(row.len());
     let n = (row.len() - from).min(cols as usize).min(TABLINE_MAX);
     let mut buf = row[from..from + n].to_vec();
+    blank_cut_wide(&mut buf, row.get(from + n));
     if n > 0 && buf[0].len == 0 {
         buf[0] = Cell {
             hl: buf[0].hl,
@@ -1837,6 +1838,24 @@ mod tests {
         fn start(&self, at: usize) -> Option<u32> {
             self.fx.d.tabline_start(&self.fx.d.panes.list[at])
         }
+    }
+
+    #[test]
+    fn a_tabline_slice_cut_through_a_wide_char_blanks_its_left_half() {
+        let mut g = Grid::default();
+        g.resize(8, 1);
+        g.cells[3] = Cell::init("x", 0);
+        g.cells[4] = Cell::init("\u{3042}", 0);
+        g.cells[5] = Cell {
+            len: 0,
+            ..Cell::default()
+        };
+        let right = tabline_slice(&g, 0, 5);
+        assert_eq!(5, right.len());
+        assert_eq!("x".as_bytes(), right[3].str());
+        assert_eq!(" ".as_bytes(), right[4].str());
+        let whole = tabline_slice(&g, 0, 6);
+        assert_eq!("\u{3042}".as_bytes(), whole[4].str());
     }
 
     #[test]
