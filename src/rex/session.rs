@@ -208,26 +208,19 @@ impl Session {
         )
     }
 
-    /// One read from Rex; false once it hung up or failed (logged, and Rex is
-    /// closed). Then call `next` until None.
-    pub fn read(&mut self) -> bool {
+    /// One read from Rex. If it hung up or failed, logs it and closes Rex; then
+    /// call `next` until None.
+    pub fn read(&mut self) {
         match self.client.read() {
-            Ok(true) => true,
-            Ok(false) => {
-                eprintln!("neorex daemon: Rex hung up");
-                self.conn = Conn::Closed;
-                false
-            }
-            Err(e) => {
-                self.fail(&e);
-                false
-            }
+            Ok(true) => {}
+            Ok(false) => self.close_rex("hung up"),
+            Err(e) => self.close_rex(&format!("failed: {e}")),
         }
     }
 
     /// Any Rex error closes Rex: the windows keep working without it.
-    fn fail(&mut self, e: &ClientError) {
-        eprintln!("neorex daemon: Rex failed, treating it as closed: {e}");
+    fn close_rex(&mut self, reason: &str) {
+        eprintln!("neorex daemon: Rex {reason}, treating it as closed");
         self.conn = Conn::Closed;
     }
 
@@ -242,7 +235,7 @@ impl Session {
                 Ok(Some(m)) => m,
                 Ok(None) => break,
                 Err(e) => {
-                    self.fail(&e);
+                    self.close_rex(&format!("failed: {e}"));
                     break;
                 }
             };
@@ -439,7 +432,11 @@ impl Session {
         }
         match self.client.request(method, Some(&payload)) {
             Ok(id) => self.pending_requests.push(Pending { id, req }),
-            Err(e) => self.fail(&e),
+            Err(e) => {
+                // no answer will come: stays pending so closing fails it
+                self.pending_requests.push(Pending { id: 0, req });
+                self.close_rex(&format!("failed: {e}"));
+            }
         }
         Ok(())
     }

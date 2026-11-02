@@ -2828,5 +2828,23 @@ mod tests {
         d.rex.focus_direction(rex_session::Direction::Left).unwrap();
         d.after_batch().unwrap();
         assert_rex_closed_and_split_failed(&d, id);
+        assert_eq!(None, d.stopped);
+    }
+
+    #[test]
+    fn a_failed_write_of_the_split_request_itself_fails_that_split() {
+        let mut fx = fixture();
+        fx.d.event_loop
+            .add_read(fx.d.rex.client.fd(), Token::RexSocket as usize)
+            .unwrap();
+        let id = fx.d.panes.add(Pane::from_neovim_window(1, 1001)).id;
+        let Fixture { mut d, rex_end, .. } = fx;
+        drop(rex_end);
+        d.rex
+            .request(Request::NewSplit(id), "block.split", json!({}))
+            .unwrap();
+        d.after_batch().unwrap();
+        assert_rex_closed_and_split_failed(&d, id);
+        assert_eq!(None, d.stopped);
     }
 }
