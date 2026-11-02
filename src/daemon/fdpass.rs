@@ -22,7 +22,7 @@ const SEND_CONTROL: usize = unsafe { libc::CMSG_SPACE(FD_SIZE) } as usize;
 /// The fd rides with the first byte sent, so anything the caller buffers for
 /// this socket must be written out before calling this. Writes all of
 /// `bytes`.
-pub fn send(sock: &impl AsRawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
+pub(crate) fn send(sock: &impl AsRawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
     assert!(!bytes.is_empty());
     let sock = sock.as_raw_fd();
     let mut control = Control::<SEND_CONTROL>([0; SEND_CONTROL]);
@@ -81,7 +81,7 @@ pub fn send(sock: &impl AsRawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Received {
+pub(crate) struct Received {
     /// Bytes read into the buffer; 0 when the peer hung up.
     pub len: usize,
     /// A passed fd, close-on-exec. The caller owns it.
@@ -89,7 +89,7 @@ pub struct Received {
 }
 
 /// One read into `buf`, keeping the first passed fd.
-pub fn recv(sock: &impl AsRawFd, buf: &mut [u8]) -> io::Result<Received> {
+pub(crate) fn recv(sock: &impl AsRawFd, buf: &mut [u8]) -> io::Result<Received> {
     let sock = sock.as_raw_fd();
     let mut control = Control::<RECV_CONTROL>([0; RECV_CONTROL]);
     let mut iov = libc::iovec {

@@ -13,10 +13,10 @@ use crate::daemon::pane_helper::{self, Message};
 use crate::term::input::{self, Event, Key};
 use crate::term::terminal::Terminal;
 
-pub const MAX_PANES: usize = 8;
+pub(crate) const MAX_PANES: usize = 8;
 
 /// Fixed slots. (Each `Terminal` owns its output buffer.)
-pub struct PaneHost {
+pub(crate) struct PaneHost {
     pub panes: [Option<Pane>; MAX_PANES],
     /// Loop tokens from here up, two per slot.
     pub base: usize,
@@ -25,7 +25,7 @@ pub struct PaneHost {
     pub next_id: u32,
 }
 
-pub struct Pane {
+pub(crate) struct Pane {
     pub id: u32,
     pub stream: UnixStream,
     pub term: Terminal,
@@ -41,7 +41,7 @@ enum Source {
 /// What `PaneHost::accept` can fail with besides I/O: `pane_helper::Error`'s
 /// `NoTerminal` and `BadHello` too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     TooManyPanes,
 }
 
@@ -57,7 +57,7 @@ impl std::error::Error for Error {}
 
 impl PaneHost {
     /// A host whose tokens start at `base`, greeting its panes as driven by `name`.
-    pub fn new(base: usize, name: &str) -> PaneHost {
+    pub(crate) fn new(base: usize, name: &str) -> PaneHost {
         PaneHost {
             panes: [const { None }; MAX_PANES],
             base,
@@ -68,14 +68,14 @@ impl PaneHost {
 
     /// Restores every terminal and hangs up, so the helpers exit. (Dropping
     /// the host does the same.)
-    pub fn deinit(&mut self) {
+    pub(crate) fn deinit(&mut self) {
         for slot in &mut self.panes {
             close(slot, None);
         }
     }
 
     /// Whether `token` is one of this host's.
-    pub fn owns(&self, token: usize) -> bool {
+    pub(crate) fn owns(&self, token: usize) -> bool {
         token >= self.base && token <= self.escape_timer()
     }
 
@@ -96,7 +96,7 @@ impl PaneHost {
     }
 
     /// Handles an event for one of this host's tokens.
-    pub fn handle(&mut self, event_loop: &Loop, token: usize) -> Result<()> {
+    pub(crate) fn handle(&mut self, event_loop: &Loop, token: usize) -> Result<()> {
         if token == self.escape_timer() {
             return self.flush_pending_escapes();
         }
@@ -133,7 +133,7 @@ impl PaneHost {
 
     /// Takes a new helper's terminal and greets it. Call between batches of
     /// events, so a stale event can't reach a reused slot.
-    pub fn accept(&mut self, event_loop: &Loop, server: &UnixListener) -> Result<()> {
+    pub(crate) fn accept(&mut self, event_loop: &Loop, server: &UnixListener) -> Result<()> {
         let (stream, _) = server.accept()?;
         let mut buf = [0u8; 1];
         let hello = fdpass::recv(&stream, &mut buf)?;

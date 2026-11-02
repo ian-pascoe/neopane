@@ -3,6 +3,7 @@
 use super::msgpack::{self, Decoder, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum Error {
     /// Not the message, or the value, that was expected.
     BadMessage,
@@ -26,10 +27,11 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// A parsed message. Slices and decoders point into its bytes.
 #[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
 pub enum Message<'a> {
     /// `[0, id, method, params]`
     Request {
@@ -55,7 +57,7 @@ pub enum Message<'a> {
 }
 
 /// Writes `[0, id, method, [`; follow with `param_count` params.
-pub fn write_request_header(w: &mut Vec<u8>, id: u32, method: &str, param_count: u32) {
+pub(crate) fn write_request_header(w: &mut Vec<u8>, id: u32, method: &str, param_count: u32) {
     msgpack::write_array_header(w, 4);
     msgpack::write_int(w, 0);
     msgpack::write_int(w, id);
@@ -64,7 +66,7 @@ pub fn write_request_header(w: &mut Vec<u8>, id: u32, method: &str, param_count:
 }
 
 /// Parses one whole message, as returned by `Framer::next`.
-pub fn parse(bytes: &[u8]) -> Result<Message<'_>> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<Message<'_>> {
     let mut d = Decoder::of(bytes);
     let len = expect_array(&mut d)?;
     match expect_int(&mut d)? {
@@ -100,14 +102,14 @@ pub fn parse(bytes: &[u8]) -> Result<Message<'_>> {
 }
 
 /// Reads an array header, returning its length.
-pub fn expect_array(d: &mut Decoder<'_>) -> Result<u32> {
+pub(crate) fn expect_array(d: &mut Decoder<'_>) -> Result<u32> {
     match next_token(d)? {
         Token::Array(n) => Ok(n),
         _ => Err(Error::BadMessage),
     }
 }
 
-pub fn expect_int(d: &mut Decoder<'_>) -> Result<i64> {
+pub(crate) fn expect_int(d: &mut Decoder<'_>) -> Result<i64> {
     match next_token(d)? {
         Token::Int(n) => Ok(n),
         _ => Err(Error::BadMessage),
@@ -115,14 +117,14 @@ pub fn expect_int(d: &mut Decoder<'_>) -> Result<i64> {
 }
 
 /// Reads a whole string. Needs a whole message, so it's one chunk.
-pub fn expect_str<'a>(d: &mut Decoder<'a>) -> Result<&'a [u8]> {
+pub(crate) fn expect_str<'a>(d: &mut Decoder<'a>) -> Result<&'a [u8]> {
     match next_token(d)? {
         Token::Str(len) => expect_bytes(d, len),
         _ => Err(Error::BadMessage),
     }
 }
 
-pub fn expect_bool(d: &mut Decoder<'_>) -> Result<bool> {
+pub(crate) fn expect_bool(d: &mut Decoder<'_>) -> Result<bool> {
     match next_token(d)? {
         Token::Bool(b) => Ok(b),
         _ => Err(Error::BadMessage),
@@ -130,7 +132,7 @@ pub fn expect_bool(d: &mut Decoder<'_>) -> Result<bool> {
 }
 
 /// Reads a map header, returning its number of pairs.
-pub fn expect_map(d: &mut Decoder<'_>) -> Result<u32> {
+pub(crate) fn expect_map(d: &mut Decoder<'_>) -> Result<u32> {
     match next_token(d)? {
         Token::Map(n) => Ok(n),
         _ => Err(Error::BadMessage),
@@ -138,7 +140,7 @@ pub fn expect_map(d: &mut Decoder<'_>) -> Result<u32> {
 }
 
 /// A buffer, window or tabpage handle: an ext wrapping an int, or a plain int.
-pub fn expect_handle(d: &mut Decoder<'_>) -> Result<i64> {
+pub(crate) fn expect_handle(d: &mut Decoder<'_>) -> Result<i64> {
     match next_token(d)? {
         Token::Int(n) => Ok(n),
         Token::Ext(e) => {
@@ -150,7 +152,7 @@ pub fn expect_handle(d: &mut Decoder<'_>) -> Result<i64> {
 }
 
 /// Skips one whole value, however deeply nested.
-pub fn skip(d: &mut Decoder<'_>) -> Result<()> {
+pub(crate) fn skip(d: &mut Decoder<'_>) -> Result<()> {
     // values still owed; nesting doesn't matter when only counting
     let mut owed: u64 = 1;
     while owed > 0 {
@@ -172,12 +174,12 @@ pub fn skip(d: &mut Decoder<'_>) -> Result<()> {
 }
 
 /// A token that must exist: the message is whole, so None means it's cut short.
-pub fn next_token<'a>(d: &mut Decoder<'a>) -> Result<Token<'a>> {
+pub(crate) fn next_token<'a>(d: &mut Decoder<'a>) -> Result<Token<'a>> {
     d.next()?.ok_or(Error::BadMessage)
 }
 
 /// The `len` bytes after a str, bin or ext header.
-pub fn expect_bytes<'a>(d: &mut Decoder<'a>, len: u32) -> Result<&'a [u8]> {
+pub(crate) fn expect_bytes<'a>(d: &mut Decoder<'a>, len: u32) -> Result<&'a [u8]> {
     if len == 0 {
         return Ok(b"");
     }

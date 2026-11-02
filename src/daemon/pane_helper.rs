@@ -47,12 +47,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// What a helper sends the daemon, one byte each. Any other byte is
 /// `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Message {
+pub(crate) enum Message {
     /// First, with the terminal's fd attached, then the ID in decimal if any.
     Hello,
     /// The terminal was resized. Only the helper gets SIGWINCH: it's in
@@ -62,7 +62,7 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn from_byte(byte: u8) -> Message {
+    pub(crate) fn from_byte(byte: u8) -> Message {
         match byte {
             b'p' => Message::Hello,
             b'w' => Message::Resized,
@@ -71,7 +71,7 @@ impl Message {
     }
 
     /// The byte sent for this message.
-    pub fn to_byte(self) -> u8 {
+    pub(crate) fn to_byte(self) -> u8 {
         match self {
             Message::Hello => b'p',
             Message::Resized => b'w',
@@ -137,7 +137,7 @@ pub fn run(socket_path: impl AsRef<Path>, id: Option<u32>) -> Result<()> {
 }
 
 /// The hello message: `p`, then the ID if there is one.
-pub fn hello_bytes(buf: &mut [u8], id: Option<u32>) -> Result<&[u8]> {
+pub(crate) fn hello_bytes(buf: &mut [u8], id: Option<u32>) -> Result<&[u8]> {
     let hello = Message::Hello.to_byte();
     let Some(n) = id else {
         *buf.first_mut().ok_or(Error::NoSpaceLeft)? = hello;
@@ -151,15 +151,15 @@ pub fn hello_bytes(buf: &mut [u8], id: Option<u32>) -> Result<&[u8]> {
 
 /// A helper's connection and the terminal it handed over.
 #[derive(Debug)]
-pub struct Hello {
-    pub stream: UnixStream,
-    pub tty: RawFd,
+pub(crate) struct Hello {
+    pub(crate) stream: UnixStream,
+    pub(crate) tty: RawFd,
     /// None for the launcher's pane.
-    pub id: Option<u32>,
+    pub(crate) id: Option<u32>,
 }
 
 impl Hello {
-    pub fn close(self) {
+    pub(crate) fn close(self) {
         // SAFETY: `tty` is the fd this hello owns; the stream closes on drop.
         unsafe { libc::close(self.tty) };
     }
@@ -216,7 +216,7 @@ fn check_peer(peer: u32, ours: u32) -> Result<()> {
 /// The daemon's side: takes the next helper and its hello. Closes both on
 /// failure. A peer of another user, or one that sends no hello within
 /// `HELLO_TIMEOUT`, is dropped.
-pub fn accept_hello(server: &UnixListener) -> Result<Hello> {
+pub(crate) fn accept_hello(server: &UnixListener) -> Result<Hello> {
     let (stream, _) = server.accept()?;
     accept_hello_on(stream, HELLO_TIMEOUT)
 }
@@ -240,7 +240,7 @@ fn accept_hello_on(stream: UnixStream, timeout: Duration) -> Result<Hello> {
 }
 
 /// The ID in a hello: None for the launcher's pane.
-pub fn parse_hello(bytes: &[u8]) -> Result<Option<u32>> {
+pub(crate) fn parse_hello(bytes: &[u8]) -> Result<Option<u32>> {
     if bytes.first() != Some(&Message::Hello.to_byte()) {
         return Err(Error::BadHello);
     }

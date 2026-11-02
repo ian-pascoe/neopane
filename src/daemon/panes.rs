@@ -9,7 +9,7 @@ use super::event_loop::Loop;
 use super::pane::{NeovimWindowHandle, Pane};
 use crate::screen::float_groups::Group;
 
-pub struct Panes {
+pub(crate) struct Panes {
     pub list: Vec<Pane>,
     /// Never reused, so a stale token can't reach a newer pane. 0 is the startup pane.
     pub next_id: u32,
@@ -26,7 +26,7 @@ impl Default for Panes {
 
 impl Panes {
     /// Hangs up every pane still open. (Dropping `Panes` does the same.)
-    pub fn deinit(&mut self) {
+    pub(crate) fn deinit(&mut self) {
         for mut p in self.list.drain(..) {
             if p.closing.is_none() {
                 p.closing = Some(super::pane::Close::Shutdown);
@@ -36,27 +36,27 @@ impl Panes {
     }
 
     /// Adds a pane that already has its id, such as the startup pane.
-    pub fn add(&mut self, pane: Pane) -> &mut Pane {
+    pub(crate) fn add(&mut self, pane: Pane) -> &mut Pane {
         self.list.push(pane);
         self.list.last_mut().unwrap()
     }
 
     /// Adds a pane for `win`, with the next id.
-    pub fn add_for_window(&mut self, win: NeovimWindowHandle) -> &mut Pane {
+    pub(crate) fn add_for_window(&mut self, win: NeovimWindowHandle) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
         self.add(Pane::from_neovim_window(id, win))
     }
 
     /// Adds a floating pane for group `g`, with the next id.
-    pub fn add_for_group(&mut self, g: Group) -> &mut Pane {
+    pub(crate) fn add_for_group(&mut self, g: Group) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
         self.add(Pane::from_group(id, g))
     }
 
     /// Takes every pane's fds off `event_loop`, for before they are hung up.
-    pub fn unregister_all(&self, event_loop: &Loop) {
+    pub(crate) fn unregister_all(&self, event_loop: &Loop) {
         for p in &self.list {
             p.unregister_from(event_loop);
         }
@@ -64,25 +64,25 @@ impl Panes {
 
     /// Takes pane `i` off `event_loop`, hangs it up and forgets it. Set its
     /// `closing` first.
-    pub fn remove(&mut self, i: usize, event_loop: &Loop) {
+    pub(crate) fn remove(&mut self, i: usize, event_loop: &Loop) {
         let pane = self.list.remove(i);
         pane.unregister_from(event_loop);
         pane.deinit();
     }
 
-    pub fn index_of(&self, id: u32) -> Option<usize> {
+    pub(crate) fn index_of(&self, id: u32) -> Option<usize> {
         self.list.iter().position(|p| p.id == id)
     }
 
-    pub fn by_id(&self, id: u32) -> Option<&Pane> {
+    pub(crate) fn by_id(&self, id: u32) -> Option<&Pane> {
         self.list.iter().find(|p| p.id == id)
     }
 
-    pub fn by_id_mut(&mut self, id: u32) -> Option<&mut Pane> {
+    pub(crate) fn by_id_mut(&mut self, id: u32) -> Option<&mut Pane> {
         self.list.iter_mut().find(|p| p.id == id)
     }
 
-    pub fn by_win(&self, win: i64) -> Option<&Pane> {
+    pub(crate) fn by_win(&self, win: i64) -> Option<&Pane> {
         if win == 0 {
             return None;
         }
@@ -91,7 +91,7 @@ impl Panes {
             .find(|p| p.neovim_window_handle == Some(win))
     }
 
-    pub fn by_win_mut(&mut self, win: i64) -> Option<&mut Pane> {
+    pub(crate) fn by_win_mut(&mut self, win: i64) -> Option<&mut Pane> {
         if win == 0 {
             return None;
         }
@@ -100,27 +100,21 @@ impl Panes {
             .find(|p| p.neovim_window_handle == Some(win))
     }
 
-    pub fn by_block(&self, block: &[u8]) -> Option<&Pane> {
+    pub(crate) fn by_block(&self, block: &[u8]) -> Option<&Pane> {
         self.list
             .iter()
             .find(|p| p.rex_block.is_some_and(|b| b == block))
     }
 
-    pub fn by_block_mut(&mut self, block: &[u8]) -> Option<&mut Pane> {
+    pub(crate) fn by_block_mut(&mut self, block: &[u8]) -> Option<&mut Pane> {
         self.list
             .iter_mut()
             .find(|p| p.rex_block.is_some_and(|b| b == block))
     }
 
-    pub fn by_layer_key(&self, key: i64) -> Option<&Pane> {
+    pub(crate) fn by_layer_key(&self, key: i64) -> Option<&Pane> {
         self.list
             .iter()
-            .find(|p| p.layer.is_some_and(|l| l.group.key == key))
-    }
-
-    pub fn by_layer_key_mut(&mut self, key: i64) -> Option<&mut Pane> {
-        self.list
-            .iter_mut()
             .find(|p| p.layer.is_some_and(|l| l.group.key == key))
     }
 }
@@ -173,8 +167,6 @@ mod tests {
         assert_eq!(id, panes.by_layer_key(2000).unwrap().id);
         assert!(panes.by_layer_key(2001).is_none());
         assert!(panes.by_win(2000).is_none());
-        panes.by_layer_key_mut(2000).unwrap().tab = 3;
-        assert_eq!(3, panes.by_id(id).unwrap().tab);
     }
 
     #[test]

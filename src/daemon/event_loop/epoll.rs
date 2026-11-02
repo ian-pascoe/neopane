@@ -45,7 +45,7 @@ struct Signals {
     tokens: [Option<usize>; SIGNALS],
 }
 
-pub struct Backend {
+pub(super) struct Backend {
     ep: RawFd,
     watches: RefCell<HashMap<RawFd, Watch>>,
     /// The timerfd of each timer id, kept after it fires for the next time
@@ -64,7 +64,7 @@ fn empty_set() -> libc::sigset_t {
 }
 
 impl Backend {
-    pub fn init() -> Result<Backend> {
+    pub(super) fn init() -> Result<Backend> {
         // SAFETY: a plain syscall. Not inherited by children such as Neovim.
         let ep = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if ep < 0 {
@@ -83,7 +83,7 @@ impl Backend {
         })
     }
 
-    pub fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(super) fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
         self.watch(
             fd,
             Watch {
@@ -95,11 +95,11 @@ impl Backend {
     }
 
     /// `fd` must be watched for reading already.
-    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(super) fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
         self.set_write(fd, Some(token))
     }
 
-    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+    pub(super) fn remove_write(&self, fd: RawFd) -> Result<()> {
         if !self.watches.borrow().contains_key(&fd) {
             return Ok(());
         }
@@ -129,7 +129,7 @@ impl Backend {
         Ok(())
     }
 
-    pub fn remove(&self, fd: RawFd) -> Result<()> {
+    pub(super) fn remove(&self, fd: RawFd) -> Result<()> {
         // SAFETY: the event is ignored for a delete, but old kernels want one.
         let rc = unsafe { libc::epoll_ctl(self.ep, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut()) };
         if rc < 0 {
@@ -141,7 +141,7 @@ impl Backend {
 
     /// Watches `sig`. The caller has already made it ignored. Blocks it on
     /// this thread, so it queues for the signalfd instead.
-    pub fn add_signal(&self, sig: libc::c_int, token: usize) -> Result<()> {
+    pub(super) fn add_signal(&self, sig: libc::c_int, token: usize) -> Result<()> {
         let n = usize::try_from(sig).map_err(|_| Error::WatchFailed)?;
         if n == 0 || n >= SIGNALS {
             return Err(Error::WatchFailed);
@@ -190,7 +190,7 @@ impl Backend {
     /// Unblocks the signals `add_signal` blocked. They are still ignored, so
     /// one that is pending is discarded; with its old action back, it would
     /// run that action, which may end the process.
-    pub fn release_signals(&self) {
+    pub(super) fn release_signals(&self) {
         let mut signals = self.signals.borrow_mut();
         // SAFETY: the set is valid, and unblocking only changes this thread.
         unsafe {
@@ -199,7 +199,7 @@ impl Backend {
         signals.blocked = empty_set();
     }
 
-    pub fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
+    pub(super) fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
         let known = self.timers.borrow().get(&id).copied();
         let fd = match known {
             Some(fd) => {
@@ -248,7 +248,7 @@ impl Backend {
         Ok(())
     }
 
-    pub fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+    pub(super) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
         if buf.is_empty() {
             return Ok(&buf[..0]);
         }

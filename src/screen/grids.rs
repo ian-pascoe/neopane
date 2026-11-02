@@ -11,6 +11,7 @@ use crate::nvim::msgpack::{Decoder, Token};
 use crate::nvim::rpc;
 
 #[derive(Debug, Clone)]
+#[doc(hidden)]
 pub struct Grids {
     pub grids: IndexMap<u32, Grid>,
     /// Windows by grid id.
@@ -20,7 +21,7 @@ pub struct Grids {
     pub cursor_grid: u32,
     /// The message grid, drawn over grid 1 from `msg_row` down.
     pub msg_grid: Option<u32>,
-    pub msg_row: u32,
+    pub(crate) msg_row: u32,
 }
 
 impl Default for Grids {
@@ -37,15 +38,17 @@ impl Default for Grids {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[doc(hidden)]
 pub struct Win {
     /// Neovim's window handle; -1 for the popup menu.
     pub win: i64,
     pub kind: WinKind,
     /// Where it floats, for `WinKind::Float`.
-    pub float: Float,
+    pub(crate) float: Float,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum WinKind {
     /// In the tab's split layout, positioned on grid 1.
     Ordinary,
@@ -59,19 +62,19 @@ pub enum WinKind {
 
 /// A float's position, as `win_float_pos` gives it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Float {
+pub(crate) struct Float {
     /// The grid it floats over, and the corner of the float at `row`, `col`.
-    pub anchor_grid: u32,
-    pub anchor: Anchor,
-    pub row: f64,
-    pub col: f64,
-    pub zindex: u32,
+    pub(crate) anchor_grid: u32,
+    pub(crate) anchor: Anchor,
+    pub(crate) row: f64,
+    pub(crate) col: f64,
+    pub(crate) zindex: u32,
     /// Takes the mouse; Neovim sets this for focusable floats.
-    pub focusable: bool,
+    pub(crate) focusable: bool,
     /// Neovim's drawing order among equal zindexes.
-    pub compindex: u32,
+    pub(crate) compindex: u32,
     /// Where Neovim put it on grid 1, kept inside the screen.
-    pub screen: Option<[i32; 2]>,
+    pub(crate) screen: Option<[i32; 2]>,
 }
 
 impl Default for Float {
@@ -90,7 +93,7 @@ impl Default for Float {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Anchor {
+pub(crate) enum Anchor {
     Nw,
     Ne,
     Sw,
@@ -99,31 +102,32 @@ pub enum Anchor {
 
 /// A float placed over a base grid, in that grid's cells.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct Placed {
     pub grid: u32,
     pub row: i32,
     pub col: i32,
-    pub zindex: u32,
-    pub compindex: u32,
+    pub(crate) zindex: u32,
+    pub(crate) compindex: u32,
     /// On the screen (grid 1 or the message grid), not over a window.
-    pub on_screen: bool,
+    pub(crate) on_screen: bool,
     /// On the message grid, which shows at the bottom.
-    pub on_msg: bool,
+    pub(crate) on_msg: bool,
     /// The editor-relative float it hangs from, itself included; 0 if none.
-    pub top: u32,
+    pub(crate) top: u32,
 }
 
 /// Where a float sits on the grid under it all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Place {
-    pub root: u32,
-    pub row: i32,
-    pub col: i32,
-    pub top: u32,
+pub(crate) struct Place {
+    pub(crate) root: u32,
+    pub(crate) row: i32,
+    pub(crate) col: i32,
+    pub(crate) top: u32,
 }
 
 /// Most floats drawn over one pane.
-pub const MAX_FLOATS: usize = 16;
+pub(crate) const MAX_FLOATS: usize = 16;
 
 impl Grids {
     /// Grid `id`, if it exists. (`get_mut` is the mutable twin.)
@@ -146,7 +150,7 @@ impl Grids {
     }
 
     /// The window on `grid`.
-    pub fn win_on(&self, grid: u32) -> Option<Win> {
+    pub(crate) fn win_on(&self, grid: u32) -> Option<Win> {
         self.wins.get(&grid).copied()
     }
 
@@ -184,7 +188,7 @@ impl Grids {
     }
 
     /// Where float grid `id` sits on the grid under it all: floats can float over floats.
-    pub fn place(&self, id: u32) -> Option<Place> {
+    pub(crate) fn place(&self, id: u32) -> Option<Place> {
         let w = self.wins.get(&id)?;
         if w.kind != WinKind::Float {
             return None;
@@ -472,7 +476,7 @@ impl Grids {
 
 /// Sorts lowest first, as Neovim stacks them, and keeps the top-most
 /// `MAX_FLOATS`: with more floats than that, it's the lowest that go.
-pub fn keep_top_floats(placed: &mut Vec<Placed>) {
+pub(crate) fn keep_top_floats(placed: &mut Vec<Placed>) {
     placed.sort_by_key(|p| (p.zindex, p.compindex));
     let extra = placed.len().saturating_sub(MAX_FLOATS);
     placed.drain(..extra);

@@ -36,14 +36,14 @@ use crate::term::input;
 
 /// What the gate needs of the panes: the
 /// `Forwarder` that parses the input typed into a pane, if it has one.
-pub trait AimForwarder {
+pub(crate) trait AimForwarder {
     /// The pane `pane`'s forwarder, with its targets aimed, or None if the
     /// pane is gone.
     fn aim_forwarder(&mut self, pane: u32) -> Option<&mut Forwarder>;
 }
 
 #[derive(Debug, Default)]
-pub struct FocusGate {
+pub(crate) struct FocusGate {
     /// The switch in flight: asked for, not yet answered.
     pub pending: Option<Switch>,
     /// Our `nvim_get_mode` asked for it, which Neovim answers when it's waiting
@@ -65,13 +65,13 @@ pub struct FocusGate {
 
 /// A request, and the pane whose window it makes current.
 #[derive(Debug, Clone, Copy)]
-pub struct Switch {
+pub(crate) struct Switch {
     pub req: u32,
     pub pane: u32,
 }
 
 #[derive(Debug)]
-pub enum Item {
+pub(crate) enum Item {
     SwitchTo {
         win: i64,
         pane: u32,
@@ -88,13 +88,13 @@ pub enum Item {
 
 impl FocusGate {
     /// The request of the switch in flight, if any.
-    pub fn in_flight(&self) -> Option<u32> {
+    pub(crate) fn in_flight(&self) -> Option<u32> {
         self.pending.map(|p| p.req)
     }
 
     /// Asks Neovim to make `win`, the window of `pane`, current once the
     /// switches and input before it are through.
-    pub fn switch_to(&mut self, nvim: &mut Nvim, win: i64, pane: u32) -> io::Result<()> {
+    pub(crate) fn switch_to(&mut self, nvim: &mut Nvim, win: i64, pane: u32) -> io::Result<()> {
         if self.pending.is_some() {
             self.queue.push(Item::SwitchTo { win, pane });
             return Ok(());
@@ -105,7 +105,7 @@ impl FocusGate {
     /// Sends `bytes`, typed into `pane`, through the forwarder
     /// `panes.aim_forwarder(pane)` finds, once the switches asked for so far
     /// are made. Dropped if it finds none.
-    pub fn send(
+    pub(crate) fn send(
         &mut self,
         nvim: &mut Nvim,
         panes: &mut impl AimForwarder,
@@ -116,7 +116,7 @@ impl FocusGate {
     }
 
     /// As `send`, for a read that came at `at`.
-    pub fn send_at(
+    pub(crate) fn send_at(
         &mut self,
         nvim: &mut Nvim,
         panes: &mut impl AimForwarder,
@@ -163,7 +163,7 @@ impl FocusGate {
     /// was ours, goes on with what waited for it. `panes` is as for `send`.
     /// (A message's response variant has no type of its own, so its fields
     /// come one by one.)
-    pub fn answered(
+    pub(crate) fn answered(
         &mut self,
         nvim: &mut Nvim,
         panes: &mut impl AimForwarder,
@@ -223,7 +223,7 @@ impl FocusGate {
     /// For the timer: asks whether Neovim is waiting for a key, if the switch
     /// in flight is unanswered and no ask is out. Not right after a key went
     /// through, see above.
-    pub fn probe_again(&mut self, nvim: &mut Nvim) -> io::Result<()> {
+    pub(crate) fn probe_again(&mut self, nvim: &mut Nvim) -> io::Result<()> {
         if self.pending.is_none() || self.probe.is_some() || self.blocked {
             return Ok(());
         }
@@ -309,7 +309,7 @@ fn flush_if_timed_out(
 }
 
 /// Whether the `nvim_get_mode` result at `result` says Neovim is waiting for a key.
-pub fn is_blocking(result: &mut Decoder<'_>) -> rpc::Result<bool> {
+pub(crate) fn is_blocking(result: &mut Decoder<'_>) -> rpc::Result<bool> {
     let mut pairs = rpc::expect_map(result)?;
     while pairs > 0 {
         let key = rpc::expect_str(result)?;

@@ -14,10 +14,10 @@ use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
 /// Most bytes a pane keeps waiting: a few full frames of a big terminal.
-pub const CAP: usize = 1 << 20;
+pub(crate) const CAP: usize = 1 << 20;
 
 #[derive(Debug)]
-pub struct Backlog {
+pub(crate) struct Backlog {
     /// Frames waiting, oldest first. The first may be partly written.
     frames: VecDeque<Vec<u8>>,
     /// How much of the first frame is written.
@@ -44,19 +44,19 @@ impl Default for Backlog {
 
 impl Backlog {
     /// Nothing waits.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 
     /// Frames were dropped: the pane is drawn again in full, not frame by
     /// frame, once what's waiting is written.
-    pub fn dropped(&self) -> bool {
+    pub(crate) fn dropped(&self) -> bool {
         self.dropped
     }
 
     /// Sends `frame` to `fd` after what waits, taking its bytes; what `fd`
     /// can't take now waits. An error means the terminal is gone.
-    pub fn send(&mut self, fd: RawFd, frame: &mut Vec<u8>) -> io::Result<()> {
+    pub(crate) fn send(&mut self, fd: RawFd, frame: &mut Vec<u8>) -> io::Result<()> {
         if frame.is_empty() {
             return Ok(());
         }
@@ -80,7 +80,7 @@ impl Backlog {
 
     /// Writes what waits, as far as `fd` takes it now. An error means the
     /// terminal is gone.
-    pub fn drain(&mut self, fd: RawFd) -> io::Result<()> {
+    pub(crate) fn drain(&mut self, fd: RawFd) -> io::Result<()> {
         while let Some(first) = self.frames.front() {
             let n = write_some(fd, &first[self.written..])?;
             self.written += n;
@@ -96,7 +96,7 @@ impl Backlog {
 
     /// True once, when frames were dropped and nothing waits any more: time
     /// for the full repaint.
-    pub fn take_dropped(&mut self) -> bool {
+    pub(crate) fn take_dropped(&mut self) -> bool {
         let repaint = self.dropped && self.is_empty();
         if repaint {
             self.dropped = false;
@@ -106,7 +106,7 @@ impl Backlog {
 
     /// The rest of the frame being written, for the terminal to get before
     /// it's restored; the frames after it are forgotten.
-    pub fn take_unfinished(&mut self) -> Vec<u8> {
+    pub(crate) fn take_unfinished(&mut self) -> Vec<u8> {
         let rest = match self.frames.pop_front() {
             Some(first) => first[self.written..].to_vec(),
             None => Vec::new(),
@@ -122,7 +122,7 @@ impl Backlog {
 /// Writes `bytes` to `fd`, waiting at most `wait` for room; what doesn't fit
 /// by then is dropped. For a terminal being restored as its pane goes: a
 /// terminal nobody reads mustn't hold the daemon up.
-pub fn write_within(fd: RawFd, bytes: &[u8], wait: Duration) {
+pub(crate) fn write_within(fd: RawFd, bytes: &[u8], wait: Duration) {
     let deadline = Instant::now() + wait;
     let mut done = 0;
     loop {

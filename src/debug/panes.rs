@@ -56,7 +56,7 @@ fn serve(event_loop: &mut Loop, server: &UnixListener, socket_path: &Path) -> Re
 }
 
 /// Listens on `socket_path`, replacing a socket left by an earlier run.
-pub fn listen(socket_path: impl AsRef<Path>) -> std::io::Result<UnixListener> {
+pub(crate) fn listen(socket_path: impl AsRef<Path>) -> std::io::Result<UnixListener> {
     let socket_path = socket_path.as_ref();
     let _ = fs::remove_file(socket_path);
     UnixListener::bind(socket_path)

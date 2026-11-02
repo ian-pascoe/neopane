@@ -7,7 +7,7 @@ use crate::nvim::windows;
 use crate::screen::grids::Grids;
 
 #[derive(Debug, Clone, Default)]
-pub struct WindowChanges {
+pub(crate) struct WindowChanges {
     /// Windows asked to become external and not seen external since.
     pub asked: IndexSet<i64>,
     /// Windows we asked Neovim to close because their pane went away.
@@ -28,14 +28,14 @@ pub struct WindowChanges {
 /// between making a window and drawing it, so a split is only forgotten
 /// once its window was seen and is gone.
 #[derive(Debug, Clone, Copy)]
-pub struct PendingSplit {
+pub(crate) struct PendingSplit {
     pub split: windows::Split,
     pub seen: bool,
 }
 
 impl WindowChanges {
     /// Forgets windows Neovim no longer has.
-    pub fn forget_gone(&mut self, grids: &Grids) {
+    pub(crate) fn forget_gone(&mut self, grids: &Grids) {
         // drawn: an ordinary window from here on
         self.reopened.retain(|&win| grids.grid_of(win).is_none());
         for set in [&mut self.asked, &mut self.closing] {
@@ -60,48 +60,48 @@ impl WindowChanges {
     }
 
     /// True the first time for `win`: ask Neovim to make it external.
-    pub fn should_adopt(&mut self, win: i64) -> bool {
+    pub(crate) fn should_adopt(&mut self, win: i64) -> bool {
         self.asked.insert(win)
     }
 
     /// `win` is external now, so it's no longer waiting on our request.
-    pub fn became_external(&mut self, win: i64) {
+    pub(crate) fn became_external(&mut self, win: i64) {
         self.asked.swap_remove(&win);
     }
 
-    pub fn mark_closing(&mut self, win: i64) {
+    pub(crate) fn mark_closing(&mut self, win: i64) {
         self.closing.insert(win);
     }
 
-    pub fn is_closing(&self, win: i64) -> bool {
+    pub(crate) fn is_closing(&self, win: i64) -> bool {
         self.closing.contains(&win)
     }
 
-    pub fn mark_reopening(&mut self, win: i64) {
+    pub(crate) fn mark_reopening(&mut self, win: i64) {
         self.reopening.insert(win);
     }
 
-    pub fn is_reopening(&self, win: i64) -> bool {
+    pub(crate) fn is_reopening(&self, win: i64) -> bool {
         self.reopening.contains(&win)
     }
 
     /// True if `win` was closing to reopen; forgets it.
-    pub fn take_reopening(&mut self, win: i64) -> bool {
+    pub(crate) fn take_reopening(&mut self, win: i64) -> bool {
         self.reopening.swap_remove(&win)
     }
 
     /// `win` reopened a closing window, and isn't drawn yet.
-    pub fn mark_reopened(&mut self, win: i64) {
+    pub(crate) fn mark_reopened(&mut self, win: i64) {
         self.reopened.insert(win);
     }
 
     /// True while `win`'s pane waits for it: closing to reopen, or the new
     /// window not drawn yet.
-    pub fn awaits_reopen(&self, win: i64) -> bool {
+    pub(crate) fn awaits_reopen(&self, win: i64) -> bool {
         self.reopening.contains(&win) || self.reopened.contains(&win)
     }
 
-    pub fn note_split(&mut self, sp: windows::Split) {
+    pub(crate) fn note_split(&mut self, sp: windows::Split) {
         self.splits.insert(
             sp.win,
             PendingSplit {
@@ -112,7 +112,7 @@ impl WindowChanges {
     }
 
     /// Where Neovim put `win`; beside the current window if it didn't say.
-    pub fn split_of(&self, win: i64) -> windows::Split {
+    pub(crate) fn split_of(&self, win: i64) -> windows::Split {
         if let Some(pending) = self.splits.get(&win) {
             return pending.split;
         }
@@ -125,7 +125,7 @@ impl WindowChanges {
         }
     }
 
-    pub fn forget_split(&mut self, win: i64) {
+    pub(crate) fn forget_split(&mut self, win: i64) {
         self.splits.swap_remove(&win);
     }
 }

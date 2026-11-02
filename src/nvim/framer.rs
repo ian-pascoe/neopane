@@ -3,6 +3,7 @@
 use super::msgpack::{self, Decoder, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum Error {
     /// The bytes aren't msgpack.
     InvalidByte,
@@ -27,7 +28,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug, Default)]
-pub struct Framer {
+pub(crate) struct Framer {
     /// Bytes received: handed-out messages, then ones not yet handed out.
     pub buf: Vec<u8>,
     /// Offset of the first byte not yet handed out.
@@ -36,7 +37,7 @@ pub struct Framer {
 
 impl Framer {
     /// Adds bytes read from the stream. Invalidates messages from `next`.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
         // drop handed-out messages
         self.buf.drain(..self.start);
         self.start = 0;
@@ -46,7 +47,7 @@ impl Framer {
 
     /// The next whole message, or None until more is fed. Valid until `feed`.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<&[u8]>, Error> {
+    pub(crate) fn next(&mut self) -> Result<Option<&[u8]>, Error> {
         let rest = &self.buf[self.start..];
         if rest.is_empty() {
             return Ok(None);

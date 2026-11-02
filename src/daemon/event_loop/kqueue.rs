@@ -5,12 +5,12 @@ use std::os::unix::io::RawFd;
 
 use super::{Error, Event, Kind, Result};
 
-pub struct Backend {
+pub(super) struct Backend {
     kq: RawFd,
 }
 
 impl Backend {
-    pub fn init() -> Result<Backend> {
+    pub(super) fn init() -> Result<Backend> {
         // SAFETY: plain syscalls.
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
@@ -22,16 +22,16 @@ impl Backend {
         Ok(Backend { kq })
     }
 
-    pub fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(super) fn add_read(&self, fd: RawFd, token: usize) -> Result<()> {
         self.change(fd as usize, libc::EVFILT_READ, libc::EV_ADD, token)
     }
 
-    pub fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
+    pub(super) fn add_write(&self, fd: RawFd, token: usize) -> Result<()> {
         self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_ADD, token)
     }
 
     /// Fails only if a write watch was there and couldn't be removed.
-    pub fn remove_write(&self, fd: RawFd) -> Result<()> {
+    pub(super) fn remove_write(&self, fd: RawFd) -> Result<()> {
         match self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_DELETE, 0) {
             Err(_) if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) => {
                 Err(Error::WatchFailed)
@@ -40,21 +40,21 @@ impl Backend {
         }
     }
 
-    pub fn remove(&self, fd: RawFd) -> Result<()> {
+    pub(super) fn remove(&self, fd: RawFd) -> Result<()> {
         self.remove_write(fd)?;
         self.change(fd as usize, libc::EVFILT_READ, libc::EV_DELETE, 0)
     }
 
     /// Watches `sig`. The caller has already made it ignored.
-    pub fn add_signal(&self, sig: libc::c_int, token: usize) -> Result<()> {
+    pub(super) fn add_signal(&self, sig: libc::c_int, token: usize) -> Result<()> {
         self.change(sig as usize, libc::EVFILT_SIGNAL, libc::EV_ADD, token)
     }
 
     /// Called as the loop ends, before the old signal actions come back.
     /// Nothing to release: kqueue watches signals without blocking them.
-    pub fn release_signals(&self) {}
+    pub(super) fn release_signals(&self) {}
 
-    pub fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
+    pub(super) fn add_timer(&self, id: usize, ms: u32, token: usize) -> Result<()> {
         self.change_data(
             id,
             libc::EVFILT_TIMER,
@@ -64,7 +64,7 @@ impl Backend {
         )
     }
 
-    pub fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+    pub(super) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
         // SAFETY: an all-zero kevent is a valid value.
         let mut raw: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
         let max = buf.len().min(raw.len()) as libc::c_int;

@@ -21,7 +21,7 @@ const RESTORE_WAIT: Duration = Duration::from_secs(1);
 
 /// How `Surface::destroy` leaves the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Restore {
+pub(crate) enum Restore {
     /// Not at all: the terminal is already gone.
     No,
     /// Without waiting: a pane closing while the daemon runs, which Rex closes
@@ -35,14 +35,14 @@ pub enum Restore {
 
 /// What a frame drawn into the terminal's writer did, sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sent {
+pub(crate) enum Sent {
     /// The terminal took it all.
     All,
     /// Some waits for room in the terminal.
     Waiting,
 }
 
-pub struct Surface {
+pub(crate) struct Surface {
     /// Closing it makes the helper exit, and Rex close the pane.
     pub helper_socket: UnixStream,
     pub terminal: Terminal,
@@ -55,7 +55,7 @@ pub struct Surface {
 impl Surface {
     /// Takes over `helper_socket` and the terminal `tty`. If it fails, both
     /// are closed.
-    pub fn create(helper_socket: UnixStream, tty: RawFd) -> std::io::Result<Box<Surface>> {
+    pub(crate) fn create(helper_socket: UnixStream, tty: RawFd) -> std::io::Result<Box<Surface>> {
         let mut terminal = match Terminal::init(tty) {
             Ok(terminal) => terminal,
             Err(e) => {
@@ -92,7 +92,7 @@ impl Surface {
 
     /// Restores the terminal as `restore` says. A `message` is left on the
     /// restored terminal: how a daemon that gives up tells the pane's user why.
-    pub fn destroy(mut self: Box<Surface>, restore: Restore, message: Option<&[u8]>) {
+    pub(crate) fn destroy(mut self: Box<Surface>, restore: Restore, message: Option<&[u8]>) {
         let wait = match restore {
             Restore::No => return, // the fds close as `self` drops
             Restore::Now => Duration::ZERO,
@@ -116,13 +116,13 @@ impl Surface {
 
     /// The window that fits the pane, less the `msg_rows` at the bottom kept for
     /// Neovim's messages and command line ('cmdheight'). Never empty.
-    pub fn window_size(&self, msg_rows: u32) -> [u32; 2] {
+    pub(crate) fn window_size(&self, msg_rows: u32) -> [u32; 2] {
         window_fitting(self.view.cols, self.view.rows, msg_rows)
     }
 
     /// Sends the frame drawn into the terminal's writer, without waiting for
     /// the terminal to take it. An error means the terminal is gone.
-    pub fn send_frame(&mut self) -> std::io::Result<Sent> {
+    pub(crate) fn send_frame(&mut self) -> std::io::Result<Sent> {
         self.backlog
             .send(self.terminal.fd, &mut self.terminal.writer)?;
         Ok(if self.backlog.is_empty() {
@@ -133,7 +133,7 @@ impl Surface {
     }
 
     /// The helper socket's fd, for the event loop.
-    pub fn helper_fd(&self) -> RawFd {
+    pub(crate) fn helper_fd(&self) -> RawFd {
         self.helper_socket.as_raw_fd()
     }
 }
@@ -149,13 +149,13 @@ impl Drop for Surface {
 
 /// `Surface::window_size` for a pane of `cols` x `rows`, one that may not exist yet.
 /// The only place the rule is.
-pub fn window_fitting(cols: u32, rows: u32, msg_rows: u32) -> [u32; 2] {
+pub(crate) fn window_fitting(cols: u32, rows: u32, msg_rows: u32) -> [u32; 2] {
     [cols.max(1), rows.saturating_sub(msg_rows).max(1)]
 }
 
 /// A pty of `cols` x `rows`: master and slave fds.
 #[cfg(test)]
-pub fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
+pub(crate) fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
     let (mut master, mut slave) = (-1, -1);
     let mut ws = libc::winsize {
         ws_row: rows,
@@ -181,7 +181,7 @@ pub fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
 impl Surface {
     /// A surface over a throwaway pty of `cols` x `rows`, for tests of what
     /// holds one. Nothing reads what it draws.
-    pub fn for_test(cols: u32, rows: u32) -> Box<Surface> {
+    pub(crate) fn for_test(cols: u32, rows: u32) -> Box<Surface> {
         let (master, slave) = open_pty(cols as u16, rows as u16);
         let (socket, _other) = UnixStream::pair().unwrap();
         let mut surface = Surface::create(socket, slave).unwrap();

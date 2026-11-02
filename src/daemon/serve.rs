@@ -31,7 +31,7 @@ use crate::rex::client::Client;
 use crate::rex::session::Session as RexSession;
 
 /// `serve` is a top layer: any error will do.
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Why the daemon couldn't start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,7 @@ impl std::error::Error for Error {}
 
 /// Longest path a Unix socket takes, less one for the terminator: 103 on macOS,
 /// 107 on Linux.
-pub const MAX_PATH: usize = {
+pub(crate) const MAX_PATH: usize = {
     // SAFETY: an all-zero sockaddr_un is valid, and only its size is read.
     let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     std::mem::size_of_val(&addr.sun_path) - 1
@@ -67,7 +67,7 @@ const LONGEST_NAME: &str = "nvim.sock";
 /// A new directory for one daemon's files, which only this user can enter:
 /// `neorex-PID.XXXXXX` in the runtime directory (see `parent_dir`). Made
 /// with `mkdtemp`, so it's never another daemon's, even when PIDs repeat.
-pub fn private_dir() -> Result<String> {
+pub(crate) fn private_dir() -> Result<String> {
     let xdg = env("XDG_RUNTIME_DIR");
     let tmpdir = env("TMPDIR");
     private_dir_in(parent_dir(xdg.as_deref(), tmpdir.as_deref()))
@@ -104,7 +104,7 @@ fn private_dir_in(parent: &str) -> Result<String> {
 
 /// Makes the log at `path`, for the daemon's stderr: a new file only this user
 /// can read, never one that's there already or a link.
-pub fn create_log(path: &str) -> std::io::Result<fs::File> {
+pub(crate) fn create_log(path: &str) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -120,26 +120,26 @@ fn owner_only(path: &str) -> std::io::Result<()> {
 }
 
 /// The file `name` in the daemon's directory `dir`.
-pub fn path(dir: &str, name: &str) -> String {
+pub(crate) fn path(dir: &str, name: &str) -> String {
     format!("{dir}/{name}")
 }
 
 /// What `serve` runs against. `run` uses the defaults (`Config::new`); tests
 /// swap the seams.
-pub struct Config<'a> {
-    pub rex_url: &'a str,
-    pub session_id: &'a str,
+pub(crate) struct Config<'a> {
+    pub(crate) rex_url: &'a str,
+    pub(crate) session_id: &'a str,
     /// Starts Neovim: its arguments follow.
-    pub nvim_command: &'a [&'a str],
+    pub(crate) nvim_command: &'a [&'a str],
     /// Connects to Neovim's socket, waiting for it to appear.
-    pub connect: fn(&str) -> nvim::Result<Nvim>,
+    pub(crate) connect: fn(&str) -> nvim::Result<Nvim>,
     /// Called once the helpers' socket listens: the launcher may connect.
-    pub ready: Box<dyn FnMut() -> Result<()> + 'a>,
+    pub(crate) ready: Box<dyn FnMut() -> Result<()> + 'a>,
 }
 
 impl<'a> Config<'a> {
     /// The config `run` uses, for Rex at `rex_url` and session `session_id`.
-    pub fn new(rex_url: &'a str, session_id: &'a str) -> Config<'a> {
+    pub(crate) fn new(rex_url: &'a str, session_id: &'a str) -> Config<'a> {
         Config {
             rex_url,
             session_id,
@@ -240,7 +240,11 @@ impl Drop for NvimChild {
     }
 }
 
-pub fn serve<S: AsRef<OsStr>>(dir: &str, nvim_args: &[S], mut config: Config<'_>) -> Result<()> {
+pub(crate) fn serve<S: AsRef<OsStr>>(
+    dir: &str,
+    nvim_args: &[S],
+    mut config: Config<'_>,
+) -> Result<()> {
     let sock = path(dir, "sock");
     let nvim_sock = path(dir, "nvim.sock");
     let log = path(dir, "log");

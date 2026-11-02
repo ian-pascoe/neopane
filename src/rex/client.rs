@@ -12,12 +12,12 @@ use serde_json::{Value, json};
 
 use super::web_socket::{self, Close, Opcode, WebSocket};
 
-pub const PROTOCOL: &str = "rex.control.v1";
-pub const API_REVISION: i64 = 7;
+pub(crate) const PROTOCOL: &str = "rex.control.v1";
+pub(crate) const API_REVISION: i64 = 7;
 
 /// What can go wrong on the connection.
 #[derive(Debug)]
-pub enum ClientError {
+pub(crate) enum ClientError {
     NotUnixUrl,
     NameTooLong,
     ResponseTooLarge,
@@ -64,7 +64,7 @@ impl From<std::io::Error> for ClientError {
 }
 
 /// A Rex control connection.
-pub struct Client {
+pub(crate) struct Client {
     pub stream: UnixStream,
     pub ws: WebSocket,
     /// Request ids are this counter as strings.
@@ -82,7 +82,7 @@ pub struct Client {
 /// A message from the server. (Owned, not slices of the parsed JSON, so the
 /// caller can keep using the client while it handles one.)
 #[derive(Debug, Clone, PartialEq)]
-pub enum Message {
+pub(crate) enum Message {
     Response(Response),
     Event(Event),
     /// The server closed the connection.
@@ -92,13 +92,13 @@ pub enum Message {
 /// A response's outcome: the value, or the error. (Not named `Result`, so it
 /// doesn't hide `std::result::Result`.)
 #[derive(Debug, Clone, PartialEq)]
-pub enum ResponseResult {
+pub(crate) enum ResponseResult {
     Ok(Value),
     Err(Error),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Response {
+pub(crate) struct Response {
     pub id: u64,
     pub seq: i64,
     pub result: ResponseResult,
@@ -106,7 +106,7 @@ pub struct Response {
 
 /// Rex's answer to a request that it refused.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Error {
+pub(crate) struct Error {
     pub code: String,
     pub message: String,
     pub status: i64,
@@ -114,7 +114,7 @@ pub struct Error {
 
 /// A server event, or a session event unwrapped from `session_event`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Event {
+pub(crate) struct Event {
     pub seq: i64,
     /// Set for session events.
     pub session_id: Option<String>,
@@ -124,7 +124,7 @@ pub struct Event {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Welcome {
+pub(crate) struct Welcome {
     pub max_message_bytes: usize,
     pub api_revision: i64,
 }
@@ -161,7 +161,7 @@ fn send_close(mut stream: &UnixStream, frame: &mut Vec<u8>, code: u16) -> std::i
 impl Client {
     /// A client on a stream that has already been upgraded, welcomed
     /// with the default limits. (For tests, which talk over a socket pair.)
-    pub fn from_stream(stream: UnixStream) -> Client {
+    pub(crate) fn from_stream(stream: UnixStream) -> Client {
         Client {
             stream,
             ws: WebSocket::default(),
@@ -175,7 +175,7 @@ impl Client {
 
     /// Connects to `server_url` (`REX_SERVER`), then exchanges hello and welcome.
     /// Blocks until welcomed.
-    pub fn connect(server_url: &str) -> Result<Client, ClientError> {
+    pub(crate) fn connect(server_url: &str) -> Result<Client, ClientError> {
         let mut path_buf = [0u8; 256];
         let path = socket_path(server_url, &mut path_buf)?;
         let stream = UnixStream::connect(Path::new(std::ffi::OsStr::from_bytes(path)))?;
@@ -237,12 +237,16 @@ impl Client {
     }
 
     /// The socket, for the caller's loop to watch.
-    pub fn fd(&self) -> RawFd {
+    pub(crate) fn fd(&self) -> RawFd {
         self.stream.as_raw_fd()
     }
 
     /// Sends a request and returns its id. A None `payload` is left out.
-    pub fn request(&mut self, method: &str, payload: Option<&Value>) -> Result<u64, ClientError> {
+    pub(crate) fn request(
+        &mut self,
+        method: &str,
+        payload: Option<&Value>,
+    ) -> Result<u64, ClientError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -267,7 +271,7 @@ impl Client {
     }
 
     /// One read from the socket. False when the server hung up.
-    pub fn read(&mut self) -> Result<bool, ClientError> {
+    pub(crate) fn read(&mut self) -> Result<bool, ClientError> {
         let mut buf = [0u8; 16384];
         let n = match read_fd(&self.stream, &mut buf) {
             Ok(n) => n,
@@ -284,7 +288,7 @@ impl Client {
     /// The next message read, or None until more is read. Answers pings and
     /// skips unknown types.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Message>, ClientError> {
+    pub(crate) fn next(&mut self) -> Result<Option<Message>, ClientError> {
         while let Some(m) = self.ws.next()? {
             match m {
                 web_socket::Message::Ping(p) => {
@@ -321,7 +325,7 @@ impl Drop for Client {
 }
 
 /// The path in a `unix://` URL, percent-decoded into `buf`.
-pub fn socket_path<'a>(url: &str, buf: &'a mut [u8]) -> Result<&'a [u8], ClientError> {
+pub(crate) fn socket_path<'a>(url: &str, buf: &'a mut [u8]) -> Result<&'a [u8], ClientError> {
     let scheme = "unix://";
     let Some(encoded) = url.strip_prefix(scheme) else {
         return Err(ClientError::NotUnixUrl);
@@ -350,7 +354,7 @@ pub fn socket_path<'a>(url: &str, buf: &'a mut [u8]) -> Result<&'a [u8], ClientE
     Ok(&buf[..n])
 }
 
-pub fn parse_welcome(root: &Value) -> Result<Welcome, ClientError> {
+pub(crate) fn parse_welcome(root: &Value) -> Result<Welcome, ClientError> {
     if !eql(get_str(root, "type"), "welcome") {
         return Err(ClientError::NotWelcome);
     }
@@ -370,7 +374,7 @@ pub fn parse_welcome(root: &Value) -> Result<Welcome, ClientError> {
 }
 
 /// A response or event, or None for a type we don't know.
-pub fn parse_message(root: &Value) -> Result<Option<Message>, ClientError> {
+pub(crate) fn parse_message(root: &Value) -> Result<Option<Message>, ClientError> {
     let Some(kind) = get_str(root, "type") else {
         return Err(ClientError::BadMessage);
     };
@@ -432,21 +436,21 @@ pub fn parse_message(root: &Value) -> Result<Option<Message>, ClientError> {
 }
 
 /// A field of an object, or None.
-pub fn get<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<&'a Value> {
+pub(crate) fn get<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<&'a Value> {
     match v.into()? {
         Value::Object(obj) => obj.get(name),
         _ => None,
     }
 }
 
-pub fn str<'a>(v: impl Into<Option<&'a Value>>) -> Option<&'a str> {
+pub(crate) fn str<'a>(v: impl Into<Option<&'a Value>>) -> Option<&'a str> {
     match v.into()? {
         Value::String(s) => Some(s),
         _ => None,
     }
 }
 
-pub fn int<'a>(v: impl Into<Option<&'a Value>>) -> Option<i64> {
+pub(crate) fn int<'a>(v: impl Into<Option<&'a Value>>) -> Option<i64> {
     match v.into()? {
         Value::Number(n) => n.as_i64(),
         _ => None,
@@ -454,12 +458,12 @@ pub fn int<'a>(v: impl Into<Option<&'a Value>>) -> Option<i64> {
 }
 
 /// The integer field `name` of an object, or None.
-pub fn get_int<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<i64> {
+pub(crate) fn get_int<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<i64> {
     int(get(v, name))
 }
 
 /// The string field `name` of an object, or None.
-pub fn get_str<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<&'a str> {
+pub(crate) fn get_str<'a>(v: impl Into<Option<&'a Value>>, name: &str) -> Option<&'a str> {
     str(get(v, name))
 }
 

@@ -6,6 +6,7 @@
 
 /// Decoding errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum Error {
     /// 0xc1, which is never used.
     InvalidByte,
@@ -19,16 +20,16 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub fn write_nil(w: &mut Vec<u8>) {
+pub(crate) fn write_nil(w: &mut Vec<u8>) {
     w.push(0xc0);
 }
 
-pub fn write_bool(w: &mut Vec<u8>, b: bool) {
+pub(crate) fn write_bool(w: &mut Vec<u8>, b: bool) {
     w.push(if b { 0xc3 } else { 0xc2 });
 }
 
 /// Smallest encoding that fits.
-pub fn write_int(w: &mut Vec<u8>, n: impl Into<i64>) {
+pub(crate) fn write_int(w: &mut Vec<u8>, n: impl Into<i64>) {
     let n: i64 = n.into();
     if n >= 0 {
         if n <= 0x7f {
@@ -60,11 +61,13 @@ pub fn write_int(w: &mut Vec<u8>, n: impl Into<i64>) {
     write_tagged(w, 0xd3, &n.to_be_bytes())
 }
 
-pub fn write_float(w: &mut Vec<u8>, f: f64) {
+#[cfg(test)]
+pub(crate) fn write_float(w: &mut Vec<u8>, f: f64) {
     write_tagged(w, 0xcb, &f.to_bits().to_be_bytes());
 }
 
 /// Panics if `s` is longer than u32 can say, which nothing here sends.
+#[doc(hidden)]
 pub fn write_str(w: &mut Vec<u8>, s: impl AsRef<[u8]>) {
     let s = s.as_ref();
     write_str_header(
@@ -75,7 +78,7 @@ pub fn write_str(w: &mut Vec<u8>, s: impl AsRef<[u8]>) {
 }
 
 /// Follow with `len` bytes of string.
-pub fn write_str_header(w: &mut Vec<u8>, len: u32) {
+pub(crate) fn write_str_header(w: &mut Vec<u8>, len: u32) {
     if len <= 31 {
         return w.push(0xa0 | len as u8); // fixstr
     }
@@ -89,7 +92,7 @@ pub fn write_str_header(w: &mut Vec<u8>, len: u32) {
 }
 
 /// Follow with `len` values.
-pub fn write_array_header(w: &mut Vec<u8>, len: u32) {
+pub(crate) fn write_array_header(w: &mut Vec<u8>, len: u32) {
     if len <= 15 {
         return w.push(0x90 | len as u8); // fixarray
     }
@@ -100,7 +103,7 @@ pub fn write_array_header(w: &mut Vec<u8>, len: u32) {
 }
 
 /// Follow with `len` key-value pairs.
-pub fn write_map_header(w: &mut Vec<u8>, len: u32) {
+pub(crate) fn write_map_header(w: &mut Vec<u8>, len: u32) {
     if len <= 15 {
         return w.push(0x80 | len as u8); // fixmap
     }
@@ -120,7 +123,7 @@ fn write_tagged(w: &mut Vec<u8>, tag: u8, big_endian: &[u8]) {
 /// is followed by `len` values, a map by `len` key-value pairs, and a str,
 /// bin or ext by chunks totalling `len` bytes.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Token<'a> {
+pub(crate) enum Token<'a> {
     Nil,
     Bool(bool),
     /// Any integer that fits in i64.
@@ -138,16 +141,17 @@ pub enum Token<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ext {
-    pub r#type: i8,
-    pub len: u32,
+pub(crate) struct Ext {
+    pub(crate) r#type: i8,
+    pub(crate) len: u32,
 }
 
 /// Streaming decoder. Feed bytes as they arrive, then call `next` until it
 /// returns None. Values may be split anywhere across feeds.
 #[derive(Debug, Clone, Copy, Default)]
+#[doc(hidden)]
 pub struct Decoder<'a> {
-    pub input: &'a [u8],
+    pub(crate) input: &'a [u8],
     /// A header split across feeds, kept until it's complete.
     pending: [u8; 9],
     pending_len: u8,
@@ -156,26 +160,27 @@ pub struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
-    pub fn new() -> Self {
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// A decoder already fed `bytes`.
-    pub fn of(bytes: &'a [u8]) -> Self {
+    pub(crate) fn of(bytes: &'a [u8]) -> Self {
         let mut d = Self::default();
         d.feed(bytes);
         d
     }
 
     /// Chunks point into `bytes`, so they live as long as `bytes` does.
-    pub fn feed(&mut self, bytes: &'a [u8]) {
+    pub(crate) fn feed(&mut self, bytes: &'a [u8]) {
         debug_assert!(self.input.is_empty());
         self.input = bytes;
     }
 
     /// The next token, or None when the fed bytes are used up.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Token<'a>>, Error> {
+    pub(crate) fn next(&mut self) -> Result<Option<Token<'a>>, Error> {
         if self.input.is_empty() {
             return Ok(None);
         }

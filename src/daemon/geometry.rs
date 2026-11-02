@@ -11,18 +11,18 @@ use crate::nvim::windows;
 use crate::screen::grids::Grids;
 
 /// A new Rex terminal's size, cols x rows, until the app lays it out.
-pub const REX_DEFAULT_SIZE: [u32; 2] = [80, 24];
+pub(crate) const REX_DEFAULT_SIZE: [u32; 2] = [80, 24];
 
 /// Where a new tab page's floating pane sits, as fractions of the window: x, y, w, h.
-pub const TAB_LAYER_BOUNDS: [f64; 4] = [0.05, 0.05, 0.9, 0.9];
+pub(crate) const TAB_LAYER_BOUNDS: [f64; 4] = [0.05, 0.05, 0.9, 0.9];
 
 /// The grid showing the pane's window, if it has one yet.
-pub fn grid_of_pane(grids: &Grids, pane: &Pane) -> Option<u32> {
+pub(crate) fn grid_of_pane(grids: &Grids, pane: &Pane) -> Option<u32> {
     let win = pane.neovim_window_handle?;
     grids.grid_of(win)
 }
 
-pub struct Geometry<'a> {
+pub(crate) struct Geometry<'a> {
     pub grids: &'a Grids,
     pub panes: &'a Panes,
     /// Rows the screen's tabline takes, as Neovim last said.
@@ -34,7 +34,7 @@ pub struct Geometry<'a> {
 impl Geometry<'_> {
     /// A guess at a new split's terminal size, cols x rows: half the pane it
     /// splits (`from`). The first of a tab page gets its floating pane's size.
-    pub fn new_pane_size(
+    pub(crate) fn new_pane_size(
         &self,
         sp: windows::Split,
         from: Option<&Pane>,
@@ -58,7 +58,7 @@ impl Geometry<'_> {
     }
 
     /// A guess at a new tab page's floating pane's terminal size, cols x rows.
-    pub fn tab_pane_size(&self) -> [u32; 2] {
+    pub(crate) fn tab_pane_size(&self) -> [u32; 2] {
         let Some(screen) = self.grids.get(1) else {
             return REX_DEFAULT_SIZE;
         };
@@ -71,7 +71,7 @@ impl Geometry<'_> {
     }
 
     /// Where pane `p`'s top left sits on grid 1: row, col.
-    pub fn pane_origin(&self, p: &Pane) -> [i32; 2] {
+    pub(crate) fn pane_origin(&self, p: &Pane) -> [i32; 2] {
         let Some(r) = p.rect else {
             return [0, 0];
         };
@@ -85,7 +85,7 @@ impl Geometry<'_> {
     }
 
     /// No terminal yet: the smallest window, as Neovim allows.
-    pub fn window_size(&self, p: &Pane) -> [u32; 2] {
+    pub(crate) fn window_size(&self, p: &Pane) -> [u32; 2] {
         let Some(s) = &p.terminal_surface else {
             return [1, 1];
         };
@@ -101,7 +101,7 @@ impl Geometry<'_> {
     /// A pane Rex hasn't placed yet counts only while none has been: it would
     /// otherwise take the top left from the panes already there, until the
     /// layout arrives. Without Rex's layout at all, the one pane is the window.
-    pub fn tabline_rows_of(&self, p: &Pane) -> u32 {
+    pub(crate) fn tabline_rows_of(&self, p: &Pane) -> u32 {
         if self.tabline_rows == 0 || p.layer.is_some() || p.tab != 0 {
             return 0;
         }
@@ -118,7 +118,7 @@ impl Geometry<'_> {
     /// Whether pane `p` draws part of the screen's tabline. It needs its
     /// terminal: its width is what the panes right of it start after, and
     /// without one it draws nothing.
-    pub fn shows_tabline(&self, p: &Pane) -> bool {
+    pub(crate) fn shows_tabline(&self, p: &Pane) -> bool {
         p.terminal_surface.is_some() && self.tabline_rows_of(p) > 0
     }
 
@@ -129,7 +129,7 @@ impl Geometry<'_> {
     /// A pane closing in the middle of `draw` leaves the panes drawn before it
     /// on their old columns for that frame; the next draw sees their start
     /// move and `PaneView` redraws the row.
-    pub fn tabline_start(&self, p: &Pane) -> Option<u32> {
+    pub(crate) fn tabline_start(&self, p: &Pane) -> Option<u32> {
         if !self.shows_tabline(p) {
             return None;
         }

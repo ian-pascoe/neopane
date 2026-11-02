@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::RawFd;
 
-pub struct Terminal {
+pub(crate) struct Terminal {
     /// Not necessarily stdin; the daemon will drive panes' terminals.
     pub fd: RawFd,
     /// Settings before raw mode, restored on deinit.
@@ -31,7 +31,7 @@ fn retry(mut f: impl FnMut() -> libc::c_int) -> io::Result<()> {
 
 impl Terminal {
     /// Switches `fd` to raw mode. Fails if it isn't a terminal.
-    pub fn init(fd: RawFd) -> io::Result<Terminal> {
+    pub(crate) fn init(fd: RawFd) -> io::Result<Terminal> {
         // SAFETY: an all-zero termios is a valid out-parameter for tcgetattr.
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: `original` is a valid termios.
@@ -51,7 +51,7 @@ impl Terminal {
     }
 
     /// Flushes, then restores the original settings. Errors are ignored.
-    pub fn deinit(&mut self) {
+    pub(crate) fn deinit(&mut self) {
         let _ = self.flush();
         // SAFETY: `original` is the termios `init` read.
         let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) });
@@ -60,7 +60,7 @@ impl Terminal {
     /// Restores the original settings now, without waiting for the output
     /// still queued to be read, as `deinit` does; input not yet read is
     /// dropped all the same. Errors are ignored.
-    pub fn restore_now(&mut self) {
+    pub(crate) fn restore_now(&mut self) {
         // SAFETY: plain calls on the terminal's fd; `original` is the termios
         // `init` read.
         unsafe { libc::tcflush(self.fd, libc::TCIFLUSH) };
@@ -68,7 +68,7 @@ impl Terminal {
     }
 
     /// Current size in cells.
-    pub fn size(&self) -> io::Result<libc::winsize> {
+    pub(crate) fn size(&self) -> io::Result<libc::winsize> {
         let mut ws = libc::winsize {
             ws_row: 0,
             ws_col: 0,
@@ -83,7 +83,7 @@ impl Terminal {
     }
 
     /// Sends the buffered frame.
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
         write_all(self.fd, &self.writer)?;
         self.writer.clear();
         Ok(())
