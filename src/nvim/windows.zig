@@ -174,6 +174,8 @@ const Harness = struct {
     /// The windows a check waits for.
     want: i64 = 0,
     gone: i64 = 0,
+    /// Made-up reports so far, to know Neovim got that far.
+    pings: i64 = 0,
 
     fn deinit(h: *Harness) void {
         h.grids.deinit(testing.allocator);
@@ -219,7 +221,72 @@ const Harness = struct {
         try h.nvim.flush();
     }
 
-    /// Runs `code` in Neovim, as a plugin would.
+    /// Starts windows.lua and waits until the first window is external.
+    fn boot(h: *Harness) !void {
+        try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+        h.chan_id = try askChannel(&h.nvim);
+        try h.nvim.flush();
+        try testing.expect(try h.until(struct {
+            fn f(x: *Harness) bool {
+                return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
+            }
+        }.f));
+    }
+
+    /// Splits the current window and makes the split external at 20 x 9,
+    /// as the daemon does. Returns it.
+    fn adoptSplit(h: *Harness) !i64 {
+        try h.input(":split<CR>");
+        try testing.expect(try h.until(struct {
+            fn f(x: *Harness) bool {
+                const cur = x.lastCurrent();
+                return cur != 0 and x.kind(cur) == .ordinary;
+            }
+        }.f));
+        const split = h.lastCurrent();
+        try adopt(&h.nvim, split, 20, 9);
+        try h.nvim.flush();
+        try testing.expect(try h.untilExternal(split));
+        return split;
+    }
+
+    fn untilExternal(h: *Harness, win: i64) !bool {
+        h.want = win;
+        return h.until(struct {
+            fn f(x: *Harness) bool {
+                return x.kind(x.want) == .external;
+            }
+        }.f);
+    }
+
+    /// Runs Lua `fmt` in Neovim, as a plugin would, and waits until it has
+    /// run. An error in it fails the test.
+    fn sync(h: *Harness, comptime fmt: []const u8, args: anytype) !void {
+        h.pings += 1;
+        const ping = 4000 + h.pings;
+        var buf: [2048]u8 = undefined;
+        const code = try std.fmt.bufPrint(&buf, fmt ++ "\nvim.rpcnotify(0, 'neorex_win', {d})", args ++ .{ping});
+        try h.lua(code);
+        h.want = ping;
+        try testing.expect(try h.until(Harness.isCurrent));
+    }
+
+    /// Waits for `win`, which a plugin moved back, to be external again.
+    fn expectExternal(h: *Harness, win: i64) !void {
+        try h.sync("assert(vim.wait(2500, function() return vim.api.nvim_win_get_config({d}).external end), 'not external')", .{win});
+        try testing.expect(try h.untilExternal(win));
+    }
+
+    /// Types something, and waits until Neovim has taken it.
+    fn typed(h: *Harness) !void {
+        h.pings += 1;
+        var buf: [96]u8 = undefined;
+        try h.input(try std.fmt.bufPrint(&buf, ":lua vim.rpcnotify(0, 'neorex_win', {d})<CR>", .{4000 + h.pings}));
+        h.want = 4000 + h.pings;
+        try testing.expect(try h.until(Harness.isCurrent));
+    }
+
+    /// Runs `code` in Neovim.
     fn lua(h: *Harness, code: []const u8) !void {
         _ = try h.nvim.execLua(code, 0);
         try h.nvim.flush();
@@ -371,64 +438,52 @@ test "windows become external; the anchor stays hidden" {
     }.f));
 }
 
-test "a window a plugin moved back into the layout is external again, and still current" {
+test "a window a plugin moved back into the layout is external again, and keeps focus" {
     var buf: [1024]u8 = undefined;
     var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     } };
     defer h.deinit();
-    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
-    h.chan_id = try askChannel(&h.nvim);
-    try h.nvim.flush();
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
-        }
-    }.f));
-    const first, const anchor = h.wins;
+    try h.boot();
+    const anchor = h.wins[1];
+    const split = try h.adoptSplit();
 
-    try h.input(":split<CR>");
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            const cur = x.lastCurrent();
-            return cur != 0 and x.kind(cur) == .ordinary;
-        }
-    }.f));
-    const split = h.lastCurrent();
-    try adopt(&h.nvim, split, 20, 9);
-    try h.nvim.flush();
-    h.want = split;
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.kind(x.want) == .external;
-        }
-    }.f));
-
-    // as edgy.nvim does on WinResized: back into the layout, once
-    h.gone = split;
-    var code: [512]u8 = undefined;
-    try h.lua(try std.fmt.bufPrint(&code, "vim.api.nvim_win_set_config({d}, {{ split = 'left', win = {d} }}); vim.rpcnotify(0, 'neorex_win', 4241)", .{ split, anchor }));
-    h.want = 4241;
-    try testing.expect(try h.until(Harness.isCurrent));
-    // nothing told the daemon: only Neovim can put it back, and it keeps focus.
-    // An error fails the wait; else a made-up report ends it.
-    try h.lua(try std.fmt.bufPrint(&code,
+    // as edgy.nvim does on WinResized: back into the layout. Nothing told the
+    // daemon, so only Neovim can put it back.
+    try h.sync("vim.api.nvim_win_set_config({d}, {{ split = 'left', win = {d} }})", .{ split, anchor });
+    try h.expectExternal(split);
+    try h.sync(
         \\local win = {d}
-        \\assert(vim.wait(1000, function() return vim.api.nvim_win_get_config(win).external end), 'not external')
         \\assert(vim.api.nvim_get_current_win() == win, 'lost focus')
         \\assert(vim.w[win].edgy_disable, 'edgy.nvim would move it again')
-        \\vim.rpcnotify(0, 'neorex_win', 4242)
-    , .{split}));
-    h.want = 4242;
-    try testing.expect(try h.until(Harness.isCurrent));
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.kind(x.gone) == .external;
+    , .{split});
+    try testing.expect(try h.untilExternal(split));
+}
+
+test "pull-backs between user actions aren't a fight" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.boot();
+    const anchor = h.wins[1];
+    const split = try h.adoptSplit();
+
+    // more often than a fight's limit, but each after something the user did:
+    // typing, or dragging a pane's border
+    for (0..12) |i| {
+        try h.sync("vim.api.nvim_win_set_config({d}, {{ split = 'left', win = {d} }})", .{ split, anchor });
+        try h.expectExternal(split);
+        if (i % 2 == 0) {
+            try h.typed();
+        } else {
+            try size(&h.nvim, split, 20 + @as(u32, @intCast(i)), 9);
+            try h.nvim.flush();
         }
-    }.f));
-    try testing.expectEqual(Grids.Win.Kind.external, h.kind(first).?);
-    try testing.expectEqual(Grids.Win.Kind.ordinary, h.kind(anchor).?);
+    }
 }
 
 test "a plugin that always moves a window back doesn't start a fight without end" {
@@ -438,54 +493,35 @@ test "a plugin that always moves a window back doesn't start a fight without end
         else => return err,
     } };
     defer h.deinit();
-    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
-    h.chan_id = try askChannel(&h.nvim);
-    try h.nvim.flush();
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.wins[0] != 0 and x.lastCurrent() == x.wins[0] and x.kind(x.wins[0]) == .external;
-        }
-    }.f));
+    try h.boot();
     const anchor = h.wins[1];
+    const split = try h.adoptSplit();
 
-    try h.input(":split<CR>");
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            const cur = x.lastCurrent();
-            return cur != 0 and x.kind(cur) == .ordinary;
-        }
-    }.f));
-    const split = h.lastCurrent();
-    try adopt(&h.nvim, split, 20, 9);
-    try h.nvim.flush();
-    h.want = split;
-    try testing.expect(try h.until(struct {
-        fn f(x: *Harness) bool {
-            return x.kind(x.want) == .external;
-        }
-    }.f));
-
-    // a plugin that puts the window back in the layout every 10 ms, for 2 s,
-    // and says how often it did at 1 s and at 2 s as 6000 + n and 7000 + n
+    // a plugin that puts the window back in the layout every 10 ms for 1.5 s,
+    // and the daemon, which asks for it external and sized to its pane every
+    // 50 ms as it does for a window it sees ordinary. It says how often the
+    // plugin did, at 1 s and at 1.5 s, as 6000 + n and 7000 + n.
+    try size(&h.nvim, split, 17, 9);
     var code: [1024]u8 = undefined;
     try h.lua(try std.fmt.bufPrint(&code,
         \\local win, anchor, pulls = {d}, {d}, 0
-        \\local timer = vim.uv.new_timer()
+        \\local timer, daemon = vim.uv.new_timer(), vim.uv.new_timer()
         \\timer:start(10, 10, vim.schedule_wrap(function()
         \\  if vim.api.nvim_win_get_config(win).external then
         \\    pulls = pulls + 1
         \\    vim.api.nvim_win_set_config(win, {{ split = 'left', win = anchor }})
         \\  end
         \\end))
-        \\-- the daemon asks for it external again, as it does for a window it sees ordinary
-        \\local daemon = vim.uv.new_timer()
-        \\daemon:start(50, 50, vim.schedule_wrap(function() neorex.adopt(win, 20, 9) end))
+        \\daemon:start(50, 50, vim.schedule_wrap(function()
+        \\  neorex.adopt(win, 17, 9)
+        \\  neorex.size(win, 17, 9)
+        \\end))
         \\vim.defer_fn(function() vim.rpcnotify(0, 'neorex_win', 6000 + pulls) end, 1000)
         \\vim.defer_fn(function()
         \\  timer:stop()
         \\  daemon:stop()
         \\  vim.rpcnotify(0, 'neorex_win', 7000 + pulls)
-        \\end, 2000)
+        \\end, 1500)
     , .{ split, anchor }));
     try testing.expect(try h.until(struct {
         fn f(x: *Harness) bool {
@@ -496,10 +532,19 @@ test "a plugin that always moves a window back doesn't start a fight without end
     for (h.notes.items) |n| if (n == .current and n.current >= 6000 and n.current < 7000) {
         at_1s = n.current - 6000;
     };
-    const at_2s = h.lastCurrent() - 7000;
+    const at_end = h.lastCurrent() - 7000;
     // it gave up, as the plugin left it no other way, and didn't go on
-    try testing.expect(at_2s >= 1 and at_2s <= 10);
-    try testing.expectEqual(at_1s, at_2s);
+    try testing.expect(at_end >= 1 and at_end <= 10);
+    try testing.expectEqual(at_1s, at_end);
+    // and sizing it to its pane would resize the window in Neovim's layout
+    try h.sync(
+        \\local win = {d}
+        \\assert(not vim.api.nvim_win_get_config(win).external, 'was never given up')
+        \\assert(vim.api.nvim_win_get_width(win) ~= 17, 'sized as if in its pane')
+    , .{split});
+
+    // once the plugin stops and the wait is over, it goes back in its pane
+    try h.expectExternal(split);
 }
 
 test "a new tab page's window is marked, and closing it closes the tab page" {

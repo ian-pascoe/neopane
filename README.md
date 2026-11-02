@@ -83,10 +83,12 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   placement they expect. A window such a plugin moves back into Neovim's own
   layout goes back to its pane. edgy.nvim works without turning it off:
   neorex tells it to leave the windows in panes alone (`vim.w.edgy_disable`),
-  so its edges don't dock anything. A plugin that moves a window back every
-  time neorex puts it in its pane wins after 5 tries within 2 seconds: that
-  window stays in Neovim's layout, its pane stays blank, and you still type
-  into it. Turn such a plugin off with `cond = vim.g.neorex == nil`.
+  so its edges don't dock anything. A plugin that keeps moving a window back
+  as fast as neorex puts it in its pane (5 times in 2 seconds, with nothing
+  typed and no pane resized) wins for a while: that window stays in Neovim's
+  layout, its pane stays blank, and you still type into it. neorex tries
+  again after 2 seconds, then 4, up to a minute. Turn such a plugin off with
+  `cond = vim.g.neorex == nil`.
 - Neovim tab pages aren't Rex tabs. A tab page opened after startup, as
   `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane, its
   windows split inside it, and closes with its last window.
