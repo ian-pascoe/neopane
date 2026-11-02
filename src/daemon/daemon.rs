@@ -26,6 +26,7 @@ use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
 use super::pane_helper;
 use super::panes::Panes;
+use super::rex_layout::{self, LayoutSnapshot};
 use super::surface::{self, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
@@ -33,7 +34,6 @@ use crate::nvim::forwarder::{self, Forwarder};
 use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
-use crate::rex::client;
 use crate::rex::session::{self as rex_session, Conn, Request, Session as RexSession};
 use crate::screen::float_groups::{self, Group};
 use crate::screen::grid::{Cell, Grid};
@@ -62,6 +62,8 @@ pub struct Daemon {
     /// Where Neovim has the windows of each tab page made after setup, as it
     /// last said, and what was done to place their panes to match.
     pub tab_layouts: IndexMap<i64, Tab>,
+    /// The Rex layout last applied to the panes.
+    pub rex_layout: Option<LayoutSnapshot>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
     /// Whether the loop still watches Rex's fd.
@@ -229,6 +231,7 @@ impl Daemon {
             tabline_rows: 0,
             msg_rows: 1,
             tab_layouts: IndexMap::new(),
+            rex_layout: None,
             stopped: None,
             rex_watched: true,
             event_loop,
@@ -1151,9 +1154,16 @@ impl Daemon {
         self.draw()
     }
 
-    /// A newer view: where our panes sit, so the editor and floats fit.
+    /// A newer view: where our panes sit, so the editor and floats fit. A view
+    /// that says what the last did, to panes that are as it left them, changes
+    /// nothing to size or draw.
     fn on_layout(&mut self, wins: &[Value]) -> Result<()> {
-        self.read_layout(wins);
+        let snapshot = rex_layout::read(wins);
+        let changed = self.apply_layout(&snapshot);
+        if !changed && self.rex_layout.as_ref() == Some(&snapshot) {
+            return Ok(());
+        }
+        self.rex_layout = Some(snapshot);
         // a pane moved to or from the top: the tabline's over it, or not
         self.size_windows();
         if let Some(f) = self.focused_pane_id() {
@@ -1163,93 +1173,56 @@ impl Daemon {
         self.draw()
     }
 
-    /// Remembers which Rex window holds our panes, and where each sits in it.
-    fn read_layout(&mut self, wins: &[Value]) {
-        for w in wins {
-            let Some(Value::Array(layers)) = client::get(w, "layers") else {
-                continue;
-            };
-            let mut found = false;
-            for layer in layers {
-                if client::get_str(layer, "kind").unwrap_or("") != "tiled" {
-                    self.read_layer_bounds(layer);
-                    // a tab page's windows float over the tiled ones
-                    if let Some(l) = client::get(layer, "layout") {
-                        let _ = self.read_rects(l);
-                    }
-                    continue;
-                }
-                if let Some(l) = client::get(layer, "layout") {
-                    found = self.read_rects(l) || found;
-                }
-            }
-            if !found {
-                continue;
-            }
-            let Some(id) = client::get_str(w, "window_id") else {
-                continue;
-            };
-            if id.len() == 43 {
-                self.rex.window = Some(id.as_bytes().try_into().unwrap());
+    /// Gives our panes their rects, remembers which Rex window holds them, and
+    /// has the floats of a floating pane the user moved follow it. Whether
+    /// any pane or the window differed from it.
+    fn apply_layout(&mut self, snapshot: &LayoutSnapshot) -> bool {
+        let mut changed = false;
+        for (block, rect) in &snapshot.rects {
+            if let Some(p) = self.panes.by_block_mut(block.as_bytes())
+                && p.rect != Some(*rect)
+            {
+                p.rect = Some(*rect);
+                changed = true;
             }
         }
+        for w in &snapshot.windows {
+            let ours = w
+                .blocks
+                .iter()
+                .any(|b| self.panes.by_block(b.as_bytes()).is_some());
+            if ours
+                && let Some(id) = w.id
+                && self.rex.window != Some(id)
+            {
+                self.rex.window = Some(id);
+                changed = true;
+            }
+        }
+        for l in &snapshot.layer_bounds {
+            changed |= self.follow_moved_layer(l);
+        }
+        changed
     }
 
     /// A floating layer of ours somewhere else: the user moved it, so its
     /// floats follow.
-    fn read_layer_bounds(&mut self, layer: &Value) {
-        let Some(bounds) = rect4(client::get(layer, "bounds")) else {
-            return;
-        };
-        let Some(Value::Array(blocks)) = client::get(layer, "blocks") else {
-            return;
-        };
-        let Some(first) = blocks.first() else {
-            return;
-        };
-        let Some(block) = client::get_str(first, "block_id") else {
-            return;
-        };
-        let Some(p) = self.panes.by_block(block.as_bytes()) else {
-            return;
+    fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
+        let Some(p) = self.panes.by_block(moved.block.as_bytes()) else {
+            return false;
         };
         let Some(l) = p.layer else {
-            return;
+            return false;
         };
-        if self.same_bounds(bounds, l.bounds) {
-            return;
+        if self.same_bounds(moved.bounds, l.bounds) {
+            return false;
         }
         let id = p.id;
         if let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer {
-            l.bounds = bounds;
+            l.bounds = moved.bounds;
         }
         let _ = self.follow_layer(id);
-    }
-
-    /// Finds our panes' blocks under layout node `node` and keeps their rects.
-    fn read_rects(&mut self, node: &Value) -> bool {
-        let mut found = false;
-        match node {
-            Value::Object(o) => {
-                if let Some(b) = client::str(o.get("block_id"))
-                    && let Some(r) = rect4(o.get("rect"))
-                    && let Some(p) = self.panes.by_block_mut(b.as_bytes())
-                {
-                    p.rect = Some(r);
-                    found = true;
-                }
-                for v in o.values() {
-                    found = self.read_rects(v) || found;
-                }
-            }
-            Value::Array(a) => {
-                for x in a {
-                    found = self.read_rects(x) || found;
-                }
-            }
-            _ => {}
-        }
-        found
+        true
     }
 
     // floating panes
@@ -1814,29 +1787,6 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> usize {
     }
 }
 
-/// `[x, y, w, h]` as fractions.
-fn rect4(v: Option<&Value>) -> Option<[f64; 4]> {
-    let Some(Value::Array(a)) = v else {
-        return None;
-    };
-    if a.len() != 4 {
-        return None;
-    }
-    let mut out = [0.0; 4];
-    for (x, o) in a.iter().zip(out.iter_mut()) {
-        // a number std.json read as a float or an integer; it kept others as strings
-        let Value::Number(n) = x else {
-            return None;
-        };
-        *o = if n.is_f64() {
-            n.as_f64()?
-        } else {
-            n.as_i64()? as f64
-        };
-    }
-    Some(out)
-}
-
 /// Grid 1's top row from column `col`, `cols` wide. A wide character cut at
 /// the left edge leaves a blank.
 fn tabline_slice(screen: &Grid, col: u32, cols: u32) -> Vec<Cell> {
@@ -2389,8 +2339,12 @@ mod tests {
 
     /// Reads `view` as Rex's, and sends what that asked of Neovim.
     fn read_and_flush(d: &mut Daemon, view: Value) {
-        d.read_layout(&[view]);
+        apply_views(d, &[view]);
         d.nvim.client.flush().unwrap();
+    }
+
+    fn apply_views(d: &mut Daemon, wins: &[Value]) -> bool {
+        d.apply_layout(&rex_layout::read(wins))
     }
 
     fn approx(a: [f64; 4], b: [f64; 4]) {
@@ -2438,18 +2392,6 @@ mod tests {
             },
         );
         d.nvim.note_entered(1002);
-    }
-
-    #[test]
-    fn rect4_reads_four_numbers_and_nothing_else() {
-        let v = json!([0.25, 0, 1, 0.5]);
-        assert_eq!(Some([0.25, 0.0, 1.0, 0.5]), rect4(Some(&v)));
-        assert_eq!(None, rect4(None));
-        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3]))));
-        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3, 0.4, 0.5]))));
-        // std.json keeps some numbers as strings: not ones to read
-        assert_eq!(None, rect4(Some(&json!([0.1, 0.2, 0.3, "0.4"]))));
-        assert_eq!(None, rect4(Some(&json!({ "x": 1 }))));
     }
 
     #[test]
@@ -2530,7 +2472,7 @@ mod tests {
                     ] },
                 ] } } ] }),
         ];
-        d.read_layout(&wins);
+        apply_views(d, &wins);
         assert_eq!(Some([0.0, 0.0, 0.5, 1.0]), d.panes.by_id(a).unwrap().rect);
         assert_eq!(Some([0.5, 0.0, 0.5, 0.25]), d.panes.by_id(b).unwrap().rect);
         assert_eq!(None, d.panes.by_id(other).unwrap().rect);
@@ -2541,6 +2483,25 @@ mod tests {
     }
 
     #[test]
+    fn applying_the_same_layout_again_changes_nothing() {
+        let mut fx = TablineFixture::init();
+        let a = fx.add(0, 60, None);
+        let d = fx.d();
+        set_block(d, a, 1);
+        let view = json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
+            "block_id": block_id(1), "rect": [0.0, 0.0, 0.5, 1.0] } } ] });
+        assert!(apply_views(d, std::slice::from_ref(&view)));
+        assert!(!apply_views(d, &[view]));
+        // a pane that gets its block later still gets its rect
+        let b = d.panes.add(Pane::from_neovim_window(50, 1000)).id;
+        set_block(d, b, 2);
+        let two = json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
+            "block_id": block_id(2), "rect": [0.5, 0.0, 0.5, 1.0] } } ] });
+        assert!(apply_views(d, &[two]));
+        assert!(d.panes.by_id(b).unwrap().rect.is_some());
+    }
+
+    #[test]
     fn a_window_id_of_the_wrong_length_or_without_our_panes_isnt_kept() {
         let mut fx = TablineFixture::init();
         let a = fx.add(0, 60, None);
@@ -2548,16 +2509,22 @@ mod tests {
         set_block(d, a, 1);
         let layers = json!([ { "kind": "tiled", "layout": {
             "block_id": block_id(1), "rect": [0.0, 0.0, 1.0, 1.0] } } ]);
-        d.read_layout(&[json!({ "window_id": "window:short", "layers": layers })]);
+        apply_views(
+            d,
+            &[json!({ "window_id": "window:short", "layers": layers })],
+        );
         assert_eq!(None, d.rex.window);
         assert!(d.panes.by_id(a).unwrap().rect.is_some());
-        d.read_layout(&[json!({ "layers": layers })]);
+        apply_views(d, &[json!({ "layers": layers })]);
         assert_eq!(None, d.rex.window);
         // our pane only in a floating layer: the tiled ones hold the window
-        d.read_layout(&[
-            json!({ "window_id": window_id(4), "layers": [ { "kind": "floating",
+        apply_views(
+            d,
+            &[
+                json!({ "window_id": window_id(4), "layers": [ { "kind": "floating",
             "layout": { "block_id": block_id(1), "rect": [0.1, 0.1, 0.2, 0.2] } } ] }),
-        ]);
+            ],
+        );
         assert_eq!(None, d.rex.window);
         assert_eq!(Some([0.1, 0.1, 0.2, 0.2]), d.panes.by_id(a).unwrap().rect);
     }

@@ -8,6 +8,7 @@ pub mod nvim_session;
 pub mod pane;
 pub mod pane_helper;
 pub mod panes;
+pub mod rex_layout;
 pub mod serve;
 pub mod surface;
 pub mod tab_placement;
