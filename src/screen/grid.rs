@@ -137,6 +137,19 @@ pub struct Cell {
     pub hl: u32,
 }
 
+/// `cells` cut off before `beyond`, the cell that followed them: a wide
+/// character whose right half is `beyond` loses its left half to a blank.
+pub fn blank_cut_wide(cells: &mut [Cell], beyond: Option<&Cell>) {
+    if let (Some(last), Some(b)) = (cells.last_mut(), beyond)
+        && b.len == 0
+    {
+        *last = Cell {
+            hl: last.hl,
+            ..Cell::default()
+        };
+    }
+}
+
 impl Default for Cell {
     fn default() -> Self {
         let mut text = [0; Cell::MAX_TEXT];
