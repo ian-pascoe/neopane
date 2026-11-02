@@ -208,14 +208,20 @@ impl Session {
         )
     }
 
-    /// One read from Rex; false once it hung up. Then call `next` until None.
-    pub fn read(&mut self) -> Result<bool, ClientError> {
-        if !self.client.read()? {
-            eprintln!("neorex daemon: Rex hung up");
-            self.conn = Conn::Closed;
-            return Ok(false);
+    /// One read from Rex. If it hung up or failed, logs it and closes Rex; then
+    /// call `next` until None.
+    pub fn read(&mut self) {
+        match self.client.read() {
+            Ok(true) => {}
+            Ok(false) => self.close_rex("hung up"),
+            Err(e) => self.close_rex(&format!("failed: {e}")),
         }
-        Ok(true)
+    }
+
+    /// Any Rex error closes Rex: the windows keep working without it.
+    fn close_rex(&mut self, reason: &str) {
+        eprintln!("neorex daemon: Rex {reason}, treating it as closed");
+        self.conn = Conn::Closed;
     }
 
     /// The next update for the daemon, or None when there are none.
@@ -224,7 +230,15 @@ impl Session {
         if let Some(block) = self.queued_focus.take() {
             return Ok(Some(Update::FocusMoved(block)));
         }
-        while let Some(message) = self.client.next()? {
+        loop {
+            let message = match self.client.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => {
+                    self.close_rex(&format!("failed: {e}"));
+                    break;
+                }
+            };
             match message {
                 client::Message::Response(r) => {
                     if let Some(update) = self.on_response(r)? {
@@ -416,8 +430,14 @@ impl Session {
         if self.conn == Conn::Closed {
             return Ok(());
         }
-        let id = self.client.request(method, Some(&payload))?;
-        self.pending_requests.push(Pending { id, req });
+        match self.client.request(method, Some(&payload)) {
+            Ok(id) => self.pending_requests.push(Pending { id, req }),
+            Err(e) => {
+                // no answer will come: stays pending so closing fails it
+                self.pending_requests.push(Pending { id: 0, req });
+                self.close_rex(&format!("failed: {e}"));
+            }
+        }
         Ok(())
     }
 
