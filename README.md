@@ -78,7 +78,8 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
-  controls instead.
+  controls instead. The exception is resizing a window in a tab page's
+  floating pane, below: that resizes its Rex pane.
 - `<C-w>h/j/k/l` (also `<C-w><C-h>`, `<C-w><BS>` and `<C-w><Left>` and the like,
   in Normal and Visual mode) move to the neighbouring pane in Rex, and stay
   put at an edge. A count repeats the move, up to 20 times. Mappings that
@@ -93,8 +94,9 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   - Rex looks at every pane in its window, so a move can enter an open
     floating pane, such as a tab page's, and leave it.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
-  placement they expect. A window such a plugin moves back into Neovim's own
-  layout goes back to its pane. edgy.nvim works without turning it off:
+  placement they expect, except in a tab page's floating pane, below. A
+  window such a plugin moves back into Neovim's own layout goes back to its
+  pane. edgy.nvim works without turning it off:
   neorex tells it to leave the windows in panes alone (`vim.w.edgy_disable`),
   so its edges don't dock anything. A plugin that keeps moving a window back
   as fast as neorex puts it in its pane (5 times in 2 seconds, with nothing
@@ -103,8 +105,12 @@ keys, Neovim's redraw events, the renderer, and pane hand-off.
   again after 2 seconds, then 4, up to a minute. Turn such a plugin off with
   `cond = vim.g.neorex == nil`.
 - Neovim tab pages aren't Rex tabs. A tab page opened after startup, as
-  `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane, its
-  windows split inside it, and closes with its last window.
+  `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane and
+  closes with its last window. Its windows' panes are placed as Neovim's
+  layout has them, at about their sizes, so Diffview's file panel is on the
+  left. They follow the layout as windows come and go, and a window Neovim
+  resizes, such as with `<C-w>|`, resizes its pane. Moving windows once they
+  show in panes, as with `<C-w>H`, still does nothing.
 - Plugins that draw cursor effects with editor floats, such as
   smear-cursor.nvim, draw them in the wrong place: Neovim can't tell them
   where a pane's window is.

@@ -88,6 +88,81 @@ pub const Note = union(enum) {
     tabline: i64,
     /// `<C-w>h/j/k/l` was typed: Rex knows where the panes sit, not Neovim.
     direction: Move,
+    /// Where the windows of a tab page made after setup sit in it.
+    layout: Layout,
+};
+
+/// The layout of a tab page's windows: nested rows, columns and windows,
+/// each with the size Neovim gave it, in cells. Empty if the tab page has
+/// none the daemon can place, or has closed.
+///
+/// A note holds it inline, about 1.5 KB: `parseNote` has no allocator, a
+/// note is used and dropped at once, and the daemon keeps one per tab page.
+pub const Layout = struct {
+    tab: i64,
+    len: usize = 0,
+    /// Parents before their kids.
+    nodes: [max_nodes]Node = undefined,
+
+    /// The most nodes there are room for. The same as `MAX_LAYOUT_NODES` in
+    /// windows.lua, which sends none for a bigger layout.
+    pub const max_nodes = 63;
+
+    pub const Node = struct {
+        kind: Kind,
+        /// A window's handle.
+        win: i64 = 0,
+        w: u32,
+        h: u32,
+        /// The index after this node and everything in it.
+        end: usize = 0,
+    };
+
+    pub const Kind = enum { window, row, column };
+
+    /// The nodes in use.
+    pub fn items(self: *const Layout) []const Node {
+        return self.nodes[0..self.len];
+    }
+
+    /// The indices of the kids of the node at `at`, in order.
+    pub fn kids(self: *const Layout, at: usize) Kids {
+        return .{ .layout = self, .next_at = at + 1, .end = self.nodes[at].end };
+    }
+
+    pub const Kids = struct {
+        layout: *const Layout,
+        next_at: usize,
+        end: usize,
+
+        pub fn next(self: *Kids) ?usize {
+            if (self.next_at >= self.end) return null;
+            const at = self.next_at;
+            self.next_at = self.layout.nodes[at].end;
+            return at;
+        }
+    };
+
+    /// Reads one node and what's in it, from `[kind, win or kids, w, h]`.
+    fn read(self: *Layout, d: *msgpack.Decoder) !void {
+        if (self.len == max_nodes) return error.BadMessage;
+        const at = self.len;
+        self.len += 1;
+        const kind = std.enums.fromInt(Kind, try rpc.expectInt(d)) orelse return error.BadMessage;
+        const win_or_kids = try rpc.expectInt(d);
+        const w = std.math.cast(u32, try rpc.expectInt(d)) orelse return error.BadMessage;
+        const h = std.math.cast(u32, try rpc.expectInt(d)) orelse return error.BadMessage;
+        self.nodes[at] = .{ .kind = kind, .w = w, .h = h };
+        if (kind == .window) {
+            self.nodes[at].win = win_or_kids;
+        } else {
+            const kid_count = std.math.cast(u32, win_or_kids) orelse return error.BadMessage;
+            // a row or column of one is no row
+            if (kid_count < 2) return error.BadMessage;
+            for (0..kid_count) |_| try self.read(d);
+        }
+        self.nodes[at].end = self.len;
+    }
 };
 
 /// Which way a window command goes: `h`, `j`, `k` or `l`.
@@ -127,11 +202,13 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered
     else if (std.mem.eql(u8, method, "neorex_tabline"))
         .tabline
+    else if (std.mem.eql(u8, method, "neorex_layout"))
+        .layout
     else
         return null;
     const want: u32 = switch (tag) {
         .split => 5,
-        .reopened => 2,
+        .reopened, .layout => 2,
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
@@ -144,6 +221,14 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered => .{ .entered = win },
         .tabline => .{ .tabline = win },
         .direction => unreachable, // read above
+        .layout => blk: {
+            var layout: Layout = .{ .tab = win };
+            // the nodes are flattened into one array, four numbers each
+            const count = try rpc.expectArray(params);
+            if (count > 0) try layout.read(params);
+            if (count != layout.len * 4) return error.BadMessage;
+            break :blk .{ .layout = layout };
+        },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
@@ -208,15 +293,24 @@ const Harness = struct {
     /// Made-up reports so far, to know Neovim got that far.
     pings: i64 = 0,
 
+    /// A tab page and its windows, for checks that wait on them.
+    tab: i64 = 0,
+    watch: [3]i64 = .{ 0, 0, 0 },
+
     /// Spawns a clean Neovim and boots it (`boot`). Skips the test without
     /// `nvim`. `buf` is the Neovim connection's buffer.
     fn start(h: *Harness, buf: []u8) !void {
+        return h.startSized(buf, 40, 10);
+    }
+
+    /// `start`, with a screen of `cols` x `rows`.
+    fn startSized(h: *Harness, buf: []u8, cols: u32, rows: u32) !void {
         h.* = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, buf) catch |err| switch (err) {
             error.FileNotFound => return error.SkipZigTest,
             else => return err,
         } };
         errdefer h.deinit();
-        try h.boot();
+        try h.bootSized(cols, rows);
     }
 
     fn deinit(h: *Harness) void {
@@ -265,7 +359,11 @@ const Harness = struct {
 
     /// Starts windows.lua and waits until the first window is external.
     fn boot(h: *Harness) !void {
-        try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+        try h.bootSized(40, 10);
+    }
+
+    fn bootSized(h: *Harness, cols: u32, rows: u32) !void {
+        try h.nvim.uiAttach(cols, rows, .{ .ext_multigrid = true });
         h.chan_id = try askChannel(&h.nvim);
         try h.nvim.flush();
         try testing.expect(try h.until(struct {
@@ -351,6 +449,21 @@ const Harness = struct {
             if (h.notes.items[i] == .tabline) return h.notes.items[i].tabline;
         }
         return -1;
+    }
+
+    /// The layout last reported for tab page `tab`.
+    fn lastLayout(h: *const Harness, tab: i64) ?Layout {
+        var i = h.notes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (h.notes.items[i] == .layout and h.notes.items[i].layout.tab == tab) return h.notes.items[i].layout;
+        }
+        return null;
+    }
+
+    fn watchedExternal(h: *const Harness) bool {
+        for (h.watch) |win| if (h.kind(win) != .external) return false;
+        return true;
     }
 
     fn splitNote(h: *const Harness, win: i64) ?Note {
@@ -1168,4 +1281,294 @@ test "a window's own statusline leaves no blank row with laststatus=0" {
             return gridHeight(x, x.wins[0]) == 9 and rowStarts(x, x.wins[0], 8, "~");
         }
     }.f));
+}
+
+/// The windows of `layout`, left to right, if it's one row of them.
+fn layoutRow(layout: *const Layout, out: []Layout.Node) ![]const Layout.Node {
+    const nodes = layout.items();
+    try testing.expectEqual(Layout.Kind.row, nodes[0].kind);
+    var kids = layout.kids(0);
+    var n: usize = 0;
+    while (kids.next()) |kid| : (n += 1) {
+        try testing.expectEqual(Layout.Kind.window, nodes[kid].kind);
+        if (n < out.len) out[n] = nodes[kid];
+    }
+    try testing.expectEqual(out.len, n);
+    return out;
+}
+
+test "a tab page built as Diffview does reports its layout, final order and sizes" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.startSized(&buf, 120, 30);
+    defer h.deinit();
+    const first = h.wins[0];
+
+    // a tab page with a pivot window; two windows left of it, the pivot
+    // closed, then a narrow file panel left of all: made in the order
+    // old, new, panel, shown as panel, old, new
+    h.notes.clearRetainingCapacity();
+    try h.lua(
+        \\local api = vim.api
+        \\vim.cmd('tabnew')
+        \\local pivot = api.nvim_get_current_win()
+        \\for _ = 1, 2 do
+        \\  api.nvim_win_call(pivot, function() vim.cmd('aboveleft vsplit') end)
+        \\end
+        \\api.nvim_win_close(pivot, true)
+        \\vim.cmd('topleft vsplit')
+        \\vim.cmd('vertical resize 20')
+        \\vim.rpcnotify(0, 'neorex_win', 4242)
+    );
+    // the layout comes once the command is done
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            for (x.notes.items) |note| if (note == .layout) return true;
+            return false;
+        }
+    }.f));
+    var made: [4]i64 = undefined;
+    var n: usize = 0;
+    var tab: i64 = 0;
+    for (h.notes.items) |note| if (note == .split) {
+        made[n] = note.split.win;
+        n += 1;
+        if (note.split.tab != 0) tab = note.split.tab;
+    };
+    // the pivot, old, new, panel: the layout names the three left, by size
+    try testing.expectEqual(@as(usize, 4), n);
+    var shown: [3]Layout.Node = undefined;
+    const layout = h.lastLayout(tab) orelse return error.NoLayout;
+    _ = try layoutRow(&layout, &shown);
+    try testing.expectEqual(made[3], shown[0].win);
+    try testing.expectEqual(made[1], shown[1].win);
+    try testing.expectEqual(made[2], shown[2].win);
+    try testing.expect(shown[0].w >= 15 and shown[0].w <= 25);
+    try testing.expect(shown[1].w > 30 and shown[2].w > 30);
+
+    // once external, they're out of Neovim's own layout: it's still told
+    h.tab = tab;
+    h.watch = .{ made[1], made[2], made[3] };
+    for (h.watch) |win| try adopt(&h.nvim, win, 30, 8);
+    try h.nvim.flush();
+    try testing.expect(try h.until(Harness.watchedExternal));
+    _ = try layoutRow(&h.lastLayout(tab).?, &shown);
+    try testing.expectEqual(made[3], shown[0].win);
+    try testing.expectEqual(made[1], shown[1].win);
+    try testing.expectEqual(made[2], shown[2].win);
+    try testing.expect(shown[0].w < shown[1].w and shown[0].w < shown[2].w);
+
+    // the panel closing leaves the other two
+    h.notes.clearRetainingCapacity();
+    try close(&h.nvim, made[3]);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            return l.len == 3;
+        }
+    }.f));
+    var two: [2]Layout.Node = undefined;
+    _ = try layoutRow(&h.lastLayout(tab).?, &two);
+    try testing.expectEqual(made[1], two[0].win);
+    try testing.expectEqual(made[2], two[1].win);
+
+    // a file panel again, toggled back on: leftmost again, the others keeping their shares
+    h.notes.clearRetainingCapacity();
+    try h.lua(
+        \\vim.cmd('topleft vsplit')
+        \\vim.cmd('vertical resize 20')
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            return l.len == 4;
+        }
+    }.f));
+    _ = try layoutRow(&h.lastLayout(tab).?, &shown);
+    try testing.expectEqual(made[1], shown[1].win);
+    try testing.expectEqual(made[2], shown[2].win);
+    try testing.expect(shown[0].w >= 15 and shown[0].w <= 25);
+    // 59 and 39 cells before
+    try testing.expect(shown[1].w > shown[2].w + 10);
+
+    // Diffview's Panel:resize, on a window that's external: Neovim's size
+    // for it is the layout's, not what its pane fits it to
+    h.notes.clearRetainingCapacity();
+    var cmd_buf: [128]u8 = undefined;
+    try h.lua(try std.fmt.bufPrint(&cmd_buf, "vim.api.nvim_win_set_width({d}, 45)", .{made[1]}));
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            for (l.items()) |node| if (node.kind == .window and node.w == 45) return true;
+            return false;
+        }
+    }.f));
+
+    // a window as wide as the editor leaves the layout's windows a cell
+    // for all of them: every size is still at least one
+    h.notes.clearRetainingCapacity();
+    try h.lua(
+        \\vim.cmd('vnew')
+        \\vim.cmd('vertical resize 999')
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            return l.len == 5;
+        }
+    }.f));
+    for (h.lastLayout(tab).?.items()) |node| try testing.expect(node.w >= 1 and node.h >= 1);
+
+    // :tabclose, as :DiffviewClose does: the windows go, and the window
+    // current before comes back, reopened as it was
+    h.notes.clearRetainingCapacity();
+    try h.input(":tabclose<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            for (x.notes.items) |note| if (note == .reopened and x.kind(note.reopened.new) == .external) {
+                return x.lastCurrent() == note.reopened.new and x.kind(x.watch[0]) == null and x.kind(x.watch[1]) == null;
+            };
+            return false;
+        }
+    }.f));
+    for (h.notes.items) |note| if (note == .reopened) try testing.expectEqual(first, note.reopened.old);
+    _ = try h.nvim.request("nvim_command", 1);
+    try msgpack.writeStr(h.nvim.writer(), "if tabpagenr('$') != 1 | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4242)");
+    try h.nvim.flush();
+    h.want = 4242;
+    try testing.expect(try h.until(Harness.isCurrent));
+}
+
+/// Parses a `neorex_layout` note of tab page 7 with `flat` numbers.
+fn parseLayoutNote(flat: []const i64) !?Note {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msgpack.writeArrayHeader(&w, 2);
+    try msgpack.writeInt(&w, 7);
+    try msgpack.writeArrayHeader(&w, @intCast(flat.len));
+    for (flat) |n| try msgpack.writeInt(&w, n);
+    var d: msgpack.Decoder = .{};
+    d.feed(w.buffered());
+    return parseNote("neorex_layout", &d);
+}
+
+test "a layout note is read, empty or not, and a note that doesn't add up is an error" {
+    const empty = (try parseLayoutNote(&.{})).?.layout;
+    try testing.expectEqual(@as(i64, 7), empty.tab);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+
+    // a row of two windows
+    const row = (try parseLayoutNote(&.{ 1, 2, 30, 5, 0, 1000, 10, 5, 0, 1001, 20, 5 })).?.layout;
+    try testing.expectEqual(@as(usize, 3), row.len);
+    var kids = row.kids(0);
+    try testing.expectEqual(@as(?usize, 1), kids.next());
+    try testing.expectEqual(@as(?usize, 2), kids.next());
+    try testing.expectEqual(@as(?usize, null), kids.next());
+    try testing.expectEqual(@as(i64, 1001), row.nodes[2].win);
+
+    // a negative size, a row of one, an unknown kind, too few or too many numbers
+    try testing.expectError(error.BadMessage, parseLayoutNote(&.{ 1, 2, -3, 5, 0, 1000, 10, 5, 0, 1001, 20, 5 }));
+    try testing.expectError(error.BadMessage, parseLayoutNote(&.{ 1, 1, 30, 5, 0, 1000, 30, 5 }));
+    try testing.expectError(error.BadMessage, parseLayoutNote(&.{ 9, 1000, 30, 5 }));
+    try testing.expectError(error.BadMessage, parseLayoutNote(&.{ 1, 2, 30, 5, 0, 1000, 10, 5 }));
+    try testing.expectError(error.BadMessage, parseLayoutNote(&.{ 0, 1000, 30, 5, 0, 1001, 10, 5 }));
+}
+
+test "a tab page's layout follows windows moved before they're external, and none is told once it's too big" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.startSized(&buf, 120, 30);
+    defer h.deinit();
+
+    // two windows; the one made last, on the left, moved to the far right
+    h.notes.clearRetainingCapacity();
+    try h.lua(
+        \\vim.cmd('tabnew')
+        \\vim.cmd('vsplit')
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            for (x.notes.items) |note| if (note == .layout) return true;
+            return false;
+        }
+    }.f));
+    var made: [2]i64 = undefined;
+    var n: usize = 0;
+    for (h.notes.items) |note| if (note == .split) {
+        made[n] = note.split.win;
+        n += 1;
+        h.tab = note.split.tab;
+    };
+    try testing.expectEqual(@as(usize, 2), n);
+    var two: [2]Layout.Node = undefined;
+    _ = try layoutRow(&h.lastLayout(h.tab).?, &two);
+    try testing.expectEqual(made[1], two[0].win);
+
+    h.notes.clearRetainingCapacity();
+    try h.lua("vim.cmd('wincmd L')");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            return l.nodes[1].win != x.watch[0] and l.len == 3;
+        }
+    }.f));
+    _ = try layoutRow(&h.lastLayout(h.tab).?, &two);
+    try testing.expectEqual(made[0], two[0].win);
+    try testing.expectEqual(made[1], two[1].win);
+
+    // more windows than the layout has room for: the daemon is told to
+    // drop the layout it has
+    h.notes.clearRetainingCapacity();
+    try h.lua(
+        \\for _ = 1, 6 do vim.cmd('vsplit') end
+        \\for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        \\  if not vim.api.nvim_win_get_config(win).external then
+        \\    vim.api.nvim_win_call(win, function() for _ = 1, 6 do vim.cmd('split') end end)
+        \\  end
+        \\end
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const l = x.lastLayout(x.tab) orelse return false;
+            return l.len == 0;
+        }
+    }.f));
+    // not a layout of some of them before
+    var splits: usize = 0;
+    for (h.notes.items) |note| if (note == .split) {
+        splits += 1;
+    };
+    try testing.expect(splits >= 54);
+}
+
+test "an idle floating tab page doesn't keep Neovim busy" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = undefined;
+    try h.startSized(&buf, 120, 30);
+    defer h.deinit();
+    try h.lua(
+        \\vim.cmd('tabnew')
+        \\vim.cmd('vsplit')
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            for (x.notes.items) |note| if (note == .layout) return true;
+            return false;
+        }
+    }.f));
+
+    // SafeState fires again after every scheduled callback, so one that
+    // schedules work keeps Neovim looping, while a floating tab page is current
+    try h.lua(
+        \\_G.safe_states = 0
+        \\vim.api.nvim_create_autocmd('SafeState', { callback = function() _G.safe_states = _G.safe_states + 1 end })
+        \\vim.defer_fn(function() vim.rpcnotify(0, 'neorex_tabline', 1000 + _G.safe_states) end, 300)
+    );
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.lastTabline() >= 1000;
+        }
+    }.f));
+    try testing.expect(h.lastTabline() - 1000 < 20);
 }
