@@ -860,4 +860,208 @@ mod tests {
             s.next().unwrap()
         );
     }
+
+    fn ok(v: Value) -> client::ResponseResult {
+        client::ResponseResult::Ok(v)
+    }
+
+    fn refused() -> client::ResponseResult {
+        client::ResponseResult::Err(client::Error {
+            code: "refused".into(),
+            message: "no".into(),
+            status: 400,
+        })
+    }
+
+    /// The ids of the requests still waiting for `kind`, oldest first.
+    fn pending(s: &Session, kind: Request) -> Vec<u64> {
+        s.pending_requests
+            .iter()
+            .filter(|p| p.req == kind)
+            .map(|p| p.id)
+            .collect()
+    }
+
+    fn answer(s: &mut Session, id: u64, result: client::ResponseResult) -> Option<Update> {
+        s.on_response(client::Response { id, seq: 0, result })
+            .unwrap()
+    }
+
+    /// Applies a view at `rev` focused on `focused`, and returns the focus
+    /// change it reports, if any (the layout is dropped).
+    fn view_focus(s: &mut Session, rev: i64, focused: &ids::Block) -> Option<Update> {
+        let view = json!({
+            "revision": rev,
+            "active_window_id": "window:w",
+            "windows": [{ "window_id": "window:w",
+                          "focused_block_id": String::from_utf8_lossy(focused) }],
+        });
+        let Some(Update::Layout(_)) = s.apply_view(&view) else {
+            panic!("expected a layout");
+        };
+        s.queued_focus.take().map(Update::FocusMoved)
+    }
+
+    fn view_changed(rev: i64) -> client::Event {
+        client::Event {
+            seq: 0,
+            session_id: Some("session:s".into()),
+            name: "session_view_changed".into(),
+            payload: json!({ "revision": rev }),
+        }
+    }
+
+    #[test]
+    fn only_the_last_of_two_focus_requests_settles() {
+        let (mut s, _theirs) = session();
+        let (a, b) = (block('a'), block('b'));
+        s.focus(Some(a)).unwrap();
+        s.focus(Some(b)).unwrap();
+        let ids = pending(&s, Request::FocusBlock);
+        assert_eq!(2, ids.len());
+
+        // the first echo lands while the second is still out
+        answer(&mut s, ids[0], ok(json!({ "revision": 5 })));
+        assert_eq!(None, view_focus(&mut s, 6, &a));
+        assert!(matches!(
+            s.focused_block,
+            FocusedBlock::Requesting { in_flight: 1, .. }
+        ));
+        assert!(s.has_focused(Some(b)));
+
+        // the second answers: its echo settles, and reports nothing
+        answer(&mut s, ids[1], ok(json!({ "revision": 7 })));
+        assert_eq!(None, view_focus(&mut s, 8, &b));
+        assert!(matches!(s.focused_block, FocusedBlock::Settled(x) if x == b));
+    }
+
+    #[test]
+    fn view_older_than_applied_revision_is_ignored() {
+        let (mut s, _theirs) = session();
+        let (a, b) = (block('a'), block('b'));
+        s.focus(Some(a)).unwrap();
+        let id = pending(&s, Request::FocusBlock)[0];
+        answer(&mut s, id, ok(json!({ "revision": 10 })));
+
+        // from before our change landed: not the user's move
+        assert_eq!(None, view_focus(&mut s, 9, &b));
+        assert!(matches!(
+            s.focused_block,
+            FocusedBlock::Requesting {
+                applied_rev: 10,
+                ..
+            }
+        ));
+        assert!(s.has_focused(Some(a)));
+
+        // at the applied revision, a different block is the user's move
+        assert_eq!(
+            Some(Update::FocusMoved(String::from_utf8_lossy(&b).into_owned())),
+            view_focus(&mut s, 10, &b)
+        );
+        assert!(matches!(s.focused_block, FocusedBlock::Settled(x) if x == b));
+    }
+
+    #[test]
+    fn refused_focus_fetches_view_only_when_nothing_is_in_flight() {
+        let (mut s, _theirs) = session();
+        s.focus(Some(block('a'))).unwrap();
+        s.focus(Some(block('b'))).unwrap();
+        let ids = pending(&s, Request::FocusBlock);
+
+        answer(&mut s, ids[0], refused());
+        assert!(pending(&s, Request::View).is_empty());
+        assert_eq!(Fetch::Idle, s.view.fetch);
+
+        answer(&mut s, ids[1], refused());
+        assert_eq!(1, pending(&s, Request::View).len());
+        assert_eq!(Fetch::Running, s.view.fetch);
+    }
+
+    #[test]
+    fn event_during_view_fetch_refetches_once() {
+        let (mut s, _theirs) = session();
+        s.on_event(view_changed(1)).unwrap();
+        assert_eq!(Fetch::Running, s.view.fetch);
+        let first = pending(&s, Request::View);
+        assert_eq!(1, first.len());
+
+        // while it runs: marked stale, no second request yet
+        s.on_event(view_changed(2)).unwrap();
+        s.on_event(view_changed(3)).unwrap();
+        assert_eq!(Fetch::Stale, s.view.fetch);
+        assert_eq!(1, pending(&s, Request::View).len());
+
+        // its answer triggers exactly one more fetch
+        answer(&mut s, first[0], ok(json!({ "revision": 1 })));
+        assert_eq!(Fetch::Running, s.view.fetch);
+        let second = pending(&s, Request::View);
+        assert_eq!(1, second.len());
+        assert_ne!(first[0], second[0]);
+
+        answer(&mut s, second[0], ok(json!({ "revision": 3 })));
+        assert_eq!(Fetch::Idle, s.view.fetch);
+        assert!(pending(&s, Request::View).is_empty());
+
+        // an event no newer than the view read does not fetch
+        s.on_event(view_changed(3)).unwrap();
+        assert_eq!(Fetch::Idle, s.view.fetch);
+    }
+
+    #[test]
+    fn repeated_focus_requests_to_one_block_are_sent_once() {
+        let (mut s, _theirs) = session();
+        let (a, b) = (block('a'), block('b'));
+        s.focus(Some(a)).unwrap();
+        s.focus(Some(a)).unwrap();
+        assert_eq!(1, pending(&s, Request::FocusBlock).len());
+        assert!(matches!(
+            s.focused_block,
+            FocusedBlock::Requesting { in_flight: 1, .. }
+        ));
+
+        // a different block is a new request; asking again for it is not
+        s.focus(Some(b)).unwrap();
+        s.focus(Some(b)).unwrap();
+        assert_eq!(2, pending(&s, Request::FocusBlock).len());
+        assert!(matches!(
+            s.focused_block,
+            FocusedBlock::Requesting { in_flight: 2, .. }
+        ));
+
+        // once settled, asking for the focused block sends nothing
+        for id in pending(&s, Request::FocusBlock) {
+            answer(&mut s, id, ok(json!({ "revision": 1 })));
+        }
+        view_focus(&mut s, 2, &b);
+        s.focus(Some(b)).unwrap();
+        assert!(pending(&s, Request::FocusBlock).is_empty());
+    }
+
+    #[test]
+    fn rex_closing_fails_each_pending_split_and_layer_once() {
+        let (mut s, _theirs) = session();
+        s.request(Request::NewSplit(1), "session.new_split", json!({}))
+            .unwrap();
+        s.request(Request::NewLayer(2), "session.new_layer", json!({}))
+            .unwrap();
+        s.request(Request::View, "session.view", json!({})).unwrap();
+        s.request(Request::NewSplit(3), "session.new_split", json!({}))
+            .unwrap();
+        s.on_closed(&Close {
+            code: Some(1000),
+            reason: Vec::new(),
+        });
+
+        let mut failures = Vec::new();
+        while let Some(update) = s.next().unwrap() {
+            failures.push(update);
+        }
+        let has = |u: Update| failures.iter().filter(|f| **f == u).count();
+        assert_eq!(3, failures.len());
+        assert_eq!(1, has(Update::SplitFailed(Failed { pane: 1 })));
+        assert_eq!(1, has(Update::LayerFailed(Failed { pane: 2 })));
+        assert_eq!(1, has(Update::SplitFailed(Failed { pane: 3 })));
+        assert_eq!(None, s.next().unwrap());
+    }
 }
