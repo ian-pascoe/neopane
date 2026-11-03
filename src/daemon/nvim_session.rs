@@ -722,28 +722,6 @@ mod tests {
         check_a_held_ctrl_c_interrupts_a_busy_neovim(b"\x1b[99;5u");
     }
 
-    /// A Ctrl-C typed as `ctrl_c` while Neovim looks busy: it goes at once.
-    fn check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(ctrl_c: &[u8]) {
-        let Some(mut r) = Rig::start() else { return };
-        let busy = r.busy_until_interrupted();
-        r.make_current(0, r.wins[0]);
-        r.type_into(0, b"x");
-        r.pause();
-        r.tick();
-        assert!(r.session.gate.probe.is_some());
-        r.pause();
-        r.type_into(0, ctrl_c);
-        // `x`, and a mark of when the Ctrl-C came
-        assert_eq!(2, r.session.gate.queue.len());
-        r.type_into(0, b"p");
-        let _ = r.wait(busy);
-        // `x` and `p` went after the switch, in order: `p` puts back what `x` cut
-        r.expect_texts("noe|two");
-        r.expect_nothing_held();
-        let cur = r.current_win();
-        assert_eq!(r.wins[0], cur);
-    }
-
     #[test]
     fn an_escape_held_a_timeout_before_a_ctrl_c_that_goes_ahead_is_still_the_escape_key() {
         let Some(mut r) = Rig::start() else { return };
@@ -805,6 +783,28 @@ mod tests {
         let _ = r.wait(busy);
         r.settle();
         r.expect_nothing_held();
+    }
+
+    /// A Ctrl-C typed as `ctrl_c` while Neovim looks busy: it goes at once.
+    fn check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(ctrl_c: &[u8]) {
+        let Some(mut r) = Rig::start() else { return };
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        r.type_into(0, b"x");
+        r.pause();
+        r.tick();
+        assert!(r.session.gate.probe.is_some());
+        r.pause();
+        r.type_into(0, ctrl_c);
+        // `x`, and a mark of when the Ctrl-C came
+        assert_eq!(2, r.session.gate.queue.len());
+        r.type_into(0, b"p");
+        let _ = r.wait(busy);
+        // `x` and `p` went after the switch, in order: `p` puts back what `x` cut
+        r.expect_texts("noe|two");
+        r.expect_nothing_held();
+        let cur = r.current_win();
+        assert_eq!(r.wins[0], cur);
     }
 
     #[test]
