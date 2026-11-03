@@ -652,8 +652,9 @@ end
 -- Pickers that open a file in the last ordinary window that isn't showing
 -- a file can pick an anchor, as snacks.nvim's does when the pane shows oil
 -- or a dashboard: nothing would show it. Moves such a buffer, with its view,
--- to the pane the user was in, and gives the anchor a scratch buffer again.
--- Focus, if on the anchor, goes with it. Returns whether it moved one.
+-- to a pane of the tab page, the one the user was in if it can, and gives
+-- the anchor a scratch buffer again. Focus, if on the anchor, goes with it.
+-- Returns whether it moved one.
 local function evict(tab)
   local a = anchor_of(tab)
   if not a then return false end
@@ -664,7 +665,8 @@ local function evict(tab)
   local view = api.nvim_win_call(a, vim.fn.winsaveview)
   -- :buffer, as the picker meant to, keeps the jump list; :hide, so a
   -- modified buffer it replaces stays, hidden, even with 'nohidden'. If it
-  -- fails anyway, the buffer stays where it is.
+  -- fails anyway, as for a modified one 'bufhidden' would unload, the buffer
+  -- stays where it is.
   if not pcall(api.nvim_win_call, to, function() vim.cmd('hide buffer ' .. buf) end) then return false end
   api.nvim_win_call(to, function() vim.fn.winrestview(view) end)
   -- only once the pane shows it: one with 'bufhidden' set would go, hidden
