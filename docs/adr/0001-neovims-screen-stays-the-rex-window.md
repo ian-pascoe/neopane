@@ -30,7 +30,8 @@ pane in the top right.
   `'tabline'` to a rendered format string, stay clipped.
 - `g:neorex_tabline_width` holds the tabline width while it's narrower than
   the screen, for tablines that want to fit themselves.
-- The padding is added only when the tabline read the width: Neovim cuts a
-  too-wide tabline from the left, so padding one that ignored it would hide
-  its first tabs. It follows a `%<`, so a tabline that read the width but came
-  out wider loses padding instead.
+- The padding is added only when the tabline read the width: a tabline that
+  ignored it fills the screen, and padded would lose its end. The padding
+  follows a `%<`, since Neovim cuts a too-wide tabline from the left, or at
+  its first `%<`: a tabline that read the width but came out wider loses
+  padding, not its first tabs.
