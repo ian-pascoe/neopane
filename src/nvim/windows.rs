@@ -37,8 +37,9 @@ pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
     msgpack::write_int(nvim.writer(), rows.max(1));
 }
 
-/// Fits a `%!` tabline to the tabline width `cols`, the tabline panes'
-/// columns, while that's narrower than Neovim's screen; None while it isn't.
+/// Fits every non-empty `'tabline'` to the tabline width `cols`, the tabline
+/// panes' columns, while that's narrower than Neovim's screen; None while it
+/// isn't.
 pub(crate) fn set_tabline_width(nvim: &mut Nvim, cols: Option<u32>) {
     nvim.exec_lua("neorex.set_tabline_width(...)", 1);
     match cols {
@@ -444,6 +445,10 @@ mod tests {
         /// A tab page and its windows, for checks that wait on them.
         tab: i64,
         watch: [i64; 3],
+
+        /// Grid 1's top row as of each frame (flush) received while it's
+        /// `Some`, consecutive repeats dropped.
+        tabline_log: Option<Vec<String>>,
     }
 
     impl Harness {
@@ -463,6 +468,7 @@ mod tests {
                 pings: 0,
                 tab: 0,
                 watch: [0; 3],
+                tabline_log: None,
             };
             h.nvim
                 .ui_attach(
@@ -523,7 +529,9 @@ mod tests {
                     match frame.message().unwrap() {
                         rpc::Message::Notification { method, mut params } => {
                             if method == b"redraw" {
-                                self.grids.apply_redraw(&mut params).unwrap();
+                                if self.grids.apply_redraw(&mut params).unwrap() {
+                                    self.log_tabline();
+                                }
                             } else if let Some(note) = parse_note(method, &mut params).unwrap() {
                                 self.notes.push(note);
                             }
@@ -1302,6 +1310,41 @@ mod tests {
             set_tabline_width(&mut self.nvim, cols);
             self.nvim.flush().unwrap();
         }
+
+        /// The highlight of each cell of grid 1's top row.
+        fn tabline_hls(&self) -> Vec<u32> {
+            self.grids.get(1).map_or(Vec::new(), |g| {
+                if g.height == 0 {
+                    Vec::new()
+                } else {
+                    g.row(0).iter().map(|c| c.hl).collect()
+                }
+            })
+        }
+
+        /// Notes grid 1's top row, if a log is being kept.
+        fn log_tabline(&mut self) {
+            if self.tabline_log.is_none() {
+                return;
+            }
+            let row = self.tabline_text();
+            let log = self.tabline_log.as_mut().unwrap();
+            if log.last() != Some(&row) {
+                log.push(row);
+            }
+        }
+
+        /// Waits until the tabline reads `left`, then `right` ending at column
+        /// `cols - 1`, then blanks to the screen's edge.
+        fn until_right_ends_at(&mut self, cols: usize, left: &str, right: &str) {
+            self.until_tabline(&right_aligned(cols, left, right));
+        }
+    }
+
+    /// `left` and `right` in `cols` columns, `right` ending the last.
+    fn right_aligned(cols: usize, left: &str, right: &str) -> String {
+        let gap = cols - left.len() - right.len();
+        format!("{left}{}{right}", " ".repeat(gap))
     }
 
     #[test]
@@ -1320,11 +1363,11 @@ mod tests {
     }
 
     #[test]
-    fn a_tabline_that_doesnt_read_the_width_is_left_as_it_is() {
+    fn a_tabline_that_ignores_the_width_keeps_its_first_columns() {
         let Some(mut h) = Harness::start_sized(60, 10) else {
             return;
         };
-        // as wide as the screen: padding it would cut its start off
+        // as wide as the screen: padding it must not cut its start off
         h.sync(
             "_G.tl = function() return 'A' .. string.rep('x', 58) .. 'Z' end\n\
              vim.o.tabline = '%!v:lua.tl()'\n\
@@ -1332,7 +1375,13 @@ mod tests {
         );
         h.set_tabline_width(Some(30));
         h.sync("assert(vim.g.neorex_tabline_width == 30)");
-        h.until_tabline(&format!("A{}Z", "x".repeat(58)));
+        // the first 30 columns, as they'd be without padding
+        let want = format!("A{}", "x".repeat(29));
+        assert!(
+            h.until(|x| x.tabline_text().starts_with(&want)),
+            "tabline: {:?}",
+            h.tabline_text()
+        );
     }
 
     #[test]
@@ -1435,6 +1484,287 @@ mod tests {
              vim.api.nvim_exec_autocmds('User', { pattern = 'Tl' })",
         );
         h.until_laid_out_to(30, 'N', 'P');
+    }
+
+    /// Set at the end of a timer a test runs, as a made-up report.
+    const TIMER_DONE: i64 = 8000;
+
+    #[test]
+    fn a_format_string_tabline_is_padded_in_place_so_its_right_end_shows() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        // as lualine sets it: a format string, with a `%=` right part
+        h.sync("vim.o.tabline = '%#TabLine#L%<%=R'\nvim.o.showtabline = 2");
+        h.until_right_ends_at(60, "L", "R");
+
+        h.set_tabline_width(Some(30));
+        h.until_right_ends_at(30, "L", "R");
+        // still a format string, not a `%!` wrapper, and the screen as wide as before
+        h.sync(
+            "assert(vim.o.tabline:sub(1, 2) ~= '%!', vim.o.tabline)\n\
+             assert(vim.o.columns == 60)",
+        );
+    }
+
+    #[test]
+    fn a_format_string_too_wide_is_cut_at_its_own_percent_less_than() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let x = "x".repeat(40);
+        h.sync(&format!(
+            "vim.o.tabline = 'AB%<{x}Z'\nvim.o.showtabline = 2"
+        ));
+        h.set_tabline_width(Some(30));
+        // as nvim_eval_statusline with maxwidth=30 gives it
+        h.until_tabline(&format!("AB<{}Z", "x".repeat(26)));
+    }
+
+    #[test]
+    fn a_format_string_too_wide_without_one_keeps_its_first_columns() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let x = "x".repeat(40);
+        h.sync(&format!("vim.o.tabline = 'AB{x}Z'\nvim.o.showtabline = 2"));
+        h.set_tabline_width(Some(30));
+        let want = format!("AB{}", "x".repeat(28));
+        assert!(
+            h.until(|x| x.tabline_text().starts_with(&want)),
+            "tabline: {:?}",
+            h.tabline_text()
+        );
+    }
+
+    #[test]
+    fn a_lua_tabline_that_reads_the_tabline_width_right_aligns_to_it() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        // reads g:neorex_tabline_width, never vim.o.columns
+        h.sync(
+            "_G.tl = function() return 'L%=R' .. (vim.g.neorex_tabline_width or 60) end\n\
+             vim.o.tabline = '%!v:lua.tl()'\n\
+             vim.o.showtabline = 2",
+        );
+        h.set_tabline_width(Some(30));
+        h.until_laid_out_to(30, 'L', 'R');
+    }
+
+    #[test]
+    fn a_vimscript_tabline_that_reads_the_tabline_width_right_aligns_to_it() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync(
+            "vim.cmd([[\n\
+             function! Tl()\n\
+             \x20 return 'L%=R' . get(g:, 'neorex_tabline_width', 60)\n\
+             endfunction]])\n\
+             vim.o.tabline = '%!Tl()'\n\
+             vim.o.showtabline = 2",
+        );
+        h.set_tabline_width(Some(30));
+        h.until_laid_out_to(30, 'L', 'R');
+    }
+
+    /// Runs `set` (Lua that sets 'tabline') with a tabline width coming,
+    /// changing and going, and checks 'tabline' reads exactly what `set` set
+    /// after, and `padded` (a Lua expression, given the screen's width and
+    /// the tabline width) while there's a width, if it's given.
+    fn tabline_comes_back_exactly(set: &str, padded: Option<&str>) {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync(&format!(
+            "{set}\n_G.orig = vim.o.tabline\nvim.o.showtabline = 2"
+        ));
+        for w in [30, 45, 30] {
+            h.set_tabline_width(Some(w));
+            // twice: the SafeState in between must leave it as it is
+            h.sync("assert(vim.o.tabline ~= '')");
+            let check = padded.map_or(String::new(), |p| {
+                format!(
+                    "local cols, width = vim.o.columns, {w}\n\
+                     assert(vim.o.tabline == {p}, vim.o.tabline)"
+                )
+            });
+            h.sync(&check);
+        }
+        h.set_tabline_width(None);
+        h.sync("assert(vim.o.tabline == _G.orig, vim.o.tabline)");
+        h.sync("assert(vim.o.tabline == _G.orig, vim.o.tabline)");
+    }
+
+    #[test]
+    fn a_format_string_comes_back_byte_for_byte() {
+        tabline_comes_back_exactly(
+            "vim.o.tabline = '%#TabLine#L%<%=R'",
+            Some("_G.orig .. '%<' .. string.rep(' ', cols - width)"),
+        );
+    }
+
+    #[test]
+    fn a_percent_bang_expression_comes_back_byte_for_byte() {
+        tabline_comes_back_exactly(
+            "_G.tl = function() return 'L%=R' end\nvim.o.tabline = '%!v:lua.tl()'",
+            None,
+        );
+    }
+
+    #[test]
+    fn a_format_string_ending_in_percent_less_than_and_blanks_is_never_shortened() {
+        // the user's own, so padded after it, once
+        tabline_comes_back_exactly(
+            "vim.o.tabline = 'L%=R%<   '",
+            Some("_G.orig .. '%<' .. string.rep(' ', cols - width)"),
+        );
+    }
+
+    #[test]
+    fn a_new_width_or_screen_width_moves_the_right_part_to_the_new_edge() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.tabline = 'L%=R'\nvim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.until_right_ends_at(30, "L", "R");
+        h.set_tabline_width(Some(20));
+        h.until_right_ends_at(20, "L", "R");
+        h.set_tabline_width(Some(40));
+        h.until_right_ends_at(40, "L", "R");
+
+        // a wider screen: the same width, so the same edge
+        h.nvim.ui_try_resize(80, 10).unwrap();
+        assert!(h.until(|x| x.grids.get(1).is_some_and(|g| g.width == 80)));
+        h.until_right_ends_at(40, "L", "R");
+        // a narrower one
+        h.nvim.ui_try_resize(50, 10).unwrap();
+        assert!(h.until(|x| x.grids.get(1).is_some_and(|g| g.width == 50)));
+        h.until_right_ends_at(40, "L", "R");
+    }
+
+    #[test]
+    fn the_same_tabline_width_again_leaves_tabline_alone() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.tabline = 'L%=R'\nvim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.until_right_ends_at(30, "L", "R");
+        h.sync(
+            "_G.sets, _G.padded = 0, vim.o.tabline\n\
+             vim.api.nvim_create_autocmd('OptionSet', {\n\
+             \x20 pattern = 'tabline',\n\
+             \x20 callback = function() _G.sets = _G.sets + 1 end,\n\
+             })",
+        );
+
+        h.set_tabline_width(Some(30));
+        h.sync("assert(_G.sets == 0, _G.sets)\nassert(vim.o.tabline == _G.padded)");
+    }
+
+    #[test]
+    fn a_format_string_set_again_every_20_ms_is_never_seen_unpadded() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.tabline = '%#TabLine#L%<%=R'\nvim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.until_right_ends_at(30, "L", "R");
+
+        // as lualine does, from a scheduled callback, for about a second
+        h.tabline_log = Some(Vec::new());
+        h.lua(&format!(
+            "local n = 0\n\
+             local timer = vim.uv.new_timer()\n\
+             timer:start(20, 20, vim.schedule_wrap(function()\n\
+             \x20 vim.o.tabline = '%#TabLine#L%<%=R'\n\
+             \x20 n = n + 1\n\
+             \x20 if n == 50 then\n\
+             \x20   timer:stop()\n\
+             \x20   vim.rpcnotify(0, 'neorex_win', {TIMER_DONE})\n\
+             \x20 end\n\
+             end))"
+        ));
+        h.want = TIMER_DONE;
+        assert!(h.until(Harness::is_current));
+
+        let want = format!("{:<60}", right_aligned(30, "L", "R"));
+        let log = h.tabline_log.take().unwrap();
+        assert!(log.iter().all(|row| *row == want), "rows: {log:?}");
+    }
+
+    #[test]
+    fn a_format_string_set_in_an_autocommand_shows_padded() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.sync(
+            "vim.api.nvim_create_autocmd('BufEnter', {\n\
+             \x20 callback = function() vim.o.tabline = 'L%=R' end,\n\
+             })",
+        );
+        h.input(":enew<CR>");
+        h.until_right_ends_at(30, "L", "R");
+    }
+
+    #[test]
+    fn a_padded_tabline_starts_with_the_format_string_as_it_was_set() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.tabline = '%#lualine_c_normal#L%<%=R'\nvim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.sync(
+            "local orig = '%#lualine_c_normal#L%<%=R'\n\
+             assert(#vim.o.tabline > #orig)\n\
+             assert(vim.o.tabline:sub(1, #orig) == orig, vim.o.tabline)\n\
+             assert(vim.o.tabline:find('lualine', 1, true))",
+        );
+    }
+
+    #[test]
+    fn padding_keeps_the_highlights_the_tabline_had() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        // ends in a highlight of its own
+        h.sync(
+            "vim.api.nvim_set_hl(0, 'TabLineSel', { bg = 'red', ctermbg = 1 })\n\
+             vim.api.nvim_set_hl(0, 'TabLineFill', { bg = 'blue', ctermbg = 4 })\n\
+             vim.o.tabline = '%#TabLineSel#x%#TabLineFill#y'\n\
+             vim.o.showtabline = 2",
+        );
+        h.until_tabline("xy");
+        // Neovim fills what's left in the last highlight
+        let [sel, fill] = [h.tabline_hls()[0], h.tabline_hls()[1]];
+        assert_ne!(sel, fill);
+        assert_eq!(fill, h.tabline_hls()[20]);
+
+        h.set_tabline_width(Some(30));
+        // never unpadded, so once it's changed it's seen padded
+        h.sync("vim.o.tabline = '%#TabLineSel#x%#TabLineFill#z'");
+        h.until_tabline("xz");
+        let hls = h.tabline_hls();
+        assert_eq!([sel, fill, fill], [hls[0], hls[1], hls[20]]);
+    }
+
+    #[test]
+    fn an_empty_tabline_is_left_alone() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("vim.o.tabline = ''\nvim.o.showtabline = 2");
+        h.set_tabline_width(Some(30));
+        h.sync("assert(vim.o.tabline == '', vim.o.tabline)");
+        h.sync("assert(vim.o.tabline == '', vim.o.tabline)");
+        // and the one set after is padded
+        h.sync("vim.o.tabline = 'L%=R'");
+        h.until_right_ends_at(30, "L", "R");
     }
 
     #[test]

@@ -24,14 +24,19 @@ pane in the top right.
 
 - No Neovim option sets a tabline's width, so `windows.lua` wraps any `%!`
   `'tabline'`: while it's evaluated, `vim.o.columns` reads as the tabline width,
-  and the result is padded with blanks to the screen's width. Only tablines
-  whose Lua reads `vim.o.columns` fit, such as bufferline's; the built-in
-  tabline, Vimscript ones that read `&columns`, and lualine's, which sets
-  `'tabline'` to a rendered format string, stay clipped.
+  and the result is padded with blanks to the screen's width. Tablines whose
+  Lua reads `vim.o.columns` fit their own widths too, such as bufferline's;
+  lualine's right-hand sections now fit, and only widths it computes from
+  `'columns'` (`max_length`) don't. The built-in tabline stays clipped.
 - `g:neorex_tabline_width` holds the tabline width while it's narrower than
   the screen, for tablines that want to fit themselves.
-- The padding is added only when the tabline read the width: a tabline that
-  ignored it fills the screen, and padded would lose its end. The padding
-  follows a `%<`, since Neovim cuts a too-wide tabline from the left, or at
-  its first `%<`: a tabline that read the width but came out wider loses
-  padding, not its first tabs.
+- Every tabline is padded with blanks to the screen's width while there's a
+  tabline width, whether or not it read the width, and a format-string
+  `'tabline'`, such as lualine's, is padded in place. The padding follows a
+  `%<`. A tabline with no `%<` of its own loses only padding, and one with its
+  own `%<` is cut there to the tabline width, as Neovim would cut it on a
+  screen that wide. Since nothing past the tabline width is ever shown, padding
+  can only bring into view what a `%=` right-aligned. The one tabline it hurts
+  fills the screen with literal blanks and has an early `%<`: it is cut from its
+  start. Widths a tabline computes from `'columns'` fit only through the `vim.o`
+  proxy or `g:neorex_tabline_width`.
