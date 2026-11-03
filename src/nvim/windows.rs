@@ -2781,6 +2781,43 @@ mod tests {
     }
 
     #[test]
+    fn a_float_shows_no_statusline_under_laststatus_3() {
+        let argv = [
+            "nvim",
+            "--clean",
+            "--embed",
+            "-n",
+            "--cmd",
+            "set laststatus=3 statusline=GLOBAL",
+        ];
+        let Some(mut h) = Harness::spawn(&argv, 40, 10) else {
+            return;
+        };
+        assert!(h.until(|x| x.wins[0] != 0 && x.grid_height(x.wins[0]) == 9));
+
+        // lualine's globalstatus gives the current float the statusline, for
+        // laststatus=3 to show; at the 2 neorex sets, Neovim would draw it in
+        // the float, over what's under it, as a picker's input over its list
+        h.sync(
+            "_G.float = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, \
+             { relative = 'editor', row = 1, col = 1, width = 10, height = 1 })\n\
+             vim.wo[float][0].statusline = 'LUALINE'",
+        );
+        let float = h.eval_str("return tostring(float)").parse().unwrap();
+        h.want = float;
+        assert!(h.until(|x| x.grid_height(x.want) == 1));
+
+        // set in an autocommand a key fires, as lualine's on WinEnter: no OptionSet
+        h.input(":autocmd User Stl ++once setlocal statusline=INAUTO<CR>:doautocmd User Stl<CR>");
+        h.barrier();
+        assert_eq!("", h.eval_str("return vim.wo[float][0].statusline"));
+        h.want = float;
+        assert!(h.until(|x| x.grid_height(x.want) == 1));
+        // the pane keeps its own
+        assert!(h.row_starts(h.wins[0], 8, "GLOBAL"));
+    }
+
+    #[test]
     fn a_windows_own_statusline_under_laststatus_3_goes_when_it_loses_focus() {
         let argv = [
             "nvim",

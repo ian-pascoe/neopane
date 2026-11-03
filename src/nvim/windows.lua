@@ -1172,6 +1172,18 @@ local function rewrite_laststatus_3()
 end
 rewrite_laststatus_3()
 
+-- A float with a local 'statusline' shows it at laststatus=2, not at 3, and
+-- lualine's globalstatus gives the current float one, for laststatus=3 to
+-- show: it would cover a row of what's under it, a picker's list under its
+-- input. While mirroring, floats that aren't panes show none, as at 3.
+local function hide_float_statuslines()
+  if not mirroring then return end
+  for _, win in ipairs(api.nvim_list_wins()) do
+    local c = api.nvim_win_get_config(win)
+    if c.relative ~= '' and not c.external and local_stl(win) ~= '' then set_local_stl(win, '') end
+  end
+end
+
 -- a statusline came, went or changed: fit the windows to their panes again. A
 -- laststatus other than 3 set by the user ends the mirroring.
 api.nvim_create_autocmd('OptionSet', {
@@ -1181,6 +1193,8 @@ api.nvim_create_autocmd('OptionSet', {
     if ev.match == 'laststatus' and mirroring and tonumber(vim.v.option_new) ~= 3 then
       stop_mirroring()
     end
+    -- before the redraw that would show it
+    if ev.match == 'statusline' then hide_float_statuslines() end
     request_refit()
   end,
 })
@@ -1202,6 +1216,8 @@ api.nvim_create_autocmd('SafeState', {
       stop_mirroring()
       changed = true
     end
+    -- the redraw comes after SafeState
+    hide_float_statuslines()
     if mirroring then
       local cur = api.nvim_get_current_win()
       local stl = local_stl(cur)
