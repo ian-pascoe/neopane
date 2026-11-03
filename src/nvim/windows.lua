@@ -634,15 +634,18 @@ api.nvim_create_autocmd('WinNew', {
   end,
 })
 
--- The pane a buffer opened in `tab`'s anchor goes to: the window last
+-- The window a buffer opened in `tab`'s anchor goes to: the one last
 -- current, if it's that tab page's, else the tab page's own focused last,
--- else its first shown.
+-- else its first shown. Never one 'winfixbuf' keeps on its buffer.
 local function anchor_target(tab)
+  local function takes(win)
+    return shown(win) and tab_of(win) == tab and not vim.wo[win].winfixbuf
+  end
   for _, win in ipairs({ last or 0, focused[tab] or 0 }) do
-    if shown(win) and tab_of(win) == tab then return win end
+    if takes(win) then return win end
   end
   for _, win in ipairs(api.nvim_list_wins()) do
-    if shown(win) and tab_of(win) == tab then return win end
+    if takes(win) then return win end
   end
 end
 
@@ -650,23 +653,24 @@ end
 -- a file can pick an anchor, as snacks.nvim's does when the pane shows oil
 -- or a dashboard: nothing would show it. Moves such a buffer, with its view,
 -- to the pane the user was in, and gives the anchor a scratch buffer again.
--- Returns the window it went to, if any.
+-- Focus, if on the anchor, goes with it. Returns whether it moved one.
 local function evict(tab)
   local a = anchor_of(tab)
-  if not a then return end
+  if not a then return false end
   local buf = api.nvim_win_get_buf(a)
-  if vim.b[buf].neorex_anchor then return end
+  if vim.b[buf].neorex_anchor then return false end
   local to = anchor_target(tab)
-  if not to then return end
+  if not to then return false end
   local view = api.nvim_win_call(a, vim.fn.winsaveview)
-  -- :buffer, as the picker meant to, keeps the jump list; it refuses to
-  -- leave a modified buffer with 'nohidden'
-  local ok = pcall(api.nvim_win_call, to, function() vim.cmd('buffer ' .. buf) end)
-  if not ok then api.nvim_win_set_buf(to, buf) end
+  -- :buffer, as the picker meant to, keeps the jump list; :hide, so a
+  -- modified buffer it replaces stays, hidden, even with 'nohidden'. If it
+  -- fails anyway, the buffer stays where it is.
+  if not pcall(api.nvim_win_call, to, function() vim.cmd('hide buffer ' .. buf) end) then return false end
   api.nvim_win_call(to, function() vim.fn.winrestview(view) end)
-  -- after: one with 'bufhidden' set would go, hidden
+  -- only once the pane shows it: one with 'bufhidden' set would go, hidden
   api.nvim_win_set_buf(a, anchor_buf())
-  return to
+  if api.nvim_get_current_win() == a then api.nvim_set_current_win(to) end
+  return true
 end
 
 local evict_pending = false
@@ -690,8 +694,7 @@ local function report()
   local cur = api.nvim_get_current_win()
   if is_anchor(cur) then
     -- a buffer opened in it: on to the pane it went to
-    local to = evict(api.nvim_win_get_tabpage(cur))
-    if to then return api.nvim_set_current_win(to) end
+    if evict(api.nvim_win_get_tabpage(cur)) then return end
     -- never shown: move on the way <C-w>w or <C-w>W was going
     local wins = vim.tbl_filter(shown, api.nvim_tabpage_list_wins(0))
     if #wins == 0 then return end

@@ -894,38 +894,60 @@ mod tests {
             return;
         };
         h.boot();
-        let [first, anchor] = h.wins;
+        let anchor = h.wins[1];
+        // two panes, so a move on from the anchor could go either way
+        let pane = h.adopt_split();
         // where the pane shows no file, as with oil, snacks.nvim's picker
         // takes the anchor for the last ordinary window and opens the file
         // there, cursor and all
         h.sync(
             "vim.bo.buftype = 'nofile'\n\
-             _G.picked = vim.api.nvim_create_buf(true, false)\n\
-             vim.api.nvim_buf_set_lines(picked, 0, -1, false, { 'a', 'b', 'c' })",
+             _G.pick = function()\n\
+             \x20 local b = vim.api.nvim_create_buf(true, false)\n\
+             \x20 vim.api.nvim_buf_set_lines(b, 0, -1, false, { 'a', 'b', 'c' })\n\
+             \x20 _G.picked = b\n\
+             \x20 return b\n\
+             end",
         );
-        h.notes.clear();
-        h.lua(&format!(
-            "vim.api.nvim_set_current_win({anchor})\n\
-             vim.cmd('buffer ' .. picked)\n\
-             vim.api.nvim_win_set_cursor(0, {{ 3, 0 }})"
-        ));
-        h.want = first;
-        assert!(h.until(Harness::is_current));
         let got = |h: &mut Harness| {
             h.eval_str(&format!(
                 "local a = vim.api.nvim_win_get_buf({anchor})\n\
-                 return string.format('%s %d %s', vim.api.nvim_win_get_buf({first}) == picked, \
-                 vim.api.nvim_win_get_cursor({first})[1], vim.b[a].neorex_anchor)"
+                 return string.format('%s %d %s', vim.api.nvim_win_get_buf({pane}) == picked, \
+                 vim.api.nvim_win_get_cursor({pane})[1], vim.b[a].neorex_anchor)"
             ))
         };
+        h.notes.clear();
+        h.lua(&format!(
+            "vim.api.nvim_set_current_win({anchor})\n\
+             vim.cmd('buffer ' .. pick())\n\
+             vim.api.nvim_win_set_cursor(0, {{ 3, 0 }})"
+        ));
+        h.want = pane;
+        assert!(h.until(Harness::is_current));
         assert_eq!("true 3 true", got(&mut h));
 
-        // one put there without entering it goes too
-        h.sync(&format!(
-            "vim.cmd('enew')\n\
-             vim.api.nvim_win_set_buf({anchor}, picked)\n\
+        // put there before it's entered: focus still goes with it
+        h.notes.clear();
+        h.lua(&format!(
+            "vim.api.nvim_win_set_buf({anchor}, pick())\n\
              vim.api.nvim_win_set_cursor({anchor}, {{ 3, 0 }})\n\
-             assert(vim.wait(2500, function() return vim.api.nvim_win_get_buf({first}) == picked end), 'not moved')"
+             vim.api.nvim_set_current_win({anchor})"
+        ));
+        h.want = pane;
+        assert!(h.until(Harness::is_current));
+        assert_eq!("true 3 true", got(&mut h));
+
+        // put there without entering it, over a modified buffer with
+        // 'nohidden': it goes too, and the changes stay
+        h.sync(&format!(
+            "_G.edited = vim.api.nvim_create_buf(true, false)\n\
+             vim.api.nvim_win_set_buf({pane}, edited)\n\
+             vim.o.hidden = false\n\
+             vim.api.nvim_buf_set_lines(edited, 0, -1, false, {{ 'changed' }})\n\
+             vim.api.nvim_win_set_buf({anchor}, pick())\n\
+             vim.api.nvim_win_set_cursor({anchor}, {{ 3, 0 }})\n\
+             assert(vim.wait(2500, function() return vim.api.nvim_win_get_buf({pane}) == picked end), 'not moved')\n\
+             assert(vim.bo[edited].modified and vim.api.nvim_buf_is_loaded(edited), 'changes lost')"
         ));
         assert_eq!("true 3 true", got(&mut h));
         assert_eq!(Some(WinKind::Ordinary), h.kind(anchor));
