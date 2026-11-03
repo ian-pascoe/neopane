@@ -702,10 +702,12 @@ function M.tabline()
   local pad = real_o.columns - proxy_columns
   proxy_columns = nil
   if not ok then error(s, 0) end
-  -- one that didn't lay out to the width fills the screen as before:
-  -- Neovim cuts a tabline too wide for it from the left
+  -- one that didn't lay out to the width fills the screen as before: padded,
+  -- it would lose its end to the padding
   if not columns_read then return s end
-  -- and one that did but came out wider loses the padding, not its start
+  -- one that did but came out wider loses padding, not its start, as Neovim
+  -- cuts a tabline too wide for it from the left, or at its first %<. One
+  -- with a %< of its own is cut there, to fit the width before the padding.
   return s .. '%<' .. string.rep(' ', pad)
 end
 

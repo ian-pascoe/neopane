@@ -32,4 +32,5 @@ pane in the top right.
   the screen, for tablines that want to fit themselves.
 - The padding is added only when the tabline read the width: Neovim cuts a
   too-wide tabline from the left, so padding one that ignored it would hide
-  its first tabs.
+  its first tabs. It follows a `%<`, so a tabline that read the width but came
+  out wider loses padding instead.

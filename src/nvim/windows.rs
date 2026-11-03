@@ -1290,9 +1290,12 @@ mod tests {
             assert!(ok, "tabline: {:?}", self.tabline_text());
         }
 
-        /// Waits until `LUA_TABLINE` shows laid out to `cols` columns.
-        fn until_laid_out_to(&mut self, cols: usize) {
-            self.until_tabline(&format!("L{}R{cols}", " ".repeat(cols - 4)));
+        /// Waits until a tabline such as `LUA_TABLINE`, `left` then `right` and
+        /// the width it read, right-aligned, shows laid out to `cols` columns.
+        fn until_laid_out_to(&mut self, cols: usize, left: char, right: char) {
+            let label = format!("{right}{cols}");
+            let gap = cols - 1 - label.len();
+            self.until_tabline(&format!("{left}{}{label}", " ".repeat(gap)));
         }
 
         fn set_tabline_width(&mut self, cols: Option<u32>) {
@@ -1307,10 +1310,10 @@ mod tests {
             return;
         };
         h.sync(LUA_TABLINE);
-        h.until_laid_out_to(60);
+        h.until_laid_out_to(60, 'L', 'R');
 
         h.set_tabline_width(Some(30));
-        h.until_laid_out_to(30);
+        h.until_laid_out_to(30, 'L', 'R');
         h.sync("assert(vim.g.neorex_tabline_width == 30)");
         // the screen is as wide as before
         h.sync("assert(vim.o.columns == 60)");
@@ -1360,10 +1363,10 @@ mod tests {
         };
         h.sync(LUA_TABLINE);
         h.set_tabline_width(Some(30));
-        h.until_laid_out_to(30);
+        h.until_laid_out_to(30, 'L', 'R');
 
         h.set_tabline_width(None);
-        h.until_laid_out_to(60);
+        h.until_laid_out_to(60, 'L', 'R');
         h.sync(
             "assert(vim.g.neorex_tabline_width == nil)\n\
              assert(vim.o.tabline == '%!v:lua.tl()', vim.o.tabline)",
@@ -1382,7 +1385,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.until_laid_out_to(30);
+        h.until_laid_out_to(30, 'L', 'R');
 
         h.sync("_G.boom = true\npcall(vim.cmd.redrawtabline)");
         h.sync(
@@ -1403,7 +1406,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.until_laid_out_to(30);
+        h.until_laid_out_to(30, 'L', 'R');
         h.sync(
             "assert(not rawequal(_G.kept, vim.o))\n\
              assert(_G.kept.columns == 60)\n\
@@ -1419,11 +1422,11 @@ mod tests {
         };
         h.sync(LUA_TABLINE);
         h.set_tabline_width(Some(30));
-        h.until_laid_out_to(30);
+        h.until_laid_out_to(30, 'L', 'R');
 
         // as bufferline's setup() running again
         h.sync("_G.tl2 = function() return 'M%=Q' .. vim.o.columns end\nvim.o.tabline = '%!v:lua.tl2()'");
-        h.until_tabline(&format!("M{}Q30", " ".repeat(26)));
+        h.until_laid_out_to(30, 'M', 'Q');
 
         // set in an autocommand, where OptionSet doesn't fire
         h.lua(
@@ -1431,7 +1434,7 @@ mod tests {
              vim.api.nvim_create_autocmd('User', { pattern = 'Tl', callback = function() vim.o.tabline = '%!v:lua.tl3()' end })\n\
              vim.api.nvim_exec_autocmds('User', { pattern = 'Tl' })",
         );
-        h.until_tabline(&format!("N{}P30", " ".repeat(26)));
+        h.until_laid_out_to(30, 'N', 'P');
     }
 
     #[test]
