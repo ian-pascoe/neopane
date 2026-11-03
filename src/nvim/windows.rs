@@ -37,9 +37,8 @@ pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
     msgpack::write_int(nvim.writer(), rows.max(1));
 }
 
-/// Fits a `%!` tabline to the tabline width `cols`, the columns of the panes
-/// that show it, while that's narrower than Neovim's screen; None while it
-/// isn't.
+/// Fits a `%!` tabline to the tabline width `cols`, the tabline panes'
+/// columns, while that's narrower than Neovim's screen; None while it isn't.
 pub(crate) fn set_tabline_width(nvim: &mut Nvim, cols: Option<u32>) {
     nvim.exec_lua("neorex.set_tabline_width(...)", 1);
     match cols {
@@ -1291,6 +1290,11 @@ mod tests {
             assert!(ok, "tabline: {:?}", self.tabline_text());
         }
 
+        /// Waits until `LUA_TABLINE` shows laid out to `cols` columns.
+        fn until_laid_out_to(&mut self, cols: usize) {
+            self.until_tabline(&format!("L{}R{cols}", " ".repeat(cols - 4)));
+        }
+
         fn set_tabline_width(&mut self, cols: Option<u32>) {
             set_tabline_width(&mut self.nvim, cols);
             self.nvim.flush().unwrap();
@@ -1303,10 +1307,10 @@ mod tests {
             return;
         };
         h.sync(LUA_TABLINE);
-        h.until_tabline(&format!("L{}R60", " ".repeat(56)));
+        h.until_laid_out_to(60);
 
         h.set_tabline_width(Some(30));
-        h.until_tabline(&format!("L{}R30", " ".repeat(26)));
+        h.until_laid_out_to(30);
         h.sync("assert(vim.g.neorex_tabline_width == 30)");
         // the screen is as wide as before
         h.sync("assert(vim.o.columns == 60)");
@@ -1329,16 +1333,37 @@ mod tests {
     }
 
     #[test]
+    fn a_tabline_wider_than_the_width_it_read_keeps_its_start() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        // it reads the width, then lays out wider than it anyway
+        h.sync(
+            "_G.tl = function() local _ = vim.o.columns; return 'A' .. string.rep('x', 40) .. 'Z' end\n\
+             vim.o.tabline = '%!v:lua.tl()'\n\
+             vim.o.showtabline = 2",
+        );
+        h.set_tabline_width(Some(30));
+        h.sync("assert(vim.g.neorex_tabline_width == 30)");
+        let want = format!("A{}Z", "x".repeat(40));
+        assert!(
+            h.until(|x| x.tabline_text().starts_with(&want)),
+            "tabline: {:?}",
+            h.tabline_text()
+        );
+    }
+
+    #[test]
     fn with_no_tabline_width_the_tabline_is_as_it_was() {
         let Some(mut h) = Harness::start_sized(60, 10) else {
             return;
         };
         h.sync(LUA_TABLINE);
         h.set_tabline_width(Some(30));
-        h.until_tabline(&format!("L{}R30", " ".repeat(26)));
+        h.until_laid_out_to(30);
 
         h.set_tabline_width(None);
-        h.until_tabline(&format!("L{}R60", " ".repeat(56)));
+        h.until_laid_out_to(60);
         h.sync(
             "assert(vim.g.neorex_tabline_width == nil)\n\
              assert(vim.o.tabline == '%!v:lua.tl()', vim.o.tabline)",
@@ -1357,7 +1382,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.until_tabline(&format!("L{}R30", " ".repeat(26)));
+        h.until_laid_out_to(30);
 
         h.sync("_G.boom = true\npcall(vim.cmd.redrawtabline)");
         h.sync(
@@ -1378,7 +1403,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.until_tabline(&format!("L{}R30", " ".repeat(26)));
+        h.until_laid_out_to(30);
         h.sync(
             "assert(not rawequal(_G.kept, vim.o))\n\
              assert(_G.kept.columns == 60)\n\
@@ -1394,7 +1419,7 @@ mod tests {
         };
         h.sync(LUA_TABLINE);
         h.set_tabline_width(Some(30));
-        h.until_tabline(&format!("L{}R30", " ".repeat(26)));
+        h.until_laid_out_to(30);
 
         // as bufferline's setup() running again
         h.sync("_G.tl2 = function() return 'M%=Q' .. vim.o.columns end\nvim.o.tabline = '%!v:lua.tl2()'");

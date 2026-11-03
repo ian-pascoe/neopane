@@ -25,8 +25,9 @@ pane in the top right.
 - No Neovim option sets a tabline's width, so `windows.lua` wraps any `%!`
   `'tabline'`: while it's evaluated, `vim.o.columns` reads as the tabline width,
   and the result is padded with blanks to the screen's width. Only tablines
-  whose Lua reads `vim.o.columns` fit (bufferline, lualine); the built-in
-  tabline and Vimscript ones that read `&columns` stay clipped.
+  whose Lua reads `vim.o.columns` fit, such as bufferline's; the built-in
+  tabline, Vimscript ones that read `&columns`, and lualine's, which sets
+  `'tabline'` to a rendered format string, stay clipped.
 - `g:neorex_tabline_width` holds the tabline width while it's narrower than
   the screen, for tablines that want to fit themselves.
 - The padding is added only when the tabline read the width: Neovim cuts a

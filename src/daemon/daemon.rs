@@ -375,18 +375,10 @@ impl Daemon {
         Ok(())
     }
 
-    /// Tells Neovim the tabline width when it changed, so its tabline fits
-    /// the panes that show it.
+    /// Tells Neovim the tabline width when it changed.
     fn sync_tabline_width(&mut self) -> Result<()> {
-        if !self.nvim.ready {
-            return Ok(());
-        }
         let cols = self.geometry().tabline_width();
-        if cols == self.nvim.tabline_width {
-            return Ok(());
-        }
-        self.nvim.tabline_width = cols;
-        windows::set_tabline_width(&mut self.nvim.client, cols);
+        self.nvim.tell_tabline_width(cols);
         self.nvim.client.flush()?;
         Ok(())
     }
@@ -1916,13 +1908,13 @@ mod tests {
     fn the_tabline_panes_columns_are_sent_as_the_tabline_width_when_they_change() {
         let mut fx = TablineFixture::init();
         fx.d().nvim.ready = true;
-        // a shell holds x = 0 to 0.4; two Neovim panes sit right of it
+        // a foreign pane holds x = 0 to 0.4; two window panes sit right of it
         fx.add(0, 60, Some([0.4, 0.0, 0.3, 1.0]));
         fx.add(1, 60, Some([0.7, 0.0, 0.3, 1.0]));
         fx.d().sync_tabline_width().unwrap();
         // the same again: nothing
         fx.d().sync_tabline_width().unwrap();
-        // the shell closes: the panes take the whole width, and hide nothing
+        // the foreign pane closes: the panes take the whole width, and hide nothing
         fx.d().panes.list[0].rect = Some([0.0, 0.0, 0.5, 1.0]);
         fx.d().panes.list[0].terminal_surface = Some(Surface::for_test(100, 20));
         fx.d().panes.list[1].rect = Some([0.5, 0.0, 0.5, 1.0]);
@@ -1932,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tabline_width_stays_while_the_tabline_is_off_and_goes_with_no_pane_along_the_top() {
+    fn the_tabline_width_stays_while_the_tabline_is_off_and_goes_with_the_tabline_panes() {
         let mut fx = TablineFixture::init();
         fx.d().nvim.ready = true;
         fx.add(0, 120, Some([0.4, 0.0, 0.6, 0.5]));
@@ -1944,21 +1936,33 @@ mod tests {
         // ready for when it's on again
         fx.d().tabline_rows = 0;
         fx.d().sync_tabline_width().unwrap();
-        // a shell takes the top: no pane shows the tabline
+        // a foreign pane takes the top: there are no tabline panes
         fx.d().panes.list[0].rect = Some([0.4, 0.3, 0.6, 0.2]);
         fx.d().sync_tabline_width().unwrap();
         assert_eq!(vec![Some(120), None], tabline_widths_sent(fx));
     }
 
     #[test]
-    fn the_tabline_width_is_sent_after_a_batch_once_neovim_is_set_up() {
+    fn a_layout_that_moves_a_pane_to_the_top_sends_the_tabline_width_after_its_batch() {
         let mut fx = TablineFixture::init();
-        fx.add(0, 60, Some([0.4, 0.0, 0.6, 1.0]));
+        // under a foreign pane: it shows no tabline
+        let id = fx.add(0, 120, Some([0.4, 0.5, 0.6, 0.5]));
+        fx.d().panes.by_id_mut(id).unwrap().rex_block =
+            Some(pane::rex_block(block_id(1).as_bytes()).unwrap());
         // windows.lua isn't running yet
         fx.d().after_batch().unwrap();
         fx.d().nvim.ready = true;
         fx.d().after_batch().unwrap();
-        assert_eq!(vec![Some(60)], tabline_widths_sent(fx));
+
+        // the user moves it to the top, a foreign pane left of it
+        let view = json!({ "window_id": window_id(1), "layers": [ { "kind": "tiled",
+            "bounds": [0.0, 0.0, 1.0, 1.0],
+            "layout": { "kind": "split", "children": [
+                { "block_id": block_id(9), "rect": [0.0, 0.0, 0.4, 1.0] },
+                { "block_id": block_id(1), "rect": [0.4, 0.0, 0.6, 1.0] } ] } } ] });
+        fx.d().on_layout(&[view]).unwrap();
+        fx.d().after_batch().unwrap();
+        assert_eq!(vec![Some(120)], tabline_widths_sent(fx));
     }
 
     #[test]

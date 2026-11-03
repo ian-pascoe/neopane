@@ -36,12 +36,19 @@ shares the top of the Rex window). Checked against bufferline.nvim 655133c
 - A tabline wider than the screen, with no `%<`, is cut from the start: at 20
   columns, `AAAAAAAAAABBBBBBBBBBCCCCC` renders `<AAAABBBBBBBBBBCCCCC`. Padding
   appended to a tabline that already fills the screen hides its first tabs.
+- A `%<` before the padding makes Neovim cut the padding, not the start, when
+  the whole is too wide: at 20 columns, 22 columns of text then `%<` and 10
+  spaces renders the text's first 19 columns and `>`. When it fits, `%<`
+  changes nothing.
 - Swapping `vim.o` for a proxy whose `columns` is 42, then restoring it, works
   from Lua; the real `'columns'` stays 100.
 
 Other renderers read `'columns'` too: lualine's `buffers` and `tabs`
 components use `vim.o.columns`, and a Vimscript `'tabline'` would read
-`&columns`, which a `vim.o` proxy doesn't cover.
+`&columns`, which a `vim.o` proxy doesn't cover. lualine doesn't use `%!`: it
+renders the tabline on its own refresh and sets `'tabline'` to the resulting
+format string (`lua/lualine.lua`, `refresh`), so there is no expression to
+evaluate with the proxy.
 
 ## Neovim external windows vs. the screen size
 
