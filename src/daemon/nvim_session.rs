@@ -34,6 +34,9 @@ pub(crate) struct NvimSession {
     pub current_float: i64,
     /// The editor size last asked for.
     pub editor_size: [u32; 2],
+    /// The tabline width Neovim was last told (see `Geometry::tabline_width`);
+    /// None, as it starts, while the tabline hides nothing.
+    pub tabline_width: Option<u32>,
     /// Float windows that have been current, newest last; the oldest drop
     /// off. Neovim never reuses a handle, so closed ones do no harm.
     pub entered_floats: [i64; MAX_ENTERED],
@@ -54,6 +57,7 @@ impl NvimSession {
             ui_focused: true,
             current_float: 0,
             editor_size: [0, 0],
+            tabline_width: None,
             entered_floats: [0; MAX_ENTERED],
             entered_len: 0,
         }
@@ -238,6 +242,16 @@ impl NvimSession {
         }
         self.editor_size = size;
         self.client.ui_try_resize(size[0], size[1])
+    }
+
+    /// Tells Neovim the tabline width `cols` if it changed, so its tabline
+    /// fits the tabline panes. The caller flushes.
+    pub(crate) fn tell_tabline_width(&mut self, cols: Option<u32>) {
+        if !self.ready || cols == self.tabline_width {
+            return;
+        }
+        self.tabline_width = cols;
+        windows::set_tabline_width(&mut self.client, cols);
     }
 }
 

@@ -75,6 +75,19 @@ can tell it's running under neorex:
 { 'sphamba/smear-cursor.nvim', cond = vim.g.neorex == nil },
 ```
 
+The tabline shows across the panes along the top of the Rex window. When
+another pane, such as a shell, takes part of the top, those panes are narrower
+than Neovim's screen, and neorex fits the tabline to them: while a `%!`
+`'tabline'` is drawn, `vim.o.columns` reads as their width, so a tabline whose
+Lua lays out to it, such as bufferline's, fits. Other tablines, such as
+Neovim's own and lualine's, still lay out across the whole screen; they can use
+`g:neorex_tabline_width`, set to that width while it's narrower than the
+screen:
+
+```lua
+local width = vim.g.neorex_tabline_width or vim.o.columns
+```
+
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
 

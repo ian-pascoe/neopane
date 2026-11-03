@@ -102,17 +102,40 @@ impl Geometry<'_> {
     /// otherwise take the top left from the panes already there, until the
     /// layout arrives. Without Rex's layout at all, the one pane is the window.
     pub(crate) fn tabline_rows_of(&self, p: &Pane) -> u32 {
-        if self.tabline_rows == 0 || p.layer.is_some() || p.tab != 0 {
-            return 0;
-        }
-        if p.rect.is_none() && self.panes.list.iter().any(|q| q.rect.is_some()) {
-            return 0;
-        }
-        if self.pane_origin(p)[0] == 0 {
+        if self.tabline_rows > 0 && self.is_tabline_pane(p) {
             self.tabline_rows
         } else {
             0
         }
+    }
+
+    /// Whether pane `p` is one of the tabline panes: a window pane along the
+    /// top of the Rex window, which shows the tabline when there is one.
+    fn is_tabline_pane(&self, p: &Pane) -> bool {
+        if p.layer.is_some() || p.tab != 0 {
+            return false;
+        }
+        if p.rect.is_none() && self.panes.list.iter().any(|q| q.rect.is_some()) {
+            return false;
+        }
+        self.pane_origin(p)[0] == 0
+    }
+
+    /// The tabline width, the tabline panes' columns, while it's narrower than
+    /// Neovim's screen, which shows the tabline past it nowhere. None when it
+    /// hides nothing, or there are no tabline panes. Whether the tabline is
+    /// on doesn't matter.
+    pub(crate) fn tabline_width(&self) -> Option<u32> {
+        let screen = self.grids.get(1)?.width;
+        let cols: u32 = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| self.is_tabline_pane(p))
+            .filter_map(|p| p.terminal_surface.as_ref())
+            .map(|s| s.view.cols)
+            .sum();
+        (cols > 0 && cols < screen).then_some(cols)
     }
 
     /// Whether pane `p` draws part of the screen's tabline. It needs its
