@@ -46,21 +46,31 @@ local function shown(win)
   return c.external or c.relative == ''
 end
 
--- The tab page whose tabline label counts `win`: its home tab page, or for
--- an ordinary float, the one it floats in. Nil for an anchor, a window that
--- takes no focus or is hidden, and an external window with no home.
-local function counts_for(win)
-  if not api.nvim_win_is_valid(win) or is_anchor(win) then return end
+-- The tab page `win` belongs to, for the tabline: its home tab page; for a
+-- float on a window, that window's; for another ordinary float, the one it
+-- floats in. Nil for an external window with no home.
+local function tab_of(win)
   local c = api.nvim_win_get_config(win)
-  if c.focusable == false or c.hide then return end
   if c.external then return home[win] end
+  if c.relative == 'win' and c.win and api.nvim_win_is_valid(c.win) then return tab_of(c.win) end
   if c.relative ~= '' then return api.nvim_win_get_tabpage(win) end
   return home[win] or api.nvim_win_get_tabpage(win)
 end
 
--- `win` took focus: it names its tab page's label from now on
+-- The tab page whose tabline label counts `win`, as `tab_of` says. Nil for an
+-- anchor, and a window that takes no focus or is hidden.
+local function counts_for(win)
+  if not api.nvim_win_is_valid(win) or is_anchor(win) then return end
+  local c = api.nvim_win_get_config(win)
+  if c.focusable == false or c.hide then return end
+  return tab_of(win)
+end
+
+-- `win` took focus: it names its tab page's label from now on. Not while a
+-- tab page closes, which passes focus through each of its windows, other tab
+-- pages' that followed into it too.
 local function note_focus(win)
-  local tab = counts_for(win)
+  local tab = not closing_tab and counts_for(win)
   if tab then focused[tab] = win end
 end
 
@@ -69,26 +79,26 @@ end
 -- window focused last, else its first shown one, else the one Neovim
 -- remembers for it.
 local function own_windows()
-  local own = {}
-  for _, tab in ipairs(api.nvim_list_tabpages()) do own[tab] = { wins = {} } end
+  local by_tab = {}
+  for _, tab in ipairs(api.nvim_list_tabpages()) do by_tab[tab] = { wins = {} } end
   for _, win in ipairs(api.nvim_list_wins()) do
-    local o = own[counts_for(win) or 0]
-    if o then o.wins[#o.wins + 1] = win end
+    local mine = by_tab[counts_for(win) or 0]
+    if mine then mine.wins[#mine.wins + 1] = win end
   end
-  for tab, o in pairs(own) do
+  for tab, mine in pairs(by_tab) do
     local label = focused[tab]
     if not (label and counts_for(label) == tab) then
       label = nil
-      for _, win in ipairs(o.wins) do
+      for _, win in ipairs(mine.wins) do
         if shown(win) then
           label = win
           break
         end
       end
     end
-    o.label = label or api.nvim_tabpage_get_win(tab)
+    mine.label = label or api.nvim_tabpage_get_win(tab)
   end
-  return own
+  return by_tab
 end
 
 local function others_shown(win)
@@ -703,7 +713,8 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
 
 -- The tabline width: the tabline panes' columns, while they're narrower than
 -- the screen, as the daemon last said; else nil. The columns past it are
--- never shown, so every non-empty 'tabline' is padded with blanks to the
+-- never shown, so every 'tabline' but the copy, which lays itself out to the
+-- width, is padded with blanks to the
 -- screen's width, which puts the right end of a `%=` layout at the tabline
 -- width, and a `%!` one is evaluated with vim.o.columns reading as it.
 local tabline_width
@@ -741,7 +752,7 @@ end
 -- 0.12's draw_tabline, labelling each tab page from its own windows and
 -- laid out to the tabline width. 'tabline' reads this while a user or plugin
 -- leaves it empty, and only this exact value is ours.
-local copy = '%!v:lua.neorex.builtin_tabline()'
+local builtin_copy = '%!v:lua.neorex.builtin_tabline()'
 
 -- `s`'s characters, each with any that combine with it
 local function chars(s)
@@ -885,29 +896,32 @@ local function tabline_format(row)
   return table.concat(out)
 end
 
--- What the copy's groups were last set to, by name
+-- Each of the copy's groups as last set: by name, { want = what it was set
+-- to, got = what Neovim then said it was }
 local tabline_group_defs = {}
 -- Sets each of the copy's groups to draw over TabLineFill as the built-in's
 -- own does on its own: no combining with TabLineFill's attributes, and
--- colors it leaves unset from Normal, the default ones.
+-- colors it leaves unset from Normal, the default ones. Only when that
+-- changed, or the group did, as `:hi clear` clears it: each set redraws.
 local function sync_tabline_groups()
   local normal = api.nvim_get_hl(0, { name = 'Normal', link = false })
   for name, ours in pairs(tabline_groups) do
-    local hl = api.nvim_get_hl(0, { name = name, link = false })
+    local want = api.nvim_get_hl(0, { name = name, link = false })
     for _, k in ipairs({ 'fg', 'bg', 'sp', 'ctermfg', 'ctermbg' }) do
-      if hl[k] == nil then hl[k] = normal[k] end
+      if want[k] == nil then want[k] = normal[k] end
     end
-    hl.default = nil
-    hl.nocombine = true
-    hl.cterm = vim.tbl_extend('force', hl.cterm or {}, { nocombine = true })
-    if not vim.deep_equal(hl, tabline_group_defs[ours]) then
-      tabline_group_defs[ours] = hl
-      api.nvim_set_hl(0, ours, hl)
+    want.default = nil
+    want.nocombine = true
+    want.cterm = vim.tbl_extend('force', want.cterm or {}, { nocombine = true })
+    local prev = tabline_group_defs[ours]
+    local same = prev and vim.deep_equal(want, prev.want)
+      and vim.deep_equal(api.nvim_get_hl(0, { name = ours }), prev.got)
+    if not same then
+      api.nvim_set_hl(0, ours, want)
+      tabline_group_defs[ours] = { want = want, got = api.nvim_get_hl(0, { name = ours }) }
     end
   end
 end
--- a colorscheme clears them
-api.nvim_create_autocmd('ColorScheme', { group = group, callback = function() tabline_group_defs = {} end })
 
 -- The copy: the built-in tabline, laid out to the tabline width, else the
 -- screen's, and padded to the screen's width as every fitted tabline is.
@@ -915,16 +929,21 @@ function M.builtin_tabline()
   sync_tabline_groups()
   local columns = real_o.columns
   local w = math.min(tabline_width or columns, columns)
-  local own, cur, tabs = own_windows(), api.nvim_get_current_tabpage(), {}
+  local by_tab, cur, tabs = own_windows(), api.nvim_get_current_tabpage(), {}
   for _, tab in ipairs(api.nvim_list_tabpages()) do
-    local o = own[tab]
+    local mine = by_tab[tab]
     local modified = false
-    for _, win in ipairs(o.wins) do
+    for _, win in ipairs(mine.wins) do
       modified = modified or vim.bo[api.nvim_win_get_buf(win)].modified
     end
     -- as the built-in names it: its `%f`, each directory cut to a character
-    local name = api.nvim_eval_statusline('%f', { winid = o.label, maxwidth = 4096 }).str
-    tabs[#tabs + 1] = { count = #o.wins, modified = modified, name = vim.fn.pathshorten(name, 1), current = tab == cur }
+    local name = api.nvim_eval_statusline('%f', { winid = mine.label, maxwidth = 4096 }).str
+    tabs[#tabs + 1] = {
+      count = #mine.wins,
+      modified = modified,
+      name = vim.fn.pathshorten(name, 1),
+      current = tab == cur,
+    }
   end
   local showcmd
   if vim.o.showcmd and vim.o.showcmdloc == 'tabline' then
@@ -940,7 +959,10 @@ function M.tabline_click(_, clicks, button)
   local ok, err = pcall(function()
     if button == 'm' then
       if #api.nvim_list_tabpages() > 1 then vim.cmd.tabclose() end
-    elseif clicks == 2 then
+      return
+    end
+    -- each ends Visual mode as it enters another window, as the built-in's do
+    if clicks == 2 then
       vim.cmd.tabnew()
       vim.cmd.tabmove('$')
     else
@@ -953,7 +975,7 @@ end
 -- Draws the copy again, where neorex's own records changed and Neovim draws
 -- the tabline no more than it would without them.
 local function redraw_copy()
-  if vim.go.tabline == copy then vim.cmd.redrawtabline() end
+  if vim.go.tabline == builtin_copy then vim.cmd.redrawtabline() end
 end
 
 -- The one decision about 'tabline': from its `current` value, the tabline
@@ -967,7 +989,7 @@ end
 -- again, is that `%!` tabline.
 local function fit(current, width, columns, record, expr)
   local orig = current
-  if current == copy then
+  if current == builtin_copy then
     orig = ''
   elseif record and current == record.padded then
     orig = record.orig
@@ -976,7 +998,7 @@ local function fit(current, width, columns, record, expr)
   end
   local padded = orig
   if orig == '' then
-    padded = copy
+    padded = builtin_copy
   elseif width then
     padded = orig:sub(1, 2) == '%!' and wrapper or orig .. padding(width, columns)
   end
@@ -1037,7 +1059,7 @@ api.nvim_create_autocmd('VimLeavePre', {
   group = group,
   callback = function()
     stopping = true
-    if vim.go.tabline == copy then vim.go.tabline = '' end
+    if vim.go.tabline == builtin_copy then vim.go.tabline = '' end
   end,
 })
 
@@ -1167,11 +1189,16 @@ local function reopen(win, from, enter)
     api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
     keep_edgy_out(new)
     home[new] = from
+    for tab, w in pairs(focused) do
+      if w == win then focused[tab] = new end
+    end
     if last == win then last = new end
     for _, t in pairs(floating) do
       if t.back == win then t.back = new end
     end
     vim.rpcnotify(chan, 'neorex_reopened', win, new)
+    -- its tab page's label counts it again
+    redraw_copy()
     -- left on an anchor while there was nowhere to go
     if is_anchor(api.nvim_get_current_win()) then schedule_report() end
   end)

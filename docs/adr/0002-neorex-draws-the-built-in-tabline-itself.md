@@ -49,4 +49,5 @@ as every fitted tabline is.
   button, is left half-drawn by Neovim; no format string can draw that, and
   the copy draws a blank there.
 - Neovim redraws no tabline for an external window closing, as it would for a
-  split, so neorex redraws the copy when one closes.
+  split, so neorex redraws the copy when one closes, and when it reopens one
+  in a scheduled callback.
