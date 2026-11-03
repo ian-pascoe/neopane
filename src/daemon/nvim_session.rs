@@ -280,7 +280,7 @@ fn editor_size(p: &Pane) -> Option<[u32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::focus_gate::is_blocking;
+    use crate::daemon::focus_gate::{Item, is_blocking};
     use crate::nvim::forwarder::Forwarder;
     use crate::nvim::msgpack;
     use crate::nvim::nvim::{for_test_on, spawn_for_test_with};
@@ -519,6 +519,11 @@ mod tests {
             id
         }
 
+        /// Maps Alt-x to nothing: unmapped, Neovim takes it as Escape and `x`.
+        fn alt_x_does_nothing(&mut self) {
+            let _ = self.lua("vim.keymap.set('n', '<M-x>', '<Nop>') return 'ok'");
+        }
+
         /// Fills the first window's buffer with 100 lines.
         fn fill_first(&mut self) {
             let code = format!(
@@ -687,7 +692,7 @@ mod tests {
 
     /// A Ctrl-C typed as `ctrl_c` just after a switch, into a Neovim that's
     /// busy: it waits until a tick finds Neovim not answering, then goes.
-    fn a_held_ctrl_c_interrupts_a_busy_neovim(ctrl_c: &[u8]) {
+    fn check_a_held_ctrl_c_interrupts_a_busy_neovim(ctrl_c: &[u8]) {
         let Some(mut r) = Rig::start() else { return };
         let busy = r.busy_until_interrupted();
         r.make_current(0, r.wins[0]);
@@ -709,16 +714,16 @@ mod tests {
 
     #[test]
     fn a_held_ctrl_c_interrupts_a_busy_neovim_once_a_tick_finds_it_busy() {
-        a_held_ctrl_c_interrupts_a_busy_neovim(b"\x03");
+        check_a_held_ctrl_c_interrupts_a_busy_neovim(b"\x03");
     }
 
     #[test]
     fn a_held_kitty_ctrl_c_interrupts_a_busy_neovim_once_a_tick_finds_it_busy() {
-        a_held_ctrl_c_interrupts_a_busy_neovim(b"\x1b[99;5u");
+        check_a_held_ctrl_c_interrupts_a_busy_neovim(b"\x1b[99;5u");
     }
 
-    #[test]
-    fn a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once_and_the_keys_around_it_wait() {
+    /// A Ctrl-C typed as `ctrl_c` while Neovim looks busy: it goes at once.
+    fn check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(ctrl_c: &[u8]) {
         let Some(mut r) = Rig::start() else { return };
         let busy = r.busy_until_interrupted();
         r.make_current(0, r.wins[0]);
@@ -727,12 +732,13 @@ mod tests {
         r.tick();
         assert!(r.session.gate.probe.is_some());
         r.pause();
-        r.type_into(0, b"\x03");
-        assert_eq!(1, r.session.gate.queue.len());
-        r.type_into(0, b"x");
+        r.type_into(0, ctrl_c);
+        // `x`, and a mark of when the Ctrl-C came
+        assert_eq!(2, r.session.gate.queue.len());
+        r.type_into(0, b"p");
         let _ = r.wait(busy);
-        // both `x`s went after the switch, in order
-        r.expect_texts("e|two");
+        // `x` and `p` went after the switch, in order: `p` puts back what `x` cut
+        r.expect_texts("noe|two");
         r.expect_nothing_held();
         let cur = r.current_win();
         assert_eq!(r.wins[0], cur);
@@ -741,6 +747,7 @@ mod tests {
     #[test]
     fn an_escape_held_a_timeout_before_a_ctrl_c_that_goes_ahead_is_still_the_escape_key() {
         let Some(mut r) = Rig::start() else { return };
+        r.alt_x_does_nothing();
         let busy = r.busy_until_interrupted();
         r.make_current(0, r.wins[0]);
         let t0 = std::time::Instant::now();
@@ -749,11 +756,32 @@ mod tests {
         r.tick();
         r.pause();
         r.type_into_at(0, b"\x03", t0, 100);
-        assert_eq!(1, r.session.gate.queue.len());
+        assert_eq!(2, r.session.gate.queue.len());
         // close after the Ctrl-C, but a timeout after the Escape: not Alt-x
         r.type_into_at(0, b"x", t0, 110);
         let _ = r.wait(busy);
         r.expect_texts("ne|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
+    fn an_escape_held_before_a_ctrl_c_that_goes_ahead_times_out_against_it_not_the_next_read() {
+        let Some(mut r) = Rig::start() else { return };
+        r.alt_x_does_nothing();
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"\x1b", t0, 0);
+        r.pause();
+        r.tick();
+        r.pause();
+        r.type_into_at(0, b"\x03", t0, 60);
+        // another pane's read between: the `x` after it is close to neither
+        // the Ctrl-C nor it, so the Escape is a key of its own, not Alt-x
+        r.type_into_at(1, b"x", t0, 65);
+        r.type_into_at(0, b"x", t0, 70);
+        let _ = r.wait(busy);
+        r.expect_texts("e|two");
         r.expect_nothing_held();
     }
 
@@ -770,12 +798,23 @@ mod tests {
         r.type_into_at(0, b"\x03", t0, 1);
         r.tick();
         assert_eq!(2, r.session.gate.queue.len());
-        // one read after them, alone, goes
+        // one read after them, alone, goes, leaving its mark
         r.type_into_at(0, b"\x03", t0, 2);
-        assert_eq!(2, r.session.gate.queue.len());
+        assert_eq!(3, r.session.gate.queue.len());
+        assert!(matches!(&r.session.gate.queue[2], Item::Input { bytes, .. } if bytes.is_empty()));
         let _ = r.wait(busy);
         r.settle();
         r.expect_nothing_held();
+    }
+
+    #[test]
+    fn a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once_and_the_keys_around_it_wait() {
+        check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(b"\x03");
+    }
+
+    #[test]
+    fn a_kitty_ctrl_c_typed_while_neovim_looks_busy_goes_at_once_and_the_keys_around_it_wait() {
+        check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(b"\x1b[99;5u");
     }
 
     #[test]

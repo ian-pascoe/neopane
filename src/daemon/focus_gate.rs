@@ -21,7 +21,8 @@
 //! An answer to that ask is only good if no key went to Neovim since it was
 //! asked, and Neovim may not have read a key that went just before: so no
 //! ask is made on the tick after a key went through, and a key going through
-//! voids the ask outstanding. A busy Neovim answers none, and no key leaves.
+//! voids the ask outstanding. A busy Neovim answers none, and no key but
+//! Ctrl-C leaves.
 //!
 //! A switch that fails, such as for a window that closed first, drops the
 //! input typed into its pane behind it.
@@ -80,7 +81,9 @@ pub(crate) enum Item {
         win: i64,
         pane: u32,
     },
-    /// What one read of a pane's terminal gave, and how much has gone.
+    /// What one read of a pane's terminal gave, and how much has gone. Empty
+    /// for a Ctrl-C that went ahead: it keeps when it came, which an ESC held
+    /// before it times out against.
     Input {
         pane: u32,
         bytes: Vec<u8>,
@@ -151,10 +154,16 @@ impl FocusGate {
         }
         if self.looks_busy()
             && let Some(fwd) = panes.aim_forwarder(pane)
-            && lone_interrupt(fwd, &self.queue, self.last_held, pane, bytes, at)
+            && is_lone_interrupt(fwd, &self.queue, self.last_held, pane, bytes, at)
         {
             forwarder::interrupt(nvim)?;
             self.went_ahead();
+            self.queue.push(Item::Input {
+                pane,
+                bytes: Vec::new(),
+                read: 0,
+                at,
+            });
             return Ok(());
         }
         // one item per read, with its time: an ESC ending a read is the Escape
@@ -282,15 +291,16 @@ impl FocusGate {
                 continue;
             };
             let lone = panes.aim_forwarder(*pane).is_some_and(|fwd| {
-                lone_interrupt(fwd, &self.queue[..i], self.last_held, *pane, bytes, *at)
+                is_lone_interrupt(fwd, &self.queue[..i], self.last_held, *pane, bytes, *at)
             });
-            if !lone {
-                i += 1;
-                continue;
+            if lone {
+                forwarder::interrupt(nvim)?;
+                sent = true;
+                if let Item::Input { bytes, .. } = &mut self.queue[i] {
+                    bytes.clear();
+                }
             }
-            self.queue.remove(i);
-            forwarder::interrupt(nvim)?;
-            sent = true;
+            i += 1;
         }
         if sent {
             self.went_ahead();
@@ -389,7 +399,7 @@ fn timed_out(last: Option<(u32, Instant)>, pane: u32, at: Instant) -> bool {
 /// none of them, and they read the same without it. `last` is the last held
 /// read before `held`, as `FocusGate::last_held`. Reads from a copy of the
 /// parser.
-fn lone_interrupt(
+fn is_lone_interrupt(
     fwd: &Forwarder,
     held: &[Item],
     mut last: Option<(u32, Instant)>,
