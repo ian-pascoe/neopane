@@ -655,60 +655,90 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
 
 -- The tabline width: the tabline panes' columns, while they're narrower than
 -- the screen, as the daemon last said; else nil. The columns past it are
--- never shown, so a `%!` tabline is fitted to it: while it's evaluated,
--- vim.o.columns reads as the tabline width.
+-- never shown, so every non-empty 'tabline' is padded with blanks to the
+-- screen's width, which puts the right end of a `%=` layout at the tabline
+-- width, and a `%!` one is evaluated with vim.o.columns reading as it.
 local tabline_width
--- what a fitted 'tabline' is set to, and the expression it fits
-local fitted_tabline = '%!v:lua.neorex.tabline()'
-local fitted_expr
+-- what a `%!` 'tabline' is set to while it's fitted
+local wrapper = '%!v:lua.neorex.tabline()'
+-- The last 'tabline' we padded: { orig = what a user or plugin set, padded =
+-- what we set it to }, or nil. Only that exact string is ours: any other
+-- value is a new orig, so we never parse or strip a suffix.
+local last_fit
+-- The `%!` expression we last wrapped, which `wrapper` evaluates. A plugin may
+-- save the wrapper, as lualine does with a 'tabline' that isn't its own, and
+-- restore it after we've fitted another value, so it stands for this expression
+-- whenever it comes back.
+local wrapped_expr
 local real_o = vim.o
--- the columns vim.o.columns reads as while a fitted tabline is evaluated,
--- and whether it read them
-local proxy_columns, columns_read
+-- the columns vim.o.columns reads as while a `%!` tabline is evaluated
+local proxy_columns
 local o_proxy = setmetatable({}, {
   __index = function(_, k)
-    if k == 'columns' and proxy_columns then
-      columns_read = true
-      return proxy_columns
-    end
+    if k == 'columns' and proxy_columns then return proxy_columns end
     return real_o[k]
   end,
   __newindex = function(_, k, v) real_o[k] = v end,
 })
 
--- Fits 'tabline' while there's a tabline width. Only an expression can be:
--- a format string has no Lua to read vim.o.columns.
+-- What follows a tabline laid out to `width` on a screen of `columns`: a `%<`,
+-- so Neovim cuts a tabline too wide for it there, from the padding, and then
+-- blanks.
+local function padding(width, columns)
+  if columns <= width then return '' end
+  return '%<' .. string.rep(' ', columns - width)
+end
+
+-- The one decision about 'tabline': from its `current` value, the tabline
+-- `width` (nil if none), the screen's `columns` and the `record` of our last
+-- padding. Returns the value to set, or nil to leave it, and the new record.
+-- Empty is left alone. A `%!` expression is wrapped, which pads when it's
+-- evaluated; a format string is padded in place, as lualine sets one and
+-- restores any that doesn't contain its name, so a wrapper would come back.
+-- `expr` is the `%!` expression last wrapped: the wrapper, if it shows up
+-- again, is that `%!` tabline.
+local function fit(current, width, columns, record, expr)
+  local orig = current
+  if record and current == record.padded then
+    orig = record.orig
+  elseif current == wrapper and expr then
+    orig = '%!' .. expr
+  end
+  local padded = orig
+  if width and orig ~= '' then
+    padded = orig:sub(1, 2) == '%!' and wrapper or orig .. padding(width, columns)
+  end
+  local new = padded ~= orig and { orig = orig, padded = padded } or nil
+  return padded ~= current and padded or nil, new
+end
+
+-- Fits 'tabline' to what there is now.
 local function fit_tabline()
-  if not tabline_width then return end
-  local tal = vim.go.tabline
-  if tal == fitted_tabline or tal:sub(1, 2) ~= '%!' then return end
-  fitted_expr = tal:sub(3)
-  vim.go.tabline = fitted_tabline
+  local value, record = fit(vim.go.tabline, tabline_width, real_o.columns, last_fit, wrapped_expr)
+  -- first: setting it fires OptionSet, which comes back here
+  last_fit = record
+  -- the wrapper always means the newest expression: one saved while it meant
+  -- an older one shows this one when it's put back (accepted)
+  if record and record.padded == wrapper then wrapped_expr = record.orig:sub(3) end
+  if value then vim.go.tabline = value end
 end
 
--- Puts back the tabline as it was set.
-local function unfit_tabline()
-  if vim.go.tabline == fitted_tabline then vim.go.tabline = '%!' .. fitted_expr end
-end
-
--- A fitted tabline: the one set, laid out to the tabline width and padded
--- with blanks to the screen's.
+-- A fitted `%!` tabline: the expression set, laid out to the tabline width
+-- and padded.
 function M.tabline()
-  if not tabline_width then return api.nvim_eval(fitted_expr) end
-  proxy_columns, columns_read = math.min(tabline_width, real_o.columns), false
+  -- only before any `%!` tabline was wrapped, if someone set the wrapper
+  -- itself: nothing to evaluate
+  local expr = wrapped_expr
+  if not expr then return '' end
+  if not tabline_width then return api.nvim_eval(expr) end
+  proxy_columns = math.min(tabline_width, real_o.columns)
   vim.o = o_proxy
-  local ok, s = pcall(api.nvim_eval, fitted_expr)
+  local ok, s = pcall(api.nvim_eval, expr)
   vim.o = real_o
-  local pad = real_o.columns - proxy_columns
+  local pad = padding(proxy_columns, real_o.columns)
   proxy_columns = nil
   if not ok then error(s, 0) end
-  -- one that didn't lay out to the width fills the screen as before: padded,
-  -- it would lose its end to the padding
-  if not columns_read then return s end
-  -- one that did but came out wider loses padding, not its start, as Neovim
-  -- cuts a tabline too wide for it from the left, or at its first %<. One
-  -- with a %< of its own is cut there, to fit the width before the padding.
-  return s .. '%<' .. string.rep(' ', pad)
+  return s .. pad
 end
 
 -- The daemon's tabline width: `cols`, or nil (vim.NIL) when nothing is hidden.
@@ -717,14 +747,15 @@ function M.set_tabline_width(cols)
   if cols == tabline_width then return end
   tabline_width = cols
   vim.g.neorex_tabline_width = cols
-  if cols then fit_tabline() else unfit_tabline() end
+  fit_tabline()
   vim.cmd.redrawtabline()
 end
 
--- a tabline set again is fitted again. On SafeState too, as plugins set it
--- in autocommands, which fire no OptionSet.
+-- a tabline set again is padded again, and when the screen's width changes,
+-- before the next redraw. On SafeState too, as plugins set it in
+-- autocommands, which fire no OptionSet.
 api.nvim_create_autocmd('OptionSet', { group = group, pattern = 'tabline', callback = fit_tabline })
-api.nvim_create_autocmd('SafeState', { group = group, callback = fit_tabline })
+api.nvim_create_autocmd({ 'SafeState', 'VimResized' }, { group = group, callback = fit_tabline })
 
 -- 'cmdheight' as last reported: the rows at the bottom of the screen the
 -- daemon keeps clear of every pane's window, for messages and the command

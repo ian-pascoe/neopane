@@ -77,16 +77,36 @@ can tell it's running under neorex:
 
 The tabline shows across the panes along the top of the Rex window. When
 another pane, such as a shell, takes part of the top, those panes are narrower
-than Neovim's screen, and neorex fits the tabline to them: while a `%!`
-`'tabline'` is drawn, `vim.o.columns` reads as their width, so a tabline whose
-Lua lays out to it, such as bufferline's, fits. Other tablines, such as
-Neovim's own and lualine's, still lay out across the whole screen; they can use
-`g:neorex_tabline_width`, set to that width while it's narrower than the
-screen:
+than Neovim's screen, and neorex fits the tabline to them: every `'tabline'`
+that isn't empty ends at the right edge of the tabline panes (a fitted
+tabline), so the `%=`-aligned right end of one such as lualine's shows. A
+tabline too wide for them is cut as Neovim would cut it on a screen that wide.
+While a `%!` `'tabline'` is drawn, `vim.o.columns` reads as the tabline
+width, so a tabline whose Lua lays out to it, such as bufferline's, fits its
+own widths too. Widths a tabline computes from `'columns'` any other way don't
+fit by themselves, such as lualine's `max_length` or a Vimscript `&columns`;
+they can read `g:neorex_tabline_width`, set to the tabline width while it's
+narrower than the screen:
 
 ```lua
 local width = vim.g.neorex_tabline_width or vim.o.columns
+
+-- lualine's tabs and buffers components
+require('lualine').setup({
+  tabline = {
+    lualine_a = {
+      { 'buffers', max_length = function() return vim.g.neorex_tabline_width or vim.o.columns end },
+    },
+  },
+})
 ```
+
+```vim
+let width = get(g:, 'neorex_tabline_width', &columns)
+```
+
+The built-in tabline, which Neovim shows while `'tabline'` is empty, is still
+clipped by the tabline panes (#63).
 
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
