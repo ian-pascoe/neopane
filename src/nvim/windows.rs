@@ -1279,6 +1279,77 @@ mod tests {
     }
 
     #[test]
+    fn tabclose_reopens_a_floating_tab_pages_windows_that_followed_in_and_keeps_it() {
+        let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
+            return;
+        };
+        h.boot();
+        let first = h.wins[0];
+
+        // floating tab pages 2 and 3, each with a window; 3 is current, so
+        // every external window sits in it
+        let mut wins = Vec::new();
+        for _ in 0..2 {
+            h.input(":tabnew<CR>");
+            assert!(h.until(|x| {
+                let cur = x.last_current();
+                cur != 0 && cur != x.want && x.kind(cur) == Some(WinKind::Ordinary)
+            }));
+            let win = h.last_current();
+            adopt(&mut h.nvim, win, 30, 8);
+            h.nvim.flush().unwrap();
+            h.want = win;
+            assert!(h.until(|x| x.kind(x.want) == Some(WinKind::External)));
+            wins.push(win);
+        }
+        let tab = h.split_note(wins[0]).unwrap().tab;
+
+        h.notes.clear();
+        h.input(":tabclose<CR>");
+        h.gone = wins[1];
+        assert!(h.until(|x| {
+            let reopened = x.notes.iter().filter(|n| {
+                matches!(n, Note::Reopened { new, .. } if x.kind(*new) == Some(WinKind::External))
+            });
+            reopened.count() == 2 && x.kind(x.gone).is_none()
+        }));
+        let mut olds = Vec::new();
+        let mut new = 0;
+        for note in &h.notes {
+            if let Note::Reopened { old, new: n } = note {
+                olds.push(*old);
+                if *old == wins[0] {
+                    new = *n;
+                }
+            }
+        }
+        olds.sort();
+        assert_eq!(vec![first, wins[0]], olds);
+        // tab page 2 stays, with its window in its layout again
+        h.command(&format!(
+            "if tabpagenr('$') != 2 || !nvim_tabpage_is_valid({tab}) | throw 'tab page closed' | endif | call rpcnotify(0, 'neorex_win', 4242)"
+        ));
+        h.want = 4242;
+        assert!(h.until(Harness::is_current));
+        h.want = new;
+        assert!(h.until(|x| {
+            x.last_layout(tab)
+                .is_some_and(|l| l.items().len() == 1 && l.items()[0].win == x.want)
+        }));
+
+        // still floating: it closes with its last window
+        close(&mut h.nvim, new);
+        h.nvim.flush().unwrap();
+        h.gone = new;
+        assert!(h.until(|x| x.kind(x.gone).is_none()));
+        h.command(&format!(
+            "if tabpagenr('$') != 1 || nvim_tabpage_is_valid({tab}) | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4343)"
+        ));
+        h.want = 4343;
+        assert!(h.until(Harness::is_current));
+    }
+
+    #[test]
     fn the_tabline_is_reported_and_drawn_on_grid_1() {
         let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
             return;
