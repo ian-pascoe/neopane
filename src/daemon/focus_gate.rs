@@ -4,7 +4,7 @@
 //! window that was current before it. Only one switch is ever in flight: a
 //! switch asked for while another is, and the input typed after it, wait
 //! their turn. Input reaches Neovim in the order it was typed, each key
-//! after the switches typed before it, with two exceptions:
+//! after the switches typed before it, with three exceptions:
 //!
 //! - Focus reports never wait: they only tell us what the terminal has.
 //! - Neovim can't make a switch while it waits for a key to finish a
@@ -13,6 +13,10 @@
 //!   whether Neovim waits; if it does, the first key held goes through,
 //!   wherever it was typed, to finish the command. The rest stay held, and
 //!   the switch follows.
+//! - Ctrl-C interrupts a busy Neovim, which answers no switch until it's
+//!   done. Neovim looks busy while the ask above goes unanswered: a read
+//!   that is Ctrl-C alone, typed then, goes at once, and one held then goes
+//!   on the tick that finds the ask unanswered. The rest stay held.
 //!
 //! An answer to that ask is only good if no key went to Neovim since it was
 //! asked, and Neovim may not have read a key that went just before: so no
@@ -32,7 +36,7 @@ use crate::nvim::msgpack::Decoder;
 use crate::nvim::nvim::Nvim;
 use crate::nvim::rpc;
 use crate::nvim::windows;
-use crate::term::input;
+use crate::term::input::{self, Event};
 
 /// What the gate needs of the panes: the
 /// `Forwarder` that parses the input typed into a pane, if it has one.
@@ -145,6 +149,14 @@ impl FocusGate {
             }
             return Ok(());
         }
+        if self.looks_busy()
+            && let Some(fwd) = panes.aim_forwarder(pane)
+            && lone_interrupt(fwd, &self.queue, self.last_held, pane, bytes, at)
+        {
+            forwarder::interrupt(nvim)?;
+            self.went_ahead();
+            return Ok(());
+        }
         // one item per read, with its time: an ESC ending a read is the Escape
         // key if the next read came a timeout after it
         self.queue.push(Item::Input {
@@ -222,17 +234,76 @@ impl FocusGate {
 
     /// For the timer: asks whether Neovim is waiting for a key, if the switch
     /// in flight is unanswered and no ask is out. Not right after a key went
-    /// through, see above.
-    pub(crate) fn probe_again(&mut self, nvim: &mut Nvim) -> io::Result<()> {
-        if self.pending.is_none() || self.probe.is_some() || self.blocked {
+    /// through, see above. If the ask is out, Neovim looks busy: sends the
+    /// held Ctrl-Cs. `panes` is as for `send`.
+    pub(crate) fn probe_again(
+        &mut self,
+        nvim: &mut Nvim,
+        panes: &mut impl AimForwarder,
+    ) -> forwarder::Result<()> {
+        if self.pending.is_none() || self.blocked {
             return Ok(());
+        }
+        if self.probe.is_some() {
+            return self.release_interrupts(nvim, panes);
         }
         if self.settling {
             self.settling = false;
             return Ok(());
         }
         self.probe = Some(nvim.request("nvim_get_mode", 0));
-        nvim.flush()
+        Ok(nvim.flush()?)
+    }
+
+    /// Whether Neovim looks busy: it hasn't answered our ask whether it's
+    /// waiting for a key.
+    fn looks_busy(&self) -> bool {
+        self.pending.is_some() && self.probe.is_some()
+    }
+
+    /// Neovim looks busy: sends each held read that is Ctrl-C alone, ahead of
+    /// the rest, which stay held.
+    fn release_interrupts(
+        &mut self,
+        nvim: &mut Nvim,
+        panes: &mut impl AimForwarder,
+    ) -> forwarder::Result<()> {
+        let mut i: usize = 0;
+        let mut sent = false;
+        while i < self.queue.len() {
+            let Item::Input {
+                pane,
+                bytes,
+                read: 0,
+                at,
+            } = &self.queue[i]
+            else {
+                i += 1;
+                continue;
+            };
+            let lone = panes.aim_forwarder(*pane).is_some_and(|fwd| {
+                lone_interrupt(fwd, &self.queue[..i], self.last_held, *pane, bytes, *at)
+            });
+            if !lone {
+                i += 1;
+                continue;
+            }
+            self.queue.remove(i);
+            forwarder::interrupt(nvim)?;
+            sent = true;
+        }
+        if sent {
+            self.went_ahead();
+        }
+        Ok(())
+    }
+
+    /// A key went ahead of what's held: the ask outstanding is void, and the
+    /// next tick asks none, see above.
+    fn went_ahead(&mut self) {
+        self.probe = None;
+        self.blocked = false;
+        self.settling = true;
     }
 
     /// Asks for `win` as the switch in flight. No ask yet whether Neovim waits:
@@ -277,9 +348,7 @@ impl FocusGate {
                 self.queue.remove(i);
             }
             if fed.sent_key {
-                self.probe = None;
-                self.blocked = false;
-                self.settling = true;
+                self.went_ahead();
                 return Ok(());
             }
         }
@@ -298,14 +367,65 @@ fn flush_if_timed_out(
     pane: u32,
     at: Instant,
 ) -> forwarder::Result<()> {
-    if let Some((last_pane, last_at)) = last
-        && last_pane == pane
-        && at.saturating_duration_since(last_at)
-            >= Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS))
-    {
+    if timed_out(last, pane, at) {
         fwd.flush_pending(nvim)?;
     }
     Ok(())
+}
+
+/// Whether a read of `pane` that came at `at` came a timeout after `last`,
+/// the last held read, if that was of `pane` too.
+fn timed_out(last: Option<(u32, Instant)>, pane: u32, at: Instant) -> bool {
+    last.is_some_and(|(last_pane, last_at)| {
+        last_pane == pane
+            && at.saturating_duration_since(last_at)
+                >= Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS))
+    })
+}
+
+/// Whether `bytes`, the read of `pane` that came at `at`, is Ctrl-C and
+/// nothing else, after what `fwd`, the pane's forwarder, has read and then
+/// the pane's reads in `held`: they end between keys, so the Ctrl-C joins
+/// none of them, and they read the same without it. `last` is the last held
+/// read before `held`, as `FocusGate::last_held`. Reads from a copy of the
+/// parser.
+fn lone_interrupt(
+    fwd: &Forwarder,
+    held: &[Item],
+    mut last: Option<(u32, Instant)>,
+    pane: u32,
+    bytes: &[u8],
+    at: Instant,
+) -> bool {
+    let mut parser = fwd.parser.clone();
+    for item in held {
+        let Item::Input {
+            pane: p,
+            bytes: b,
+            read,
+            at: a,
+        } = item
+        else {
+            continue;
+        };
+        if *p == pane {
+            if *read == 0 && timed_out(last, pane, *a) {
+                let _ = parser.flush_pending();
+            }
+            parser.feed(&b[*read..]);
+            while parser.next().is_some() {}
+        }
+        last = Some((*p, *a));
+    }
+    if timed_out(last, pane, at) {
+        let _ = parser.flush_pending();
+    }
+    if !parser.at_ground() {
+        return false;
+    }
+    parser.feed(bytes);
+    let interrupt = matches!(parser.next(), Some(Event::Key(k)) if forwarder::is_interrupt(k));
+    interrupt && parser.next().is_none() && parser.at_ground()
 }
 
 /// Whether the `nvim_get_mode` result at `result` says Neovim is waiting for a key.

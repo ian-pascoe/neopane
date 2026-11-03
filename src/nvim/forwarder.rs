@@ -469,6 +469,26 @@ fn is_quit(k: input::KeyEvent) -> bool {
     k.mods.ctrl && !k.mods.alt && k.key == input::Key::Codepoint('q' as u32)
 }
 
+/// Whether `k` is Ctrl-C, which interrupts what Neovim is doing: Ctrl and
+/// `c`, with no other modifier.
+pub(crate) fn is_interrupt(k: input::KeyEvent) -> bool {
+    k.mods
+        == (input::Mods {
+            ctrl: true,
+            ..input::Mods::default()
+        })
+        && k.key == input::Key::Codepoint('c' as u32)
+}
+
+/// Sends Ctrl-C to Neovim and flushes, without the parser: for one read
+/// whole that held nothing else.
+pub(crate) fn interrupt(nvim: &mut Nvim) -> Result<()> {
+    let mut keys = b"<C-c>".to_vec();
+    send_keys(nvim, &mut keys)?;
+    nvim.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
