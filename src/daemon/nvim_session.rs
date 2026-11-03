@@ -34,6 +34,9 @@ pub(crate) struct NvimSession {
     pub current_float: i64,
     /// The editor size last asked for.
     pub editor_size: [u32; 2],
+    /// The tabline width Neovim was last told; None, as it starts, while
+    /// the tabline hides nothing.
+    pub tabline_width: Option<u32>,
     /// Float windows that have been current, newest last; the oldest drop
     /// off. Neovim never reuses a handle, so closed ones do no harm.
     pub entered_floats: [i64; MAX_ENTERED],
@@ -54,6 +57,7 @@ impl NvimSession {
             ui_focused: true,
             current_float: 0,
             editor_size: [0, 0],
+            tabline_width: None,
             entered_floats: [0; MAX_ENTERED],
             entered_len: 0,
         }

@@ -653,6 +653,80 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
   callback = function() vim.schedule(report_tabline) end,
 })
 
+-- The tabline width: the columns of the panes that show the tabline, while
+-- that's narrower than the screen, as the daemon last said; else nil. The
+-- columns past it are never shown, so a `%!` tabline is fitted to it: while
+-- it's evaluated, vim.o.columns reads as the tabline width.
+local tabline_width
+-- what a fitted 'tabline' is set to, and the expression it fits
+local fitted = '%!v:lua.neorex.tabline()'
+local fitted_expr
+local real_o = vim.o
+-- the width vim.o.columns reads as, while a fitted tabline is evaluated,
+-- and whether it read it
+local narrow, read_narrow
+local o_proxy = setmetatable({}, {
+  __index = function(_, k)
+    if k == 'columns' and narrow then
+      read_narrow = true
+      return narrow
+    end
+    return real_o[k]
+  end,
+  __newindex = function(_, k, v) real_o[k] = v end,
+})
+
+local function fit_tabline()
+  local tal = vim.go.tabline
+  if tal == fitted or tal:sub(1, 2) ~= '%!' then return end
+  fitted_expr = tal:sub(3)
+  vim.go.tabline = fitted
+end
+
+-- back to the tabline as it was set
+local function unfit_tabline()
+  if vim.go.tabline == fitted then vim.go.tabline = '%!' .. fitted_expr end
+end
+
+-- A fitted tabline: the one set, laid out to the tabline width and padded
+-- with blanks to the screen's.
+function M.tabline()
+  if not tabline_width then return api.nvim_eval(fitted_expr) end
+  narrow, read_narrow = math.min(tabline_width, real_o.columns), false
+  vim.o = o_proxy
+  local ok, s = pcall(api.nvim_eval, fitted_expr)
+  vim.o = real_o
+  local pad = real_o.columns - narrow
+  narrow = nil
+  if not ok then error(s, 0) end
+  -- one that didn't lay out to the width fills the screen as before:
+  -- Neovim cuts a tabline too wide for it from the left
+  if not read_narrow then return s end
+  return s .. string.rep(' ', pad)
+end
+
+-- The daemon's tabline width: `cols`, or nil (vim.NIL) when nothing is hidden.
+function M.set_tabline_width(cols)
+  if cols == vim.NIL then cols = nil end
+  if cols == tabline_width then return end
+  tabline_width = cols
+  vim.g.neorex_tabline_width = cols
+  if cols then fit_tabline() else unfit_tabline() end
+  vim.cmd.redrawtabline()
+end
+
+-- a tabline set again is fitted again. On SafeState too, as plugins set it
+-- in autocommands, which fire no OptionSet.
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'tabline',
+  callback = function() if tabline_width then fit_tabline() end end,
+})
+api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function() if tabline_width then fit_tabline() end end,
+})
+
 -- 'cmdheight' as last reported: the rows at the bottom of the screen the
 -- daemon keeps clear of every pane's window, for messages and the command
 -- line. Each tab page has its own.

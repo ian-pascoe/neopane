@@ -302,10 +302,12 @@ impl Daemon {
         Ok(())
     }
 
-    /// After each batch of events: tells Neovim whether any pane has focus.
-    /// Losing it waits a moment, in case another pane gains it.
+    /// After each batch of events: tells Neovim whether any pane has focus,
+    /// and the tabline width. Losing focus waits a moment, in case another
+    /// pane gains it.
     fn after_batch(&mut self) -> Result<()> {
         self.send_focus(false)?;
+        self.sync_tabline_width()?;
         self.stop_watching_closed_rex()?;
         if self.nvim.watch_switch() {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
@@ -370,6 +372,22 @@ impl Daemon {
         if self.nvim.recheck_switch()? {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
+        Ok(())
+    }
+
+    /// Tells Neovim the tabline width when it changed, so its tabline fits
+    /// the panes that show it.
+    fn sync_tabline_width(&mut self) -> Result<()> {
+        if !self.nvim.ready {
+            return Ok(());
+        }
+        let cols = self.geometry().tabline_width();
+        if cols == self.nvim.tabline_width {
+            return Ok(());
+        }
+        self.nvim.tabline_width = cols;
+        windows::set_tabline_width(&mut self.nvim.client, cols);
+        self.nvim.client.flush()?;
         Ok(())
     }
 
@@ -1868,6 +1886,79 @@ mod tests {
         // no tabline: no pane shows any
         fx.d().tabline_rows = 0;
         assert_eq!(None, fx.start(1));
+    }
+
+    /// The tabline widths a daemon sent Neovim, in order; None for nil.
+    fn tabline_widths_sent(fx: TablineFixture) -> Vec<Option<i64>> {
+        let Fixture {
+            d, mut nvim_end, ..
+        } = fx.fx;
+        drop(d);
+        let mut all = Vec::new();
+        nvim_end.read_to_end(&mut all).unwrap();
+        let call = b"neorex.set_tabline_width(...)";
+        let mut sent = Vec::new();
+        let mut at = 0;
+        while let Some(i) = all[at..].windows(call.len()).position(|w| w == call) {
+            at += i + call.len();
+            let mut args = msgpack::Decoder::of(&all[at..]);
+            assert_eq!(Some(msgpack::Token::Array(1)), args.next().unwrap());
+            sent.push(match args.next().unwrap() {
+                Some(msgpack::Token::Int(n)) => Some(n),
+                Some(msgpack::Token::Nil) => None,
+                t => panic!("not a width: {t:?}"),
+            });
+        }
+        sent
+    }
+
+    #[test]
+    fn the_tabline_panes_columns_are_sent_as_the_tabline_width_when_they_change() {
+        let mut fx = TablineFixture::init();
+        fx.d().nvim.ready = true;
+        // a shell holds x = 0 to 0.4; two Neovim panes sit right of it
+        fx.add(0, 60, Some([0.4, 0.0, 0.3, 1.0]));
+        fx.add(1, 60, Some([0.7, 0.0, 0.3, 1.0]));
+        fx.d().sync_tabline_width().unwrap();
+        // the same again: nothing
+        fx.d().sync_tabline_width().unwrap();
+        // the shell closes: the panes take the whole width, and hide nothing
+        fx.d().panes.list[0].rect = Some([0.0, 0.0, 0.5, 1.0]);
+        fx.d().panes.list[0].terminal_surface = Some(Surface::for_test(100, 20));
+        fx.d().panes.list[1].rect = Some([0.5, 0.0, 0.5, 1.0]);
+        fx.d().panes.list[1].terminal_surface = Some(Surface::for_test(100, 20));
+        fx.d().sync_tabline_width().unwrap();
+        assert_eq!(vec![Some(120), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn the_tabline_width_stays_while_the_tabline_is_off_and_goes_with_no_pane_along_the_top() {
+        let mut fx = TablineFixture::init();
+        fx.d().nvim.ready = true;
+        fx.add(0, 120, Some([0.4, 0.0, 0.6, 0.5]));
+        // under it, and a floating tab page's: neither shows the tabline
+        fx.add(1, 200, Some([0.0, 0.5, 1.0, 0.5]));
+        fx.add(2, 30, Some([0.0, 0.0, 0.15, 0.5]));
+        fx.d().panes.list[2].tab = 2;
+        fx.d().sync_tabline_width().unwrap();
+        // ready for when it's on again
+        fx.d().tabline_rows = 0;
+        fx.d().sync_tabline_width().unwrap();
+        // a shell takes the top: no pane shows the tabline
+        fx.d().panes.list[0].rect = Some([0.4, 0.3, 0.6, 0.2]);
+        fx.d().sync_tabline_width().unwrap();
+        assert_eq!(vec![Some(120), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn the_tabline_width_is_sent_after_a_batch_once_neovim_is_set_up() {
+        let mut fx = TablineFixture::init();
+        fx.add(0, 60, Some([0.4, 0.0, 0.6, 1.0]));
+        // windows.lua isn't running yet
+        fx.d().after_batch().unwrap();
+        fx.d().nvim.ready = true;
+        fx.d().after_batch().unwrap();
+        assert_eq!(vec![Some(60)], tabline_widths_sent(fx));
     }
 
     #[test]
