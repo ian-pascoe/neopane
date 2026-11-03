@@ -48,6 +48,10 @@ as every fitted tabline is.
 - A wide character whose right half the built-in overwrites, as with the close
   button, is left half-drawn by Neovim; no format string can draw that, and
   the copy draws a blank there.
+- A tab page closing passes focus through each of its windows, other tab
+  pages' that followed into it too, so neorex takes no focus as the last
+  focused until it has closed. That needs TabClosedPre: on a Neovim without it,
+  a window that only passed focus in a close can name its tab page's label.
 - Neovim redraws no tabline for an external window closing, as it would for a
   split, so neorex redraws the copy when one closes, and when it reopens one
   in a scheduled callback.

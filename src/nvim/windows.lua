@@ -714,9 +714,9 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
 -- The tabline width: the tabline panes' columns, while they're narrower than
 -- the screen, as the daemon last said; else nil. The columns past it are
 -- never shown, so every 'tabline' but the copy, which lays itself out to the
--- width, is padded with blanks to the
--- screen's width, which puts the right end of a `%=` layout at the tabline
--- width, and a `%!` one is evaluated with vim.o.columns reading as it.
+-- width, is padded with blanks to the screen's width, which puts the right end
+-- of a `%=` layout at the tabline width, and a `%!` one is evaluated with
+-- vim.o.columns reading as it.
 local tabline_width
 -- what a `%!` 'tabline' is set to while it's fitted
 local wrapper = '%!v:lua.neorex.tabline()'
@@ -1239,7 +1239,19 @@ pcall(api.nvim_create_autocmd, 'TabClosedPre', {
   group = group,
   callback = function()
     closing_tab = api.nvim_get_current_tabpage()
+    -- for a close that fails
     vim.schedule(function() closing_tab = nil end)
+  end,
+})
+-- Closed, after its windows: focus from here on is real, the window Neovim
+-- enters next included. A closed tab page's record goes.
+api.nvim_create_autocmd('TabClosed', {
+  group = group,
+  callback = function()
+    closing_tab = nil
+    for tab in pairs(focused) do
+      if not api.nvim_tabpage_is_valid(tab) then focused[tab] = nil end
+    end
   end,
 })
 

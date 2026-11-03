@@ -1919,6 +1919,15 @@ mod tests {
             }
         }
 
+        /// Runs each step in both, then in neorex its Lua to adopt windows
+        /// with, rather than adopting them all.
+        fn steps_adopting(&mut self, steps: &[(&str, &str)]) {
+            for (s, adopt) in steps {
+                self.r.step(s);
+                self.h.sync(&format!("{s}\n{adopt}"));
+            }
+        }
+
         /// neorex's tabline, to the tabline width, is the reference's, cell
         /// for cell, once both have drawn what they've been told.
         fn expect_same(&mut self) {
@@ -2199,16 +2208,13 @@ mod tests {
             ]);
             // the second tab page's window stays ordinary, in it: one that
             // followed into the third would close the second with it
-            for (s, adopt) in [
+            p.steps_adopting(&[
                 ("vim.cmd('tabnew three')", ""),
                 ("vim.cmd('tabnew four')", ADOPT_CURRENT),
                 // closes the first tab page's windows, which followed into it;
                 // neorex reopens them, while focus goes to the second's
                 ("vim.cmd.tabclose()", ADOPT_CURRENT),
-            ] {
-                p.r.step(s);
-                p.h.sync(&format!("{s}\n{adopt}"));
-            }
+            ]);
             p.expect_same();
             let name = if focus == "two.txt" {
                 "~/s/n/two.txt"
@@ -2222,6 +2228,29 @@ mod tests {
                 p.h.tabline_text()
             );
         }
+    }
+
+    #[test]
+    fn focus_moved_as_a_tab_page_closes_names_the_label() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(&[TWO_TABS[0]]);
+        // the second tab page's windows stay ordinary, in it, as above
+        p.steps_adopting(&[
+            ("vim.cmd('tabnew three')", ""),
+            ("vim.cmd('vsplit six')", ""),
+            ("vim.api.nvim_set_current_win(vim.fn.bufwinid('three'))", ""),
+            ("vim.cmd('tabnew four')", ADOPT_CURRENT),
+            // back in the second, then to its window focused before
+            ("vim.cmd('tabclose | wincmd p')", ADOPT_CURRENT),
+        ]);
+        p.expect_same();
+        assert!(
+            p.h.tabline_text().starts_with(" one.lua  2 six "),
+            "{:?}",
+            p.h.tabline_text()
+        );
     }
 
     #[test]

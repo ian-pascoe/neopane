@@ -111,7 +111,8 @@ each tab page's own windows
 ([ADR 0002](docs/adr/0002-neorex-draws-the-built-in-tabline-itself.md)).
 Set `'tabline'` to anything else and that shows instead; set it back to empty,
 or put back a saved copy of neorex's value, and the built-in tabline comes
-back. It differs from Neovim's own in a few ways:
+back. neorex's copy differs from the built-in tabline Neovim draws in a few
+ways:
 
 - `:set tabline?` shows neorex's value rather than nothing.
 - Labels are drawn in the highlight groups `NeorexTabLineSel` and
