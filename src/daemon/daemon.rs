@@ -369,7 +369,11 @@ impl Daemon {
     }
 
     fn recheck_switch(&mut self) -> Result<()> {
-        if self.nvim.recheck_switch()? {
+        let mut fwds = PaneForwarders {
+            panes: &mut self.panes,
+            grids: &self.grids,
+        };
+        if self.nvim.recheck_switch(&mut fwds)? {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
         Ok(())

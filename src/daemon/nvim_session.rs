@@ -197,9 +197,13 @@ impl NvimSession {
 
     /// The timer fired. A switch still unanswered may be stuck behind a command
     /// waiting for a key, so asks Neovim whether it is, which a busy one won't
-    /// answer. A newer switch than the one watched only starts its wait. True to
-    /// start the timer again.
-    pub(crate) fn recheck_switch(&mut self) -> io::Result<bool> {
+    /// answer, and lets held Ctrl-Cs go if it looks busy. A newer switch than
+    /// the one watched only starts its wait. True to start the timer again.
+    /// `panes` is as for `type_into`.
+    pub(crate) fn recheck_switch(
+        &mut self,
+        panes: &mut impl AimForwarder,
+    ) -> forwarder::Result<bool> {
         let Some(id) = self.gate.in_flight() else {
             return Ok(false);
         };
@@ -207,7 +211,7 @@ impl NvimSession {
             self.watched_switch = Some(id);
             return Ok(true);
         }
-        self.gate.probe_again(&mut self.client)?;
+        self.gate.probe_again(&mut self.client, panes)?;
         Ok(true)
     }
 
@@ -276,8 +280,9 @@ fn editor_size(p: &Pane) -> Option<[u32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::focus_gate::is_blocking;
+    use crate::daemon::focus_gate::{Item, is_blocking};
     use crate::nvim::forwarder::Forwarder;
+    use crate::nvim::msgpack;
     use crate::nvim::nvim::{for_test_on, spawn_for_test_with};
     use crate::nvim::rpc;
     use std::time::Duration;
@@ -424,7 +429,7 @@ mod tests {
         /// The timer, as the Daemon has it, firing for the switch in flight.
         fn tick(&mut self) {
             let _ = self.session.watch_switch();
-            let _ = self.session.recheck_switch().unwrap();
+            let _ = self.session.recheck_switch(&mut self.fwds).unwrap();
         }
 
         /// Reads until the probe asked, if any, is answered.
@@ -503,6 +508,20 @@ mod tests {
                 .client
                 .exec_lua(&format!("vim.uv.sleep({ms})"), 0);
             self.session.client.flush().unwrap();
+        }
+
+        /// Makes Neovim busy until it's interrupted, without waiting: it
+        /// reads only `nvim_input` meanwhile. The request to wait on.
+        fn busy_until_interrupted(&mut self) -> u32 {
+            let id = self.session.client.request("nvim_command", 1);
+            msgpack::write_str(self.session.client.writer(), "while 1 | endwhile");
+            self.session.client.flush().unwrap();
+            id
+        }
+
+        /// Maps Alt-x to nothing: unmapped, Neovim takes it as Escape and `x`.
+        fn alt_x_does_nothing(&mut self) {
+            let _ = self.lua("vim.keymap.set('n', '<M-x>', '<Nop>') return 'ok'");
         }
 
         /// Fills the first window's buffer with 100 lines.
@@ -665,10 +684,156 @@ mod tests {
         // the timer fires, twice, before Neovim answers anything
         r.tick();
         let probe = r.session.gate.probe.unwrap();
-        assert!(r.session.recheck_switch().unwrap());
+        assert!(r.session.recheck_switch(&mut r.fwds).unwrap());
         assert_eq!(Some(probe), r.session.gate.probe);
         assert_eq!(1, r.session.gate.queue.len());
         r.expect_texts("ne|two");
+    }
+
+    /// A Ctrl-C typed as `ctrl_c` just after a switch, into a Neovim that's
+    /// busy: it waits until a tick finds Neovim not answering, then goes.
+    fn check_a_held_ctrl_c_interrupts_a_busy_neovim(ctrl_c: &[u8]) {
+        let Some(mut r) = Rig::start() else { return };
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        r.type_into(0, ctrl_c);
+        r.type_into(0, b"x");
+        // the first tick asks, the next finds no answer
+        r.pause();
+        r.tick();
+        assert_eq!(2, r.session.gate.queue.len());
+        r.pause();
+        r.tick();
+        let _ = r.wait(busy);
+        // the `x` typed after it waited for the switch
+        r.expect_texts("ne|two");
+        r.expect_nothing_held();
+        let cur = r.current_win();
+        assert_eq!(r.wins[0], cur);
+    }
+
+    #[test]
+    fn a_held_ctrl_c_interrupts_a_busy_neovim_once_a_tick_finds_it_busy() {
+        check_a_held_ctrl_c_interrupts_a_busy_neovim(b"\x03");
+    }
+
+    #[test]
+    fn a_held_kitty_ctrl_c_interrupts_a_busy_neovim_once_a_tick_finds_it_busy() {
+        check_a_held_ctrl_c_interrupts_a_busy_neovim(b"\x1b[99;5u");
+    }
+
+    #[test]
+    fn an_escape_held_a_timeout_before_a_ctrl_c_that_goes_ahead_is_still_the_escape_key() {
+        let Some(mut r) = Rig::start() else { return };
+        r.alt_x_does_nothing();
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"\x1b", t0, 0);
+        r.pause();
+        r.tick();
+        r.pause();
+        r.type_into_at(0, b"\x03", t0, 100);
+        assert_eq!(2, r.session.gate.queue.len());
+        // close after the Ctrl-C, but a timeout after the Escape: not Alt-x
+        r.type_into_at(0, b"x", t0, 110);
+        let _ = r.wait(busy);
+        r.expect_texts("ne|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
+    fn an_escape_held_before_a_ctrl_c_that_goes_ahead_times_out_against_it_not_the_next_read() {
+        let Some(mut r) = Rig::start() else { return };
+        r.alt_x_does_nothing();
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"\x1b", t0, 0);
+        r.pause();
+        r.tick();
+        r.pause();
+        r.type_into_at(0, b"\x03", t0, 60);
+        // another pane's read between: the `x` after it is close to neither
+        // the Ctrl-C nor it, so the Escape is a key of its own, not Alt-x
+        r.type_into_at(1, b"x", t0, 65);
+        r.type_into_at(0, b"x", t0, 70);
+        let _ = r.wait(busy);
+        r.expect_texts("e|two");
+        r.expect_nothing_held();
+    }
+
+    #[test]
+    fn a_ctrl_c_read_just_after_a_held_esc_joins_it_and_waits() {
+        let Some(mut r) = Rig::start() else { return };
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        let t0 = std::time::Instant::now();
+        r.type_into_at(0, b"\x1b", t0, 0);
+        r.pause();
+        r.tick();
+        r.pause();
+        r.type_into_at(0, b"\x03", t0, 1);
+        r.tick();
+        assert_eq!(2, r.session.gate.queue.len());
+        // one read after them, alone, goes, leaving its mark
+        r.type_into_at(0, b"\x03", t0, 2);
+        assert_eq!(3, r.session.gate.queue.len());
+        assert!(matches!(&r.session.gate.queue[2], Item::Input { bytes, .. } if bytes.is_empty()));
+        let _ = r.wait(busy);
+        r.settle();
+        r.expect_nothing_held();
+    }
+
+    /// A Ctrl-C typed as `ctrl_c` while Neovim looks busy: it goes at once.
+    fn check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(ctrl_c: &[u8]) {
+        let Some(mut r) = Rig::start() else { return };
+        let busy = r.busy_until_interrupted();
+        r.make_current(0, r.wins[0]);
+        r.type_into(0, b"x");
+        r.pause();
+        r.tick();
+        assert!(r.session.gate.probe.is_some());
+        r.pause();
+        r.type_into(0, ctrl_c);
+        // `x`, and a mark of when the Ctrl-C came
+        assert_eq!(2, r.session.gate.queue.len());
+        r.type_into(0, b"p");
+        let _ = r.wait(busy);
+        // `x` and `p` went after the switch, in order: `p` puts back what `x` cut
+        r.expect_texts("noe|two");
+        r.expect_nothing_held();
+        let cur = r.current_win();
+        assert_eq!(r.wins[0], cur);
+    }
+
+    #[test]
+    fn a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once_and_the_keys_around_it_wait() {
+        check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(b"\x03");
+    }
+
+    #[test]
+    fn a_kitty_ctrl_c_typed_while_neovim_looks_busy_goes_at_once_and_the_keys_around_it_wait() {
+        check_a_ctrl_c_typed_while_neovim_looks_busy_goes_at_once(b"\x1b[99;5u");
+    }
+
+    #[test]
+    fn a_ctrl_c_typed_after_a_switch_into_a_neovim_thats_not_busy_keeps_its_place() {
+        let Some(mut r) = Rig::start() else { return };
+        r.make_current(0, r.wins[0]);
+        r.type_into(0, b"A");
+        r.type_into(0, b"x");
+        r.type_into(0, b"\x03");
+        assert_eq!(3, r.session.gate.queue.len());
+        // the timer asks, and Neovim answers
+        r.tick();
+        r.probe_answered();
+        // ahead of `Ax`, it would leave Neovim in insert mode. (Neovim drops
+        // the keys it hasn't run when it reads Ctrl-C, so the `x` may be gone.)
+        r.settle();
+        r.expect_nothing_held();
+        let mode = r.lua("return vim.api.nvim_get_mode().mode");
+        assert_eq!("n", mode);
     }
 
     #[test]
@@ -686,9 +851,9 @@ mod tests {
         // `g` went. A key just went through: Neovim may not have read it when
         // it's asked, so the next tick doesn't ask, and the one after does
         r.pause();
-        assert!(r.session.recheck_switch().unwrap());
+        assert!(r.session.recheck_switch(&mut r.fwds).unwrap());
         assert_eq!(None, r.session.gate.probe);
-        assert!(r.session.recheck_switch().unwrap());
+        assert!(r.session.recheck_switch(&mut r.fwds).unwrap());
         assert!(r.session.gate.probe.is_some());
         r.probe_answered();
         // `z` finished it, and `x` waited for the switch
@@ -760,7 +925,7 @@ mod tests {
     fn the_timer_watches_each_switch_once_and_does_nothing_for_one_thats_done() {
         let Some(mut r) = Rig::start() else { return };
         assert!(!r.session.watch_switch());
-        assert!(!r.session.recheck_switch().unwrap());
+        assert!(!r.session.recheck_switch(&mut r.fwds).unwrap());
 
         r.make_current(0, r.wins[0]);
         assert!(r.session.watch_switch());
@@ -768,7 +933,7 @@ mod tests {
         // a switch queued behind it isn't the one in flight
         r.make_current(1, r.wins[1]);
         assert!(!r.session.watch_switch());
-        assert!(r.session.recheck_switch().unwrap());
+        assert!(r.session.recheck_switch(&mut r.fwds).unwrap());
 
         // the first answered, the second in flight: its wait starts over
         r.type_into(1, b"x");
@@ -777,11 +942,11 @@ mod tests {
         let second = r.session.switch_in_flight().unwrap();
         assert_ne!(first, second);
         // a stale timer: it only starts the new switch's wait
-        assert!(r.session.recheck_switch().unwrap());
+        assert!(r.session.recheck_switch(&mut r.fwds).unwrap());
         assert_eq!(Some(second), r.session.watched_switch);
         r.settle();
         // nothing in flight: the timer stops
-        assert!(!r.session.recheck_switch().unwrap());
+        assert!(!r.session.recheck_switch(&mut r.fwds).unwrap());
         r.expect_texts("one|wo");
     }
 
