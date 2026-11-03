@@ -449,8 +449,9 @@ mod tests {
         /// Grid 1's top row as of each frame (flush) received while it's
         /// `Some`, consecutive repeats dropped.
         tabline_log: Option<Vec<String>>,
-        /// Responses that are strings, by request id: what `eval_str` waits for.
-        replies: Vec<(u32, String)>,
+        /// The request id `eval_str` waits an answer to, and the string it got.
+        awaiting: Option<u32>,
+        reply: Option<String>,
     }
 
     impl Harness {
@@ -471,7 +472,8 @@ mod tests {
                 tab: 0,
                 watch: [0; 3],
                 tabline_log: None,
-                replies: Vec::new(),
+                awaiting: None,
+                reply: None,
             };
             h.nvim
                 .ui_attach(
@@ -554,9 +556,11 @@ mod tests {
                                 self.nvim.flush().unwrap();
                             } else if id == self.setup_id {
                                 self.wins = parse_setup(&mut result).unwrap();
-                            } else if let Ok(s) = rpc::expect_str(&mut result) {
-                                self.replies
-                                    .push((id, String::from_utf8_lossy(s).into_owned()));
+                            } else if self.awaiting == Some(id) {
+                                self.reply = rpc::expect_str(&mut result)
+                                    .ok()
+                                    .map(|s| String::from_utf8_lossy(s).into_owned());
+                                self.awaiting = None;
                             }
                         }
                         rpc::Message::Request { id, .. } => {
@@ -1298,9 +1302,9 @@ mod tests {
         fn eval_str(&mut self, code: &str) -> String {
             let id = self.nvim.exec_lua(code, 0);
             self.nvim.flush().unwrap();
-            assert!(self.until(|x| x.replies.iter().any(|(i, _)| *i == id)));
-            let at = self.replies.iter().position(|(i, _)| *i == id).unwrap();
-            self.replies.remove(at).1
+            self.awaiting = Some(id);
+            assert!(self.until(|x| x.awaiting.is_none()));
+            self.reply.take().expect("a string")
         }
 
         /// Waits until the tabline starts with `want`.
@@ -1721,7 +1725,8 @@ mod tests {
         h.sync("vim.o.tabline = '%#TabLine#L%<%=R'\nvim.o.showtabline = 2");
         h.until_right_ends_at(60, "L", "R");
 
-        // every frame from when the width is set on
+        // the 60-column frames are all in by now; log every one from the width on
+        h.sync("");
         h.tabline_log = Some(Vec::new());
         h.set_tabline_width(Some(30));
         // as lualine does, from a scheduled callback, for about a second

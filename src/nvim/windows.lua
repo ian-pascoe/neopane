@@ -717,6 +717,8 @@ local function fit_tabline()
   local value, record = fit(vim.go.tabline, tabline_width, real_o.columns, last_fit, wrapped_expr)
   -- first: setting it fires OptionSet, which comes back here
   last_fit = record
+  -- the wrapper always means the newest expression: one saved while it meant
+  -- an older one shows this one when it's put back (accepted)
   if record and record.padded == wrapper then wrapped_expr = record.orig:sub(3) end
   if value then vim.go.tabline = value end
 end
