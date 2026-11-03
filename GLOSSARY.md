@@ -53,3 +53,7 @@ The tabline panes' columns, summed.
 **Fitted tabline**:
 Neovim's tabline drawn to end at the right edge of the tabline panes rather than of Neovim's screen.
 _Avoid_: narrowed tabline, shrunk tabline
+
+**Home tab page**:
+The tab page a window belongs to: the one it was opened in, or for a split, its origin window's. Not where Neovim keeps it: an external window sits in whichever tab page is current.
+_Avoid_: owning tab, the window's tab page
