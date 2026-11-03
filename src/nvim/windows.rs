@@ -420,6 +420,7 @@ mod tests {
     use crate::nvim::nvim::{UiOptions, spawn_for_test_with};
     use crate::screen::grid::Grid;
     use crate::screen::grids::{Grids, WinKind};
+    use crate::screen::style::Attr;
 
     /// Made-up reports the tests wait for: a real window handle is never this big.
     const PING_BASE: i64 = 4000;
@@ -452,6 +453,8 @@ mod tests {
         /// The request id `eval_str` waits an answer to, and the string it got.
         awaiting: Option<u32>,
         reply: Option<String>,
+        /// A reference: windows.lua never runs in it.
+        bare: bool,
     }
 
     impl Harness {
@@ -474,6 +477,7 @@ mod tests {
                 tabline_log: None,
                 awaiting: None,
                 reply: None,
+                bare: false,
             };
             h.nvim
                 .ui_attach(
@@ -500,6 +504,14 @@ mod tests {
         fn start_sized(cols: u32, rows: u32) -> Option<Harness> {
             let mut h = Harness::spawn(&CLEAN, cols, rows)?;
             h.boot();
+            Some(h)
+        }
+
+        /// A reference: a clean Neovim without neorex, on a screen of `cols`
+        /// x `rows`, its windows all in their tab pages' layouts.
+        fn reference(cols: u32, rows: u32) -> Option<Harness> {
+            let mut h = Harness::spawn(&CLEAN, cols, rows)?;
+            h.bare = true;
             Some(h)
         }
 
@@ -550,7 +562,7 @@ mod tests {
                                 eprintln!("neovim: {}", String::from_utf8_lossy(e));
                                 panic!("NvimError");
                             }
-                            if id == self.chan_id {
+                            if id == self.chan_id && !self.bare {
                                 let chan = parse_channel(&mut result).unwrap();
                                 self.setup_id = setup(&mut self.nvim, chan, 40, 9);
                                 self.nvim.flush().unwrap();
@@ -605,7 +617,8 @@ mod tests {
             let ping = PING_BASE + self.pings;
             self.lua(&format!("{code}\nvim.rpcnotify(0, 'neorex_win', {ping})"));
             self.want = ping;
-            assert!(self.until(Harness::is_current));
+            // reports `code` scheduled may follow it in the same read
+            assert!(self.until(|x| x.notes.iter().rev().any(|n| *n == Note::Current(x.want))));
         }
 
         /// Waits for `win`, which a plugin moved back, to be external again.
@@ -1822,18 +1835,519 @@ mod tests {
         assert_eq!([sel, fill, fill], [hls[0], hls[1], hls[20]]);
     }
 
+    /// Adopts every window that isn't external yet, as the daemon gives each
+    /// new window a pane.
+    const ADOPT_ALL: &str =
+        "for _, w in ipairs(vim.api.nvim_list_wins()) do neorex.adopt(w, 20, 5) end";
+
+    impl Harness {
+        /// Grid 1's first `n` cells of the top row: text and highlight, with
+        /// the default colors where it leaves them unset.
+        fn tabline_cells(&self, n: usize) -> Vec<(String, Attr)> {
+            let Some(g) = self.grids.get(1).filter(|g| g.height > 0) else {
+                return Vec::new();
+            };
+            let style = &self.grids.style;
+            g.row(0)
+                .iter()
+                .take(n)
+                .map(|c| {
+                    let mut a = style.attr(c.hl);
+                    a.fg = a.fg.or(style.default_fg);
+                    a.bg = a.bg.or(style.default_bg);
+                    a.sp = a.sp.or(style.default_sp);
+                    (String::from_utf8_lossy(c.str()).into_owned(), a)
+                })
+                .collect()
+        }
+
+        /// Runs Lua `step`, then, but in a reference, adopts the windows it
+        /// opened.
+        fn step(&mut self, step: &str) {
+            if self.bare {
+                self.sync(step);
+            } else {
+                self.sync(&format!("{step}\n{ADOPT_ALL}"));
+            }
+        }
+    }
+
+    /// neorex on a screen `cols` wide, maybe with a tabline width, and a
+    /// reference as wide as the tabline: the same steps build the same tab
+    /// pages in both.
+    struct Pair {
+        h: Harness,
+        r: Harness,
+        /// The tabline width, or the screen's.
+        w: usize,
+    }
+
+    impl Pair {
+        fn new(cols: u32, width: Option<u32>) -> Option<Pair> {
+            let mut h = Harness::start_sized(cols, 10)?;
+            let w = width.unwrap_or(cols);
+            let r = Harness::reference(w, 10)?;
+            if width.is_some() {
+                h.set_tabline_width(width);
+            }
+            let mut p = Pair {
+                h,
+                r,
+                w: w as usize,
+            };
+            // a message too long for a narrow screen waits for Enter before
+            // Neovim draws again
+            p.steps(&["vim.o.messagesopt = 'wait:0,history:500'"]);
+            Some(p)
+        }
+
+        /// Runs each of `steps` in both.
+        fn steps(&mut self, steps: &[&str]) {
+            for s in steps {
+                self.r.step(s);
+                self.h.step(s);
+            }
+        }
+
+        /// neorex's tabline, to the tabline width, is the reference's, cell
+        /// for cell, once both have drawn what they've been told.
+        fn expect_same(&mut self) {
+            // after what the steps scheduled
+            for x in [&mut self.r, &mut self.h] {
+                x.sync("");
+                x.sync("vim.cmd.redraw()");
+            }
+            self.expect_same_now();
+        }
+
+        /// neorex's tabline, to the tabline width, is the reference's, cell
+        /// for cell, as they are.
+        fn expect_same_now(&self) {
+            let want = self.r.tabline_cells(self.w);
+            let got = self.h.tabline_cells(self.w);
+            let text =
+                |cells: &[(String, Attr)]| cells.iter().map(|c| c.0.as_str()).collect::<String>();
+            assert_eq!(text(&want), text(&got));
+            assert_eq!(want.len(), got.len());
+            for (i, (w, g)) in want.iter().zip(&got).enumerate() {
+                assert_eq!(w, g, "cell {i} of {:?}", text(&want));
+            }
+        }
+    }
+
+    /// Two tab pages: the first with two windows, one modified, named by a
+    /// path; the second current.
+    const TWO_TABS: &[&str] = &[
+        "vim.o.showtabline = 2\nvim.cmd('file one.lua')",
+        "vim.cmd('vsplit ~/src/neorex/two.txt')\n\
+         vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'x' })",
+        "vim.cmd('tabnew three')",
+    ];
+
     #[test]
-    fn an_empty_tabline_is_left_alone() {
+    fn with_no_tabline_width_the_built_in_tabline_is_drawn_as_without_neorex() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        p.expect_same();
+    }
+
+    /// `TWO_TABS`, then a third named by a path too long for its label.
+    const THREE_TABS: &[&str] = &[
+        TWO_TABS[0],
+        TWO_TABS[1],
+        TWO_TABS[2],
+        "vim.cmd('tabnew ~/src/neorex/docs/research/builtin-tabline.md')",
+    ];
+
+    /// `THREE_TABS`, then a fourth.
+    const FOUR_TABS: &[&str] = &[
+        THREE_TABS[0],
+        THREE_TABS[1],
+        THREE_TABS[2],
+        THREE_TABS[3],
+        "vim.cmd('tabnew four')",
+    ];
+
+    #[test]
+    fn beside_a_foreign_pane_every_label_and_the_close_button_show_where_they_fit() {
+        let Some(mut p) = Pair::new(60, Some(40)) else {
+            return;
+        };
+        p.steps(THREE_TABS);
+        p.expect_same();
+        let text = p.h.tabline_text();
+        assert!(
+            text.contains("three") && text.contains("tabline.md"),
+            "{text:?}"
+        );
+        assert_eq!(Some('X'), text.chars().nth(39));
+        // a count on the current tab page's label too
+        p.steps(&["vim.cmd.vsplit()"]);
+        p.expect_same();
+    }
+
+    #[test]
+    fn beside_a_foreign_pane_trailing_tab_pages_drop_as_the_built_in_drops_them() {
+        let Some(mut p) = Pair::new(60, Some(20)) else {
+            return;
+        };
+        p.steps(FOUR_TABS);
+        p.expect_same();
+        assert!(!p.h.tabline_text().contains("four"));
+    }
+
+    #[test]
+    fn beside_a_foreign_pane_labels_keep_six_columns_and_the_last_is_cut() {
+        let Some(mut p) = Pair::new(60, Some(17)) else {
+            return;
+        };
+        p.steps(THREE_TABS);
+        p.expect_same();
+    }
+
+    #[test]
+    fn labels_are_drawn_in_their_own_highlights_whatever_tablinefill_has() {
+        let Some(mut p) = Pair::new(60, Some(40)) else {
+            return;
+        };
+        p.steps(&[
+            "vim.api.nvim_set_hl(0, 'TabLineFill', { fg = 'yellow', bg = 'blue', sp = 'red', reverse = true, underline = true })\n\
+             vim.api.nvim_set_hl(0, 'TabLineSel', { italic = true })\n\
+             vim.api.nvim_set_hl(0, 'TabLine', { fg = 'red' })\n\
+             vim.api.nvim_set_hl(0, 'Title', { fg = 'green', bold = true })",
+        ]);
+        p.steps(THREE_TABS);
+        p.steps(&["vim.cmd.vsplit()"]);
+        p.expect_same();
+    }
+
+    #[test]
+    fn wide_characters_in_names_are_cut_as_the_built_in_cuts_them() {
+        // From Neovim's narrowest screen. At 16, the close button lands on
+        // the right half of a wide character: Neovim leaves its left half
+        // before the X, which no format string can draw, and the copy draws a
+        // blank, as a terminal shows it.
+        for width in (12..40).filter(|&w| w != 16) {
+            let Some(mut p) = Pair::new(60, Some(width)) else {
+                return;
+            };
+            p.steps(&[
+                "vim.o.showtabline = 2\nvim.cmd('file 日本語/漢字かな.md')",
+                "vim.cmd('tabnew ab漢字cd')",
+                "vim.cmd('tabnew 全角全角全角')",
+            ]);
+            p.expect_same();
+        }
+    }
+
+    #[test]
+    fn the_built_in_tablines_value_is_the_same_at_any_width() {
         let Some(mut h) = Harness::start_sized(60, 10) else {
             return;
         };
-        h.sync("vim.o.tabline = ''\nvim.o.showtabline = 2");
-        h.set_tabline_width(Some(30));
+        h.sync("_G.copy = vim.o.tabline\nassert(_G.copy ~= '')");
+        for w in [Some(30), Some(45), None] {
+            h.set_tabline_width(w);
+            h.sync("assert(vim.o.tabline == _G.copy, vim.o.tabline)");
+        }
+    }
+
+    #[test]
+    fn each_label_counts_only_its_tab_pages_own_windows() {
+        // one window each: no counts
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(&[
+            "vim.o.showtabline = 2\nvim.cmd('file a')",
+            "vim.cmd('tabnew b')",
+        ]);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" a  b "));
+
+        // two windows, one modified, in the first; the second current
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/n/two.txt  three "));
+    }
+
+    #[test]
+    fn a_label_names_its_tab_pages_own_window_focused_last() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(&[
+            TWO_TABS[0],
+            TWO_TABS[1],
+            "vim.api.nvim_set_current_win(vim.fn.bufwinid('one.lua'))",
+            TWO_TABS[2],
+        ]);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" 2+ one.lua "));
+    }
+
+    #[test]
+    fn a_tab_pages_focusable_shown_floats_count_for_it() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        let float = |opts: &str| {
+            format!(
+                "vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, \
+                 {{ relative = 'editor', row = 3, col = 3, width = 5, height = 1{opts} }})"
+            )
+        };
+        let (shown, unfocusable, hidden) = (
+            float(""),
+            float(", focusable = false"),
+            float(", hide = true"),
+        );
+        p.steps(&[TWO_TABS[0], &shown, &unfocusable, &hidden, TWO_TABS[2]]);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" 2 one.lua "));
+    }
+
+    #[test]
+    fn the_current_tab_page_is_neovims_even_with_focus_in_another_tab_pages_window() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        // two.txt's window, whose home is the first tab page, sits in the
+        // current one, as every pane's window does
+        p.h.sync("vim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))\nassert(vim.fn.tabpagenr() == 2)");
+        p.expect_same();
+    }
+
+    #[test]
+    fn closing_another_tab_pages_window_redraws_its_label() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        p.expect_same();
+        p.steps(&["for _, w in ipairs(vim.api.nvim_list_wins()) do\n\
+                   \x20 if vim.fn.bufname(vim.api.nvim_win_get_buf(w)):find('two.txt') then vim.api.nvim_win_close(w, true) end\n\
+                   end"]);
+        p.expect_same();
+        assert!(
+            p.h.tabline_text().starts_with(" one.lua "),
+            "{:?}",
+            p.h.tabline_text()
+        );
+    }
+
+    #[test]
+    fn windows_reopened_after_tabclose_count_for_their_tab_page_again() {
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        p.expect_same();
+        // closes the windows that followed into it too, which neorex reopens
+        p.steps(&["vim.cmd.tabclose()"]);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/n/two.txt "));
+
+        // and the one focused last still names it
+        let Some(mut p) = Pair::new(60, None) else {
+            return;
+        };
+        p.steps(&[
+            TWO_TABS[0],
+            TWO_TABS[1],
+            "vim.api.nvim_set_current_win(vim.fn.bufwinid('one.lua'))",
+            TWO_TABS[2],
+            "vim.cmd.tabclose()",
+        ]);
+        p.expect_same();
+        assert!(p.h.tabline_text().starts_with(" 2+ one.lua "));
+    }
+
+    impl Harness {
+        /// Sends a mouse `button` `action` on grid 1's top row, the tabline,
+        /// at `col`.
+        fn mouse(&mut self, button: &str, action: &str, col: i64) {
+            self.nvim.request("nvim_input_mouse", 6);
+            let w = self.nvim.writer();
+            msgpack::write_str(w, button);
+            msgpack::write_str(w, action);
+            msgpack::write_str(w, "");
+            msgpack::write_int(w, 1);
+            msgpack::write_int(w, 0);
+            msgpack::write_int(w, col);
+            self.nvim.flush().unwrap();
+        }
+
+        /// Clicks `button` on the tabline at `col`, `times` in a row, and
+        /// waits until Neovim has taken the clicks.
+        fn click(&mut self, button: &str, col: i64, times: u32) {
+            for _ in 0..times {
+                self.mouse(button, "press", col);
+                self.mouse(button, "release", col);
+            }
+            self.input_taken();
+        }
+
+        /// Waits until Neovim has taken the input sent so far.
+        fn input_taken(&mut self) {
+            self.pings += 1;
+            let ping = PING_BASE + self.pings;
+            self.input(&format!(":lua vim.rpcnotify(0, 'neorex_win', {ping})<CR>"));
+            self.want = ping;
+            assert!(self.until(|x| x.notes.iter().rev().any(|n| *n == Note::Current(x.want))));
+        }
+    }
+
+    /// Three tab pages, `a`, `b` and `c`, the last current: at a tabline
+    /// width of 40, their labels are columns 0-2, 3-5 and 6-8, and the close
+    /// button column 39; the first two's the same.
+    const ABC: &[&str] = &[
+        "vim.o.showtabline = 2\nvim.cmd('file a')",
+        "vim.cmd('tabnew b')",
+        "vim.cmd('tabnew c')",
+    ];
+
+    #[test]
+    fn a_click_on_a_label_goes_to_its_tab_page_and_a_middle_click_closes_it() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.set_tabline_width(Some(40));
+        for s in ABC {
+            h.step(s);
+        }
+        h.until_tabline_starts_with(" a  b  c ");
+        h.click("left", 1, 1);
+        h.sync("assert(vim.fn.tabpagenr() == 1, 'current: ' .. vim.fn.tabpagenr())");
+        h.click("middle", 4, 1);
+        h.sync(
+            "assert(vim.fn.tabpagenr('$') == 2, 'tab pages: ' .. vim.fn.tabpagenr('$'))\n\
+             assert(vim.fn.tabpagenr() == 1, 'current: ' .. vim.fn.tabpagenr())",
+        );
+    }
+
+    #[test]
+    fn the_close_button_closes_the_current_tab_page_and_clicks_after_the_labels_act_as_the_built_ins()
+     {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.set_tabline_width(Some(40));
+        // labels at columns 0-2 and 3-5
+        for s in &ABC[..2] {
+            h.step(s);
+        }
+        h.until_tabline_starts_with(" a  b ");
+        h.click("left", 39, 1);
+        h.sync("assert(vim.fn.tabpagenr('$') == 1, 'tab pages: ' .. vim.fn.tabpagenr('$'))");
+        // the first click goes to the next, the second opens one at the end
+        h.click("left", 25, 2);
+        h.step(
+            "assert(vim.fn.tabpagenr('$') == 2, 'tab pages: ' .. vim.fn.tabpagenr('$'))\n\
+             assert(vim.fn.tabpagenr() == 2, 'current: ' .. vim.fn.tabpagenr())",
+        );
+        // the next, round to the first, and on
+        h.click("left", 20, 1);
+        h.sync("assert(vim.fn.tabpagenr() == 1, 'current: ' .. vim.fn.tabpagenr())");
+        h.click("left", 15, 1);
+        h.sync("assert(vim.fn.tabpagenr() == 2, 'current: ' .. vim.fn.tabpagenr())");
+        // and the middle button closes the current one
+        h.click("middle", 30, 1);
+        h.sync("assert(vim.fn.tabpagenr('$') == 1, 'tab pages: ' .. vim.fn.tabpagenr('$'))");
+    }
+
+    #[test]
+    fn dragging_a_label_past_the_last_moves_its_tab_page_to_the_end() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.set_tabline_width(Some(40));
+        for s in ABC {
+            h.step(s);
+        }
+        h.until_tabline_starts_with(" a  b  c ");
+        h.sync("_G.first = vim.api.nvim_list_tabpages()[1]");
+        // one at a time: Neovim takes each event's position as it's queued
+        h.mouse("left", "press", 1);
+        h.input_taken();
+        h.mouse("left", "drag", 20);
+        h.input_taken();
+        h.sync(
+            "local tabs = vim.api.nvim_list_tabpages()\n\
+             assert(tabs[3] == _G.first, vim.inspect(tabs))",
+        );
+    }
+
+    #[test]
+    fn a_pending_command_shows_where_the_built_in_shows_it_with_showcmdloc_tabline() {
+        for width in [Some(40), None] {
+            let Some(mut p) = Pair::new(60, width) else {
+                return;
+            };
+            p.steps(TWO_TABS);
+            p.steps(&["vim.o.showcmd = true\nvim.o.showcmdloc = 'tabline'"]);
+            p.expect_same();
+            for x in [&mut p.r, &mut p.h] {
+                x.input("2d");
+                let ok = x.until(|x| x.tabline_text().contains("2d"));
+                assert!(ok, "tabline: {:?}", x.tabline_text());
+            }
+            p.expect_same_now();
+        }
+    }
+
+    #[test]
+    fn a_tabline_set_is_shown_instead_until_its_set_empty_again() {
+        let Some(mut p) = Pair::new(60, Some(30)) else {
+            return;
+        };
+        p.steps(TWO_TABS);
+        p.expect_same();
+        // as #66 fits it
+        p.h.sync("vim.o.tabline = 'L%=R'");
+        p.h.until_right_ends_at(30, "L", "R");
+        p.h.sync("vim.o.tabline = ''");
+        p.expect_same();
+    }
+
+    #[test]
+    fn a_saved_value_of_the_built_in_tabline_put_back_draws_it_live() {
+        let Some(mut p) = Pair::new(60, Some(40)) else {
+            return;
+        };
+        p.steps(&TWO_TABS[..1]);
+        p.expect_same();
+        // as lualine saves a 'tabline' that isn't its own, and puts it back
+        p.h.sync(
+            "_G.saved = vim.o.tabline\n\
+             assert(_G.saved:sub(1, 2) == '%!', _G.saved)\n\
+             vim.o.tabline = '%#TabLine#M%<%=Q'",
+        );
+        p.h.until_right_ends_at(40, "M", "Q");
+        p.steps(&TWO_TABS[1..]);
+        p.h.sync("vim.o.tabline = _G.saved");
+        p.expect_same();
+        p.steps(&["vim.cmd('tabnew four')"]);
+        p.expect_same();
+    }
+
+    #[test]
+    fn quitting_leaves_an_empty_tabline_empty() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync("assert(vim.o.tabline ~= '')");
+        h.sync(
+            "vim.api.nvim_exec_autocmds('VimLeavePre', {})\n\
+             assert(vim.o.tabline == '', vim.o.tabline)",
+        );
         h.sync("assert(vim.o.tabline == '', vim.o.tabline)");
-        h.sync("assert(vim.o.tabline == '', vim.o.tabline)");
-        // and the one set after is padded
-        h.sync("vim.o.tabline = 'L%=R'");
-        h.until_right_ends_at(30, "L", "R");
     }
 
     #[test]

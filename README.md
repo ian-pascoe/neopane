@@ -105,8 +105,14 @@ require('lualine').setup({
 let width = get(g:, 'neorex_tabline_width', &columns)
 ```
 
-The built-in tabline, which Neovim shows while `'tabline'` is empty, is still
-clipped by the tabline panes (#63).
+While `'tabline'` is empty, neorex draws the built-in tabline itself: a copy
+of Neovim 0.12's, laid out to the tabline panes, whose labels count and name
+each tab page's own windows
+([ADR 0002](docs/adr/0002-neorex-draws-the-built-in-tabline-itself.md)). It
+differs in two ways: `:set tabline?` shows neorex's value rather than nothing,
+and a label window's `'winhighlight'` is ignored. Set `'tabline'` to anything
+else and that shows instead; set it back to empty, or put back a saved copy of
+neorex's value, and the built-in tabline comes back.
 
 `neorex help` lists the debug commands, which run each layer on its own:
 keys, Neovim's redraw events, the renderer, and pane hand-off.
