@@ -111,6 +111,14 @@ end
 
 local making_anchor = false
 
+-- an anchor's own buffer: a scratch one, wiped once another replaces it
+local function anchor_buf()
+  local buf = api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.b[buf].neorex_anchor = true
+  return buf
+end
+
 -- window -> its pane: `w` x `h`, the rows and columns, statusline included.
 -- Layout plugins move windows back into Neovim's layout (see `restore`), so
 -- it also has `fight`: `restored`, when we put it back (ms), `off_until`,
@@ -442,10 +450,8 @@ function M.adopt(win, w, h)
   -- before it leaves winlayout()
   refresh_layout(tab)
   if not anchor_of(tab) then
-    local buf = api.nvim_create_buf(false, true)
-    vim.bo[buf].bufhidden = 'wipe'
     making_anchor = true
-    anchors[tab] = api.nvim_open_win(buf, false, { split = 'left', win = win })
+    anchors[tab] = api.nvim_open_win(anchor_buf(), false, { split = 'left', win = win })
     making_anchor = false
   end
   give_statusline(win)
@@ -628,11 +634,64 @@ api.nvim_create_autocmd('WinNew', {
   end,
 })
 
+-- The pane a buffer opened in `tab`'s anchor goes to: the window last
+-- current, if it's that tab page's, else the tab page's own focused last,
+-- else its first shown.
+local function anchor_target(tab)
+  for _, win in ipairs({ last or 0, focused[tab] or 0 }) do
+    if shown(win) and tab_of(win) == tab then return win end
+  end
+  for _, win in ipairs(api.nvim_list_wins()) do
+    if shown(win) and tab_of(win) == tab then return win end
+  end
+end
+
+-- Pickers that open a file in the last ordinary window that isn't showing
+-- a file can pick an anchor, as snacks.nvim's does when the pane shows oil
+-- or a dashboard: nothing would show it. Moves such a buffer, with its view,
+-- to the pane the user was in, and gives the anchor a scratch buffer again.
+-- Returns the window it went to, if any.
+local function evict(tab)
+  local a = anchor_of(tab)
+  if not a then return end
+  local buf = api.nvim_win_get_buf(a)
+  if vim.b[buf].neorex_anchor then return end
+  local to = anchor_target(tab)
+  if not to then return end
+  local view = api.nvim_win_call(a, vim.fn.winsaveview)
+  -- :buffer, as the picker meant to, keeps the jump list; it refuses to
+  -- leave a modified buffer with 'nohidden'
+  local ok = pcall(api.nvim_win_call, to, function() vim.cmd('buffer ' .. buf) end)
+  if not ok then api.nvim_win_set_buf(to, buf) end
+  api.nvim_win_call(to, function() vim.fn.winrestview(view) end)
+  -- after: one with 'bufhidden' set would go, hidden
+  api.nvim_win_set_buf(a, anchor_buf())
+  return to
+end
+
+local evict_pending = false
+local function evict_all()
+  evict_pending = false
+  for tab in pairs(anchors) do evict(tab) end
+end
+-- after the command, which may still move the cursor in it
+api.nvim_create_autocmd('BufWinEnter', {
+  group = group,
+  callback = function()
+    if making_anchor or evict_pending then return end
+    evict_pending = true
+    vim.schedule(evict_all)
+  end,
+})
+
 local pending = false
 local function report()
   pending = false
   local cur = api.nvim_get_current_win()
   if is_anchor(cur) then
+    -- a buffer opened in it: on to the pane it went to
+    local to = evict(api.nvim_win_get_tabpage(cur))
+    if to then return api.nvim_set_current_win(to) end
     -- never shown: move on the way <C-w>w or <C-w>W was going
     local wins = vim.tbl_filter(shown, api.nvim_tabpage_list_wins(0))
     if #wins == 0 then return end

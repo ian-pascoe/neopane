@@ -889,6 +889,49 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_opened_in_the_anchor_goes_to_the_pane() {
+        let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
+            return;
+        };
+        h.boot();
+        let [first, anchor] = h.wins;
+        // where the pane shows no file, as with oil, snacks.nvim's picker
+        // takes the anchor for the last ordinary window and opens the file
+        // there, cursor and all
+        h.sync(
+            "vim.bo.buftype = 'nofile'\n\
+             _G.picked = vim.api.nvim_create_buf(true, false)\n\
+             vim.api.nvim_buf_set_lines(picked, 0, -1, false, { 'a', 'b', 'c' })",
+        );
+        h.notes.clear();
+        h.lua(&format!(
+            "vim.api.nvim_set_current_win({anchor})\n\
+             vim.cmd('buffer ' .. picked)\n\
+             vim.api.nvim_win_set_cursor(0, {{ 3, 0 }})"
+        ));
+        h.want = first;
+        assert!(h.until(Harness::is_current));
+        let got = |h: &mut Harness| {
+            h.eval_str(&format!(
+                "local a = vim.api.nvim_win_get_buf({anchor})\n\
+                 return string.format('%s %d %s', vim.api.nvim_win_get_buf({first}) == picked, \
+                 vim.api.nvim_win_get_cursor({first})[1], vim.b[a].neorex_anchor)"
+            ))
+        };
+        assert_eq!("true 3 true", got(&mut h));
+
+        // one put there without entering it goes too
+        h.sync(&format!(
+            "vim.cmd('enew')\n\
+             vim.api.nvim_win_set_buf({anchor}, picked)\n\
+             vim.api.nvim_win_set_cursor({anchor}, {{ 3, 0 }})\n\
+             assert(vim.wait(2500, function() return vim.api.nvim_win_get_buf({first}) == picked end), 'not moved')"
+        ));
+        assert_eq!("true 3 true", got(&mut h));
+        assert_eq!(Some(WinKind::Ordinary), h.kind(anchor));
+    }
+
+    #[test]
     fn a_window_a_plugin_moved_back_into_the_layout_is_external_again_and_keeps_focus() {
         let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
             return;
