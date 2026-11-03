@@ -205,6 +205,19 @@ new session.
   left. They follow the layout as windows come and go, and a window Neovim
   resizes, such as with `<C-w>|`, resizes its pane. Moving windows once they
   show in panes, as with `<C-w>H`, still does nothing.
+- Neovim's current tab page doesn't follow focus. It stays put when you focus
+  the pane of another tab page's window, and changes only as Neovim changes
+  it, as with `:tabnext` or a click on the tabline. So `tabpagenr()`, the
+  tabline's highlighted label, `:tcd` and `t:` variables are that tab page's,
+  not the focused window's home tab page's.
+- Neovim's tab-page queries are wrong under neorex (#67). Every window shown
+  in a pane sits in Neovim's current tab page, so `tabpagebuflist()`,
+  `tabpagewinnr()` and `nvim_tabpage_list_wins()` count every such window in
+  the current tab page, plus a hidden window neorex keeps in each tab page,
+  and see the other tab pages as holding only that hidden window. Plugins that
+  label tab pages from them, such as lualine's `tabs` component, label them
+  wrong. The built-in tabline doesn't: neorex draws it from its own record of
+  each window's home tab page.
 - Plugins that draw cursor effects with editor floats, such as
   smear-cursor.nvim, draw them in the wrong place: Neovim can't tell them
   where a pane's window is.
