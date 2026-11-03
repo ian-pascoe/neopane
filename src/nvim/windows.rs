@@ -449,6 +449,8 @@ mod tests {
         /// Grid 1's top row as of each frame (flush) received while it's
         /// `Some`, consecutive repeats dropped.
         tabline_log: Option<Vec<String>>,
+        /// Responses that are strings, by request id: what `eval_str` waits for.
+        replies: Vec<(u32, String)>,
     }
 
     impl Harness {
@@ -469,6 +471,7 @@ mod tests {
                 tab: 0,
                 watch: [0; 3],
                 tabline_log: None,
+                replies: Vec::new(),
             };
             h.nvim
                 .ui_attach(
@@ -551,6 +554,9 @@ mod tests {
                                 self.nvim.flush().unwrap();
                             } else if id == self.setup_id {
                                 self.wins = parse_setup(&mut result).unwrap();
+                            } else if let Ok(s) = rpc::expect_str(&mut result) {
+                                self.replies
+                                    .push((id, String::from_utf8_lossy(s).into_owned()));
                             }
                         }
                         rpc::Message::Request { id, .. } => {
@@ -1288,6 +1294,21 @@ mod tests {
             })
         }
 
+        /// Runs Lua `code`, which returns a string, in Neovim and gives that string.
+        fn eval_str(&mut self, code: &str) -> String {
+            let id = self.nvim.exec_lua(code, 0);
+            self.nvim.flush().unwrap();
+            assert!(self.until(|x| x.replies.iter().any(|(i, _)| *i == id)));
+            let at = self.replies.iter().position(|(i, _)| *i == id).unwrap();
+            self.replies.remove(at).1
+        }
+
+        /// Waits until the tabline starts with `want`.
+        fn until_tabline_starts_with(&mut self, want: &str) {
+            let ok = self.until(|x| x.tabline_text().starts_with(want));
+            assert!(ok, "tabline: {:?}", self.tabline_text());
+        }
+
         /// Waits until the tabline reads `want`, then blanks to the screen's edge.
         fn until_tabline(&mut self, want: &str) {
             let want = want.to_string();
@@ -1376,12 +1397,7 @@ mod tests {
         h.set_tabline_width(Some(30));
         h.sync("assert(vim.g.neorex_tabline_width == 30)");
         // the first 30 columns, as they'd be without padding
-        let want = format!("A{}", "x".repeat(29));
-        assert!(
-            h.until(|x| x.tabline_text().starts_with(&want)),
-            "tabline: {:?}",
-            h.tabline_text()
-        );
+        h.until_tabline_starts_with(&format!("A{}", "x".repeat(29)));
     }
 
     #[test]
@@ -1397,12 +1413,7 @@ mod tests {
         );
         h.set_tabline_width(Some(30));
         h.sync("assert(vim.g.neorex_tabline_width == 30)");
-        let want = format!("A{}Z", "x".repeat(40));
-        assert!(
-            h.until(|x| x.tabline_text().starts_with(&want)),
-            "tabline: {:?}",
-            h.tabline_text()
-        );
+        h.until_tabline_starts_with(&format!("A{}Z", "x".repeat(40)));
     }
 
     #[test]
@@ -1514,11 +1525,15 @@ mod tests {
         };
         let x = "x".repeat(40);
         h.sync(&format!(
-            "vim.o.tabline = 'AB%<{x}Z'\nvim.o.showtabline = 2"
+            "_G.orig = 'AB%<{x}Z'\nvim.o.tabline = _G.orig\nvim.o.showtabline = 2"
         ));
         h.set_tabline_width(Some(30));
-        // as nvim_eval_statusline with maxwidth=30 gives it
-        h.until_tabline(&format!("AB<{}Z", "x".repeat(26)));
+        // as nvim_eval_statusline cuts it to the width
+        let want = h.eval_str(
+            "return vim.api.nvim_eval_statusline(_G.orig, { use_tabline = true, maxwidth = 30 }).str",
+        );
+        assert_eq!(30, want.len());
+        h.until_tabline(&want);
     }
 
     #[test]
@@ -1527,14 +1542,16 @@ mod tests {
             return;
         };
         let x = "x".repeat(40);
-        h.sync(&format!("vim.o.tabline = 'AB{x}Z'\nvim.o.showtabline = 2"));
+        h.sync(&format!(
+            "_G.orig = 'AB{x}Z'\nvim.o.tabline = _G.orig\nvim.o.showtabline = 2"
+        ));
         h.set_tabline_width(Some(30));
-        let want = format!("AB{}", "x".repeat(28));
-        assert!(
-            h.until(|x| x.tabline_text().starts_with(&want)),
-            "tabline: {:?}",
-            h.tabline_text()
+        // the first 30 columns, as they'd be without padding
+        let want = h.eval_str(
+            "return vim.api.nvim_eval_statusline(_G.orig, { use_tabline = true }).str:sub(1, 30)",
         );
+        assert_eq!(30, want.len());
+        h.until_tabline_starts_with(&want);
     }
 
     #[test]
@@ -1614,6 +1631,37 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_wrapper_a_plugin_restores_still_shows_the_expression_it_wrapped() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        h.sync(
+            "_G.tl = function() return 'L%=R' .. vim.o.columns end\n\
+             vim.o.tabline = '%!v:lua.tl()'\n\
+             vim.o.showtabline = 2",
+        );
+        h.set_tabline_width(Some(30));
+        h.until_laid_out_to(30, 'L', 'R');
+
+        // as lualine does: saves a 'tabline' that doesn't have its name in it,
+        // sets its own, and puts the saved one back when it's hidden
+        h.sync("_G.saved = vim.o.tabline\nvim.o.tabline = '%#lualine_a#M%<%=Q'");
+        h.until_right_ends_at(30, "M", "Q");
+        h.sync("vim.o.tabline = _G.saved");
+        h.until_laid_out_to(30, 'L', 'R');
+
+        // the width goes: the expression comes back as it was set
+        h.set_tabline_width(None);
+        h.sync("assert(vim.o.tabline == '%!v:lua.tl()', vim.o.tabline)");
+        h.until_laid_out_to(60, 'L', 'R');
+        // and the wrapper put back after that is the expression too
+        h.sync(
+            "vim.o.tabline = _G.saved\n\
+             assert(vim.o.tabline == '%!v:lua.tl()', vim.o.tabline)",
+        );
+    }
+
+    #[test]
     fn a_format_string_ending_in_percent_less_than_and_blanks_is_never_shortened() {
         // the user's own, so padded after it, once
         tabline_comes_back_exactly(
@@ -1671,11 +1719,12 @@ mod tests {
             return;
         };
         h.sync("vim.o.tabline = '%#TabLine#L%<%=R'\nvim.o.showtabline = 2");
-        h.set_tabline_width(Some(30));
-        h.until_right_ends_at(30, "L", "R");
+        h.until_right_ends_at(60, "L", "R");
 
-        // as lualine does, from a scheduled callback, for about a second
+        // every frame from when the width is set on
         h.tabline_log = Some(Vec::new());
+        h.set_tabline_width(Some(30));
+        // as lualine does, from a scheduled callback, for about a second
         h.lua(&format!(
             "local n = 0\n\
              local timer = vim.uv.new_timer()\n\
@@ -1693,6 +1742,7 @@ mod tests {
 
         let want = format!("{:<60}", right_aligned(30, "L", "R"));
         let log = h.tabline_log.take().unwrap();
+        assert!(!log.is_empty());
         assert!(log.iter().all(|row| *row == want), "rows: {log:?}");
     }
 
@@ -1708,8 +1758,21 @@ mod tests {
              \x20 callback = function() vim.o.tabline = 'L%=R' end,\n\
              })",
         );
+        // the built-in tabline, until the autocommand sets one
+        assert!(h.until(|x| !x.tabline_text().trim().is_empty()));
+        h.tabline_log = Some(Vec::new());
         h.input(":enew<CR>");
         h.until_right_ends_at(30, "L", "R");
+
+        // and no frame of it was unpadded; the built-in tabline, redrawn for
+        // the new buffer before the autocommand ran, isn't it
+        let want = format!("{:<60}", right_aligned(30, "L", "R"));
+        let log = h.tabline_log.take().unwrap();
+        assert!(log.contains(&want), "rows: {log:?}");
+        assert!(
+            log.iter().all(|row| *row == want || !row.starts_with('L')),
+            "rows: {log:?}"
+        );
     }
 
     #[test]
@@ -1741,9 +1804,10 @@ mod tests {
         );
         h.until_tabline("xy");
         // Neovim fills what's left in the last highlight
-        let [sel, fill] = [h.tabline_hls()[0], h.tabline_hls()[1]];
+        let hls = h.tabline_hls();
+        let [sel, fill] = [hls[0], hls[1]];
         assert_ne!(sel, fill);
-        assert_eq!(fill, h.tabline_hls()[20]);
+        assert_eq!(fill, hls[20]);
 
         h.set_tabline_width(Some(30));
         // never unpadded, so once it's changed it's seen padded

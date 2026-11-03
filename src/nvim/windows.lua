@@ -664,7 +664,12 @@ local wrapper = '%!v:lua.neorex.tabline()'
 -- The last 'tabline' we padded: { orig = what a user or plugin set, padded =
 -- what we set it to }, or nil. Only that exact string is ours: any other
 -- value is a new orig, so we never parse or strip a suffix.
-local fitted
+local last_fit
+-- The `%!` expression we last wrapped, which `wrapper` evaluates. A plugin may
+-- save the wrapper, as lualine does with a 'tabline' that isn't its own, and
+-- restore it after we've fitted another value, so it stands for this expression
+-- whenever it comes back.
+local wrapped_expr
 local real_o = vim.o
 -- the columns vim.o.columns reads as while a `%!` tabline is evaluated
 local proxy_columns
@@ -690,8 +695,15 @@ end
 -- Empty is left alone. A `%!` expression is wrapped, which pads when it's
 -- evaluated; a format string is padded in place, as lualine sets one and
 -- restores any that doesn't contain its name, so a wrapper would come back.
-local function fit(current, width, columns, record)
-  local orig = (record and current == record.padded) and record.orig or current
+-- `expr` is the `%!` expression last wrapped: the wrapper, if it shows up
+-- again, is that `%!` tabline.
+local function fit(current, width, columns, record, expr)
+  local orig = current
+  if record and current == record.padded then
+    orig = record.orig
+  elseif current == wrapper and expr then
+    orig = '%!' .. expr
+  end
   local padded = orig
   if width and orig ~= '' then
     padded = orig:sub(1, 2) == '%!' and wrapper or orig .. padding(width, columns)
@@ -702,16 +714,19 @@ end
 
 -- Fits 'tabline' to what there is now.
 local function fit_tabline()
-  local value, record = fit(vim.go.tabline, tabline_width, real_o.columns, fitted)
+  local value, record = fit(vim.go.tabline, tabline_width, real_o.columns, last_fit, wrapped_expr)
   -- first: setting it fires OptionSet, which comes back here
-  fitted = record
+  last_fit = record
+  if record and record.padded == wrapper then wrapped_expr = record.orig:sub(3) end
   if value then vim.go.tabline = value end
 end
 
 -- A fitted `%!` tabline: the expression set, laid out to the tabline width
 -- and padded.
 function M.tabline()
-  local expr = fitted and fitted.orig:sub(3)
+  -- only before any `%!` tabline was wrapped, if someone set the wrapper
+  -- itself: nothing to evaluate
+  local expr = wrapped_expr
   if not expr then return '' end
   if not tabline_width then return api.nvim_eval(expr) end
   proxy_columns = math.min(tabline_width, real_o.columns)

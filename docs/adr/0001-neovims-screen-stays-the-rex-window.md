@@ -1,4 +1,4 @@
-# Neovim's screen stays the size of the Rex window; only the tabline is narrowed
+# Neovim's screen stays the size of the Rex window; only the tabline is fitted
 
 When a foreign pane shares the top of the Rex window, the tabline panes are
 narrower than Neovim's screen and the tabline's right end is never shown (#11).
@@ -30,7 +30,7 @@ pane in the top right.
   `'columns'` (`max_length`) don't. The built-in tabline stays clipped.
 - `g:neorex_tabline_width` holds the tabline width while it's narrower than
   the screen, for tablines that want to fit themselves.
-- Every tabline is padded with blanks to the screen's width while there's a
+- Every non-empty tabline is padded with blanks to the screen's width while there's a
   tabline width, whether or not it read the width, and a format-string
   `'tabline'`, such as lualine's, is padded in place. The padding follows a
   `%<`. A tabline with no `%<` of its own loses only padding, and one with its
