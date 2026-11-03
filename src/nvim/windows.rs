@@ -1325,9 +1325,10 @@ mod tests {
         }
         olds.sort();
         assert_eq!(vec![first, wins[0]], olds);
-        // tab page 2 stays, with its window in its layout again
-        h.command(&format!(
-            "if tabpagenr('$') != 2 || !nvim_tabpage_is_valid({tab}) | throw 'tab page closed' | endif | call rpcnotify(0, 'neorex_win', 4242)"
+        // tab page 2 stays, with its window in its layout again. Checked
+        // after what's scheduled, as closing a tab page is.
+        h.lua(&format!(
+            "vim.schedule(function() if vim.fn.tabpagenr('$') == 2 and vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, 'neorex_win', 4242) end end)"
         ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
@@ -1342,8 +1343,8 @@ mod tests {
         h.nvim.flush().unwrap();
         h.gone = new;
         assert!(h.until(|x| x.kind(x.gone).is_none()));
-        h.command(&format!(
-            "if tabpagenr('$') != 1 || nvim_tabpage_is_valid({tab}) | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4343)"
+        h.lua(&format!(
+            "vim.schedule(function() if vim.fn.tabpagenr('$') == 1 and not vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, 'neorex_win', 4343) end end)"
         ));
         h.want = 4343;
         assert!(h.until(Harness::is_current));
