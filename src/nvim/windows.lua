@@ -12,7 +12,8 @@ local anchors = {}
 local last
 -- tab page made after setup -> { back = the window current before it }.
 -- Its windows show in a Rex floating pane, and it closes with the last.
--- The record also holds its window layout, as the daemon is told of it.
+-- The record also holds its window layout, as the daemon is told of it, and
+-- how many of its windows are being reopened (`reopening`).
 local floating = {}
 -- window -> the tab page it belongs to: the one it was made in, or its
 -- origin's for a split. External windows follow the current tab page, so
@@ -367,6 +368,12 @@ local function layout_windows(node, set)
   return set
 end
 
+-- puts window `new` where `old` is in one of our layouts, `node`
+local function swap_win(node, old, new)
+  if node.win == old then node.win = new end
+  for _, kid in ipairs(node.kids or {}) do swap_win(kid, old, new) end
+end
+
 -- node kind (0 window, 1 row, 2 column), then its window or kid count, its
 -- width and height, then its kids
 local function flatten(node, out)
@@ -381,10 +388,11 @@ end
 
 -- Takes floating tab page `tab`'s layout from winlayout(), while its windows
 -- aren't external, and from what it was and the sizes Neovim has since given
--- external ones; tells the daemon if it changed.
+-- external ones; tells the daemon if it changed. Not while any of its windows
+-- is being reopened.
 local function refresh_layout(tab)
   local t = floating[tab]
-  if not t or not api.nvim_tabpage_is_valid(tab) then return end
+  if not t or (t.reopening or 0) > 0 or not api.nvim_tabpage_is_valid(tab) then return end
   local anchor = anchor_of(tab)
   local node = vim.fn.winlayout(api.nvim_tabpage_get_number(tab))
   local ordinary = winlayout_windows(node, {})
@@ -1160,7 +1168,8 @@ api.nvim_create_autocmd('QuitPre', {
 -- tab page too, from another one, as external windows would go with it.
 local function close_tab(tab)
   local t = floating[tab]
-  if not t then return end
+  -- windows being reopened in it are still to come
+  if not t or (t.reopening or 0) > 0 then return end
   for w, h in pairs(home) do
     if h == tab and shown(w) then return end
   end
@@ -1177,13 +1186,18 @@ local function close_tab(tab)
 end
 
 -- Opens external `win`, about to close, again with its buffer and view, in
--- tab page `from`. The daemon gives the new window its pane.
+-- tab page `from`. The daemon gives the new window its pane. A floating tab
+-- page's layout waits for it, and has it where `win` was.
 local function reopen(win, from, enter)
   local c = api.nvim_win_get_config(win)
   local buf = api.nvim_win_get_buf(win)
   local view = api.nvim_win_call(win, vim.fn.winsaveview)
+  local t = floating[from]
+  if t then t.reopening = (t.reopening or 0) + 1 end
   vim.rpcnotify(chan, 'neorex_reopen', win)
   vim.schedule(function()
+    -- first, so an error below can't stop its layout for good
+    if t then t.reopening = t.reopening - 1 end
     if not api.nvim_buf_is_valid(buf) then buf = api.nvim_create_buf(true, false) end
     local new = api.nvim_open_win(buf, enter, { external = true, width = c.width, height = c.height })
     api.nvim_win_call(new, function() vim.fn.winrestview(view) end)
@@ -1193,10 +1207,15 @@ local function reopen(win, from, enter)
       if w == win then focused[tab] = new end
     end
     if last == win then last = new end
-    for _, t in pairs(floating) do
-      if t.back == win then t.back = new end
+    for _, f in pairs(floating) do
+      if f.back == win then f.back = new end
     end
     vim.rpcnotify(chan, 'neorex_reopened', win, new)
+    -- unless the tab page closed meanwhile
+    if t and floating[from] == t then
+      if t.layout then swap_win(t.layout, win, new) end
+      refresh_layout(from)
+    end
     -- its tab page's label counts it again
     redraw_copy()
     -- left on an anchor while there was nowhere to go
@@ -1207,7 +1226,7 @@ end
 -- Neovim never closes its last window, but the anchor lets :close do it. So
 -- reopen it, and the daemon gives the new window the same pane. Windows
 -- that only followed into a tab page, closed with it by :tabclose, are
--- reopened too.
+-- reopened too, in their home tab page, which stays even if it's floating.
 api.nvim_create_autocmd('WinClosed', {
   group = group,
   callback = function(ev)
@@ -1218,6 +1237,10 @@ api.nvim_create_autocmd('WinClosed', {
     -- Neovim redraws no tabline for an external window closing, as it would
     -- for a split: its tab page's label counts one fewer
     vim.schedule(redraw_copy)
+    local external = shown(win) and api.nvim_win_get_config(win).external
+    -- before its home tab page's own close: a floating one stays
+    local followed = closing_tab and not closing_ours and from and from ~= closing_tab and api.nvim_tabpage_is_valid(from)
+    if external and followed then return reopen(win, from, false) end
     if from and floating[from] then
       -- after the command, which may open more windows in it
       vim.schedule(function()
@@ -1226,10 +1249,7 @@ api.nvim_create_autocmd('WinClosed', {
       end)
       return
     end
-    if not shown(win) or not api.nvim_win_get_config(win).external then return end
-    local followed = closing_tab and not closing_ours and from and from ~= closing_tab and api.nvim_tabpage_is_valid(from)
-    if followed then return reopen(win, from, false) end
-    if not others_shown(win) then reopen(win, from, true) end
+    if external and not others_shown(win) then reopen(win, from, true) end
   end,
 })
 
