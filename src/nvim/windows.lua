@@ -134,6 +134,8 @@ local mirroring = false
 -- window -> { text = the current window's statusline we last gave it, own = what
 -- it showed before }
 local copied = {}
+-- float -> the local statusline it had before we hid it while mirroring
+local hidden_stl = {}
 
 local function now_ms()
   return vim.uv.hrtime() / 1e6
@@ -205,12 +207,17 @@ local function give_statusline(win)
 end
 
 -- Each pane's statusline is its own again: what it showed before a copy.
+-- Each float's we hid, too, unless it was set since.
 local function stop_mirroring()
   mirroring = false
   for win, c in pairs(copied) do
     if api.nvim_win_is_valid(win) and local_stl(win) == c.text then set_local_stl(win, c.own) end
   end
   copied = {}
+  for win, stl in pairs(hidden_stl) do
+    if api.nvim_win_is_valid(win) and local_stl(win) == '' then set_local_stl(win, stl) end
+  end
+  hidden_stl = {}
 end
 
 -- the text's height: what's left of the pane after the statusline, if it has
@@ -1172,6 +1179,24 @@ local function rewrite_laststatus_3()
 end
 rewrite_laststatus_3()
 
+-- Neovim draws a float's own statusline at laststatus=2, not at 3. Lualine's
+-- globalstatus gives the current float one, for laststatus=3 to show. At the
+-- 2 we set, it would take a row over what's under the float: the first entry
+-- of a picker's list, under its input. So while mirroring, a float that isn't
+-- external shows none, as at 3.
+local function is_inner_float(win)
+  local c = api.nvim_win_get_config(win)
+  return c.relative ~= '' and not c.external
+end
+
+local function hide_float_statusline(win)
+  if not mirroring or not api.nvim_win_is_valid(win) or not is_inner_float(win) then return end
+  local stl = local_stl(win)
+  if stl == '' then return end
+  hidden_stl[win] = stl
+  set_local_stl(win, '')
+end
+
 -- a statusline came, went or changed: fit the windows to their panes again. A
 -- laststatus other than 3 set by the user ends the mirroring.
 api.nvim_create_autocmd('OptionSet', {
@@ -1181,13 +1206,18 @@ api.nvim_create_autocmd('OptionSet', {
     if ev.match == 'laststatus' and mirroring and tonumber(vim.v.option_new) ~= 3 then
       stop_mirroring()
     end
+    -- before the redraw that would show it; the window set is current
+    if ev.match == 'statusline' then hide_float_statusline(api.nvim_get_current_win()) end
     request_refit()
   end,
 })
 
 api.nvim_create_autocmd('WinClosed', {
   group = group,
-  callback = function(ev) copied[tonumber(ev.match)] = nil end,
+  callback = function(ev)
+    local win = tonumber(ev.match)
+    copied[win], hidden_stl[win] = nil, nil
+  end,
 })
 
 -- the current window and its statusline, last time we looked
@@ -1201,6 +1231,10 @@ api.nvim_create_autocmd('SafeState', {
     if mirroring and vim.go.laststatus < 2 then
       stop_mirroring()
       changed = true
+    end
+    -- set in an autocommand, which fires no OptionSet: the redraw comes after
+    if mirroring then
+      for _, win in ipairs(api.nvim_list_wins()) do hide_float_statusline(win) end
     end
     if mirroring then
       local cur = api.nvim_get_current_win()
