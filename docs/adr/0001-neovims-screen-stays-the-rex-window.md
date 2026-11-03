@@ -27,7 +27,8 @@ pane in the top right.
   and the result is padded with blanks to the screen's width. Tablines whose
   Lua reads `vim.o.columns` fit their own widths too, such as bufferline's;
   lualine's right-hand sections now fit, and only widths it computes from
-  `'columns'` (`max_length`) don't. The built-in tabline stays clipped.
+  `'columns'` (`max_length`) don't. The built-in tabline has no expression to
+  evaluate, so neorex draws it itself, fitted (ADR 0002).
 - `g:neorex_tabline_width` holds the tabline width while it's narrower than
   the screen, for tablines that want to fit themselves.
 - Every non-empty tabline is padded with blanks to the screen's width while
