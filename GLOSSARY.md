@@ -28,6 +28,10 @@ _Avoid_: editor, editor size, default grid
 Neovim's tab page.
 _Avoid_: tab (on its own)
 
+**Built-in tabline**:
+The tabline Neovim shows when `'tabline'` is empty: a label per tab page, then a close button.
+_Avoid_: default tabline, Neovim's own tabline
+
 ### neorex
 
 **Neovim pane**:
@@ -45,3 +49,7 @@ _Avoid_: top-row Neovim panes, Neovim region
 
 **Tabline width**:
 The tabline panes' columns, summed.
+
+**Fitted tabline**:
+Neovim's tabline drawn to end at the right edge of the tabline panes rather than of Neovim's screen.
+_Avoid_: narrowed tabline, shrunk tabline
