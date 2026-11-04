@@ -20,7 +20,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::daemon::{Daemon, Token};
+use super::daemon::{Daemon, StopReason, Token};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
 use super::pane::{self, Pane, RexBlock};
@@ -198,7 +198,8 @@ impl Drop for RemoveFiles {
 
 /// Neovim's process. As it drops, after the terminals are restored: SIGHUP
 /// makes Neovim save swap files and exit, and it's waited for. Not one that
-/// has already ended.
+/// has already ended, such as one that quit by itself and ended within the
+/// grace [`NvimChild::wait_for_exit`] gives it.
 ///
 /// A Neovim that doesn't end within `grace` of the SIGHUP is killed: one
 /// caught in a `system()` call, such as a clipboard read from an autocommand,
@@ -218,6 +219,22 @@ impl NvimChild {
             grace: NVIM_EXIT_GRACE,
         }
     }
+
+    /// Waits up to the grace for Neovim to end; whether it did. One that
+    /// closed its socket is exiting by itself: it closes the socket before it
+    /// deletes its swap files, so a SIGHUP in between keeps them.
+    fn wait_for_exit(&mut self) -> bool {
+        let deadline = Instant::now() + self.grace;
+        loop {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 impl Drop for NvimChild {
@@ -227,12 +244,8 @@ impl Drop for NvimChild {
         }
         // SAFETY: signalling our own child, which hasn't been reaped.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP) };
-        let deadline = Instant::now() + self.grace;
-        while Instant::now() < deadline {
-            if !matches!(self.child.try_wait(), Ok(None)) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        if self.wait_for_exit() {
+            return;
         }
         eprintln!("neorex daemon: Neovim didn't exit after SIGHUP; killing it");
         let _ = self.child.kill();
@@ -355,6 +368,12 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     let stop_reason = d.run(&server)?;
     eprintln!("neorex daemon: {}", stop_reason.tag_name());
+    if stop_reason == StopReason::NvimExited {
+        // panes first: Neovim may take a while to finish exiting
+        drop(d);
+        // one still running is sent SIGHUP as it drops
+        child.wait_for_exit();
+    }
     // a clean end needs no log
     let _ = fs::remove_file(&log);
     Ok(())
@@ -525,6 +544,37 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         // reaped: no such process
         assert_eq!(-1, unsafe { libc::kill(pid, 0) });
+    }
+
+    #[test]
+    fn a_neovim_exiting_by_itself_is_waited_for_not_sent_sighup() {
+        // Neovim closes its socket before it deletes its swap files: a SIGHUP
+        // in between keeps them. This one notes a SIGHUP, then ends itself.
+        let marker = std::env::temp_dir().join(format!("neorex-hup-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let script = format!(
+            "trap 'echo hup > {}; exit 1' HUP; echo ready; sleep 0.3",
+            marker.display()
+        );
+        let child = Command::new("sh")
+            .args(["-c", &script])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child = NvimChild {
+            child,
+            grace: Duration::from_secs(3),
+        };
+        let mut ready = [0u8; 6];
+        std::io::Read::read_exact(child.child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+        child.wait_for_exit();
+        drop(child);
+        let sent_sighup = marker.exists();
+        let _ = fs::remove_file(&marker);
+        assert!(
+            !sent_sighup,
+            "Neovim was sent SIGHUP while exiting by itself"
+        );
     }
 
     #[test]
