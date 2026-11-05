@@ -446,3 +446,117 @@ Use `--embed --headless` with a held stdin pipe:
   decision is that Neovim must outlive the daemon while changes are unsaved,
   don't use it; keep stdin null, and use the R1 probe (`modified = {}`) as the
   test for whether it is safe to let a daemon or Neovim go.
+
+## R4: `:detach` when the daemon is the `--embed` stdio UI
+
+Same setup as R3: `nvim --embed --headless --listen SOCK`, the daemon attached
+with `nvim_ui_attach` over stdio. Run on 0.12.6 with a Neovim parent
+(`jobstart(..., {rpc = true})`) as the embedder and a second client on the
+socket.
+
+**Answers**
+
+- `:detach` is not limited to remote TUIs, and it does not refuse. It
+  detaches the "current UI" and closes that UI's RPC channel, here the stdio
+  one, and **Neovim keeps running**, reachable only by `--listen`. Observed:
+  after `:detach` (typed with `nvim_input`) the embedder got `Invalid
+  channel` for further requests, `nvim_list_uis()` was empty, the process was
+  alive and a socket client still worked.
+- It does not run the exit path: no `ExitPre`, `VimLeavePre`, `QuitPre` or
+  swap preservation. Nothing is written. The only event is `UILeave`, and it
+  fires after the detach, so it can't veto it.
+- The "current UI" is the channel that last attached, gained focus
+  (`nvim_ui_set_focus(true)`) or sent input. So **any RPC client can trigger
+  it**: `nvim_command("detach")` from a socket client closed the daemon's
+  stdio channel (observed). `nvim_ui_detach` from the embedder itself only
+  detaches the UI and leaves the channel open (observed: `UILeave` fired, the
+  embedder's request still worked).
+- It can be blocked only for typed use, not by a user command: `:detach` is
+  built in and `:command! detach` is E183 (user commands start with an
+  uppercase letter; observed). `cnoreabbrev detach …` and a `CmdlineLeave`
+  autocommand setting `v:event.abort = v:true` both stopped a typed `:detach`
+  (the UI stayed attached; observed), but neither runs for
+  `nvim_command("detach")` from RPC, which detached as usual (observed). No
+  event runs before the detach.
+- Without a UI attached (a plain `--headless --listen`), `:detach` from a
+  client says "UI not attached" and does nothing (observed).
+- Consequence for the R3 pipe design: once the stdio channel is closed by
+  `:detach`, the stdin pipe no longer ties Neovim to the daemon; Neovim
+  outlives the daemon. The embedder gets a UI `error_exit` event, then EOF
+  (source: `api/ui.c:95-99`), which is the daemon's cue; re-attaching over the
+  socket was not tried (*unconfirmed*).
+
+**Source (0.12.6)**
+
+- `ex_detach` (`ex_docmd.c:6003-6063`): fails with "UI not attached" when
+  `current_ui` is 0 (`:6018-6021`); sets the channel's `detach` flag via
+  `nvim__chan_set_detach` (`:6028-6031`; `api/vim.c:1748-1764`, an internal
+  `nvim__` API any remote client can call); `remote_ui_disconnect(..., true)`
+  sends `error_exit` and removes the UI (`:6033-6037`; `api/ui.c:89-109`);
+  then `channel_close(chan->id, kChannelPartAll)` (`:6039-6044`).
+- `detach` stops the self-exit: `rpc_close_event` calls `exit_on_closed_chan`
+  for a stdio channel only `&& !channel->detach`
+  (`msgpack_rpc/channel.c:515`; `channel.h:34-36`: "Prevents self-exit on
+  channel-close").
+- `current_ui` is set in `nvim_ui_attach` (`api/ui.c:208`), `nvim_ui_set_focus`
+  (`:237`) and `input_enqueue` (`os/input.c:277`).
+- `:detach` is defined with `flags = TRLBAR`, no bang and no range
+  (`ex_cmds.lua:742-746`); the "bang (!) not supported yet" branch
+  (`ex_docmd.c:6011-6012`) is unreachable, and `detach!` gave E477 (observed).
+- `UILeave` runs from `ui_detach_impl` after the UI is removed
+  (`ui.c:415-451`, `autocmd.c:2683-2700`; `runtime/doc/autocmd.txt:1301-1305`).
+- **Master differs.** `:detach!` there sets `chan->detach = true` (Neovim
+  "will continue running if the UI disconnects") and `:%detach` detaches the
+  other UIs (`ex_docmd.c:5873-5917` at commit `893d90fc`; `ex_cmds.lua:756-760`).
+  So on master a user typing `:detach!` turns off the exit-on-pipe-close of R3
+  for the daemon's channel; 0.12.6 has the same switch only through
+  `nvim__chan_set_detach`. Not run on master.
+
+## R5: what `preserve_exit()` runs after the stdio channel closes
+
+The path: `rpc_close_event` → `exit_on_closed_chan(0)` → `exit_event` →
+`preserve_exit(NULL)` if not already exiting (`event/proc.c:417-441`), as in
+R3. Everything below is `main.c` at 0.12.6; master is the same, at
+`preserve_exit` `:910-960`. Run: embedder SIGKILLed; Neovim with `-u NONE -i
+x.shada`, two files (one modified over RPC), a `:terminal` job, and
+autocommands logging events.
+
+In order:
+
+1. `errmsg` is NULL, so nothing is printed (`main.c:907-910`). Further
+   SIGHUPs are ignored, `signal_reject_deadly()` (`:901`).
+2. **`ml_close_notmod()`** (`main.c:915`): for each buffer that isn't
+   `bufIsChanged`, `ml_close(buf, true)`: the memfile is closed and **its swap
+   file deleted** (`memline.c:601-608`, `:567-580`). That includes `terminal`
+   buffers, which are never "changed". Run: the unmodified file's swap was
+   gone, the modified one's kept.
+3. **`ml_sync_all(false, false, true)`** (`main.c:917-923`, `memline.c:1729-1759`):
+   only if some buffer still has a swap file; flushes and fsyncs the changed
+   buffers' swap files. This is what keeps the unsaved text.
+4. **`ml_close_all(false)`** (`main.c:927`, `memline.c:590-597`): closes the
+   remaining memfiles *without deleting*, and removes the temp directory.
+   This sets every buffer's `ml_mfp` to NULL (`memline.c:579`).
+5. **`getout(1)`** (`main.c:933`; `:747-880`), with `v:dying` 0 so the
+   `v_dying <= 1` blocks run:
+   - `BufWinLeave` for each buffer shown in a window, once per buffer
+     (`:776-802`). Observed.
+   - `BufUnload` loop (`:804-815`) only for buffers whose `ml_mfp` is not NULL.
+     Step 4 cleared them all, so **`BufUnload` does not fire** (observed:
+     absent).
+   - `VimLeavePre` (`:817-828`), then **ShaDa is written**
+     (`shada_write_file`, `:830-836`) if 'shada' is set; observed: the file was
+     written and held a register set before the kill. Then `VimLeave`
+     (`:839-849`). Both observed.
+   - `ExitPre` and `QuitPre` are not run (they belong to `:quit`/`:qall`);
+     observed absent. `v:exiting` is set to 1.
+   - `os_exit(1)` (`:717-733`; `:731` calls `ml_close_all(true)`, a no-op now
+     that every memfile is closed) then `event_teardown` (`:171-189`).
+6. **Jobs are stopped last**, in `event_teardown`: `proc_teardown` stops
+   ordinary children, and for pty (`:terminal`) jobs closes the handles so the
+   pty hangs the child up (`event/proc.c:131-147`). Observed: the `sleep` was
+   gone, and `TermClose` fired after `VimLeave`.
+
+So the saved state is: modified buffers' swap files (recover with `:recover`),
+ShaDa, and nothing for unmodified buffers (their swap files are deleted, which
+is correct: the file on disk is current). Unsaved changes in a terminal or
+`nofile` buffer are not preserved. The exit status is 1.
