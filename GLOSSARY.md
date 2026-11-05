@@ -34,11 +34,48 @@ _Avoid_: default tabline, Neovim's own tabline
 
 ### neorex
 
+**Daemon**:
+What a user starts, attaches terminals to, lists and kills: one Neovim, run in the background, showing its windows in the Neovim panes attached to it. A user may run several.
+_Avoid_: session (Rex's, tmux's and `:mksession`'s), server (Neovim's `--listen`), instance, workspace
+
+**Daemon name**:
+What a daemon is found by: unique among a user's running daemons, and by default the name of the directory it was started in.
+_Avoid_: session name
+
+**Daemon address**:
+Where a daemon takes attaches: a Unix socket path, or a named pipe on Windows. Passed whole, never taken apart.
+_Avoid_: socket, socket path
+
+**Unattached daemon**:
+A daemon with no Neovim pane attached or on its way, whether it hasn't had one yet or its last pane went.
+_Avoid_: detached daemon (kept for a deliberate detach), headless, orphan, paneless
+
+**First attach**:
+The attach that takes a daemon from unattached to attached: the one `neorex` makes when it starts a daemon, or the first after its last pane went.
+_Avoid_: initial attach
+
+**Unsaved changes**:
+A buffer `:qa` would refuse to quit over: modified and writable. A running `:terminal` job is never one.
+_Avoid_: modified buffer, dirty buffer
+
 **Neovim pane**:
-A Rex pane neorex runs: a window pane or a floating pane.
+A terminal neorex shows Neovim in, attached to it: one a terminal provider made (a Rex or tmux pane, a Ghostty window), or any terminal attached by hand. A window pane or a floating pane.
+_Avoid_: client, UI (panes don't attach as Neovim UIs)
+
+**Requested pane**:
+A Neovim pane the daemon asked the terminal provider for, for a window or a float group.
+_Avoid_: provided pane
+
+**Self-attached pane**:
+A Neovim pane whose terminal attached without being asked for, such as the one `neorex` was run in. The layout provider may still know it, as Rex knows the pane `neorex` was run in.
+_Avoid_: unasked pane, manual pane, launcher pane, adopted pane
+
+**Unshown window**:
+A Neovim window no Neovim pane shows and no pane is on its way for.
+_Avoid_: hidden window, paneless window, detached window
 
 **Window pane**:
-A tiled Neovim pane showing one Neovim window.
+A Neovim pane showing one Neovim window.
 
 **Floating pane**:
 A Neovim pane in a Rex floating pane, showing a group of Neovim floats or a tab page's windows.
@@ -57,3 +94,17 @@ _Avoid_: narrowed tabline, shrunk tabline
 **Home tab page**:
 The tab page a window belongs to: the one it was opened in, or for a split, its origin window's. Not where Neovim keeps it: an external window sits in whichever tab page is current.
 _Avoid_: owning tab, the window's tab page
+
+### Pane providers
+
+**Pane provider**:
+What gives neorex Neovim panes beyond those that attach themselves: a terminal provider, with an optional layout provider to place them. Rex is both in one; Ghostty with AeroSpace is the two apart.
+_Avoid_: frontend (Neovim's word for the UI, which neorex is), host, backend, driver
+
+**Terminal provider**:
+What makes a new terminal that attaches to neorex when neorex asks for one, as Ghostty opens a window, or Rex or tmux a pane. Without one, every Neovim pane is a self-attached pane.
+_Avoid_: window provider (clashes with Rex window and Neovim window), terminal emulator (tmux makes terminals inside one)
+
+**Layout provider**:
+What places Neovim panes' terminals, beside one another as a split does or floating over them, and focuses, moves and resizes them: AeroSpace, or Rex and tmux for their own panes.
+_Avoid_: split provider, window manager (AeroSpace is one; Rex and tmux aren't)
