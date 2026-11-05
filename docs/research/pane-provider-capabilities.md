@@ -150,15 +150,13 @@ Confirmed.
 - Logic: `Surface.childExited` (`src/Surface.zig:1299-1330`):
   `runtime_ms <= threshold` -> (non-Darwin: exit code 0 is "good", skip) ->
   show the abnormal message and return (surface stays open). **On macOS exit
-  code 0 does not help**: a fast command is abnormal regardless. Note `<=`, so
-  `0` only suppresses it for runtime of 0 ms exactly... Caution: with
-  threshold 0, `runtime_ms <= 0` is still true if the measured runtime is 0 ms;
-  use a threshold the child can't meet, but `0` is the intended minimum;
-  verify empirically (unconfirmed: whether runtime_ms can truncate to 0).
-- A slower exit (> threshold) still shows "Process exited. Press any key to
-  close the terminal." unless `wait-after-command` is false... per
-  `Surface.zig:1334-1360` the message is printed, and closing follows if
-  `wait-after-command` is false (`Config.zig:1348-1352`, default false).
+  code 0 does not help**: a fast command is abnormal regardless. The comparison
+  is `<=` on whole milliseconds (`src/termio/Exec.zig:279-283`), so `=0` only
+  disables it in practice (a process lives >= 1 ms; a 0 ms runtime would still
+  match). Tested: no (not run, to avoid opening windows).
+- Otherwise (runtime above the threshold) Ghostty prints "Process exited."
+  and closes the surface immediately unless `wait-after-command` is true (default
+  false) (`Surface.zig:1334-1372`; `Config.zig:1348-1352`).
 - CLI: `help.zig:57-59` and `main_ghostty.zig:86-87` document `open -na
   Ghostty.app --args --foo=bar` for macOS. `-e` sets `initial-command`, forces
   `quit-after-last-window-closed=true`, `gtk-single-instance=false`, and
