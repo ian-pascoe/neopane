@@ -90,3 +90,60 @@ Takeaway: `nmux`, `nvimux`, `neomux`, `neoplex`, `nvimd` are all used by prior p
 - search.nixos.org and GitHub code search for nixpkgs; Ubuntu file-contents search.
 - Trademark registries; general web search for products named like these.
 - Bare crates.io API was queried with a custom User-Agent; availability could differ for reserved or yanked names (a 404 means no crate by that name).
+
+---
+
+# Follow-up: oriel (primary), dormer, transom (backups)
+
+Checked 2026-11-05, same methods and endpoints as above (crates.io API with owner endpoints; Homebrew formula/cask JSON; Debian/Ubuntu name and Debian contents search; Arch and AUR RPC; nixpkgs `pkgs/by-name`; MacPorts API; Repology; npm; PyPI; GitHub search/users API; awesome-neovim README).
+
+| Check | **oriel** | dormer | transom |
+|---|---|---|---|
+| crates.io | **TAKEN** (placeholder, see below) | free (404) | free (404) |
+| Homebrew formula / cask | free / free | free / free | free / free |
+| Debian / Ubuntu (names; Debian `bin/` contents) | free | free | free |
+| Arch official / AUR | free / free | free / free | free / AUR substring only (`r-transomics2cytoscape`, not the name) |
+| nixpkgs by-name / MacPorts / Repology | free / free / no project | free / free / no project | free / free / no project |
+| npm | name was published then **fully unpublished** 2026-06-21 (registry returns no versions); currently unusable-looking but not clearly held | free (404) | **TAKEN**: `transom` 0.1.0 (2026-10), "A calm Postgres viewer in your browser", ships a CLI (`bin: transom`) |
+| PyPI | **TAKEN**: `oriel` 0.1.0 (jw-y, "Turn any folder of Markdown into a beautiful website", last upload 2026-07-21) | **TAKEN**: `dormer` 0.2, "save/restore i3 workspace->output mappings" (palfrey/dormer) | **TAKEN**: `transom` 0.0.1 (empty summary) |
+| GitHub user/org login | taken: `oriel` (person "Oriel Frigo", since 2008, 6 repos) | taken: `dormer` (user since 2011, 1 repo) | taken: `Transom` (since 2013, 5 repos) |
+| GitHub repos named exactly | ~90 repos, mostly 0-3★ and mostly 2026 (see below) | ~8, all 0★ | ~30, 0-5★ |
+| awesome-neovim | no match | no match | no match |
+| dotfyle | unchecked | unchecked | unchecked |
+
+## oriel
+
+- **crates.io: taken.** `oriel` 0.0.0, a single version published 2026-10-23, 10 downloads, owner user `nexxeln`, description "A desktop UI framework for Rust, built for deterministic testing and agent-driven verification. Early development.", no repository link. It looks like a name reservation for an early project; no activity since. Owner-transfer requests are possible on crates.io but are not guaranteed. Source: https://crates.io/api/v1/crates/oriel and `/owner_user`. No public GitHub repo for it under `nexxeln` was found.
+- **PyPI taken, npm formerly published/now unpublished**, see table. A neorex binary would not need these, but `pip`/`npm` users could be confused.
+- **GitHub:** many unrelated, mostly brand-new, repos named `oriel`. The most starred: wojciech-graj/oriel 57★ (interpreter for the 1991 Oriel scripting language, last push 2023-11-19). Several are desktop/terminal-adjacent and current, so the name is crowded:
+  - domus-apps/oriel, 4★, 2026-10: keyboard-driven window manager for macOS
+  - ParadoxInfinite/oriel, 9★, 2026-09: local GUI for Colima/Docker and MCP server
+  - Irfanwani/oriel, 2★, 2026-11: macOS auto-tiling desktop
+  - eymardfreire/oriel, 0★: "A terminal desk for markets, news, weather, and sports"
+  - FruitieX/oriel, 0★: low-latency remote desktop in Rust
+  - highercomve/Oriel, 1★: desktop and mobile apps in Zig
+  Source: `https://api.github.com/search/repositories?q=oriel+in:name`.
+- **Search for "oriel neovim" / "oriel terminal":** no Neovim or terminal-multiplexer project called oriel found. A repo search of `oriel` with `terminal`/`neovim`/`nvim` returned only the repos above and "O'Reilly" misspellings ("Orielly"). General web search for "oriel neovim terminal" returned only generic Neovim terminal-multiplexer articles, none naming oriel.
+- **Notable products/trademarks:**
+  - **Oriel**, a 1991 graphical scripting language for Windows 3.x from the LeBlond Group's Power Tools books, with a Wikipedia page: https://en.wikipedia.org/wiki/Oriel_(scripting_language). Historical; a Rust interpreter exists (wojciech-graj/oriel).
+  - ORIEL registered trademarks exist in unrelated fields: Newport Corporation (US serial 75927079, registered 2002; optics, lasers by field of use) https://www.trademarkia.com/oriel-75927079 ; Oriel Ventures (Cyprus) Limited (US reg. 5189059, 2017) https://trademarks.justia.com/867/65/oriel-86765588.html ; a VIBE INC. EU filing 019259661. I did not read the goods/services classes in detail and did not search the Class 9/42 software register: **trademark clearance for software is unchecked**.
+  - "oriel" is also an architectural term (a bay window), which fits the pane/window theme and also means plenty of non-software search noise.
+- **Neovim policy:** the name contains no "nvim"/"neovim", so the Q2 findings do not apply.
+
+## dormer
+
+- crates.io, npm, Homebrew, distros: free.
+- PyPI `dormer` 0.2 is palfrey's i3 workspace-to-output saver (GitHub palfrey/dormer, 0★, 2025-08), a window-manager utility, adjacent in spirit but tiny.
+- GitHub: ~8 repos named `dormer`, all 0★ (e.g. bytes2bit/dormer, a Linux/Wayland living wallpaper, 2026-10). User `dormer` taken (since 2011). Also small "Dormer" (olajowon/dormer-*) repos.
+- No awesome-neovim match; no notable product or trademark found (not searched in registries).
+
+## transom
+
+- crates.io, Homebrew, distros: free.
+- npm `transom` is taken by a Postgres viewer with a CLI of the same name (0.1.0, 2026-10). Also npm `transomjs/transom-core` (10★, low-code REST API framework, 2025-11) and PyPI `transom` 0.0.1.
+- GitHub: ~30 repos named `transom`, mostly 0-5★ and current (2026), several macOS/desktop window tools (aydinmrnv/transom, remote app windows macOS to Windows, 5★; domus-apps/transom, macOS brightness; darvid/transom, macOS browser-profile manager; mangerle/transom, Rust desktop app, 0★). Org `Transom` taken (since 2013, 5 repos). Search noise from TransOMCS and "transomics".
+- Product note: the Vornado Transom is a fan (Home Assistant integration repo exists). No trademark search done.
+
+## Summary
+
+Cleanest of the three for registries is **dormer** (crates.io, npm, all distros free), then **oriel** (but crates.io `oriel` is reserved by nexxeln, and PyPI is taken). **transom** loses on npm (CLI of the same name). On GitHub, `oriel` is the most crowded name by far (~90 repos, several in the macOS window/terminal space). Unchecked for all three: dotfyle, trademark registers beyond the hits above, search.nixos.org, Ubuntu contents search.
