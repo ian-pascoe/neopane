@@ -1,6 +1,6 @@
 # neorex
 
-neorex shows one Neovim's windows as panes of Rex, a terminal with tiled and floating panes.
+neorex runs Neovim in the background and shows its windows in the terminals attached to it, which a pane provider, such as Rex, can open and place.
 
 ## Language
 

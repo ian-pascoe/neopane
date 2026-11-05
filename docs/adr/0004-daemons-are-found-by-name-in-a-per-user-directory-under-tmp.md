@@ -10,6 +10,9 @@ launch, and deliberately ignores the XDG advice to put sockets in
 processes, a daemon attached to tmux over ssh among them, live on. tmux makes
 the same choice.
 
+`<name>` and `<NAME>` stand for the tool's name, one constant everywhere:
+neorex until the rename, then `neopane` (ADR 0005).
+
 ## Considered Options
 
 - **Random directories plus an index file.** Two records to keep in step,
@@ -46,5 +49,6 @@ the same choice.
   requested pane's command line, `$<NAME>`, `--address`), so on Windows it can
   be a named pipe. Requested pane ids carry a per-daemon token, since names
   are reused.
-- The layout is a contract across versions: a running daemon keeps the binary
-  it started with, and a newer `<name>` must still find it.
+- From the first tagged release on, the layout is a contract across versions:
+  a running daemon keeps the binary it started with, and a newer `<name>` must
+  still find it.
