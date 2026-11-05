@@ -131,9 +131,8 @@ docs/source were read. Items marked **unconfirmed** have no primary source.
 - `move [--window-id] left|down|up|right`, `swap [--window-id] <dir>|dfs-next|dfs-prev`,
   `move-node-to-workspace [--window-id] NAME`, `layout [--window-id] h_tiles|v_tiles|h_accordion|v_accordion|floating|tiling`,
   `close [--window-id]`, `resize [--window-id] smart|smart-opposite|width|height [+|-]N`
-  (absolute if no sign) (all `--help`, `AS docs/aerospace-*.adoc`). Resize is in
-  pixels/points as AeroSpace defines it; **unconfirmed** whether it maps to
-  terminal cells (it does not: the docs give no cell conversion).
+  (absolute if no sign) (all `--help`, `AS docs/aerospace-*.adoc`). The docs give no unit or cell conversion
+  for resize, so sizing a pane to N terminal cells is **unconfirmed**.
 - `aerospace flatten-workspace-tree`, `balance-sizes` reset layout.
 
 ## Reading the layout
