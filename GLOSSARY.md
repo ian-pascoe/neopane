@@ -70,6 +70,17 @@ _Avoid_: provided pane
 A Neovim pane whose terminal attached without being asked for, such as the one `neorex` was run in. The layout provider may still know it, as Rex knows the pane `neorex` was run in.
 _Avoid_: unasked pane, manual pane, launcher pane, adopted pane
 
+**Pane id**:
+The daemon's name for a Neovim pane, given to a requested pane before its terminal exists.
+_Avoid_: terminal id, block id
+
+**Origin pane**:
+The Neovim pane showing the window a new window came from: the one its terminal is placed beside, and the one it's drawn in when no terminal can be had.
+_Avoid_: anchor (the anchor windows are Neovim's), source pane
+
+**Unplaced pane**:
+A requested pane left wherever its terminal provider puts new terminals, because nothing could place it beside its origin pane.
+
 **Unshown window**:
 A Neovim window no Neovim pane shows and no pane is on its way for.
 _Avoid_: hidden window, paneless window, detached window
@@ -106,5 +117,25 @@ What makes a new terminal that attaches to neorex when neorex asks for one, as G
 _Avoid_: window provider (clashes with Rex window and Neovim window), terminal emulator (tmux makes terminals inside one)
 
 **Layout provider**:
-What places Neovim panes' terminals, beside one another as a split does or floating over them, and focuses, moves and resizes them: AeroSpace, or Rex and tmux for their own panes.
+What finds, places, focuses, moves and resizes Neovim panes' terminals, beside one another as a split does or floating over them: AeroSpace, or Rex and tmux for their own panes.
 _Avoid_: split provider, window manager (AeroSpace is one; Rex and tmux aren't)
+
+**Capability**:
+Something a pane provider can do when the daemon asks, such as open, find or focus a terminal. Opening a terminal is the only one every pane provider has.
+_Avoid_: feature (a terminal's), operation, command
+
+**Terminal id**:
+A pane provider's own name for a terminal: a Rex block id, a tmux pane id, an AeroSpace window id.
+_Avoid_: handle, block, window id, pane id
+
+**Reach**:
+The terminals a pane provider counts as its own: those it made, the one whose attach chose it, and the self-attached ones its layout provider finds, or every one if it can't find any. A window opened from a pane out of reach is drawn in that pane.
+_Avoid_: scope, context, session
+
+**Live layout**:
+Where a layout provider's terminals sit and which share an area, as it reports them when asked.
+_Avoid_: view (Rex's), snapshot
+
+**Terminal feature**:
+Something a terminal supports that Neovim can use, such as the kitty keyboard protocol, undercurl or focus reports.
+_Avoid_: capability (a pane provider's)
