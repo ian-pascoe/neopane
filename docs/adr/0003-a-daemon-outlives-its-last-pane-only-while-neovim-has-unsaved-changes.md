@@ -47,8 +47,9 @@ unless it holds work nobody threw away.
   sends Neovim SIGHUP. `windows.lua` refuses a typed `:detach`, but a
   plugin's `vim.cmd('detach')` gets past that, so the SIGHUP rule isn't
   redundant with it.
-- The pane provider is chosen at each first attach, from that attach's
-  context, so a resumed daemon never opens windows where nobody is looking.
+- A daemon that goes unattached drops its pane provider, and the next
+  self-attach chooses again from its own context (ADR 0007), so a resumed
+  daemon never opens windows where nobody is looking.
 
 Research: `docs/research/daemon-lifetime.md` on branch
 `research/daemon-lifetime`.

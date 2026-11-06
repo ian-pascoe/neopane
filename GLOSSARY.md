@@ -67,7 +67,7 @@ A Neovim pane the daemon asked the terminal provider for, for a window or a floa
 _Avoid_: provided pane
 
 **Self-attached pane**:
-A Neovim pane whose terminal attached without being asked for, such as the one `neorex` was run in. The layout provider may still know it, as Rex knows the pane `neorex` was run in.
+A Neovim pane whose terminal attached without being asked for, such as the one `neorex` was run in. The layout provider may still find it, as Rex finds the pane `neorex` was run in. A pane provider is only ever chosen for a self-attach.
 _Avoid_: unasked pane, manual pane, launcher pane, adopted pane
 
 **Pane id**:
@@ -109,28 +109,48 @@ _Avoid_: owning tab, the window's tab page
 ### Pane providers
 
 **Pane provider**:
-What gives neorex Neovim panes beyond those that attach themselves: a terminal provider, with an optional layout provider to place them. Rex is both in one; Ghostty with AeroSpace is the two apart.
+What gives neorex Neovim panes beyond those that attach themselves, or places and focuses the terminals in its reach: a terminal provider, a layout provider, or both, either in one, as Rex is, or paired, as Ghostty with AeroSpace. A daemon has at most one at a time, chosen for a self-attach by the user's config and kept while a terminal in its reach is attached.
 _Avoid_: frontend (Neovim's word for the UI, which neorex is), host, backend, driver
 
 **Terminal provider**:
-What makes a new terminal that attaches to neorex when neorex asks for one, as Ghostty opens a window, or Rex or tmux a pane. Without one, every Neovim pane is a self-attached pane.
+What makes a new terminal that attaches to neorex when neorex asks for one, as Ghostty opens a window, or Rex or tmux a pane. One that is only a terminal provider can be paired with any layout provider. Without one, every Neovim pane is a self-attached pane.
 _Avoid_: window provider (clashes with Rex window and Neovim window), terminal emulator (tmux makes terminals inside one)
 
 **Layout provider**:
-What finds, places, focuses, moves and resizes Neovim panes' terminals, beside one another as a split does or floating over them: AeroSpace, or Rex and tmux for their own panes.
+What finds, places, focuses, moves and resizes Neovim panes' terminals, beside one another as a split does or floating over them: AeroSpace, or Rex and tmux for their own panes. One that is only a layout provider can be paired with any terminal provider; without a terminal provider, it acts only on self-attached panes.
 _Avoid_: split provider, window manager (AeroSpace is one; Rex and tmux aren't)
 
+**Built-in provider**:
+A terminal provider, layout provider or pane provider that comes with neorex, known by its name, such as `rex`. Rex's runs inside neorex and is never paired; later ones are written as a user would write theirs, to use as they are or copy and change.
+_Avoid_: default provider, bundled provider
+
+**Config**:
+The user's own Lua file that sets up terminal and layout providers and says, for a self-attach, which pane provider to use. Neovim never reads it.
+_Avoid_: Neovim's config, init.lua (Neovim's), rc
+
 **Capability**:
-Something a pane provider can do when the daemon asks, such as open, find or focus a terminal. Opening a terminal is the only one every pane provider has.
+Something a pane provider can do when the daemon asks, such as open, find or focus a terminal. Each is optional: without one, that act falls back as if there were no pane provider.
 _Avoid_: feature (a terminal's), operation, command
 
 **Terminal id**:
-A pane provider's own name for a terminal: a Rex block id, a tmux pane id, an AeroSpace window id.
+A terminal provider's or layout provider's own name for a terminal: a Rex block id, a tmux pane id, an AeroSpace window id. A terminal from a paired pane provider has one from each.
 _Avoid_: handle, block, window id, pane id
 
+**Pane title**:
+A marker neorex puts in a Neovim pane's terminal title, unique to the pane, so a layout provider such as AeroSpace can find the terminal when it attaches.
+_Avoid_: window title (Neovim's `'titlestring'`), tab title
+
 **Reach**:
-The terminals a pane provider counts as its own: those it made, the one whose attach chose it, and the self-attached ones its layout provider finds, or every one if it can't find any. A window opened from a pane out of reach is drawn in that pane.
-_Avoid_: scope, context, session
+The terminals a pane provider counts as its own: those it made, its choosing attach's, and the self-attached ones from the choosing attach's context that its layout provider finds, if it can find any. A window opened from a pane out of reach is drawn in that pane.
+_Avoid_: scope, session
+
+**Attach context**:
+Where an attach comes from, as its environment shows: the terminal app, tmux server or Rex session its terminal runs in. A pane provider is chosen in one and runs its commands in it.
+_Avoid_: session (Rex's, tmux's), environment (the variables, not where they point)
+
+**Choosing attach**:
+The self-attach the daemon's pane provider was chosen for. The config sees its environment, and the pane provider's commands run in it, even after its pane has gone.
+_Avoid_: chooser, launcher, first attach (often the same attach, but not always)
 
 **Live layout**:
 Where a layout provider's terminals sit and which share an area, as it reports them when asked.
