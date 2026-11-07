@@ -11,7 +11,7 @@ The layout area of the current Rex tab: the space its tiled panes share, with Re
 _Avoid_: the window, terminal window
 
 **Rex floating pane**:
-A pane Rex floats over a Rex window, outside its tiling. It holds a float group pane, or a tab page's window panes.
+A pane Rex floats over a Rex window, outside its tiling. It holds a float group pane, or a tab page area's window panes, which float within the Rex window's layout area.
 _Avoid_: floating pane (on its own)
 
 **Rex tab**:
@@ -86,11 +86,11 @@ _Avoid_: anchor (the anchor windows are Neovim's), source pane
 A requested pane left wherever its terminal provider puts new terminals, because nothing could place it beside its origin pane.
 
 **Unshown window**:
-A Neovim window no Neovim pane shows and no pane is on its way for.
+A Neovim window no Neovim pane holds and no pane is on its way for, such as one of a tab page from `-p` not yet visited. A window in a pane's layout for a tab page that pane isn't showing is held, not unshown.
 _Avoid_: hidden window, paneless window, detached window
 
 **Layout area**:
-The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, out of the pane provider's reach, or not in the live layout is a layout area of its own.
+The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, out of the pane provider's reach, or not in the live layout is a layout area of its own. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's.
 _Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
 
 **Foreign pane**:
@@ -98,14 +98,14 @@ A terminal in a layout area that isn't a Neovim pane, such as a shell or an agen
 _Avoid_: shell pane, non-Neovim pane
 
 **Current pane**:
-The window pane showing Neovim's current window, or, while a float is current, the window pane last current before it. Neovim's screen is the size of its layout area. Only the current pane shows the command line, messages and screen floats, except float groups with no float group pane, which stay in the pane they were last current in.
+The window pane showing Neovim's current window, or, while a float is current, the window pane last current before it. Neovim's current tab page is its window's home tab page, and Neovim's screen is the size of its layout area. Only the current pane shows the command line, messages and screen floats, except float groups with no float group pane, which stay in the pane they were last current in.
 _Avoid_: focused pane (focus is the terminal's or the window manager's, and may be elsewhere), active pane
 
 **Window pane**:
-A Neovim pane showing Neovim windows: one, or several laid out as Neovim lays out splits when windows opened from it had no terminal of their own. It also draws any float group with no float group pane that was last current in it.
+A Neovim pane showing Neovim windows: one, or several laid out as Neovim lays out splits when windows opened from it had no terminal of their own. Holding windows of several tab pages, it shows one tab page's at a time: that of the window last current in it. It also draws any float group with no float group pane that was last current in it, while that group's tab page is current.
 
 **Pane layout**:
-How the windows a window pane shows share it, side by side or one above another, as Neovim lays out splits. Each window pane has its own; Neovim's own layout of a tab page never holds them.
+How a window pane's windows of one tab page share it, side by side or one above another, as Neovim lays out splits. Each window pane has one for each tab page whose windows it holds; Neovim's own layout of a tab page never holds them.
 _Avoid_: split layout, window layout (Neovim's `winlayout()`), tiling
 
 **Float group**:
@@ -120,7 +120,7 @@ A Neovim pane showing one float group and nothing else of Neovim, in a floating 
 _Avoid_: floating pane (Rex's and tmux's word for any floated pane), layer, popup
 
 **Tabline panes**:
-The window panes along the top of a layout area, which between them show Neovim's tabline, left to right. A window pane that is its own layout area is one.
+The window panes along the top of a layout area, which between them show Neovim's tabline, left to right, whatever tab page each shows. A window pane that is its own layout area is one; a window pane in a floating terminal never is.
 _Avoid_: top-row Neovim panes, Neovim region
 
 **Tabline width**:
@@ -131,8 +131,12 @@ Neovim's tabline drawn to end at the right edge of the tabline panes of the curr
 _Avoid_: narrowed tabline, shrunk tabline
 
 **Home tab page**:
-The tab page a window belongs to: the one it was opened in, or for a split, its origin window's. Not where Neovim keeps it: an external window sits in whichever tab page is current.
+The tab page a window belongs to: the one it was opened in, or for a split, its origin window's. Not where Neovim keeps it: an external window sits in whichever tab page is current. Neovim's current tab page is always the current window's home tab page. A float group with a float group pane belongs to the tab page it opened in, though Neovim keeps it in the current one.
 _Avoid_: owning tab, the window's tab page
+
+**Tab page area**:
+Where `open-tab-page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
+_Avoid_: tab layer, floating tab page, tab (on its own)
 
 ### Pane providers
 

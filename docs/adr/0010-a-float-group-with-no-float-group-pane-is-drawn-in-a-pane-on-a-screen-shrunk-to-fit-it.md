@@ -1,5 +1,11 @@
 # A float group with no float group pane is drawn in a pane, on a screen shrunk to fit it
 
+Amended by ADR 0011 before implementation: a float group with a float group
+pane moves into whichever tab page is current; one drawn in a pane is hidden
+while its tab page isn't current. Amended by ADR 0012: `<NAME>_KIND` also
+takes `tab-page`, with `place-tab-page`; whichever of the two comes first
+brings it.
+
 Only Rex makes floating panes today, and an entered float group goes to one
 (#89). Other pane providers may have none, such as tmux before 3.8, herdr and
 AeroSpace with Ghostty, and any request may fail. Since ADR 0008 Neovim's

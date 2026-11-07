@@ -1,10 +1,15 @@
 # neorex, not Neovim, lays out the windows a pane shows
 
+Amended by ADR 0012 before implementation: a window pane keeps a pane layout
+for each tab page whose windows it holds and shows one at a time; a tab page
+that came into a pane showing another stays whole in it.
+
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
 provider, when `open` fails or no attach comes in time, for an origin out of
-reach, and for a window opened without being entered when the daemon can't
-focus the current window's terminal again. Neovim's own layout of a tab page
+reach, for a window opened without being entered when the daemon can't
+focus the current window's terminal again, and for a later window of a tab
+page drawn in a pane over another (ADR 0012). Neovim's own layout of a tab page
 serves one screen, and panes in separate terminals each need their own. So
 every window a pane shows stays external, and each window pane keeps its own
 pane layout: rows and columns of its windows, which neorex splits, closes,
@@ -72,14 +77,18 @@ resizes and draws as Neovim would.
 - When a pane's terminal resizes, its windows keep their shares of it.
   Windows at their floor stay there, and get their earlier shares back when
   the pane grows.
-- Windows opened at startup with `-o` or `-O` are laid out as Neovim had
-  them.
+- Windows of the current tab page at the first attach, such as those `-o`
+  or `-O` open, are laid out as Neovim had them; other tab pages, as from
+  `-p`, get their place when first current (ADR 0012).
 - A window waits for its requested terminal for the terminal provider's
   attach timeout (ADR 0007), 5 s by default from `open` finishing, Rex's
   included. Then it is drawn in its origin pane, with a warning. A terminal
   that attaches after that is closed.
-- A pane ends when its last window closes: a requested terminal is closed, a
-  self-attached one goes back to its shell. Its terminal hanging up closes
-  every window it shows (#83). Windows drawn in a pane stay there when a pane
-  provider appears later (ADR 0007). Moving one into a terminal of its own,
-  and which tab page's windows a pane lays out (#90), are decided elsewhere.
+- A pane ends when its last window closes, whichever tab page it's in: a
+  requested terminal is closed, a self-attached one goes back to its shell.
+  Its terminal hanging up closes every window it holds, shown or not (#83).
+  Windows drawn in a pane stay there when a pane provider appears later (ADR
+  0007). Moving one into a terminal of its own is decided elsewhere.
+- A pane keeps a pane layout for each tab page whose windows it holds and
+  shows one at a time, that of the window last current in it, so the current
+  pane shows Neovim's current tab page (ADRs 0011, 0012).

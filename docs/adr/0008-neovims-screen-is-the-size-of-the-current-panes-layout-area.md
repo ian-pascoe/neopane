@@ -7,6 +7,12 @@ and too big for the current pane, Neovim's screen is the current pane's own
 size. A float group pane's bounds are always measured from the current pane.
 "Floating pane" below now reads float group pane.
 
+Amended by ADR 0012 before implementation: a tab page area that is a layout
+area of its own, such as a tmux window, has its own tabline panes; a window
+pane in a floating terminal, such as one in a tab page's Rex floating pane,
+is never a tabline pane. By ADR 0011, the current pane's window's home tab
+page is always Neovim's current tab page.
+
 Panes need not share a window any more: a terminal provider alone opens
 separate terminal windows, on different monitors and at different cell sizes,
 and a pane out of the pane provider's reach shares nothing with the rest
@@ -64,9 +70,11 @@ is the one size at which all of them are seen.
   terminal that sends no focus reports becomes current at its first key or
   click.
 - The window panes along the top of each area are its tabline panes, so a
-  pane that is its own area always is one. That depends only on the pane's
-  own area, never on which pane is current, so no window gains or loses a row
-  when focus moves. The tabline is laid out and fitted (ADR 0002) to the
+  pane that is its own area always is one. A window pane in a floating
+  terminal, such as one in a tab page's Rex floating pane, never is: its
+  area's tabline shows above it. That depends only on the pane's own area,
+  never on which pane is current or which tab page it shows, so no window
+  gains or loses a row when focus moves or a tab page changes. The tabline is laid out and fitted (ADR 0002) to the
   current pane's area, and `g:neorex_tabline_width` follows it. Panes in
   other areas show the same row from its start, cut at their width or blank
   past it.

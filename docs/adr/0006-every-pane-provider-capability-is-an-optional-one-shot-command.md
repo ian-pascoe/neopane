@@ -12,6 +12,12 @@ group is drawn in a pane, and there is no two-step float. A layout-side
 `place-float`, and `<NAME>_KIND` for `open`, are recorded there as the form
 they take once a pane provider needs them.
 
+Amended by ADR 0012 before implementation: `open-tab-page` gives a tab page
+a tab page area, from a pane provider returned whole; without it a tab page
+is drawn in the pane it opened in. A layout-side `place-tab-page`, and
+`tab-page` for `<NAME>_KIND`, are recorded there alongside ADR 0010's
+`place-float`.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -20,8 +26,9 @@ process. No capability is required: `open`, which opens a terminal running the
 attach command it is given, is what makes a pane provider a terminal provider,
 and one without it only places and focuses terminals attached by hand (#87).
 When a capability is missing or fails, that one act falls back as if there
-were no pane provider: the window is drawn in its origin pane, its terminal is
-left unplaced, or the next key switches focus back.
+were no pane provider: the window is drawn in its origin pane, a tab page in
+the pane it opened in, its terminal is left unplaced, or the next key
+switches focus back.
 
 ## Considered Options
 
@@ -46,12 +53,18 @@ left unplaced, or the next key switches focus back.
 
 - The capabilities are `open` and `close`, the terminal provider's; `find`,
   `place-beside`, `resize`, `focus`, `focus-direction`, `report-layout` and
-  `events`, the layout provider's; and `open-beside` and `open-float`, which
-  open and place in one step for a pane provider that is both in one. Without
+  `events`, the layout provider's; and `open-beside`, `open-float` and
+  `open-tab-page`, which open and place in one step and come only from a
+  pane provider returned whole, never from a pair's halves. Without
   `open-beside`, as always for a terminal provider paired with a layout
   provider, the daemon opens the terminal, then places it once it attaches.
-  Without `open-float`, a float group is drawn in a pane (ADR 0010). A
-  capability is added only when a pane provider needs it.
+  Without `open-float`, a float group is drawn in a pane (ADR 0010).
+  `open-tab-page` is given `{attach}`, `{title}` and the origin pane's
+  terminal, opens a terminal running the attach command in a new tab page
+  area, and prints its terminal id; without it, a tab page is drawn in the
+  pane it opened in (ADR 0012). `focus` makes a terminal the one the user
+  types into wherever it is, switching tmux window, herdr tab or workspace as
+  needed. A capability is added only when a pane provider needs it.
 - A command is an argv run without a shell. Its inputs are `<NAME>_*`
   variables and whole-word placeholders such as `{terminal}`; `{attach}` is the
   attach command's words, and `<NAME>_ATTACH` is the same as one string any

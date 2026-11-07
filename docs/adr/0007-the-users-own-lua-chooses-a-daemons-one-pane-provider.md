@@ -1,5 +1,8 @@
 # The user's own Lua chooses a daemon's one pane provider, which may pair a terminal provider with a layout provider
 
+Amended by ADR 0012 before implementation: one-step capabilities come only
+from a pane provider returned whole.
+
 A daemon gets its pane provider from the user's own Lua file, which Neovim
 never reads (#87). The file returns a `provider` function. When a self-attach
 arrives and the daemon has no pane provider, the daemon runs the file afresh
@@ -77,7 +80,9 @@ the Lua only chooses.
   table of capabilities and settings used whole; or `{ terminal = T, layout =
   L }`, which takes only `T`'s `open` and `close` and only `L`'s layout
   capabilities, so a pair always opens, then places. `{ terminal = T }` or
-  `{ layout = L }` uses one half alone. Settings such as timeouts, protocol
+  `{ layout = L }` uses one half alone, taking the same capabilities a pair
+  takes from it; `open-beside`, `open-float` and `open-tab-page` come only
+  from a pane provider returned whole. Settings such as timeouts, protocol
   numbers, the variables `find` is given and context variables belong to the
   half they serve. `<name>.builtin` gives each built-in as a fresh table to
   return as it is, or copy and change. Rex is only the name `"rex"`, and is
