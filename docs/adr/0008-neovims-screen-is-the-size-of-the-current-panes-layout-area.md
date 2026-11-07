@@ -1,5 +1,12 @@
 # Neovim's screen is the size of the current pane's layout area
 
+Amended by ADR 0010 before implementation: a float group with no float group
+pane stays in the window pane that was current when one of its floats last
+became current, rather than following the current pane. While it is current
+and too big for the current pane, Neovim's screen is the current pane's own
+size. A float group pane's bounds are always measured from the current pane.
+"Floating pane" below now reads float group pane.
+
 Panes need not share a window any more: a terminal provider alone opens
 separate terminal windows, on different monitors and at different cell sizes,
 and a pane out of the pane provider's reach shares nothing with the rest
@@ -44,7 +51,8 @@ is the one size at which all of them are seen.
   in the cells of the one everything is drawn in, and moving between two of
   them resizes the screen.
 - The screen is resized with the window switch that makes a pane current,
-  and only when its size changes. A switch already runs WinLeave and
+  and only when its size changes, or shrunk to the current pane while a float
+  group too big for it is current with no float group pane (ADR 0010). A switch already runs WinLeave and
   WinEnter; VimResized is one more. Under ext_multigrid Neovim never shrinks
   external windows to its screen, so a smaller screen leaves windows in
   bigger panes as they are.
@@ -63,13 +71,13 @@ is the one size at which all of them are seen.
   other areas show the same row from its start, cut at their width or blank
   past it.
 - The command line, messages and floats placed on the screen are drawn in
-  the current pane only. Every pane keeps `'cmdheight'` rows clear at its
+  the current pane only, except float groups with no float group pane, which
+  stay where they were last current (ADR 0010). Every pane keeps `'cmdheight'` rows clear at its
   bottom, and tabline panes keep their top row. Nothing else of the screen
   is shown.
-- A floating pane's bounds are cells relative to the pane its floats would
-  otherwise be drawn in: the current pane for floats placed on the screen,
-  else their window's pane. Fractions of that pane's area are added when it
-  is in a live layout.
+- A float group pane's bounds are cells relative to the current pane, with
+  fractions of its area added when it is in a live layout. Floats tied to a
+  window never get one (ADR 0010).
 - `report-layout` gives each terminal's rect as fractions of its layout area,
   as Rex gives its panes'. A layout provider that measures cells or pixels
   divides by the area's size (ADR 0006).

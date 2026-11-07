@@ -2,7 +2,8 @@
 
 Widened by ADR 0008: the Rex window is one kind of layout area, and Neovim's
 screen is the size of the current pane's layout area; within an area, all of
-this still holds.
+this still holds. Its floating panes are Rex floating panes; neorex's own kind
+is now a float group pane (ADR 0010).
 
 When a foreign pane shares the top of the Rex window, the tabline panes are
 narrower than Neovim's screen and the tabline's right end is never shown (#11).

@@ -7,6 +7,11 @@ variables, and a terminal carries a pane title for `find` to match.
 Amended by ADR 0008 before implementation: `report-layout` gives each
 terminal's rect as fractions of its layout area.
 
+Amended by ADR 0010 before implementation: without `open-float`, a float
+group is drawn in a pane, and there is no two-step float. A layout-side
+`place-float`, and `<NAME>_KIND` for `open`, are recorded there as the form
+they take once a pane provider needs them.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -43,9 +48,10 @@ left unplaced, or the next key switches focus back.
   `place-beside`, `resize`, `focus`, `focus-direction`, `report-layout` and
   `events`, the layout provider's; and `open-beside` and `open-float`, which
   open and place in one step for a pane provider that is both in one. Without
-  them, as always for a terminal provider paired with a layout provider, the
-  daemon opens the terminal, then places it once it attaches. A capability is
-  added only when a pane provider needs it.
+  `open-beside`, as always for a terminal provider paired with a layout
+  provider, the daemon opens the terminal, then places it once it attaches.
+  Without `open-float`, a float group is drawn in a pane (ADR 0010). A
+  capability is added only when a pane provider needs it.
 - A command is an argv run without a shell. Its inputs are `<NAME>_*`
   variables and whole-word placeholders such as `{terminal}`; `{attach}` is the
   attach command's words, and `<NAME>_ATTACH` is the same as one string any
