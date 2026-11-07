@@ -7,21 +7,17 @@ neorex runs Neovim in the background and shows its windows in the terminals atta
 ### Rex
 
 **Rex window**:
-The area the tiled panes of the current Rex tab share, with floating panes floating over it.
+The layout area of the current Rex tab: the space its tiled panes share, with floating panes floating over it.
 _Avoid_: the window, terminal window
 
 **Rex tab**:
 A tab of the Rex app, holding one Rex window.
 _Avoid_: tab page (that is Neovim's)
 
-**Foreign pane**:
-A Rex pane neorex doesn't run, such as a shell or an agent.
-_Avoid_: shell pane, non-Neovim pane
-
 ### Neovim
 
 **Neovim's screen**:
-The area Neovim lays its editor out on, `'columns'` by `'lines'` cells, drawn as grid 1.
+The area Neovim lays its editor out on, `'columns'` by `'lines'` cells, drawn as grid 1: the size of the current pane's layout area, in the current pane's cells. Only its tabline, command line, messages and floats are shown.
 _Avoid_: editor, editor size, default grid
 
 **Tab page**:
@@ -75,7 +71,7 @@ The daemon's name for a Neovim pane, given to a requested pane before its termin
 _Avoid_: terminal id, block id
 
 **Origin pane**:
-The Neovim pane showing the window a new window came from: the one its terminal is placed beside, and the one it's drawn in when no terminal can be had.
+The Neovim pane showing the window a new window came from: the one its terminal is placed beside, and the one it's drawn in, beside that window, when no terminal can be had.
 _Avoid_: anchor (the anchor windows are Neovim's), source pane
 
 **Unplaced pane**:
@@ -85,21 +81,37 @@ A requested pane left wherever its terminal provider puts new terminals, because
 A Neovim window no Neovim pane shows and no pane is on its way for.
 _Avoid_: hidden window, paneless window, detached window
 
+**Layout area**:
+The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating panes over it. A Neovim pane with no live layout, out of the pane provider's reach, or not in the live layout is a layout area of its own.
+_Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
+
+**Foreign pane**:
+A terminal in a layout area that isn't a Neovim pane, such as a shell or an agent in a Rex or tmux pane.
+_Avoid_: shell pane, non-Neovim pane
+
+**Current pane**:
+The window pane showing Neovim's current window, or, while a float is current, the window pane last current before it. Neovim's screen is the size of its layout area, and only it shows the command line, messages and the floats placed on Neovim's screen.
+_Avoid_: focused pane (focus is the terminal's or the window manager's, and may be elsewhere), active pane
+
 **Window pane**:
-A Neovim pane showing one Neovim window.
+A Neovim pane showing Neovim windows: one, or several laid out as Neovim lays out splits when windows opened from it had no terminal of their own.
+
+**Pane layout**:
+How the windows a window pane shows share it, side by side or one above another, as Neovim lays out splits. Each window pane has its own; Neovim's own layout of a tab page never holds them.
+_Avoid_: split layout, window layout (Neovim's `winlayout()`), tiling
 
 **Floating pane**:
 A Neovim pane in a Rex floating pane, showing a group of Neovim floats or a tab page's windows.
 
 **Tabline panes**:
-The window panes along the top of the Rex window, which between them show Neovim's tabline, left to right.
+The window panes along the top of a layout area, which between them show Neovim's tabline, left to right. A window pane that is its own layout area is one.
 _Avoid_: top-row Neovim panes, Neovim region
 
 **Tabline width**:
-The tabline panes' columns, summed.
+The columns of the tabline panes of the current pane's layout area, summed.
 
 **Fitted tabline**:
-Neovim's tabline drawn to end at the right edge of the tabline panes rather than of Neovim's screen.
+Neovim's tabline drawn to end at the right edge of the tabline panes of the current pane's layout area, rather than of Neovim's screen.
 _Avoid_: narrowed tabline, shrunk tabline
 
 **Home tab page**:
@@ -153,7 +165,7 @@ The self-attach the daemon's pane provider was chosen for. The config sees its e
 _Avoid_: chooser, launcher, first attach (often the same attach, but not always)
 
 **Live layout**:
-Where a layout provider's terminals sit and which share an area, as it reports them when asked.
+Where a layout provider's terminals sit and which share a layout area, as it reports them when asked.
 _Avoid_: view (Rex's), snapshot
 
 **Terminal feature**:

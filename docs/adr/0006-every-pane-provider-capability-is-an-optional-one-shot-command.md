@@ -4,6 +4,9 @@ Amended by ADR 0007 before implementation: no capability is required, a
 terminal provider may be paired with a layout provider, reach checks context
 variables, and a terminal carries a pane title for `find` to match.
 
+Amended by ADR 0008 before implementation: `report-layout` gives each
+terminal's rect as fractions of its layout area.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -48,8 +51,9 @@ left unplaced, or the next key switches focus back.
   attach command's words, and `<NAME>_ATTACH` is the same as one string any
   shell reads, for a pane provider that types it. It gets stdio only, the
   environment of its pane provider's choosing attach, and never `$<NAME>`.
-- Exit 0 is done; stdout holds a terminal id, or JSON from `report-layout`;
-  stderr goes to the log. Exit 69, or a command that can't start, means
+- Exit 0 is done; stdout holds a terminal id, or JSON from `report-layout`,
+  which gives each terminal's rect as fractions of its layout area; stderr
+  goes to the log. Exit 69, or a command that can't start, means
   unsupported until the pane provider is chosen again; any other failure, or a
   timeout, fails that act alone, and nothing is retried.
 - A terminal id comes from `open`'s stdout or from `find`, which is given the

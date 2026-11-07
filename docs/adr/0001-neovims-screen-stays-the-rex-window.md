@@ -1,5 +1,9 @@
 # Neovim's screen stays the size of the Rex window; only the tabline is fitted
 
+Widened by ADR 0008: the Rex window is one kind of layout area, and Neovim's
+screen is the size of the current pane's layout area; within an area, all of
+this still holds.
+
 When a foreign pane shares the top of the Rex window, the tabline panes are
 narrower than Neovim's screen and the tabline's right end is never shown (#11).
 We keep Neovim's screen (`'columns'` x `'lines'`) the size of the Rex window, and
