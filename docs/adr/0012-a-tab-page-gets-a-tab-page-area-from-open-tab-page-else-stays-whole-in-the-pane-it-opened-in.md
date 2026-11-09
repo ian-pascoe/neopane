@@ -1,5 +1,8 @@
 # A tab page gets a tab page area from `open-tab-page`, else stays whole in the pane it opened in
 
+Amended by #92 before implementation: the first attach's other windows get
+terminals of their own where they can (ADR 0009).
+
 A tab page made after startup has always had a Rex floating pane; other pane
 providers may have a tmux window or a herdr tab for it, or nothing, and any
 request may fail (#90). Plain Neovim shows one tab page at a time on its
@@ -84,12 +87,13 @@ their place until visited.
   is its home tab page's only one. The old window goes by the usual rules: a
   pane layout closes up, a requested terminal left empty closes, a
   self-attached one goes back to its shell.
-- At the first attach, the choosing attach's pane shows the current tab
-  page, its other windows laid out as Neovim had them (ADR 0009); every
-  other tab page gets its place when first current. A self-attach takes an
-  unshown window, current first, then by tab page and window order, so a
-  second terminal after `nvim -p a b c` shows `b` and becomes its place.
-  There is no setup tab page.
+- At the first attach, the choosing attach's pane shows the current tab page's
+  current window; the tab page's other windows get terminals of their own as
+  new windows do, or are laid out in that pane as Neovim had them where they
+  can't (ADR 0009). Every other tab page gets its place when first current. A
+  self-attach takes an unshown window, current first, then by tab page and
+  window order, so a second terminal after `nvim -p a b c` shows `b` and
+  becomes its place. There is no setup tab page.
 - A tab page area that is a layout area of its own, such as a tmux window or
   a herdr tab, has its own tabline panes. A tab page's Rex floating pane
   isn't one: its panes float over the Rex window, whose tabline shows above

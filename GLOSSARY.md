@@ -4,20 +4,6 @@ neorex runs Neovim in the background and shows its windows in the terminals atta
 
 ## Language
 
-### Rex
-
-**Rex window**:
-The layout area of the current Rex tab: the space its tiled panes share, with Rex floating panes over it.
-_Avoid_: the window, terminal window
-
-**Rex floating pane**:
-A pane Rex floats over a Rex window, outside its tiling. It holds a float group pane, or a tab page area's window panes, which float within the Rex window's layout area.
-_Avoid_: floating pane (on its own)
-
-**Rex tab**:
-A tab of the Rex app, holding one Rex window.
-_Avoid_: tab page (that is Neovim's)
-
 ### Neovim
 
 **Neovim's screen**:
@@ -114,7 +100,7 @@ A Neovim window no Neovim pane holds and no pane is on its way for, such as one 
 _Avoid_: hidden window, paneless window, detached window
 
 **Layout area**:
-The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, out of the pane provider's reach, or not in the live layout is a layout area of its own. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's.
+The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's.
 _Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
 
 **Foreign pane**:
@@ -213,9 +199,33 @@ A terminal a layout provider floats over a layout area, outside its tiling: one 
 _Avoid_: floating window (an OS window or a Neovim float), popup
 
 **Live layout**:
-Where a layout provider's terminals sit and which share a layout area, as it reports them when asked.
+Where a layout provider's terminals sit and which share a layout area, as it reports them: each terminal's rect as fractions of its area, any cells at the rect's edges that aren't the terminal's, and which terminal has focus.
 _Avoid_: view (Rex's), snapshot
 
 **Terminal feature**:
 Something a terminal supports that Neovim can use, such as the kitty keyboard protocol, undercurl or focus reports.
 _Avoid_: capability (a pane provider's)
+
+### Rex's pane provider
+
+Terms used only by the built-in `rex` pane provider and the Rex client (`src/providers/rex/`, `src/rex/`); the core never uses them.
+
+**Rex window**:
+The layout area of a Rex tab: the space its tiled panes share, with Rex floating panes over it.
+_Avoid_: the window, terminal window
+
+**Rex tab**:
+A tab of the Rex app, holding one Rex window.
+_Avoid_: tab page (that is Neovim's)
+
+**Rex block**:
+A pane of Rex's: a terminal in a Rex window or a Rex floating pane. Its id, `block:` and a UUIDv7, is its terminal id.
+_Avoid_: block (on its own), Rex pane (beside Neovim pane)
+
+**Rex floating pane**:
+A pane Rex floats over a Rex window, outside its tiling. It holds a float group pane, or a tab page area's window panes, which float within the Rex window's layout area. It closes with its last Rex block.
+_Avoid_: floating pane (on its own), layer (Rex's API word)
+
+**Rex session**:
+What `REX_SESSION` names: the Rex tabs one Rex server keeps for a session, and the attach context of Rex's pane provider. A terminal in another Rex session is out of its reach.
+_Avoid_: session (on its own)

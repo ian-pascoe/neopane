@@ -3,6 +3,10 @@
 Amended by ADR 0012 before implementation: one-step capabilities come only
 from a pane provider returned whole.
 
+Amended by #92 before implementation: the built-in default runs in the daemon;
+choosing Rex never blocks; a pane provider that fails as a whole is dropped at
+once.
+
 A daemon gets its pane provider from the user's own Lua file, which Neovim
 never reads (#87). The file returns a `provider` function. When a self-attach
 arrives and the daemon has no pane provider, the daemon runs the file afresh
@@ -69,7 +73,9 @@ the Lua only chooses.
   when it starts, never from a later attach. `require` looks only in the
   file's `lua/` directory. The Lua is 5.1, Neovim's portable dialect, built in
   from vendored PUC Lua 5.1.5. With no file, the built-in `<name>.default`
-  chooses: Rex inside Rex, so Rex users need no config.
+  chooses, run in the daemon itself rather than a child process since it runs
+  no user code: Rex inside Rex, so Rex users need no config and no process
+  start. The `<name>.default` a config can call is the same function.
 - The file runs afresh for each choice, in a child process of the daemon's own
   binary, with the choosing attach's environment and working directory. It has
   3 s, then it is killed with its process group. It returns data only:
@@ -112,6 +118,13 @@ the Lua only chooses.
   starts afresh, as ADR 0003 has it. A later attach never changes the pane
   provider or its environment; a pane from elsewhere, where the pane provider
   can tell, is out of reach and draws its own windows.
+- A pane provider that fails as a whole, as when Rex's connection breaks, is
+  dropped at once: its pending acts fail and fall back, a warning shows once,
+  and the next self-attach chooses again. A pane provider chosen while panes
+  are attached checks each of them for reach, so panes Rex made before its
+  connection broke rejoin it. Choosing Rex never blocks the daemon:
+  connecting, `session.attach` and `find` are steps of its loop, with the
+  config's 3 s deadline.
 - Pane providers come only from the user's file and the built-ins: never from
   Neovim's config or a project's files, unless the user's own code reads one.
 

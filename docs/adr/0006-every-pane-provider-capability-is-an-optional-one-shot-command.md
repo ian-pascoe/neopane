@@ -22,6 +22,12 @@ Amended by ADR 0013 before implementation: `{attach}` is `<exe> attach
 --address A --pane ID`, the pane title's token is the pane id's, and a late
 terminal's helper exits quietly.
 
+Amended by #92 before implementation: the daemon keeps both queues itself, for
+Rex too, sending layout acts one at a time; `open-beside` and `open-tab-page`
+get `<NAME>_COLS`/`_ROWS`, `open-float` gets `<NAME>_ORIGIN_COLS`/`_ROWS`;
+`resize`'s inputs, the direction and count are named; `report-layout` may give
+an `inset`; Rex's `find` checks the attaching terminal is `REX_BLOCK`'s.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -76,10 +82,11 @@ switches focus back.
   shell reads, for a pane provider that types it. It gets stdio only, the
   environment of its pane provider's choosing attach, and never `$<NAME>`.
 - Exit 0 is done; stdout holds a terminal id, or JSON from `report-layout`,
-  which gives each terminal's rect as fractions of its layout area; stderr
-  goes to the log. Exit 69, or a command that can't start, means
-  unsupported until the pane provider is chosen again; any other failure, or a
-  timeout, fails that act alone, and nothing is retried.
+  which gives each terminal's rect as fractions of its layout area, and may
+  give an `inset`: the cells at each edge of the rect that aren't the
+  terminal's own; stderr goes to the log. Exit 69, or a command that can't
+  start, means unsupported until the pane provider is chosen again; any other
+  failure, or a timeout, fails that act alone, and nothing is retried.
 - A terminal id comes from `open`'s stdout or from `find`, which is given the
   attach's pid, tty, pane title and the variables the pane provider names: the
   daemon never knows a pane provider's own variable names. In a pair, the
@@ -89,16 +96,19 @@ switches focus back.
   attach has ended; a pane provider whose ids can be reused puts what proves
   them current into the id.
 - Before the first `find` command runs for an attach, the daemon writes a pane
-  title into the terminal's title: `<name>-` and the token of the pane's id (ADR 0013),
-  sent as ordinary output, so it works over a relay too. `open` gets it as
-  `{title}` and `<NAME>_TITLE`, so a terminal provider can make it the
-  window's first title rather than rely on the terminal honouring the escape
-  code. `find` gets it as `<NAME>_TITLE` and matches a window whose title
-  contains it, retrying for a while, since a window manager may not list a new
-  window at once. It has to last only until `find` answers. The terminal's own
-  title is saved first, and put back, or cleared where it can't be, when the
-  pane hangs up. Rex's in-process `find` doesn't need a title, so Rex panes
-  never get one.
+  title into the terminal's title: `<name>-` and the token of the pane's id
+  (ADR 0013), sent as ordinary output, so it works over a relay too. `open`
+  gets it as `{title}` and `<NAME>_TITLE`, so a terminal provider can make it
+  the window's first title rather than rely on the terminal honouring the
+  escape code. `find` gets it as `<NAME>_TITLE` and matches a window whose
+  title contains it, retrying for a while, since a window manager may not list
+  a new window at once. It has to last only until `find` answers. The
+  terminal's own title is saved first, and put back, or cleared where it can't
+  be, when the pane hangs up. Rex's in-process `find` doesn't need a title, so
+  Rex panes never get one: it asks Rex for the process of the block
+  `REX_BLOCK` names and accepts the attach only if that process's controlling
+  terminal is the attach's own; where Rex or the system can't say, it trusts
+  `REX_BLOCK`, as before.
 - A terminal provider paired with a layout provider must open each terminal in
   a window of its own: a terminal in a split or a tab is found, focused and
   placed as its whole window.
@@ -119,8 +129,23 @@ switches focus back.
   that treats a quick exit as a crash, as Ghostty does, still closes; one
   refused for arriving late exits with status 0 and no message, which closes
   a terminal whose `open` printed no id to `close` it by (ADR 0013).
-- Focus requests have a queue of their own, so a slow `open` never holds up
-  `<C-w>w`.
+- Each pane provider's acts go through two queues the daemon keeps itself, for
+  a built-in pane provider as for commands. Layout acts (`open*`, `find`,
+  `place-beside`, `resize`, `close`, `report-layout`) run one at a time, each
+  sent only once the one before is answered or has timed out, since Rex
+  applies some back-to-back layout requests out of order. Focus acts (`focus`,
+  `focus-direction`) have one running and at most one waiting, the newest
+  replacing it, so a slow `open` never holds up `<C-w>w`.
+- `open-beside` and `open-tab-page` also get `<NAME>_COLS` and `<NAME>_ROWS`,
+  a guess at the new terminal's size (for `open-tab-page`, the origin's layout
+  area); `open-float` also gets `<NAME>_ORIGIN_COLS` and `<NAME>_ORIGIN_ROWS`,
+  the reference terminal's size. `<NAME>_RATIO` is always the share of the
+  terminal being opened, placed or resized. `resize` takes `{terminal}` and
+  `{origin}`, the terminals either side of the split, and sets `{terminal}`'s
+  share with `<NAME>_SIZE` and `<NAME>_RATIO` as `place-beside` gives them. A
+  split's direction and `focus-direction`'s are `<NAME>_DIRECTION` (`left`,
+  `right`, `up`, `down`), and its count `<NAME>_COUNT`. None bumps
+  `<NAME>_PROTOCOL`.
 - New variables, optional capabilities and JSON fields leave `<NAME>_PROTOCOL`
   as it is; changing the meaning of an existing one bumps it. Each half of a
   pair agrees its own number. Commands ignore variables they don't know, and
@@ -131,5 +156,5 @@ switches focus back.
 
 Research: `docs/research/rex-capabilities.md`, `tmux-pane-provider.md`,
 `herdr-pane-provider.md`, `aerospace-ghostty-pane-provider.md`,
-`pane-provider-prior-art.md`, `pane-provider-capabilities.md` and
-`pane-title.md`, each on its `research/` branch.
+`pane-provider-prior-art.md`, `pane-provider-capabilities.md`, `pane-title.md`
+and `rex-provider-facts.md`, each on its `research/` branch.

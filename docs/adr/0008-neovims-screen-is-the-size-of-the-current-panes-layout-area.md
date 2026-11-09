@@ -13,17 +13,26 @@ pane in a floating terminal, such as one in a tab page's Rex floating pane,
 is never a tabline pane. By ADR 0011, the current pane's window's home tab
 page is always Neovim's current tab page.
 
+Amended by #92 before implementation: a requested pane the live layout hasn't
+reported yet is in no layout area for up to 1 s; `report-layout` may give an
+`inset`.
+
 Panes need not share a window any more: a terminal provider alone opens
 separate terminal windows, on different monitors and at different cell sizes,
 and a pane out of the pane provider's reach shares nothing with the rest
 (#88). So the Rex window of ADR 0001 becomes one kind of layout area: the
-space a group of Neovim panes share, as a live layout reports it. With no
-live layout, and for a pane out of reach or not in the live layout, each pane
-is a layout area of its own. Neovim's screen is the size of the current
-pane's layout area, counted in the current pane's cells, and changes when the
-current pane moves to an area of another size. The command line, messages
-and floats placed on the screen are shown only in the current pane, so this
-is the one size at which all of them are seen.
+space a group of Neovim panes share, as a live layout reports it. With no live
+layout, and for a pane out of reach, each pane is a layout area of its own. A
+requested pane in reach that the live layout hasn't reported yet is in no
+layout area: it is no tabline pane, and while it is current Neovim's screen
+keeps its size. It joins its area when the live layout reports it, and becomes
+a layout area of its own once 1 s passes after its terminal has attached and
+been given its terminal id without that, or when the live layout goes.
+Neovim's screen is the size of the current pane's layout area, counted in the
+current pane's cells, and changes when the current pane moves to an area of
+another size. The command line, messages and floats placed on the screen are
+shown only in the current pane, so this is the one size at which all of them
+are seen.
 
 ## Considered Options
 
@@ -87,8 +96,11 @@ is the one size at which all of them are seen.
   fractions of its area added when it is in a live layout. Floats tied to a
   window never get one (ADR 0010).
 - `report-layout` gives each terminal's rect as fractions of its layout area,
-  as Rex gives its panes'. A layout provider that measures cells or pixels
-  divides by the area's size (ADR 0006).
+  as Rex gives its panes', and may give an `inset`: the cells at each edge of
+  the rect that aren't the terminal's, such as a floating pane's frame. Rex's
+  pane provider gives its float group panes' terminals the frame neorex has
+  always guessed for them, 3 cells across and 2 down. A layout provider that
+  measures cells or pixels divides by the area's size (ADR 0006).
 - When a live layout arrives, the panes it reports join their areas: the
   screen may change size and a pane may stop being a tabline pane, but no
   terminal is moved and no window changes pane. A pane provider is dropped

@@ -7,6 +7,9 @@ that came into a pane showing another stays whole in it.
 Amended by ADR 0013 before implementation: a late terminal is refused,
 closed by its helper exiting as well as by `close`.
 
+Amended by #92 before implementation: windows at the first attach get
+terminals of their own where they can.
+
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
 provider, when `open` fails or no attach comes in time, for an origin out of
@@ -80,9 +83,13 @@ resizes and draws as Neovim would.
 - When a pane's terminal resizes, its windows keep their shares of it.
   Windows at their floor stay there, and get their earlier shares back when
   the pane grows.
-- Windows of the current tab page at the first attach, such as those `-o`
-  or `-O` open, are laid out as Neovim had them; other tab pages, as from
-  `-p`, get their place when first current (ADR 0012).
+- Windows of the current tab page at the first attach, such as those `-o` or
+  `-O` open, other than the one the choosing attach's pane shows, wait unshown
+  for the pane provider to be chosen, then get terminals of their own as any
+  new window does, opened from the choosing attach's pane in the direction
+  Neovim's layout has them, so Rex still gives each its own Rex pane. Only
+  where they can't are they laid out in that pane as Neovim had them. Other
+  tab pages, as from `-p`, get their place when first current (ADR 0012).
 - A window waits for its requested terminal for the terminal provider's
   attach timeout (ADR 0007), 5 s by default from `open` finishing, Rex's
   included. Then it is drawn in its origin pane, with a warning. A terminal
