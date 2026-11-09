@@ -1,12 +1,17 @@
 # A daemon outlives its last pane only while Neovim has unsaved changes
 
+Amended by #94 before implementation: `kill` refuses while Neovim has unsaved
+changes unless `--force`, and a daemon started with `--detach` stays until
+Neovim quits or it is killed.
+
 When a daemon's last Neovim pane goes, it ends, as neorex always has, unless
 Neovim has unsaved changes: buffers `:qa` would refuse to quit over
-(`getbufinfo(b)[1].changed`). Then it stays, unattached, until an attach comes
-or the changes are gone (#84). An accidentally closed terminal becomes an
-`attach` instead of a swap recovery, while a Rex user who closes the last pane
-with nothing unsaved sees no change, and no Neovim is left running unseen
-unless it holds work nobody threw away.
+(`getbufinfo(b)[1].changed`). Then it stays, unattached, until an attach
+comes, the changes are gone, or it is ended by `kill --force` or a signal
+(#84, #94). An accidentally closed terminal becomes an `attach` instead of a
+swap recovery, while a Rex user who closes the last pane with nothing unsaved
+sees no change, and no Neovim is left running unseen unless it holds work
+nobody threw away.
 
 ## Considered Options
 
@@ -28,7 +33,10 @@ unless it holds work nobody threw away.
 - Each pane that goes closes its windows, so an unattached daemon keeps one
   window, the last current one that isn't a float, and a reattach opens no
   burst of terminals. Keeping a whole layout is for a deliberate `detach`,
-  which, like starting without attaching, sets an "asked to stay" flag.
+  which, like starting without attaching, sets an "asked to stay" flag. The
+  flag lasts for the daemon's life: a kept daemon, started with `<name>
+  --detach`, outlives its last pane with nothing unsaved and ends only when
+  Neovim quits, on `kill`, on a signal, or by crashing (#94).
 - On going unattached the daemon cancels pending pane requests, sends
   FocusLost so autosave can run, waits for Neovim's next SafeState (about 1 s
   at most), and decides from a `neorex_unsaved` note `windows.lua` keeps
@@ -50,6 +58,10 @@ unless it holds work nobody threw away.
 - A daemon that goes unattached drops its pane provider, and the next
   self-attach chooses again from its own context (ADR 0007), so a resumed
   daemon never opens windows where nobody is looking.
+- `<name> kill` asks the daemon to stop. With unsaved changes it refuses and
+  names them, unless `--force`, which ends it with the changes kept in swap
+  files, as a signal does: a daemon that outlived its pane for unsaved work
+  isn't thrown away by a `kill` that didn't know about it (#94).
 
 Research: `docs/research/daemon-lifetime.md` on branch
 `research/daemon-lifetime`.

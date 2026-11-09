@@ -36,6 +36,18 @@ _Avoid_: session name
 Where a daemon takes attaches and control requests: a Unix socket path, or a named pipe on Windows, written `//./pipe/…`. Passed whole, never taken apart.
 _Avoid_: socket, socket path
 
+**Launcher**:
+The `<name>` a user runs to start a daemon: it starts the daemon, then stays in its terminal as the helper of the daemon's first attach, or with `--detach` exits once Neovim is up.
+_Avoid_: client, wrapper, starter
+
+**Command word**:
+A first argument `<name>` reads as a command, such as `list` or `attach`, never as a file to open; `./list` opens the file.
+_Avoid_: verb
+
+**Neovim arguments**:
+What follows `<name>`'s own options when it starts a daemon, given to Neovim as typed. A running daemon takes only a line and one file.
+_Avoid_: passthrough, extra args
+
 **Helper**:
 The process a Neovim pane's terminal runs, `<name> attach`: it connects the terminal to a daemon, owns the terminal's settings, and stays until the attach ends.
 _Avoid_: client, shim, proxy, pane process
@@ -57,15 +69,23 @@ The number a helper and a daemon must share to attach. Status and stop work what
 _Avoid_: protocol (on its own), `<NAME>_PROTOCOL` (the pane provider interface's)
 
 **Control request**:
-A connection that asks a daemon something without a terminal: status, stop, or open FILE.
+A connection that asks a daemon something without a terminal: status; stop, which a daemon with unsaved changes refuses unless forced; or open FILE, which may wait until the file is done.
 _Avoid_: command (a capability's), RPC (Neovim's)
+
+**Waited file**:
+A file `<name> FILE` opens from a daemon's own `:terminal`: `<name>` returns once no window shows it, or its buffer is unloaded or deleted, so `EDITOR=<name>` works there too; `--no-wait` returns at once.
+_Avoid_: remote-wait (nvr's)
 
 **Unattached daemon**:
 A daemon with no Neovim pane attached or on its way, whether it hasn't had one yet or its last pane went.
-_Avoid_: detached daemon (kept for a deliberate detach), headless, orphan, paneless
+_Avoid_: detached daemon (see Kept daemon), headless, orphan, paneless
+
+**Kept daemon**:
+A daemon asked to stay, by starting it with `--detach` (later also by a `detach`): it outlives its last pane with nothing unsaved, until Neovim quits or it is killed.
+_Avoid_: detached daemon, persistent daemon, server
 
 **First attach**:
-The attach that takes a daemon from unattached to attached: the one `neorex` makes when it starts a daemon, or the first after its last pane went.
+The attach that takes a daemon from unattached to attached: the one `neorex` makes when it starts a daemon, the first to a daemon started with `--detach`, or the first after its last pane went.
 _Avoid_: initial attach
 
 **Unsaved changes**:

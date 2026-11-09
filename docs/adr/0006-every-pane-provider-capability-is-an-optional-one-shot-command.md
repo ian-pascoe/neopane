@@ -35,6 +35,9 @@ the opens get `{pane}` and `<NAME>_ATTACH_JSON` and `open` gets
 ignored; commands run in the choosing attach's working directory, without the
 variables the daemon sets; `find`'s answers are set out for each use.
 
+Amended by #94 before implementation: under the relay diagnostic, `{attach}`
+ends with `--transport relay`.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -91,8 +94,9 @@ switches focus back.
   name after `<NAME>_`, in lower case, so `{terminal}` is `<NAME>_TERMINAL`.
   `{attach}` alone becomes several words, the attach command's: `<exe> attach
   --address <address> --pane <pane id>`, `<exe>` being the daemon's own
-  executable. `<NAME>_ATTACH` is the same as one string any shell reads, for a
-  pane provider that types it, and `<NAME>_ATTACH_JSON` as a JSON array, for
+  executable; a daemon started with `<NAME>_TRANSPORT=relay` adds `--transport
+  relay` (#94). `<NAME>_ATTACH` is the same as one string any shell reads, for
+  a pane provider that types it, and `<NAME>_ATTACH_JSON` as a JSON array, for
   one that speaks JSON over a socket. A placeholder is replaced only as a
   whole word, never inside one, so a value inside a word goes through `sh -c`
   and the variable, and `{{name}}` passes `{name}`. A capability whose argv
