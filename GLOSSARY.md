@@ -145,7 +145,7 @@ The tab page a window belongs to: the one it was opened in, or for a split, its 
 _Avoid_: owning tab, the window's tab page
 
 **Tab page area**:
-Where `open-tab-page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
+Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
 _Avoid_: tab layer, floating tab page, tab (on its own)
 
 ### Pane providers
@@ -158,9 +158,17 @@ _Avoid_: frontend (Neovim's word for the UI, which neorex is), host, backend, dr
 What makes a new terminal that attaches to neorex when neorex asks for one, as Ghostty opens a window, or Rex or tmux a pane. One that is only a terminal provider can be paired with any layout provider. Without one, every Neovim pane is a self-attached pane.
 _Avoid_: window provider (clashes with Rex window and Neovim window), terminal emulator (tmux makes terminals inside one)
 
+**Attach timeout**:
+How long a requested pane's terminal has to attach once its terminal provider has opened it. A window whose terminal misses it is drawn in its origin pane, and the late terminal is closed.
+_Avoid_: open timeout, spawn timeout
+
 **Layout provider**:
 What finds, places, focuses, moves and resizes Neovim panes' terminals, beside one another as a split does or floating over them: AeroSpace, or Rex and tmux for their own panes. One that is only a layout provider can be paired with any terminal provider; without a terminal provider, it acts only on self-attached panes.
 _Avoid_: split provider, window manager (AeroSpace is one; Rex and tmux aren't)
+
+**Pair**:
+A terminal provider and a layout provider used together as one pane provider, each half of the pair, such as Ghostty with AeroSpace. A pair opens a terminal, then places it, never both in one step.
+_Avoid_: combination, combo
 
 **Built-in provider**:
 A terminal provider, layout provider or pane provider that comes with neorex, known by its name, such as `rex`. Rex's runs inside neorex and is never paired; later ones are written as a user would write theirs, to use as they are or copy and change.
@@ -173,6 +181,10 @@ _Avoid_: Neovim's config, init.lua (Neovim's), rc
 **Capability**:
 Something a pane provider can do when the daemon asks, such as open, find or focus a terminal. Each is optional: without one, that act falls back as if there were no pane provider.
 _Avoid_: feature (a terminal's), operation, command
+
+**Placeholder**:
+A whole word in what a capability runs, such as `{terminal}`, that the daemon replaces with one of the act's inputs before running it; `{attach}` becomes the attach command's several words.
+_Avoid_: template variable, macro
 
 **Terminal id**:
 A terminal provider's or layout provider's own name for a terminal: a Rex block id, a tmux pane id, an AeroSpace window id. A terminal from a paired pane provider has one from each.
@@ -187,8 +199,12 @@ The terminals a pane provider counts as its own: those it made, its choosing att
 _Avoid_: scope, session
 
 **Attach context**:
-Where an attach comes from, as its environment shows: the terminal app, tmux server or Rex session its terminal runs in. A pane provider is chosen in one and runs its commands in it.
+Where an attach comes from, as its environment shows: the terminal app, tmux server or Rex session its terminal runs in, as far as the pane provider's context variables tell. A pane provider is chosen in one and runs its commands in it.
 _Avoid_: session (Rex's, tmux's), environment (the variables, not where they point)
+
+**Context variable**:
+A variable a pane provider names as saying which attach context a terminal is in, such as `REX_SESSION`. A self-attached terminal whose value differs from the choosing attach's is in another context, so out of reach.
+_Avoid_: match variable, marker
 
 **Choosing attach**:
 The self-attach the daemon's pane provider was chosen for. The config sees its environment, and the pane provider's commands run in it, even after its pane has gone.

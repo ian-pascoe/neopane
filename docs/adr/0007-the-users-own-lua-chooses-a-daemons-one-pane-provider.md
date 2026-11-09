@@ -7,6 +7,11 @@ Amended by #92 before implementation: the built-in default runs in the daemon;
 choosing Rex never blocks; a pane provider that fails as a whole is dropped at
 once.
 
+Amended by #93 before implementation: the file's table holds only `provider`;
+`false` means none; the daemon, not the config's process, checks what it
+returned; nothing the config starts outlives it; `<name>.builtin` holds
+functions, and `<name>.inside` proves where an attach is.
+
 A daemon gets its pane provider from the user's own Lua file, which Neovim
 never reads (#87). The file returns a `provider` function. When a self-attach
 arrives and the daemon has no pane provider, the daemon runs the file afresh
@@ -42,8 +47,10 @@ the Lua only chooses.
   copies its `open`.
 - **Neovim's config.** The choice comes before Neovim has read any config, it
   must work under `nvim --clean`, and `g:<name>` is only a flag (ADR 0005).
-- **Running the Lua inside the daemon.** A blocking `os.execute` can't be
-  interrupted, and a slow config would stall every pane.
+- **The config's process checking its own result.** After an upgrade in place
+  it is a newer binary than its daemon, and would pass fields the daemon
+  doesn't know. - **Running the Lua inside the daemon.** A blocking
+  `os.execute` can't be interrupted, and a slow config would stall every pane.
 - **Lua functions as capabilities.** The interpreter would have to live on, or
   run again for every act.
 - **LuaJIT, or Lua 5.4.** LuaJIT doesn't build statically for aarch64 musl or
@@ -77,23 +84,35 @@ the Lua only chooses.
   no user code: Rex inside Rex, so Rex users need no config and no process
   start. The `<name>.default` a config can call is the same function.
 - The file runs afresh for each choice, in a child process of the daemon's own
-  binary, with the choosing attach's environment and working directory. It has
-  3 s, then it is killed with its process group. It returns data only:
-  strings, numbers and tables. `print` goes to the log. There is no sandbox,
-  and `<name>.run(argv)` runs a command without a shell, as a capability runs.
-  It is never called for anything but choosing.
-- The function returns `nil` for none; a built-in's name; a pane provider, a
-  table of capabilities and settings used whole; or `{ terminal = T, layout =
-  L }`, which takes only `T`'s `open` and `close` and only `L`'s layout
-  capabilities, so a pair always opens, then places. `{ terminal = T }` or
-  `{ layout = L }` uses one half alone, taking the same capabilities a pair
-  takes from it; `open-beside`, `open-float` and `open-tab-page` come only
-  from a pane provider returned whole. Settings such as timeouts, protocol
+  binary, with the choosing attach's working directory and the environment its
+  commands get (ADR 0006). It has 3 s, then it is killed with its process
+  group, and once it has answered the group is killed anyway, so nothing it
+  started outlives the choice. It returns a table whose only key is
+  `provider`. Other keys get a warning, since a daemon-wide setting would be
+  read where no daemon starts. The process sends back what `provider` returned
+  as plain data (nil, booleans, numbers, strings and tables, with a mark for
+  anything else), and the daemon checks it against its own rules: after an
+  upgrade in place, the binary at the daemon's path is newer than the daemon.
+  `print` goes to the log. There is no sandbox: `io`, `os` and `dofile` stay,
+  and only `require` is limited, to the file's `lua/` directory with no C
+  modules. `<name>.run(argv)` runs a command without a shell, as a capability
+  runs, returns what happened rather than raising, and gives up in time for
+  the config to answer. It is never called for anything but choosing.
+- The function returns `nil` or `false` for none; a built-in's name; a pane
+  provider, a table of capabilities and settings used whole; or `{ terminal =
+  T, layout = L }`, which takes only `T`'s `open` and `close` and only `L`'s
+  layout capabilities, so a pair always opens, then places. `{ terminal = T }`
+  or `{ layout = L }` uses one half alone, taking the same capabilities a pair
+  takes from it; `open_beside`, `open_float` and `open_tab_page` come only
+  from a pane provider returned whole, and a table holding both capabilities
+  and `terminal` or `layout` is an error. Settings such as timeouts, protocol
   numbers, the variables `find` is given and context variables belong to the
-  half they serve. `<name>.builtin` gives each built-in as a fresh table to
-  return as it is, or copy and change. Rex is only the name `"rex"`, and is
-  never half of a pair. Ids, the pane title and reach for a pair are in ADR
-  0006.
+  half they serve. Each `<name>.builtin` function returns a fresh table to
+  return as it is, or copy and change. Each `<name>.inside` function proves,
+  by asking the multiplexer, that an attach's terminal is directly its own, so
+  code can fall through to its next choice where variables leaked. Rex is only
+  the name `"rex"`, and is never half of a pair. Ids, the pane title and reach
+  for a pair are in ADR 0006.
 - `--provider none`, or `$<NAME>_PROVIDER=none`, means no pane provider
   without running the file. Any other value reaches the function as a hint:
   a project can set it, but only the user's code gives it meaning.
@@ -103,10 +122,17 @@ the Lua only chooses.
   provider, with a warning. So a `TMUX` leaked into a Ghostty window doesn't
   send new windows to a tmux pane nobody sees.
 - Any error means no pane provider for that choice, never the default: the
-  file fails to load, runs out its 3 s or returns a bad value; a half has no
-  usable capability; `rex` is paired; or no protocol number is shared. It
-  shows as a Neovim warning, in the log, in `list` and in `<name> provider
-  check`. The next self-attach runs the file again, so a fix applies at once.
+  file fails to load, runs out its 3 s or ends without answering, or returns
+  something malformed, such as a wrong type or an argv with a hole; a half has
+  no usable capability; `rex` is paired; or no protocol number is shared.
+  Anything unknown (a key, a field, a placeholder) gets a warning and is
+  ignored, a capability holding an unknown placeholder with it, and a time
+  over 60 s gets a warning and is cut to 60 s, so an older daemon still reads
+  a newer file. Each problem names its place, such as
+  `provider().layout.focus[2]`. It shows as one Neovim warning per choice, in
+  the log, in `list`, and in `<name> provider check`, which runs the file and
+  the chosen `find` as a self-attach in that terminal would. The next
+  self-attach runs the file again, so a fix applies at once.
 - The choosing attach's window shows at once. Only acts that need the pane
   provider wait for a running choice, and self-attaches that arrive meanwhile
   wait their turn, until one gets a pane provider. A requested pane's attach
@@ -128,5 +154,5 @@ the Lua only chooses.
 - Pane providers come only from the user's file and the built-ins: never from
   Neovim's config or a project's files, unless the user's own code reads one.
 
-Research: `docs/research/pane-provider-matching.md`, `pane-title.md` and
-`embedded-lua.md`, each on its `research/` branch.
+Research: `docs/research/pane-provider-matching.md`, `pane-title.md`,
+`embedded-lua.md` and `lua-config-api.md`, each on its `research/` branch.

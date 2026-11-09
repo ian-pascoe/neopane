@@ -1,4 +1,4 @@
-# A tab page gets a tab page area from `open-tab-page`, else stays whole in the pane it opened in
+# A tab page gets a tab page area from `open_tab_page`, else stays whole in the pane it opened in
 
 Amended by #92 before implementation: the first attach's other windows get
 terminals of their own where they can (ADR 0009).
@@ -7,9 +7,9 @@ A tab page made after startup has always had a Rex floating pane; other pane
 providers may have a tmux window or a herdr tab for it, or nothing, and any
 request may fail (#90). Plain Neovim shows one tab page at a time on its
 screen. So when a tab page first becomes current it gets a tab page area
-through `open-tab-page`, an optional capability that opens its first
+through `open_tab_page`, an optional capability that opens its first
 window's terminal somewhere apart: a tmux window, a herdr tab, Rex's floating
-pane. Otherwise, with no pane provider, no `open-tab-page`, an origin out of
+pane. Otherwise, with no pane provider, no `open_tab_page`, an origin out of
 reach or a failure, it is drawn whole in the pane it opened in. A window
 pane keeps a pane layout for each tab page whose windows it holds and shows
 one at a time, that of the window last current in it, so `gt` swaps it as
@@ -32,8 +32,8 @@ their place until visited.
 - **Terminals of their own for the later windows of a tab page drawn in a
   pane.** After `gt`, half the tab page would stay on screen beside the
   other.
-- **A floating terminal per tab page through `open-float`, for every pane
-  provider**, as Rex's. `open-float` opens a float group pane, never current,
+- **A floating terminal per tab page through `open_float`, for every pane
+  provider**, as Rex's. `open_float` opens a float group pane, never current,
   at a group's bounds, while a tab page's place holds window panes that are
   current and split further, and not every floating terminal can be split.
   tmux would get a float over its own window where a tmux window fits.
@@ -44,12 +44,12 @@ their place until visited.
   page, and a session's tab pages would all open at once. Tiling them all in
   the first area, as Rex did, tiles every window of a session into one Rex
   window.
-- **A layout-side `place-tab-page` now.** AeroSpace could move a pair's
+- **A layout-side `place_tab_page` now.** AeroSpace could move a pair's
   terminal to a workspace of its own, but no built-in needs it yet.
 
 ## Consequences
 
-- `open-tab-page` is one step, like `open-beside` and `open-float`, so it
+- `open_tab_page` is one step, like `open_beside` and `open_float`, so it
   comes only from a pane provider returned whole, never from a pair's
   halves. It is given `{attach}`, `{title}` and the origin pane's terminal,
   opens a terminal running the attach command in a new tab page area next to
@@ -67,14 +67,14 @@ their place until visited.
   any window does, beside another of the tab page's panes when the origin
   has none, and wait while its first terminal is on its way. Once each has
   one, the requested panes in the area are placed as Neovim lays out the tab
-  page, with `place-beside` and `resize`, and again as that changes.
+  page, with `place_beside` and `resize`, and again as that changes.
   Self-attached panes are never moved.
 - A tab page that came into a pane already showing another tab page stays
   whole in it: its later windows are drawn there, never in terminals of
   their own. Every other new window gets a terminal where the pane provider
   can give one (#83). So with Ghostty and AeroSpace, `:vsplit` opens a
   Ghostty window and `:tabnew` takes over the current one, and the Ghostty
-  built-in has no `open-tab-page`: with no layout provider, a window per tab
+  built-in has no `open_tab_page`: with no layout provider, a window per tab
   page would scatter its splits too.
 - Only a window becoming current makes a pane show its tab page, so the
   current pane always shows Neovim's current tab page (ADR 0011), and another
@@ -105,7 +105,7 @@ their place until visited.
   through `close`, and the area goes with its last terminal; a pane drawing
   it shows the tab page it has left, or ends. No capability closes a whole
   area: it would kill the foreign and self-attached panes in it.
-- Should a pair need it, `place-tab-page` is a layout-provider capability
+- Should a pair need it, `place_tab_page` is a layout-provider capability
   run once `find` has answered for a tab page's first terminal, which `open`
   opened with `<NAME>_KIND=tab-page`. It takes `{terminal}`, the origin
   pane's terminal and `<NAME>_TAB_PAGE`, a token unique to the tab page for

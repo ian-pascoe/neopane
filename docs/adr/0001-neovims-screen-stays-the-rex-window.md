@@ -4,7 +4,7 @@ Widened by ADR 0008: the Rex window is one kind of layout area, and Neovim's
 screen is the size of the current pane's layout area; within an area, all of
 this still holds. Its floating panes are Rex floating panes; neorex's own kind
 is now a float group pane (ADR 0010). A tab page's floating pane is Rex's
-tab page area, opened by its `open-tab-page`; its panes still float within
+tab page area, opened by its `open_tab_page`; its panes still float within
 the Rex window's area (ADR 0012).
 
 When a foreign pane shares the top of the Rex window, the tabline panes are

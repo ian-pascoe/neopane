@@ -4,29 +4,36 @@ Amended by ADR 0007 before implementation: no capability is required, a
 terminal provider may be paired with a layout provider, reach checks context
 variables, and a terminal carries a pane title for `find` to match.
 
-Amended by ADR 0008 before implementation: `report-layout` gives each
+Amended by ADR 0008 before implementation: `report_layout` gives each
 terminal's rect as fractions of its layout area.
 
-Amended by ADR 0010 before implementation: without `open-float`, a float
+Amended by ADR 0010 before implementation: without `open_float`, a float
 group is drawn in a pane, and there is no two-step float. A layout-side
-`place-float`, and `<NAME>_KIND` for `open`, are recorded there as the form
+`place_float`, and `<NAME>_KIND` for `open`, are recorded there as the form
 they take once a pane provider needs them.
 
-Amended by ADR 0012 before implementation: `open-tab-page` gives a tab page
+Amended by ADR 0012 before implementation: `open_tab_page` gives a tab page
 a tab page area, from a pane provider returned whole; without it a tab page
-is drawn in the pane it opened in. A layout-side `place-tab-page`, and
+is drawn in the pane it opened in. A layout-side `place_tab_page`, and
 `tab-page` for `<NAME>_KIND`, are recorded there alongside ADR 0010's
-`place-float`.
+`place_float`.
 
 Amended by ADR 0013 before implementation: `{attach}` is `<exe> attach
 --address A --pane ID`, the pane title's token is the pane id's, and a late
 terminal's helper exits quietly.
 
 Amended by #92 before implementation: the daemon keeps both queues itself, for
-Rex too, sending layout acts one at a time; `open-beside` and `open-tab-page`
-get `<NAME>_COLS`/`_ROWS`, `open-float` gets `<NAME>_ORIGIN_COLS`/`_ROWS`;
-`resize`'s inputs, the direction and count are named; `report-layout` may give
+Rex too, sending layout acts one at a time; `open_beside` and `open_tab_page`
+get `<NAME>_COLS`/`_ROWS`, `open_float` gets `<NAME>_ORIGIN_COLS`/`_ROWS`;
+`resize`'s inputs, the direction and count are named; `report_layout` may give
 an `inset`; Rex's `find` checks the attaching terminal is `REX_BLOCK`'s.
+
+Amended by #93 before implementation: capability names are written with `_`
+everywhere; every variable a capability gets is also a whole-word placeholder,
+the opens get `{pane}` and `<NAME>_ATTACH_JSON` and `open` gets
+`<NAME>_COLS`/`_ROWS`; a capability holding a placeholder it isn't given is
+ignored; commands run in the choosing attach's working directory, without the
+variables the daemon sets; `find`'s answers are set out for each use.
 
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
@@ -55,46 +62,69 @@ switches focus back.
 - **A new terminal for every window, whatever pane it came from.** For a pane
   in another context, such as another Rex session, it opens where nobody is
   looking.
-- **Finding a window only by its terminal's process.** Many terminals run
-  every window in one process, so a layout provider paired with one couldn't
-  tell its windows apart; a title works with any terminal that shows it.
+- **Placeholders replaced inside words**, as in `--title={title}`. One more
+  quoting rule for every value, when `sh -c` and the variable already do it
+  for the cost of one process. - **Finding a window only by its terminal's
+  process.** Many terminals run every window in one process, so a layout
+  provider paired with one couldn't tell its windows apart; a title works with
+  any terminal that shows it.
 
 ## Consequences
 
 - The capabilities are `open` and `close`, the terminal provider's; `find`,
-  `place-beside`, `resize`, `focus`, `focus-direction`, `report-layout` and
-  `events`, the layout provider's; and `open-beside`, `open-float` and
-  `open-tab-page`, which open and place in one step and come only from a
+  `place_beside`, `resize`, `focus`, `focus_direction`, `report_layout` and
+  `events`, the layout provider's; and `open_beside`, `open_float` and
+  `open_tab_page`, which open and place in one step and come only from a
   pane provider returned whole, never from a pair's halves. Without
-  `open-beside`, as always for a terminal provider paired with a layout
+  `open_beside`, as always for a terminal provider paired with a layout
   provider, the daemon opens the terminal, then places it once it attaches.
-  Without `open-float`, a float group is drawn in a pane (ADR 0010).
-  `open-tab-page` is given `{attach}`, `{title}` and the origin pane's
+  Without `open_float`, a float group is drawn in a pane (ADR 0010).
+  `open_tab_page` is given `{attach}`, `{title}` and the origin pane's
   terminal, opens a terminal running the attach command in a new tab page
   area, and prints its terminal id; without it, a tab page is drawn in the
   pane it opened in (ADR 0012). `focus` makes a terminal the one the user
   types into wherever it is, switching tmux window, herdr tab or workspace as
   needed. A capability is added only when a pane provider needs it.
-- A command is an argv run without a shell. Its inputs are `<NAME>_*`
-  variables and whole-word placeholders such as `{terminal}`; `{attach}` is the
-  attach command's words, `<exe> attach --address <address> --pane <pane id>`,
-  `<exe>` being the daemon's own executable, and `<NAME>_ATTACH` is the same as one string any
-  shell reads, for a pane provider that types it. It gets stdio only, the
-  environment of its pane provider's choosing attach, and never `$<NAME>`.
-- Exit 0 is done; stdout holds a terminal id, or JSON from `report-layout`,
+- A command is an argv run without a shell, in the choosing attach's working
+  directory, or `/` if that has gone. Its inputs are `<NAME>_*` variables, and
+  the same as whole-word placeholders: each variable but `<NAME>_ENV_*` by its
+  name after `<NAME>_`, in lower case, so `{terminal}` is `<NAME>_TERMINAL`.
+  `{attach}` alone becomes several words, the attach command's: `<exe> attach
+  --address <address> --pane <pane id>`, `<exe>` being the daemon's own
+  executable. `<NAME>_ATTACH` is the same as one string any shell reads, for a
+  pane provider that types it, and `<NAME>_ATTACH_JSON` as a JSON array, for
+  one that speaks JSON over a socket. A placeholder is replaced only as a
+  whole word, never inside one, so a value inside a word goes through `sh -c`
+  and the variable, and `{{name}}` passes `{name}`. A capability whose argv
+  holds a whole-word placeholder it isn't given is ignored, with a warning, as
+  an unknown capability is. It gets stdio only, and the environment of its
+  pane provider's choosing attach without `$<NAME>` and without any variable
+  the daemon sets for a capability, so none leaks in from an earlier command.
+- Exit 0 is done; stdout holds a terminal id, or JSON from `report_layout`,
   which gives each terminal's rect as fractions of its layout area, and may
   give an `inset`: the cells at each edge of the rect that aren't the
   terminal's own; stderr goes to the log. Exit 69, or a command that can't
   start, means unsupported until the pane provider is chosen again; any other
   failure, or a timeout, fails that act alone, and nothing is retried.
 - A terminal id comes from `open`'s stdout or from `find`, which is given the
-  attach's pid, tty, pane title and the variables the pane provider names: the
-  daemon never knows a pane provider's own variable names. In a pair, the
-  terminal provider's id from `open` serves only `close`, and the layout
-  provider's `find` runs for every attach, even when `open` printed an id; its
-  id serves the rest. Ids are opaque, and the daemon never acts on a pane whose
-  attach has ended; a pane provider whose ids can be reused puts what proves
-  them current into the id.
+  attach's pid, tty, pane id, pane title and, as `<NAME>_ENV_<VAR>`, the
+  variables the pane provider names: `find` runs in the choosing attach's
+  environment, so the attaching terminal's own variables reach it only that
+  way, and the daemon never knows a pane provider's own variable names. In a
+  pair, the terminal provider's id from `open` serves only `close`, and the
+  layout provider's `find` runs for every attach, even when `open` printed an
+  id; its id serves the rest. Ids are opaque, and the daemon never acts on a
+  pane whose attach has ended; a pane provider whose ids can be reused puts
+  what proves them current into the id.
+- `find` answers the same way for each use. Exit 0 with a line gives that
+  terminal's id. Exit 0 with nothing gives none, and every act that needs it
+  falls back. Exit 69, or a command that can't start, accepts the choosing
+  attach, leaves reach to context variables alone and gives no ids until the
+  pane provider is chosen again. Anything else, or a timeout, refuses the
+  choice for the choosing attach, puts a later self-attached terminal out of
+  reach, and leaves a requested terminal without an id, unplaced. Context
+  variables are compared first; a terminal that fails them is out of reach and
+  `find` doesn't run.
 - Before the first `find` command runs for an attach, the daemon writes a pane
   title into the terminal's title: `<name>-` and the token of the pane's id
   (ADR 0013), sent as ordinary output, so it works over a relay too. `open`
@@ -131,21 +161,26 @@ switches focus back.
   a terminal whose `open` printed no id to `close` it by (ADR 0013).
 - Each pane provider's acts go through two queues the daemon keeps itself, for
   a built-in pane provider as for commands. Layout acts (`open*`, `find`,
-  `place-beside`, `resize`, `close`, `report-layout`) run one at a time, each
+  `place_beside`, `resize`, `close`, `report_layout`) run one at a time, each
   sent only once the one before is answered or has timed out, since Rex
   applies some back-to-back layout requests out of order. Focus acts (`focus`,
-  `focus-direction`) have one running and at most one waiting, the newest
+  `focus_direction`) have one running and at most one waiting, the newest
   replacing it, so a slow `open` never holds up `<C-w>w`.
-- `open-beside` and `open-tab-page` also get `<NAME>_COLS` and `<NAME>_ROWS`,
-  a guess at the new terminal's size (for `open-tab-page`, the origin's layout
-  area); `open-float` also gets `<NAME>_ORIGIN_COLS` and `<NAME>_ORIGIN_ROWS`,
-  the reference terminal's size. `<NAME>_RATIO` is always the share of the
-  terminal being opened, placed or resized. `resize` takes `{terminal}` and
-  `{origin}`, the terminals either side of the split, and sets `{terminal}`'s
-  share with `<NAME>_SIZE` and `<NAME>_RATIO` as `place-beside` gives them. A
-  split's direction and `focus-direction`'s are `<NAME>_DIRECTION` (`left`,
-  `right`, `up`, `down`), and its count `<NAME>_COUNT`. None bumps
-  `<NAME>_PROTOCOL`.
+- The opens get `{attach}`, `{attach_json}`, `{title}` and `{pane}`. `open`,
+  `open_beside` and `open_tab_page` get `<NAME>_COLS` and `<NAME>_ROWS`, a
+  guess at the new terminal's size: for `open` and `open_beside`, its share
+  beside its origin pane; for `open_tab_page`, the origin's layout area.
+  `open_float` gets the float group's size in them, and `<NAME>_ORIGIN_COLS`
+  and `<NAME>_ORIGIN_ROWS`, the reference terminal's. The terminal acted on is
+  `<NAME>_TERMINAL`, and the origin pane's terminal, or for `resize` the one
+  across the split, `<NAME>_ORIGIN`. `docs/capabilities.md` will list every
+  capability's inputs and their formats. `<NAME>_RATIO` is always the share of
+  the terminal being opened, placed or resized. `resize` takes `{terminal}`
+  and `{origin}`, the terminals either side of the split, and sets
+  `{terminal}`'s share with `<NAME>_SIZE` and `<NAME>_RATIO` as `place_beside`
+  gives them. A split's direction and `focus_direction`'s are
+  `<NAME>_DIRECTION` (`left`, `right`, `up`, `down`), and its count
+  `<NAME>_COUNT`. None bumps `<NAME>_PROTOCOL`.
 - New variables, optional capabilities and JSON fields leave `<NAME>_PROTOCOL`
   as it is; changing the meaning of an existing one bumps it. Each half of a
   pair agrees its own number. Commands ignore variables they don't know, and

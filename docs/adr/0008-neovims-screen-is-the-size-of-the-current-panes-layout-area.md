@@ -14,7 +14,7 @@ is never a tabline pane. By ADR 0011, the current pane's window's home tab
 page is always Neovim's current tab page.
 
 Amended by #92 before implementation: a requested pane the live layout hasn't
-reported yet is in no layout area for up to 1 s; `report-layout` may give an
+reported yet is in no layout area for up to 1 s; `report_layout` may give an
 `inset`.
 
 Panes need not share a window any more: a terminal provider alone opens
@@ -95,7 +95,7 @@ are seen.
 - A float group pane's bounds are cells relative to the current pane, with
   fractions of its area added when it is in a live layout. Floats tied to a
   window never get one (ADR 0010).
-- `report-layout` gives each terminal's rect as fractions of its layout area,
+- `report_layout` gives each terminal's rect as fractions of its layout area,
   as Rex gives its panes', and may give an `inset`: the cells at each edge of
   the rect that aren't the terminal's, such as a floating pane's frame. Rex's
   pane provider gives its float group panes' terminals the frame neorex has
@@ -105,5 +105,5 @@ are seen.
   screen may change size and a pane may stop being a tabline pane, but no
   terminal is moved and no window changes pane. A pane provider is dropped
   only once no terminal in its reach is attached, so dropping it changes
-  nothing on screen. A `report-layout` that fails leaves the last layout in
+  nothing on screen. A `report_layout` that fails leaves the last layout in
   place; one found unsupported makes every pane its own area.

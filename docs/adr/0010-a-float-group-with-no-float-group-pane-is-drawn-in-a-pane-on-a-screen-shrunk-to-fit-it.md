@@ -3,7 +3,7 @@
 Amended by ADR 0011 before implementation: a float group with a float group
 pane moves into whichever tab page is current; one drawn in a pane is hidden
 while its tab page isn't current. Amended by ADR 0012: `<NAME>_KIND` also
-takes `tab-page`, with `place-tab-page`; whichever of the two comes first
+takes `tab-page`, with `place_tab_page`; whichever of the two comes first
 brings it.
 
 Only Rex makes floating panes today, and an entered float group goes to one
@@ -34,7 +34,7 @@ out again to fit, as pickers and float terminals do on `VimResized`.
 - **A short grace, then the group drawn in a pane until its floating terminal
   attaches.** A Rex floating pane can take longer than any grace, and a picker
   would flash in the pane, then jump: a Rex regression.
-- **A layout-side `place-float` now**, floating a terminal a pair opened. No
+- **A layout-side `place_float` now**, floating a terminal a pair opened. No
   pane provider on the map needs it: AeroSpace can float a window but neither
   size nor place it, and reports no geometry, so each AeroSpace pane is a
   layout area of its own and its float groups fit it. sway and Hyprland can,
@@ -43,7 +43,7 @@ out again to fit, as pickers and float terminals do on `VimResized`.
   as it maps. It changes ADR 0006's title for what only some window managers
   use, and Ghostty keeps a title given at launch for good.
 - **A trigger per pane provider** (entered, focusable or never). Never is a
-  missing `open-float`, and focusable would float completion menus.
+  missing `open_float`, and focusable would float completion menus.
 
 ## Consequences
 
@@ -52,11 +52,11 @@ out again to fit, as pickers and float terminals do on `VimResized`.
   window that isn't a float are never in one, and never get a float group
   pane, as in Rex today.
 - An entered float group gets a float group pane when the pane provider has
-  `open-float`, the same for every pane provider: at most four at once, the
+  `open_float`, the same for every pane provider: at most four at once, the
   top-most. Its bounds are cells relative to the current pane, with fractions
   of that pane's area when it is in a live layout.
 - A group whose float group pane is on its way is drawn nowhere until its
-  floats are fitted to the new terminal, `open-float` fails, or the attach
+  floats are fitted to the new terminal, `open_float` fails, or the attach
   timeout passes, as Rex's are today. A group whose request failed or timed
   out is drawn in a pane for the rest of its life; the next group asks again.
   Exit 69 means unsupported until the pane provider is chosen again (ADR
@@ -96,8 +96,8 @@ out again to fit, as pickers and float terminals do on `VimResized`.
 - A float group pane's terminal hanging up closes its group's floats, however
   it was closed.
 - Should a pane provider need to float a terminal it opened, it gets
-  `place-float`, a layout-provider capability run once `find` has answered for
-  the new terminal. It takes `{terminal}` and `open-float`'s inputs: the
+  `place_float`, a layout-provider capability run once `find` has answered for
+  the new terminal. It takes `{terminal}` and `open_float`'s inputs: the
   current pane's terminal, the bounds in cells relative to it, its size in
   cells, and `<NAME>_AREA_BOUNDS` when it is in a live layout. On failure the
   terminal is closed, never left tiled, and the group is drawn in a pane; exit
