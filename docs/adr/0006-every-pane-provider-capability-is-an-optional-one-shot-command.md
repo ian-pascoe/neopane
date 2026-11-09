@@ -18,6 +18,10 @@ is drawn in the pane it opened in. A layout-side `place-tab-page`, and
 `tab-page` for `<NAME>_KIND`, are recorded there alongside ADR 0010's
 `place-float`.
 
+Amended by ADR 0013 before implementation: `{attach}` is `<exe> attach
+--address A --pane ID`, the pane title's token is the pane id's, and a late
+terminal's helper exits quietly.
+
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a
 capability, and each is one command run once, so a user can write a pane
@@ -67,7 +71,8 @@ switches focus back.
   needed. A capability is added only when a pane provider needs it.
 - A command is an argv run without a shell. Its inputs are `<NAME>_*`
   variables and whole-word placeholders such as `{terminal}`; `{attach}` is the
-  attach command's words, and `<NAME>_ATTACH` is the same as one string any
+  attach command's words, `<exe> attach --address <address> --pane <pane id>`,
+  `<exe>` being the daemon's own executable, and `<NAME>_ATTACH` is the same as one string any
   shell reads, for a pane provider that types it. It gets stdio only, the
   environment of its pane provider's choosing attach, and never `$<NAME>`.
 - Exit 0 is done; stdout holds a terminal id, or JSON from `report-layout`,
@@ -84,7 +89,7 @@ switches focus back.
   attach has ended; a pane provider whose ids can be reused puts what proves
   them current into the id.
 - Before the first `find` command runs for an attach, the daemon writes a pane
-  title into the terminal's title: `<name>-` and a token unique to the pane,
+  title into the terminal's title: `<name>-` and the token of the pane's id (ADR 0013),
   sent as ordinary output, so it works over a relay too. `open` gets it as
   `{title}` and `<NAME>_TITLE`, so a terminal provider can make it the
   window's first title rather than rely on the terminal honouring the escape
@@ -111,7 +116,9 @@ switches focus back.
 - `close` is called whenever the daemon is done with a requested terminal, so
   it must succeed on one already gone. A self-attached terminal is never
   closed. A pane's helper never exits within 300 ms of starting, so a terminal
-  that treats a quick exit as a crash, as Ghostty does, still closes.
+  that treats a quick exit as a crash, as Ghostty does, still closes; one
+  refused for arriving late exits with status 0 and no message, which closes
+  a terminal whose `open` printed no id to `close` it by (ADR 0013).
 - Focus requests have a queue of their own, so a slow `open` never holds up
   `<C-w>w`.
 - New variables, optional capabilities and JSON fields leave `<NAME>_PROTOCOL`

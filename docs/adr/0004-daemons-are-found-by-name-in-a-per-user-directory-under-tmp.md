@@ -1,5 +1,10 @@
 # Daemons are found by name in a per-user directory under /tmp
 
+Amended by ADR 0013 before implementation: the attach command is `<name>
+attach --address A --pane ID`, every pane id carries a token unique to the
+pane, and a newer `<name>` can always ask an older daemon its status and stop
+it.
+
 An attach has to find a daemon that may have outlived the terminal that
 started it (ADR 0003), so each daemon has a name, unique among the user's
 running daemons, and lives at a predictable path:
@@ -46,9 +51,13 @@ neorex until the rename, then `neopane` (ADR 0005).
   only daemon running; none or several is an error listing them. Provider
   variables such as `REX_SESSION` never pick a daemon.
 - A daemon address is passed whole everywhere outside the platform layer (the
-  requested pane's command line, `$<NAME>`, `--address`), so on Windows it can
-  be a named pipe. Requested pane ids carry a per-daemon token, since names
-  are reused.
+  attach command, `<name> attach --address A --pane ID`; `$<NAME>`;
+  `--address`), so on Windows it can be a named pipe, written `//./pipe/<name>`
+  with no `/` in the name so the attach command stays bare words; there,
+  addresses that differ only in case or in `/` for `\` are the same. Every
+  pane id carries a random token unique to the pane, such as `12-k3j9x2qpa8`,
+  since names and paths are reused (ADR 0013).
 - From the first tagged release on, the layout is a contract across versions:
   a running daemon keeps the binary it started with, and a newer `<name>` must
-  still find it.
+  still find it, ask its status and stop it, whatever its attach protocol
+  version (ADR 0013).

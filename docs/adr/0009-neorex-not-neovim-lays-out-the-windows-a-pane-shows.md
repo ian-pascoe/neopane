@@ -4,6 +4,9 @@ Amended by ADR 0012 before implementation: a window pane keeps a pane layout
 for each tab page whose windows it holds and shows one at a time; a tab page
 that came into a pane showing another stays whole in it.
 
+Amended by ADR 0013 before implementation: a late terminal is refused,
+closed by its helper exiting as well as by `close`.
+
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
 provider, when `open` fails or no attach comes in time, for an origin out of
@@ -83,7 +86,8 @@ resizes and draws as Neovim would.
 - A window waits for its requested terminal for the terminal provider's
   attach timeout (ADR 0007), 5 s by default from `open` finishing, Rex's
   included. Then it is drawn in its origin pane, with a warning. A terminal
-  that attaches after that is closed.
+  that attaches after that is refused: its helper exits quietly, which closes
+  it, and `close` runs too when `open` printed an id (ADR 0013).
 - A pane ends when its last window closes, whichever tab page it's in: a
   requested terminal is closed, a self-attached one goes back to its shell.
   Its terminal hanging up closes every window it holds, shown or not (#83).

@@ -47,8 +47,32 @@ What a daemon is found by: unique among a user's running daemons, and by default
 _Avoid_: session name
 
 **Daemon address**:
-Where a daemon takes attaches: a Unix socket path, or a named pipe on Windows. Passed whole, never taken apart.
+Where a daemon takes attaches and control requests: a Unix socket path, or a named pipe on Windows, written `//./pipe/…`. Passed whole, never taken apart.
 _Avoid_: socket, socket path
+
+**Helper**:
+The process a Neovim pane's terminal runs, `<name> attach`: it connects the terminal to a daemon, owns the terminal's settings, and stays until the attach ends.
+_Avoid_: client, shim, proxy, pane process
+
+**Attach**:
+One helper's connection to a daemon for one terminal, from its hello to its end: a requested pane's, which carries its pane id, or a self-attach.
+_Avoid_: session, connection
+
+**Hello**:
+A helper's first message: its purpose, its transport, its terminal's size and where it comes from (environment, working directory, tty, pid). The daemon answers every one, accepting or refusing it with a reason.
+_Avoid_: handshake (the hello and its answer together), greeting
+
+**Transport**:
+How an attach's terminal reaches the daemon: handed over, so the daemon reads and writes it itself (Unix only, and the default), or relayed, the helper copying its bytes both ways (everywhere, and the only one on Windows).
+_Avoid_: mode (a terminal's), channel (Neovim's), link
+
+**Attach protocol version**:
+The number a helper and a daemon must share to attach. Status and stop work whatever it is.
+_Avoid_: protocol (on its own), `<NAME>_PROTOCOL` (the pane provider interface's)
+
+**Control request**:
+A connection that asks a daemon something without a terminal: status, stop, or open FILE.
+_Avoid_: command (a capability's), RPC (Neovim's)
 
 **Unattached daemon**:
 A daemon with no Neovim pane attached or on its way, whether it hasn't had one yet or its last pane went.
@@ -75,7 +99,7 @@ A Neovim pane whose terminal attached without being asked for, such as the one `
 _Avoid_: unasked pane, manual pane, launcher pane, adopted pane
 
 **Pane id**:
-The daemon's name for a Neovim pane, given to a requested pane before its terminal exists.
+The daemon's name for a Neovim pane: a number and a token, joined by `-`, such as `12-k3j9x2qpa8`. A requested pane's is given in its attach command before its terminal exists and is good for one attach; a self-attached pane gets one as it attaches.
 _Avoid_: terminal id, block id
 
 **Origin pane**:
@@ -169,7 +193,7 @@ A terminal provider's or layout provider's own name for a terminal: a Rex block 
 _Avoid_: handle, block, window id, pane id
 
 **Pane title**:
-A marker neorex puts in a Neovim pane's terminal title, unique to the pane, so a layout provider such as AeroSpace can find the terminal when it attaches.
+A marker neorex puts in a Neovim pane's terminal title, `<name>-` and its pane id's token, so a layout provider such as AeroSpace can find the terminal when it attaches.
 _Avoid_: window title (Neovim's `'titlestring'`), tab title
 
 **Reach**:
