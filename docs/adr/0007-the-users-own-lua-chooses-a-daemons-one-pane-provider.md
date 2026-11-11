@@ -12,6 +12,10 @@ Amended by #93 before implementation: the file's table holds only `provider`;
 returned; nothing the config starts outlives it; `<name>.builtin` holds
 functions, and `<name>.inside` proves where an attach is.
 
+Amended by #128 before implementation: `<name>.run` raises on bad arguments,
+such as an argv that isn't a list of strings or an unknown option, and
+returns what happened otherwise.
+
 A daemon gets its pane provider from the user's own Lua file, which Neovim
 never reads (#87). The file returns a `provider` function. When a self-attach
 arrives and the daemon has no pane provider, the daemon runs the file afresh

@@ -198,6 +198,10 @@ _Avoid_: default provider, bundled provider
 The user's own Lua file that sets up terminal and layout providers and says, for a self-attach, which pane provider to use. Neovim never reads it.
 _Avoid_: Neovim's config, init.lua (Neovim's), rc
 
+**Config child**:
+The process of the daemon's own binary that runs the config for one choice and sends back what its `provider` returned, as plain data the daemon checks. It has 3 s, and once it answers, it and everything it started are killed.
+_Avoid_: config process, Lua worker, sandbox (there is none)
+
 **Capability**:
 Something a pane provider can do when the daemon asks, such as open, find or focus a terminal. Each is optional: without one, that act falls back as if there were no pane provider.
 _Avoid_: feature (a terminal's), operation, command
