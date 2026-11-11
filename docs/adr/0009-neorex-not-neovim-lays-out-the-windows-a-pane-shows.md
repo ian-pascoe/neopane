@@ -10,6 +10,9 @@ closed by its helper exiting as well as by `close`.
 Amended by #92 before implementation: windows at the first attach get
 terminals of their own where they can.
 
+Amended by #107: `'equalalways'` evens the whole pane that way, as Neovim
+does, rather than only the row or column split.
+
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
 provider, when `open` fails or no attach comes in time, for an origin out of
@@ -48,8 +51,9 @@ resizes and draws as Neovim would.
 - From the start, a pane layout follows these rules:
   - A new window takes half its origin window's place, on the side and in
     the direction Neovim chose (`'splitbelow'`, `'splitright'`, `:aboveleft`,
-    `:belowright`, `:vertical`), and `'equalalways'` then evens that row or
-    column.
+    `:belowright`, `:vertical`). With `'equalalways'`, a split or close then
+    evens every window across the pane that way, as Neovim's `win_equal`
+    evens its whole tab page, not only the row or column split.
   - A closing window's space goes to the next window, or with `'splitbelow'`
     or `'splitright'` to the previous one.
   - A size Neovim gives a window (`:resize`, `<C-w>+`, `<C-w>_`, `<C-w>|`)
