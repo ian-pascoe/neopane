@@ -301,8 +301,18 @@ fn attach_with(
         if fds[2].revents != 0 {
             match relay_input(tty, &mut stream) {
                 Relayed::Sent => {}
-                // nothing left to restore it for
-                Relayed::TerminalGone => return Exit::ok(),
+                // the daemon closes the pane; what's left of the terminal
+                // is restored as on any other way out
+                Relayed::TerminalGone => {
+                    drop(stream);
+                    restore.end(false);
+                    return Exit::ok();
+                }
+                Relayed::ReadFailed(e) => {
+                    drop(stream);
+                    restore.end(false);
+                    return Exit::fail(format!("can't read the terminal: {e}"));
+                }
                 Relayed::DaemonGone => return gone(&restore),
             }
         }
@@ -346,8 +356,11 @@ fn attach_with(
 /// What relaying the terminal's input did.
 enum Relayed {
     Sent,
-    /// The terminal hung up.
+    /// The terminal hung up: a read of nothing, or EIO, as Linux has a
+    /// pty's reads once its master closes.
     TerminalGone,
+    /// Reading the terminal failed otherwise.
+    ReadFailed(io::Error),
     /// The daemon's socket failed.
     DaemonGone,
 }
@@ -362,11 +375,15 @@ fn relay_input(tty: RawFd, stream: &mut UnixStream) -> Relayed {
         if n > 0 {
             break n as usize;
         }
-        match io::Error::last_os_error().kind() {
-            _ if n == 0 => return Relayed::TerminalGone,
+        if n == 0 {
+            return Relayed::TerminalGone;
+        }
+        let e = io::Error::last_os_error();
+        match e.kind() {
             io::ErrorKind::Interrupted => {}
             io::ErrorKind::WouldBlock => return Relayed::Sent,
-            _ => return Relayed::TerminalGone,
+            _ if e.raw_os_error() == Some(libc::EIO) => return Relayed::TerminalGone,
+            _ => return Relayed::ReadFailed(e),
         }
     };
     let mut frames = Vec::new();
@@ -1614,5 +1631,66 @@ mod tests {
         assert_eq!(Exit::fail("the daemon went away; see /tmp/log"), run.exit);
         assert_eq!(b"\x1b[38;2;\x18\x1b\\<undo>", &run.shown[..]);
         assert!(run.restored && run.blocking);
+    }
+
+    /// A relayed attach whose terminal hangs up ends quietly, still
+    /// living out its minimum life and hanging up on the daemon.
+    #[test]
+    fn a_relayed_terminal_that_hangs_up_ends_the_attach_quietly() {
+        let (master, slave) = open_pty(80, 24);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            take_hello(&theirs);
+            send(&theirs, accept());
+            send(&theirs, undo(b"<undo>"));
+            // the terminal emulator goes
+            unsafe { libc::close(master) };
+            let mut rest = Vec::new();
+            (&theirs).read_to_end(&mut rest).unwrap();
+        });
+        let how = Attach::new(Want::Requested(pane()), Transport::Relay);
+        let exit = attach_on(ours, slave, &how, None);
+        fake.join().unwrap();
+        assert_eq!(Exit::ok(), exit);
+        assert!(how.started.elapsed() >= MIN_LIFE);
+        unsafe { libc::close(slave) };
+    }
+
+    /// A relayed terminal that can't be read is a failure, and still
+    /// undone and restored.
+    #[test]
+    fn a_relayed_terminal_that_cant_be_read_fails_and_is_restored() {
+        let (master, slave) = open_pty(80, 24);
+        let before = raw::settings(slave);
+        // the same terminal, open for writing only: its reads fail
+        let path = std::ffi::CString::new(tty_name(slave)).unwrap();
+        let tty = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_NOCTTY) };
+        assert!(tty >= 0);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            take_hello(&theirs);
+            send(&theirs, accept());
+            send(&theirs, undo(b"<undo>"));
+            // typed: the terminal has input to read
+            assert_eq!(1, unsafe { libc::write(master, b"x".as_ptr().cast(), 1) });
+            let mut rest = Vec::new();
+            (&theirs).read_to_end(&mut rest).unwrap();
+        });
+        let how = Attach::new(Want::Requested(pane()), Transport::Relay);
+        let exit = attach_on(ours, tty, &how, None);
+        fake.join().unwrap();
+        assert_eq!(1, exit.status);
+        let message = exit.message.unwrap_or_default();
+        assert!(
+            message.starts_with("can't read the terminal: "),
+            "{message}"
+        );
+        assert_eq!(b"<undo>", &drain(master)[..]);
+        assert!(raw::same(&before, &raw::settings(slave)));
+        unsafe {
+            libc::close(tty);
+            libc::close(master);
+            libc::close(slave);
+        }
     }
 }
