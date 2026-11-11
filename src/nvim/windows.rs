@@ -834,13 +834,24 @@ mod tests {
             assert!(self.until(Harness::is_current));
         }
 
-        /// `want` is what the notes since the last clear say, in order, then the barrier's.
+        /// The notes since the last clear but the layouts, which every tab
+        /// page tells as its windows change.
+        fn notes_but_layouts(&self) -> Vec<&Note> {
+            self.notes
+                .iter()
+                .filter(|n| !matches!(n, Note::Layout(_)))
+                .collect()
+        }
+
+        /// `want` is what the notes since the last clear say, but the
+        /// layouts, in order, then the barrier's.
         fn expect_notes(&self, want: &[Note]) {
-            assert_eq!(want.len() + 1, self.notes.len());
-            for (w, got) in want.iter().zip(&self.notes[0..want.len()]) {
-                assert_eq!(w, got);
+            let notes = self.notes_but_layouts();
+            assert_eq!(want.len() + 1, notes.len());
+            for (w, got) in want.iter().zip(&notes[0..want.len()]) {
+                assert_eq!(w, *got);
             }
-            assert_eq!(Note::Current(4242), self.notes[want.len()]);
+            assert_eq!(&Note::Current(4242), notes[want.len()]);
         }
 
         /// Splits the current window, which is already set up, and adopts the
@@ -993,7 +1004,7 @@ mod tests {
                 && x.kind(cur) == Some(WinKind::External)
                 && x.kind(x.want).is_none()
         }));
-        assert_eq!(Note::Reopen(first), h.notes[0]);
+        assert_eq!(&Note::Reopen(first), h.notes_but_layouts()[0]);
 
         // :q on the last window quits
         h.input(":q<CR>");
@@ -3236,6 +3247,22 @@ mod tests {
             n += 1;
         }
         assert_eq!(out.len(), n);
+    }
+
+    #[test]
+    fn a_tab_page_that_isnt_floating_reports_its_layout_too() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        // the daemon decides which tab pages it places: it's told of them all
+        h.notes.clear();
+        h.lua("vim.cmd('vsplit')");
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len > 0)));
+        assert!(
+            h.notes
+                .iter()
+                .all(|n| !matches!(n, Note::Split(s) if s.tab != 0))
+        );
     }
 
     #[test]

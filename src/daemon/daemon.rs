@@ -92,7 +92,7 @@ pub(crate) struct Daemon {
     /// Sizes Neovim gave windows not yet in a pane: window, cols, rows, as a
     /// `Resized` note has them. A window that joins a pane layout takes its.
     pub pending_sizes: Vec<(i64, u32, u32)>,
-    /// Where Neovim has the windows of each tab page made after setup, as it
+    /// Where Neovim has the windows of each tab page with a tab page area, as it
     /// last said, and what was done to place their panes to match.
     pub tab_layouts: IndexMap<i64, Tab>,
     /// The live layout last applied to the panes.
@@ -653,7 +653,7 @@ impl Daemon {
         // from, else any with a terminal. A tab page's first window opens its
         // Rex floating pane (`open_tab_page`) from the pane it came from.
         let (origin, beside) = if sp.tab != 0 {
-            match self.tab_origin(sp) {
+            match self.tab_anchor(sp) {
                 Some(t) => (Some(t), true),
                 None => {
                     // its tab page's Rex floating pane is on its way: open
@@ -763,18 +763,17 @@ impl Daemon {
         }
     }
 
-    /// The origin of a window of a tab page made after setup: a pane of its
-    /// tab page, the one it came from if it can. Neovim shows the tab page
-    /// over every other window, so they share a Rex floating pane over theirs;
-    /// None for the first.
-    fn tab_origin(&self, sp: windows::Split) -> Option<TerminalId> {
+    /// The anchor of a window of a tab page with a tab page area: its origin
+    /// if that's in the same area, else any requested pane of the area. None
+    /// for the area's first, or while its terminal is on its way.
+    fn tab_anchor(&self, sp: windows::Split) -> Option<TerminalId> {
         if let Some(f) = self.panes.by_win(sp.from)
             && f.tab == sp.tab
             && let Some(t) = &f.terminal
         {
             return Some(t.clone());
         }
-        self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none())
+        self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none() && q.attach_id.is_some())
     }
 
     /// The terminal of the first pane `keep` keeps that has one.
@@ -1205,9 +1204,11 @@ impl Daemon {
         true
     }
 
-    /// Neovim has a new layout for a tab page's windows, or none.
+    /// Neovim has a new layout for a tab page's windows, or none. Only a tab
+    /// page with a tab page area, or one on its way, is placed: Neovim tells
+    /// them all.
     fn on_tab_layout(&mut self, layout: Layout) -> Result<()> {
-        if layout.len == 0 {
+        if layout.len == 0 || !self.has_tab_page_area(layout.tab) {
             self.tab_layouts.swap_remove(&layout.tab);
             return Ok(());
         }
@@ -1304,6 +1305,20 @@ impl Daemon {
         })
     }
 
+    /// Whether tab page `tab` has a tab page area: a pane of its windows
+    /// opened by `open_tab_page` or beside one, still wanted, or a window of
+    /// it waiting for its pane.
+    fn has_tab_page_area(&self, tab: i64) -> bool {
+        if tab == 0 {
+            return false;
+        }
+        let panes =
+            self.panes.list.iter().any(|p| {
+                p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed)
+            });
+        panes || self.changes.splits.values().any(|s| s.split.tab == tab)
+    }
+
     /// The terminals of the panes a move is between, if both have one.
     fn terminals_of(&self, m: &PaneMove) -> Option<Terminals> {
         let moved = self.panes.by_win(m.win)?.terminal.clone()?;
@@ -1338,7 +1353,7 @@ impl Daemon {
     fn new_pane_size(&self, win: i64) -> [u32; 2] {
         let sp = self.changes.split_of(win);
         // a tab page's first: its Rex floating pane's size
-        let first_of_tab = sp.tab != 0 && self.tab_origin(sp).is_none();
+        let first_of_tab = sp.tab != 0 && self.tab_anchor(sp).is_none();
         self.geometry()
             .new_pane_size(sp, self.split_from(sp), first_of_tab)
     }
@@ -2148,7 +2163,8 @@ fn observe_window(
             WindowState::Pending
         };
     };
-    if p.closing.is_some() {
+    // a self-attached pane is never moved
+    if p.closing.is_some() || p.attach_id.is_none() {
         return WindowState::Skipped;
     }
     if p.terminal.is_none() {
@@ -3815,6 +3831,70 @@ mod tests {
                 resize(2, 3, 40, 40.0 / 80.0)
             ]),
             r9(&asked[asked.len() - 2..])
+        );
+    }
+
+    #[test]
+    fn a_tab_pages_layout_is_kept_only_while_it_has_a_tab_page_area_or_one_on_its_way() {
+        let mut fx = tab_page_of_three(&[Capability::PlaceBeside, Capability::Resize]);
+        let d = &mut fx.d;
+        // tab page 2's windows have panes in its area
+        d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
+        assert!(d.tab_layouts.contains_key(&2));
+        // tab page 5 has none, and no window waiting for one: as the tab
+        // page made at setup
+        let mut other = window_row(&[20, 40]);
+        other.tab = 5;
+        d.on_tab_layout(other).unwrap();
+        assert!(!d.tab_layouts.contains_key(&5));
+        // its first window is on its way to its area
+        d.changes.note_split(windows::Split {
+            win: 7,
+            side_by_side: false,
+            before: false,
+            from: 0,
+            tab: 5,
+        });
+        d.on_tab_layout(other).unwrap();
+        assert!(d.tab_layouts.contains_key(&5));
+    }
+
+    #[test]
+    fn a_self_attached_pane_in_a_tab_pages_area_is_never_moved() {
+        let mut fx = tab_page_of_three(&[Capability::PlaceBeside, Capability::Resize]);
+        let d = &mut fx.d;
+        // window 1's terminal attached by hand
+        let i = d.panes.index_of(d.panes.by_win(1).unwrap().id).unwrap();
+        d.panes.list[i].attach_id = None;
+        d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
+        d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
+        done(d);
+        assert_eq!(r9(&[place(2, 3, 40, 40.0 / 60.0)]), r9(&fake(d).asked()));
+    }
+
+    #[test]
+    fn a_tab_pages_window_opens_beside_a_requested_pane_of_its_area() {
+        let mut fx = fixture();
+        let d = &mut fx.d;
+        // a self-attached pane of tab page 2 first, then a requested one
+        d.panes.add(Pane::from_neovim_window(50, 50)).tab = 2;
+        set_block(d, 50, 50);
+        pane_in_block(d, 51, 2, 51);
+        let sp = windows::Split {
+            win: 60,
+            side_by_side: true,
+            before: false,
+            from: 0,
+            tab: 2,
+        };
+        assert_eq!(
+            Some(TerminalId::from(block_id(51).as_str())),
+            d.tab_anchor(sp)
+        );
+        // its origin, in the same area, comes first, self-attached or not
+        assert_eq!(
+            Some(TerminalId::from(block_id(50).as_str())),
+            d.tab_anchor(windows::Split { from: 50, ..sp })
         );
     }
 
