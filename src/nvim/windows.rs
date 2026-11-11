@@ -3276,8 +3276,7 @@ mod tests {
 
         // another tab page current: the first's layout is only looked at as
         // its window closes
-        h.lua("vim.cmd('tabnew')");
-        h.barrier();
+        h.sync("vim.cmd('tabnew')");
         h.notes.clear();
         close(&mut h.nvim, split);
         h.nvim.flush().unwrap();
@@ -3317,13 +3316,10 @@ mod tests {
             ))
         };
         // both tab pages were current, so both have one
-        h.input(":tabnext<CR>");
-        h.barrier();
-        h.input(":tabnext<CR>");
-        h.barrier();
+        h.sync("vim.cmd('tabnext')");
+        h.sync("vim.cmd('tabnext')");
         assert_eq!("2", count(&mut h));
-        h.input(":2tabclose<CR>");
-        h.barrier();
+        h.sync("vim.cmd('2tabclose')");
         assert_eq!("1", count(&mut h));
     }
 
