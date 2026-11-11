@@ -135,7 +135,7 @@ impl Transport {
 
     /// The transport `<NAME>_TRANSPORT`'s `value` picks: `fd` when it's
     /// unset or empty. Any other value is `fd` too, with a warning to show.
-    pub fn from_env(value: Option<&std::ffi::OsStr>) -> (Transport, Option<String>) {
+    pub fn from_env_value(value: Option<&std::ffi::OsStr>) -> (Transport, Option<String>) {
         let Some(value) = value.filter(|v| !v.is_empty()) else {
             return (Transport::Fd, None);
         };
@@ -150,9 +150,16 @@ impl Transport {
         }
     }
 
-    /// `from_env` of this process's environment.
-    pub fn from_environment() -> (Transport, Option<String>) {
-        Transport::from_env(std::env::var_os(Transport::env_var()).as_deref())
+    /// The transport this process's `<NAME>_TRANSPORT` picks, giving `warn`
+    /// the line for a value it can't take: helpers print it, the daemon
+    /// logs it.
+    pub fn from_env(warn: impl FnOnce(&str)) -> Transport {
+        let value = std::env::var_os(Transport::env_var());
+        let (transport, warning) = Transport::from_env_value(value.as_deref());
+        if let Some(w) = warning {
+            warn(&w);
+        }
+        transport
     }
 }
 
@@ -1392,8 +1399,8 @@ mod tests {
     #[test]
     fn the_transport_variable_is_fd_unless_set_to_relay() {
         use std::ffi::OsStr;
-        let from = |v: &str| Transport::from_env(Some(OsStr::new(v)));
-        assert_eq!((Transport::Fd, None), Transport::from_env(None));
+        let from = |v: &str| Transport::from_env_value(Some(OsStr::new(v)));
+        assert_eq!((Transport::Fd, None), Transport::from_env_value(None));
         assert_eq!((Transport::Fd, None), from(""));
         assert_eq!((Transport::Fd, None), from("fd"));
         assert_eq!((Transport::Relay, None), from("relay"));
@@ -1410,7 +1417,7 @@ mod tests {
             (b"relay ", "relay "),
             (b"\xff", "\u{fffd}"),
         ] {
-            let (t, warning) = Transport::from_env(Some(std::ffi::OsStr::from_bytes(value)));
+            let (t, warning) = Transport::from_env_value(Some(std::ffi::OsStr::from_bytes(value)));
             assert_eq!(Transport::Fd, t);
             assert_eq!(
                 Some(format!("ignoring {var}={shown} (use fd or relay)")),

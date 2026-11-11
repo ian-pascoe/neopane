@@ -426,10 +426,13 @@ fn hidden_commands() {
     });
     let attach = "/bin/x attach --address /a/sock --pane 2-abcdefghij";
     assert_eq!(parsed(&format!("debug-relay {attach}")), relay);
-    assert_eq!(
-        parsed(&format!("debug-relay {attach} --transport relay")),
-        relay
-    );
+    // it relays whatever transport the words name
+    for transport in ["relay", "fd"] {
+        assert_eq!(
+            parsed(&format!("debug-relay {attach} --transport {transport}")),
+            relay
+        );
+    }
     let takes = "debug-relay takes a requested pane's attach command";
     for line in [
         "debug-relay",

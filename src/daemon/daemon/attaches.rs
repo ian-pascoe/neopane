@@ -2,7 +2,7 @@
 //! without blocking the loop, answered, and the frames an attached helper
 //! sends after.
 
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Instant;
 
@@ -175,10 +175,7 @@ impl Daemon {
             return self.refuse_requested(stream, z, Some((id, pane)));
         }
         self.panes.ids.take(&pane).expect("checked");
-        let mut surface = match (terminal.transport, tty) {
-            (Transport::Fd, Some(tty)) => Surface::create(stream, tty.into_raw_fd(), terminal.size),
-            _ => Surface::relayed(stream, terminal.size),
-        };
+        let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: pane {shown}'s helper went: {e}");
             surface.destroy(crate::attach::Ending::Failed, "");

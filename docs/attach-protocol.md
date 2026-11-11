@@ -30,8 +30,10 @@ never among the names stripped for capabilities.
 
 `<name> debug-relay {attach}`, the relay test tool, attaches a requested
 pane over the relay with no pty: stdin goes out in `i` frames, `o`
-frames come out on stdout, and it exits as the helper would. Rust tests
-drive the same tool as `debug::relay::RelayPane`.
+frames come out on stdout, and it exits with the status the helper would.
+Unlike the helper it has no terminal to restore, so it neither restores one
+nor waits out the 300 ms minimum. Rust tests drive the same tool as
+`debug::relay::RelayPane`.
 
 A Unix daemon takes both, attach by attach. Hello, answer, size, end and
 restore are the same under both. Sizes always travel as messages: the daemon

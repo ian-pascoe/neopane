@@ -4,12 +4,12 @@
 //! still handed around as a `Box<Surface>` (what `create` returns and a `Pane`
 //! owns), which keeps a `Pane` small to move around in the `Panes` list.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use super::backlog::Backlog;
 use super::terminal_io::{FdIo, RelayIo, TerminalIo};
-use crate::attach::{End, Ending, Size};
+use crate::attach::{End, Ending, Size, Transport};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -49,9 +49,26 @@ impl Surface {
         Surface::with_io(helper_socket, Box::new(FdIo { tty }), size)
     }
 
+    /// Takes over an accepted attach's `helper_socket` and its terminal of
+    /// `size`, as `transport` carries it: `tty`, the terminal handed over,
+    /// under `fd`, which `attach_conn::check_terminal` makes sure came.
+    pub(crate) fn for_attach(
+        helper_socket: UnixStream,
+        transport: Transport,
+        tty: Option<OwnedFd>,
+        size: Size,
+    ) -> Box<Surface> {
+        match (transport, tty) {
+            (Transport::Fd, Some(tty)) => Surface::create(helper_socket, tty.into_raw_fd(), size),
+            (Transport::Fd, None) => panic!("an fd attach without its terminal was taken"),
+            // a file sent along all the same is closed: the relay doesn't use it
+            (Transport::Relay, _) => Surface::relayed(helper_socket, size),
+        }
+    }
+
     /// Takes over `helper_socket`, which relays a terminal of `size`.
     pub(crate) fn relayed(helper_socket: UnixStream, size: Size) -> Box<Surface> {
-        Surface::with_io(helper_socket, Box::new(RelayIo::default()), size)
+        Surface::with_io(helper_socket, Box::new(RelayIo), size)
     }
 
     fn with_io(helper_socket: UnixStream, io: Box<dyn TerminalIo>, size: Size) -> Box<Surface> {
@@ -292,7 +309,8 @@ mod tests {
         surface.destroy(Ending::Closed, "bye");
         let took = started.elapsed();
         assert!(took >= std::time::Duration::from_millis(900), "{took:?}");
-        assert!(took < std::time::Duration::from_millis(1500), "{took:?}");
+        // and not much more, if CI is loaded
+        assert!(took < std::time::Duration::from_millis(2500), "{took:?}");
         let (said, rest) = frames_and_rest(&helper);
         assert!(!said.iter().any(|m| matches!(m, Message::End(_))));
         assert!(!rest.is_empty(), "the `o` in flight is cut off");

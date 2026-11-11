@@ -65,7 +65,8 @@ fn run(command: Command) -> Result<ExitCode> {
         } => {
             let want = pane_helper::Want::Requested(pane);
             let address = Address::from_arg(address);
-            let transport = transport.unwrap_or_else(transport_from_env);
+            let transport =
+                transport.unwrap_or_else(|| Transport::from_env(|w| eprintln!("{NAME}: {w}")));
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
         Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
@@ -80,16 +81,6 @@ fn run(command: Command) -> Result<ExitCode> {
             pane,
         ))),
     }
-}
-
-/// The transport `<NAME>_TRANSPORT` picks, warning of a value it can't
-/// take.
-fn transport_from_env() -> Transport {
-    let (transport, warning) = Transport::from_environment();
-    if let Some(w) = warning {
-        eprintln!("{NAME}: {w}");
-    }
-    transport
 }
 
 /// The first of `start`'s options that does nothing yet.

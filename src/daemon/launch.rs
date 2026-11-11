@@ -95,10 +95,7 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
         return Err(Error::NotInRex.into());
     }
     // warned of before the daemon starts, which warns in its log
-    let (transport, warning) = Transport::from_environment();
-    if let Some(w) = warning {
-        eprintln!("{NAME}: {w}");
-    }
+    let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
     let base = dir::base()?;
     let name = default_name(&std::env::current_dir().unwrap_or_default());
 

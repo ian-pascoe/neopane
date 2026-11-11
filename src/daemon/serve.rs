@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
@@ -93,6 +93,9 @@ pub(crate) struct Config<'a> {
     pub(crate) nvim_timeout: Duration,
     /// Called once the helpers' socket listens: the launcher may connect.
     pub(crate) ready: Box<dyn FnMut() -> Result<()> + 'a>,
+    /// How requested panes' helpers attach: `<NAME>_TRANSPORT`, read as
+    /// the daemon starts.
+    pub(crate) transport: Transport,
 }
 
 impl<'a> Config<'a> {
@@ -104,6 +107,7 @@ impl<'a> Config<'a> {
             nvim_command: &["nvim"],
             nvim_timeout: NVIM_START_TIMEOUT,
             ready: Box::new(|| Ok(())),
+            transport: Transport::from_env(|w| log_warn!("{NAME} daemon: {w}")),
         }
     }
 }
@@ -550,11 +554,6 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         .canonicalize()?
         .to_string_lossy()
         .into_owned();
-    // requested panes' helpers relay too under the diagnostic
-    let (transport, warning) = Transport::from_environment();
-    if let Some(w) = warning {
-        log_warn!("{NAME} daemon: {w}");
-    }
 
     // open until we exit: every new pane's helper connects here
     let server = dir.bind()?;
@@ -621,7 +620,8 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         dir.address(),
     );
     d.name = name;
-    d.transport = transport;
+    // requested panes' helpers relay too under the diagnostic
+    d.transport = config.transport;
     d.log = log.clone();
     d.start(startup.release())?;
 
@@ -810,10 +810,7 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let mut surface = match (terminal.transport, a.tty) {
-        (Transport::Fd, Some(tty)) => Surface::create(a.stream, tty.into_raw_fd(), terminal.size),
-        _ => Surface::relayed(a.stream, terminal.size),
-    };
+    let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     log::trace_at(Point::Hello, 0, a.at);
     log::trace(Point::Accepted, 0);
@@ -829,6 +826,37 @@ mod tests {
     use crate::daemon::dir::testing::Scratch;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
+
+    /// For `the_daemon_reads_the_transport_variable_as_it_starts`, in a
+    /// process of its own, whose environment that test sets: prints the
+    /// transport the daemon's config takes.
+    #[test]
+    #[ignore = "run by another test, with the variable set"]
+    fn print_the_configs_transport() {
+        let config = Config::new("unix:///nowhere", "session:s");
+        println!("transport={}", config.transport.name());
+    }
+
+    #[test]
+    fn the_daemon_reads_the_transport_variable_as_it_starts() {
+        for (value, want) in [("relay", "relay"), ("", "fd"), ("x", "fd")] {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::serve::tests::print_the_configs_transport",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(Transport::env_var(), value)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                said.contains(&format!("transport={want}\n")),
+                "{value}: {said}"
+            );
+        }
+    }
 
     /// The file `name` in the directory `dir`.
     fn path(dir: &str, name: &str) -> String {

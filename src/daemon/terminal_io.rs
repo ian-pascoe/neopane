@@ -65,18 +65,7 @@ impl TerminalIo for FdIo {
 }
 
 /// The terminal relayed by the helper, in `i` and `o` frames.
-pub(crate) struct RelayIo {
-    /// How long the end waits for the `o` in flight: `END_FLUSH`.
-    pub(crate) flush_within: Duration,
-}
-
-impl Default for RelayIo {
-    fn default() -> RelayIo {
-        RelayIo {
-            flush_within: END_FLUSH,
-        }
-    }
-}
+pub(crate) struct RelayIo;
 
 impl TerminalIo for RelayIo {
     fn transport(&self) -> Transport {
@@ -101,7 +90,7 @@ impl TerminalIo for RelayIo {
 
     /// The `o` in flight is finished, so the frames stay whole, and the
     /// rest dropped; the `z` says whether that cut a drawn frame short. If
-    /// the socket doesn't take that and the `z` within `flush_within`, the
+    /// the socket doesn't take that and the `z` within `END_FLUSH`, the
     /// attach ends without a `z`, and the helper takes it for a crash.
     fn end(&self, helper: &UnixStream, backlog: &Backlog, mut end: End) {
         let mut bytes = Vec::new();
@@ -114,7 +103,7 @@ impl TerminalIo for RelayIo {
             return;
         };
         bytes.extend_from_slice(&z);
-        write_within(helper, &bytes, Instant::now() + self.flush_within);
+        write_within(helper, &bytes, Instant::now() + END_FLUSH);
     }
 }
 
