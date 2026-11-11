@@ -145,7 +145,8 @@ impl RexProvider {
                 self.float_asks.push(tag);
                 self.session.new_layer(tag, bounds, layout)?;
             }
-            // Rex's ratio is the anchor's share, the ask's the placed terminal's
+            // right of or below `{origin}`, as the daemon only asks; Rex's
+            // ratio is the anchor's share, the ask's the placed terminal's
             Ask::PlaceBeside {
                 terminal,
                 origin,
@@ -157,7 +158,6 @@ impl RexProvider {
                 terminal.as_str(),
                 origin.as_str(),
                 dir.across(),
-                dir.before(),
                 1.0 - ratio,
             )?,
             // `{origin}` is before the split, `{terminal}` after it

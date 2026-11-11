@@ -372,15 +372,14 @@ impl Session {
     }
 
     /// Moves `block` beside `anchor`: right of it, or below if not
-    /// `side_by_side`; left of it or above if `before`. `anchor` is left the
-    /// fraction `ratio` of the room they share.
+    /// `side_by_side`. `anchor` is left the fraction `ratio` of the room they
+    /// share.
     pub(crate) fn move_block(
         &mut self,
         tag: u64,
         block: &str,
         anchor: &str,
         side_by_side: bool,
-        before: bool,
         ratio: f64,
     ) -> Result<(), ClientError> {
         self.request(
@@ -391,7 +390,7 @@ impl Session {
                 "block_id": block,
                 "anchor_block_id": anchor,
                 "direction": if side_by_side { "horizontal" } else { "vertical" },
-                "side": if before { "before" } else { "after" },
+                "side": "after",
                 "ratio": json_f64(ratio),
             }),
         )
@@ -808,8 +807,7 @@ pub(crate) mod tests {
         let (mut s, theirs) = session();
         s.attach().unwrap();
         s.focus_direction(Direction::Left).unwrap();
-        s.move_block(0, "block:a", "block:b", true, false, 0.5)
-            .unwrap();
+        s.move_block(0, "block:a", "block:b", true, 0.5).unwrap();
         s.resize_pane(0, "block:a", "block:b", false, 1.0).unwrap();
         s.disown(0, "block:a").unwrap();
         s.new_layer(3, [1.0, 2.5, 80.0, 24.0], json!({ "kind": "leaf" }))
