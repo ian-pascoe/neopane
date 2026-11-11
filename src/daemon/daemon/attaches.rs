@@ -209,6 +209,7 @@ impl Daemon {
         {
             l.fit = Fit::Asked(req);
         }
+        self.wait_for_report(id, Instant::now())?;
         self.nvim.client.flush()?;
         self.draw()?;
         // a size sent right after the hello

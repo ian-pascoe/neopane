@@ -34,6 +34,15 @@ impl FakeProvider {
         ])
     }
 
+    /// One that can do every open and `close`, and tells its live layouts
+    /// unasked.
+    pub(crate) fn telling() -> FakeProvider {
+        let mut f = FakeProvider::opening();
+        f.caps.insert(Capability::ReportLayout);
+        f.caps.insert(Capability::Events);
+        f
+    }
+
     /// Answers ask `id` with `outcome`, at the next `next`.
     pub(crate) fn answer(&mut self, id: AskId, outcome: Outcome) {
         self.push(ProviderEvent::Answered { id, outcome });

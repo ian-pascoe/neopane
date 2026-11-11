@@ -75,9 +75,12 @@ can tell it's running under neorex:
 { 'sphamba/smear-cursor.nvim', cond = vim.g.neorex == nil },
 ```
 
-The tabline shows across the panes along the top of the Rex window. When
-another pane, such as a shell, takes part of the top, those panes are narrower
-than Neovim's screen, and neorex fits the tabline to them: every `'tabline'`
+Neovim's screen is the size of the current pane's layout area: its Rex
+window, or the pane alone with no Rex. The tabline shows across the panes
+along the top of each Rex window, and is fitted to the current pane's; the
+top panes of another Rex window show it from its start, cut at their width.
+When another pane, such as a shell, takes part of the top, those panes are
+narrower than Neovim's screen, and neorex fits the tabline to them: every `'tabline'`
 that isn't empty ends at the right edge of the tabline panes (a fitted
 tabline), so the `%=`-aligned right end of one such as lualine's shows. A
 tabline too wide for them is cut as Neovim would cut it on a screen that wide.

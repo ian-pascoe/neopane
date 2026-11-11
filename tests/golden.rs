@@ -12,7 +12,7 @@ use neorex::nvim::rpc;
 use neorex::nvim::windows::{self, Note};
 use neorex::screen::grid::{Cell, Grid};
 use neorex::screen::grids::{Grids, Placed, WinKind};
-use neorex::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown};
+use neorex::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown, tabline_slice};
 use neorex::screen::render;
 use neorex::screen::style::{Attr, Shape, Style, Underline};
 
@@ -1333,4 +1333,86 @@ fn with_laststatus_0_the_window_above_shows_a_blank_statusline_drawn_for_it() ->
         ],
     )?;
     expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
+}
+
+// The tabline over layout areas (ADR 0008): fitted to the current pane's
+// area, whose tabline panes show it end to end; a pane of another area
+// shows the same row from its start, cut at its width or blank past it.
+
+/// Draws window grid `grid`, under the tabline from column `col` of grid 1,
+/// into a pane of `cols` x 4, and checks what it shows.
+fn pane_under_the_tabline(
+    gs: &mut Grids,
+    grid: u32,
+    col: u32,
+    cols: u32,
+    rows: &[(&str, &str)],
+) -> Result<()> {
+    let tabline = tabline_slice(gs.get(1).unwrap(), col, cols);
+    let mut view = PaneView::init(cols, 4);
+    let mut t = test_terminal(cols as u16, 4)?;
+    let mut out = Vec::new();
+    let opts = Opts {
+        tabline: Some(&tabline),
+        tabline_col: col,
+        ..Opts::default()
+    };
+    assert!(view.frame(gs, Some(grid), opts, &mut out));
+    t.feed(&out);
+    expect_written(&t, &gs.style, rows)
+}
+
+#[test]
+fn a_fitted_tabline_in_the_current_area_and_a_cut_one_in_another() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // the screen is the current area, 20 wide: its tabline is fitted to it
+    let mut screen = Grid::default();
+    screen.resize(20, 4);
+    for (c, ch) in "1:one 2:two 3:three ".chars().enumerate() {
+        screen.cells[c] = Cell::init(ch.to_string(), STL);
+    }
+    gs.grids.insert(1, screen);
+    add_window(&mut gs, 2, 12, 2, 'a');
+    add_window(&mut gs, 3, 8, 2, 'b');
+    add_window(&mut gs, 4, 8, 2, 'c');
+    add_window(&mut gs, 5, 26, 2, 'd');
+
+    // the current area's tabline panes, 12 and 8 wide: every tab, once
+    pane_under_the_tabline(
+        &mut gs,
+        2,
+        0,
+        12,
+        &[
+            ("1:one 2:two ", "SSSSSSSSSSSS"),
+            ("a0          ", "............"),
+        ],
+    )?;
+    pane_under_the_tabline(
+        &mut gs,
+        3,
+        12,
+        8,
+        &[("3:three ", "SSSSSSSS"), ("b0      ", "........")],
+    )?;
+    // another area's: from its start, cut at a narrow one's width...
+    pane_under_the_tabline(
+        &mut gs,
+        4,
+        0,
+        8,
+        &[("1:one 2:", "SSSSSSSS"), ("c0      ", "........")],
+    )?;
+    // ...and blank past the screen in a wide one
+    pane_under_the_tabline(
+        &mut gs,
+        5,
+        0,
+        26,
+        &[
+            ("1:one 2:two 3:three       ", "SSSSSSSSSSSSSSSSSSSS......"),
+            ("d0                        ", ".........................."),
+        ],
+    )
 }

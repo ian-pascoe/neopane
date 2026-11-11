@@ -10,6 +10,7 @@ use std::os::fd::RawFd;
 
 use super::dir::Address;
 use super::event_loop::{self, Loop};
+use super::live_layout::Area;
 use super::pane_layout::PaneLayout;
 use super::provider::TerminalId;
 use super::surface::{Restore, Surface};
@@ -44,8 +45,11 @@ pub(crate) struct Pane {
     pub tab: i64,
     /// Set for a Rex floating pane showing a group of floats, not a window.
     pub layer: Option<Layer>,
-    /// Where Rex put the pane in its window, as fractions: x, y, w, h.
-    pub rect: Option<[f64; 4]>,
+    /// Its layout area, as the live layout last said (ADR 0008).
+    pub area: Area,
+    /// When an `Unreported` pane becomes its own area: a second after its
+    /// terminal attached with its id.
+    pub report_due: Option<std::time::Instant>,
     /// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
     pub awaiting_layout: bool,
     pub last_asked_win_size: LastAskedWinSize,
@@ -196,7 +200,8 @@ impl Pane {
             closing: None,
             tab: 0,
             layer: None,
-            rect: None,
+            area: Area::Unreported,
+            report_due: None,
             awaiting_layout: false,
             last_asked_win_size: LastAskedWinSize::default(),
         }

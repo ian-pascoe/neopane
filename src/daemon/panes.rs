@@ -121,12 +121,6 @@ impl Panes {
             .find(|p| p.terminal.as_ref().is_some_and(|x| x.as_str() == t))
     }
 
-    pub(crate) fn by_terminal_mut(&mut self, t: &str) -> Option<&mut Pane> {
-        self.list
-            .iter_mut()
-            .find(|p| p.terminal.as_ref().is_some_and(|x| x.as_str() == t))
-    }
-
     pub(crate) fn by_layer_key(&self, key: i64) -> Option<&Pane> {
         self.list
             .iter()
