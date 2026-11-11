@@ -62,6 +62,10 @@ pub enum Ran {
     LoadFailed(String),
     /// Running it raised.
     Failed(String),
+    /// The file's own table was over the limits, its keys too many or too
+    /// long. [`Answer::encode`] sends a `Returned` whose `file` is over them
+    /// as this.
+    FileOver(Limit),
     /// It returned `file`: its first value, with each table in a table
     /// sent empty, as only the top level is read. `provider` is what came
     /// of calling its `provider`.
@@ -133,6 +137,7 @@ const CANT_READ: u8 = 0;
 const LOAD_FAILED: u8 = 1;
 const FAILED: u8 = 2;
 const RETURNED: u8 = 3;
+const FILE_OVER: u8 = 4;
 
 const NOT_CALLED: u8 = 0;
 const CALLED_RETURNED: u8 = 1;
@@ -142,7 +147,7 @@ const TOO_DEEP: u8 = 4;
 
 impl Answer {
     /// The answer, without its length. A tree over the limits goes as
-    /// [`Called::Over`].
+    /// [`Ran::FileOver`] or [`Called::Over`].
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![VERSION];
         put_bytes(&mut out, self.build.as_bytes());
@@ -150,10 +155,21 @@ impl Answer {
             Ran::CantRead(m) => message(&mut out, CANT_READ, m),
             Ran::LoadFailed(m) => message(&mut out, LOAD_FAILED, m),
             Ran::Failed(m) => message(&mut out, FAILED, m),
+            Ran::FileOver(limit) => {
+                out.push(FILE_OVER);
+                out.push(limit_tag(*limit));
+            }
             Ran::Returned { file, provider } => {
+                let file = match super::tree::encode(file) {
+                    Ok(bytes) => bytes,
+                    Err(limit) => {
+                        out.push(FILE_OVER);
+                        out.push(limit_tag(limit));
+                        return out;
+                    }
+                };
                 out.push(RETURNED);
-                // the file's table is sent one level deep, so it fits
-                out.extend(super::tree::encode(file).unwrap_or_else(|_| vec![0]));
+                out.extend(file);
                 let called = match provider {
                     Called::Returned(tree) => super::tree::encode(tree).map_err(Called::Over),
                     other => Err(other.clone()),
@@ -164,8 +180,7 @@ impl Answer {
                         out.extend(bytes);
                     }
                     Err(Called::Raised(m)) => message(&mut out, RAISED, &m),
-                    Err(Called::Over(Limit::TooBig)) => out.push(TOO_BIG),
-                    Err(Called::Over(Limit::TooDeep)) => out.push(TOO_DEEP),
+                    Err(Called::Over(limit)) => out.push(limit_tag(limit)),
                     Err(_) => out.push(NOT_CALLED),
                 }
             }
@@ -187,18 +202,33 @@ impl Answer {
                     NOT_CALLED => Called::NotCalled,
                     CALLED_RETURNED => Called::Returned(r.tree()?),
                     RAISED => Called::Raised(string(&mut r)?),
-                    TOO_BIG => Called::Over(Limit::TooBig),
-                    TOO_DEEP => Called::Over(Limit::TooDeep),
+                    tag @ (TOO_BIG | TOO_DEEP) => Called::Over(limit_of(tag)?),
                     tag => return Err(DecodeError(format!("unknown call tag {tag}"))),
                 };
                 Ran::Returned { file, provider }
             }
+            FILE_OVER => Ran::FileOver(limit_of(r.u8()?)?),
             tag => return Err(DecodeError(format!("unknown outcome tag {tag}"))),
         };
         if r.at != bytes.len() {
             return Err(DecodeError("bytes after the answer".into()));
         }
         Ok(Answer { build, ran })
+    }
+}
+
+fn limit_tag(limit: Limit) -> u8 {
+    match limit {
+        Limit::TooBig => TOO_BIG,
+        Limit::TooDeep => TOO_DEEP,
+    }
+}
+
+fn limit_of(tag: u8) -> Result<Limit, DecodeError> {
+    match tag {
+        TOO_BIG => Ok(Limit::TooBig),
+        TOO_DEEP => Ok(Limit::TooDeep),
+        tag => Err(DecodeError(format!("unknown limit tag {tag}"))),
     }
 }
 
@@ -270,6 +300,7 @@ mod tests {
             Ran::CantRead("no such file".into()),
             Ran::LoadFailed("x".into()),
             Ran::Failed("y".into()),
+            Ran::FileOver(Limit::TooBig),
             Ran::Returned {
                 file: file.clone(),
                 provider: Called::NotCalled,

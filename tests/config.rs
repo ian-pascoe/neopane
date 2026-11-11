@@ -374,6 +374,14 @@ fn no_table_or_no_provider_function() {
 }
 
 #[test]
+fn the_files_table_is_too_big() {
+    assert_eq!(
+        error_of("return { provider = function() return 'rex' end, [string.rep('k', 2^20)] = 1 }"),
+        "init.lua returned a table of more than 1 MiB"
+    );
+}
+
+#[test]
 fn provider_raises_or_returns_the_wrong_thing() {
     assert_eq!(
         error_of("return { provider = function() error('nope') end }"),

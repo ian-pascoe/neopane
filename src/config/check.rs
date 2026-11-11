@@ -380,6 +380,7 @@ impl Checker {
             Ran::CantRead(e) => self.error(format!("can't read {file}: {e}")),
             Ran::LoadFailed(e) => self.error(format!("{file} failed to load: {e}")),
             Ran::Failed(e) => self.error(format!("{file} failed: {e}")),
+            Ran::FileOver(limit) => self.error(format!("{file} returned a table of {limit}")),
             Ran::Returned {
                 file: top,
                 provider,
@@ -439,12 +440,8 @@ impl Checker {
                 self.error(format!("{ROOT} raised: {e}"));
                 return None;
             }
-            Called::Over(Limit::TooBig) => {
-                self.error(format!("{ROOT} returned {}", Limit::TooBig));
-                return None;
-            }
-            Called::Over(Limit::TooDeep) => {
-                self.error(format!("{ROOT} returned {}", Limit::TooDeep));
+            Called::Over(limit) => {
+                self.error(format!("{ROOT} returned {limit}"));
                 return None;
             }
             Called::NotCalled => {
