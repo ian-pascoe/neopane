@@ -18,6 +18,20 @@ refuses it with `transport`, and nothing retries.
 - `relay`: the helper copies the terminal's bytes in `i` and `o` frames. The
   only transport on Windows. On Unix it is a diagnostic, chosen with
   `<NAME>_TRANSPORT=relay` or `--transport relay`, and never automatically.
+  The daemon's socket stays non-blocking: the backlog holds what the socket
+  hasn't taken, and drops whole drawn frames, each of whole `o` frames.
+
+The helper picks the transport: `--transport`, else `<NAME>_TRANSPORT`, `fd`
+when that is unset or empty. Any other value is `fd`, after the line
+`<name>: ignoring <NAME>_TRANSPORT=<value> (use fd or relay)` on stderr. The
+daemon reads the variable as it starts, logging that line for a bad value,
+and under `relay` adds `--transport relay` to `{attach}`. The variable is
+never among the names stripped for capabilities.
+
+`<name> debug-relay {attach}`, the relay test tool, attaches a requested
+pane over the relay with no pty: stdin goes out in `i` frames, `o`
+frames come out on stdout, and it exits as the helper would. Rust tests
+drive the same tool as `debug::relay::RelayPane`.
 
 A Unix daemon takes both, attach by attach. Hello, answer, size, end and
 restore are the same under both. Sizes always travel as messages: the daemon
@@ -128,8 +142,9 @@ closes its copy of the terminal. It sends `z` and closes:
 
 - `reason`: an ending reason.
 - `message`: one line.
-- `cut`: true if the daemon cut a frame short. The helper then writes CAN
-  and `ESC \` (`18 1B 5C`) before the undo bytes.
+- `cut`: true if the daemon cut a frame short; under `relay`, a drawn
+  frame of which the helper got some `o` frames and not all. The helper
+  then writes CAN and `ESC \` (`18 1B 5C`) before the undo bytes.
 - `exit`: int 0–255, Neovim's exit status, only with `quit`. A self-attach
   exits with it.
 
