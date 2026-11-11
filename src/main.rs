@@ -1,114 +1,96 @@
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
-use neorex::attach::{PaneId, Transport};
+use neorex::cli::{self, Command, Start, UsageError};
 use neorex::daemon::{launch, pane_helper, serve};
 use neorex::debug;
-use neorex::log;
 use neorex::name::NAME;
-
-fn usage() -> String {
-    format!(
-        "\
-usage: {NAME} [nvim args]    open Neovim in this pane
-       {NAME} <command>
-
-commands:
-  debug-keys                 show each key, paste, focus and mouse event as you type
-  debug-events [nvim args]   run Neovim and print the redraw events it sends
-  debug-tui [nvim args]      run Neovim in this terminal through {NAME}'s renderer
-  debug-panes SOCKET         stand-in daemon: drive the terminals of panes that connect
-  debug-rex SOCKET           open a split in this Rex session and drive its pane; print Rex events
-  help                       show this help
-
-{NAME} runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
-to find its pane. Only debug-rex reads them, of the debug commands.
-
-The daemon logs to `log` in its private directory, {NAME}-<launcher pid>.XXXXXX in
-$XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
-On a clean exit (Neovim quits or crashes, the last pane closes, or a signal) the
-daemon removes the log, unless {log} is debug.
-{log} sets what the daemon logs: warn, info (the default), or debug, which adds
-trace timestamps.
-When the daemon itself fails, the log and directory stay, and if it failed to start,
-{NAME} prints the log's path.
-",
-        log = log::env_var()
-    )
-}
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Runs, and on an error prints its name on stderr and exits with status 1.
+/// Runs the command line: 0 on success, 1 on a failure or refusal (one
+/// `<name>: …` line on stderr), 2 on a usage error.
 fn main() -> ExitCode {
-    match run() {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if let Err(err) = cli::started_by_us(&args, stdout_is_terminal()) {
+        return usage_error(err);
+    }
+    let parsed = cli::parse(&args);
+    let exists = |word: &OsStr| Path::new(word).symlink_metadata().is_ok();
+    if let Some(note) = cli::file_note(&args, &parsed, exists) {
+        eprintln!("{note}");
+    }
+    let command = match parsed {
+        Ok(command) => command,
+        Err(err) => return usage_error(err),
+    };
+    match run(command) {
         Ok(code) => code,
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::from(1)
-        }
+        Err(err) => fail(&err.to_string()),
     }
 }
 
-/// What a helper command asks for.
-#[derive(Debug, PartialEq, Eq)]
-enum Helper {
-    /// `attach --address A --pane ID [--transport fd|relay]`: a requested
-    /// pane's helper.
-    Attach {
-        address: OsString,
-        pane: PaneId,
-        transport: Transport,
-    },
-    /// `pane`, which older daemons ran: exits 1 with this line.
-    Replaced(String),
-    Usage,
-}
-
-/// The helper command `cmd` with `rest`, if it is one.
-fn helper_command(cmd: &OsStr, rest: &[OsString]) -> Option<Helper> {
-    if cmd == "pane" {
-        return Some(Helper::Replaced(format!(
-            "{NAME}: pane was replaced by attach --pane (this came from an older daemon)"
-        )));
-    }
-    if cmd != "attach" {
-        return None;
-    }
-    let (mut address, mut pane, mut transport) = (None, None, None);
-    let mut words = rest.iter();
-    while let Some(flag) = words.next() {
-        let Some(value) = words.next() else {
-            return Some(Helper::Usage);
-        };
-        let text = value.to_str();
-        let ok = match flag.to_str() {
-            Some("--address") if address.is_none() => {
-                address = Some(value.clone());
-                true
+fn run(command: Command) -> Result<ExitCode> {
+    let done = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
+    match command {
+        Command::Start(start) => {
+            if let Some(option) = unbuilt_option(&start) {
+                return Ok(fail(&format!("{option} isn't built yet")));
             }
-            Some("--pane") if pane.is_none() => {
-                pane = text.and_then(PaneId::parse);
-                pane.is_some()
-            }
-            Some("--transport") if transport.is_none() => {
-                transport = text.and_then(Transport::from_name);
-                transport.is_some()
-            }
-            _ => false,
-        };
-        if !ok {
-            return Some(Helper::Usage);
+            Ok(helper_exit(launch::run(&start.nvim_args)?))
         }
-    }
-    // a self-attach, without --pane, comes with #105
-    match (address, pane) {
-        (Some(address), Some(pane)) => Some(Helper::Attach {
+        Command::Help => Ok(print(&cli::help())),
+        Command::DebugHelp => Ok(print(&cli::debug_help())),
+        Command::Version => Ok(print(&cli::version())),
+        Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
+        // started by the launcher, not by people
+        Command::Daemon { dir, nvim_args } => done(serve::run(&dir.to_string_lossy(), &nvim_args)),
+        Command::ConfigChild => Ok(fail("config-child isn't built yet")),
+        Command::AttachPane {
             address,
             pane,
-            transport: transport.unwrap_or(Transport::Fd),
-        }),
-        _ => Some(Helper::Usage),
+            transport,
+        } => {
+            let want = pane_helper::Want::Requested(pane);
+            Ok(helper_exit(pane_helper::run(&address, want, transport)))
+        }
+        Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
+        Command::DebugKeys => done(debug::keys::run()),
+        Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
+        Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
+        Command::DebugPanes(socket) => done(debug::panes::run(&socket)),
+        Command::DebugRex(socket) => done(debug::rex::run(&socket)),
+        Command::DebugLatency(path) => done(debug::latency::run(&path)),
+    }
+}
+
+/// The first of `start`'s options that does nothing yet.
+fn unbuilt_option(start: &Start) -> Option<&'static str> {
+    [
+        (start.name.is_some(), "--name"),
+        (start.address.is_some(), "--address"),
+        (start.detach, "--detach"),
+        (start.no_wait, "--no-wait"),
+    ]
+    .into_iter()
+    .find_map(|(given, option)| given.then_some(option))
+}
+
+fn stdout_is_terminal() -> bool {
+    // SAFETY: isatty only inspects the fd.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+/// Prints what was asked for on stdout. A reader that went away (a broken
+/// pipe) ends it quietly.
+fn print(text: &str) -> ExitCode {
+    let mut out = io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => fail(&format!("can't write to stdout: {e}")),
     }
 }
 
@@ -120,193 +102,14 @@ fn helper_exit(exit: pane_helper::Exit) -> ExitCode {
     ExitCode::from(exit.status)
 }
 
-fn run() -> Result<ExitCode> {
-    let args: Vec<OsString> = std::env::args_os().collect();
-    let cmd: &OsStr = if args.len() >= 2 {
-        &args[1]
-    } else {
-        OsStr::new("")
-    };
-    let rest: &[OsString] = if args.len() >= 2 { &args[2..] } else { &[] };
-
-    let done = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
-    if cmd == "help" || cmd == "-h" || cmd == "--help" {
-        eprint!("{}", usage());
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cmd == "debug-keys" && rest.is_empty() {
-        return done(debug::keys::run());
-    }
-    if cmd == "debug-events" {
-        return done(debug::events::run(rest));
-    }
-    if cmd == "debug-tui" {
-        return done(debug::tui::run(rest));
-    }
-    if cmd == "debug-panes" && rest.len() == 1 {
-        return done(debug::panes::run(&rest[0]));
-    }
-    if cmd == "debug-rex" && rest.len() == 1 {
-        return done(debug::rex::run(&rest[0]));
-    }
-    // hidden: for docs/latency.md
-    if cmd == "debug-latency" && rest.len() == 1 {
-        return done(debug::latency::run(&rest[0]));
-    }
-    // hidden: run by a requested pane's terminal
-    match helper_command(cmd, rest) {
-        Some(Helper::Attach {
-            address,
-            pane,
-            transport,
-        }) => {
-            let want = pane_helper::Want::Requested(pane);
-            return Ok(helper_exit(pane_helper::run(&address, want, transport)));
-        }
-        Some(Helper::Replaced(line)) => {
-            eprintln!("{line}");
-            return Ok(ExitCode::from(1));
-        }
-        Some(Helper::Usage) => usage_exit(),
-        None => {}
-    }
-    // started by the launcher, not by people
-    if cmd == "daemon" && !rest.is_empty() {
-        return done(serve::run(&rest[0].to_string_lossy(), &rest[1..]));
-    }
-    for known in [
-        "debug-keys",
-        "debug-panes",
-        "debug-rex",
-        "debug-latency",
-        "daemon",
-    ] {
-        if cmd == known {
-            usage_exit();
-        }
-    }
-    Ok(helper_exit(launch::run(args.get(1..).unwrap_or(&[]))?))
+/// Prints `<name>: why` and exits 1.
+fn fail(why: &str) -> ExitCode {
+    eprintln!("{NAME}: {why}");
+    ExitCode::from(1)
 }
 
-/// Prints the usage and exits with status 2.
-fn usage_exit() -> ! {
-    eprint!("{}", usage());
-    std::process::exit(2);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Helper, helper_command, usage};
-    use neorex::attach::{PaneId, Transport};
-    use neorex::name::NAME;
-    use std::ffi::{OsStr, OsString};
-
-    #[test]
-    fn help_says_where_the_log_is() {
-        for want in [
-            "REX_SERVER",
-            "REX_SESSION",
-            "REX_BLOCK",
-            "XDG_RUNTIME_DIR",
-            "TMPDIR",
-            &format!("`log` in its private directory, {NAME}-<launcher pid>.XXXXXX"),
-            &format!("{}_LOG", neorex::name::upper()),
-        ] {
-            assert!(usage().contains(want), "{want}");
-        }
-    }
-
-    fn helper(words: &[&str]) -> Option<Helper> {
-        let rest: Vec<OsString> = words[1..].iter().map(OsString::from).collect();
-        helper_command(OsStr::new(words[0]), &rest)
-    }
-
-    #[test]
-    fn pane_points_at_attach() {
-        let line =
-            format!("{NAME}: pane was replaced by attach --pane (this came from an older daemon)");
-        assert_eq!(
-            Some(Helper::Replaced(line.clone())),
-            helper(&["pane", "a", "b"])
-        );
-        assert_eq!(Some(Helper::Replaced(line)), helper(&["pane"]));
-        assert!(!usage().contains("pane SOCKET"));
-    }
-
-    #[test]
-    fn attach_takes_an_address_and_a_pane() {
-        let pane = PaneId::parse("2-abcdefghij").unwrap();
-        let want = |transport| {
-            Some(Helper::Attach {
-                address: "/tmp/x/sock".into(),
-                pane,
-                transport,
-            })
-        };
-        assert_eq!(
-            want(Transport::Fd),
-            helper(&[
-                "attach",
-                "--address",
-                "/tmp/x/sock",
-                "--pane",
-                "2-abcdefghij"
-            ])
-        );
-        assert_eq!(
-            want(Transport::Relay),
-            helper(&[
-                "attach",
-                "--pane",
-                "2-abcdefghij",
-                "--address",
-                "/tmp/x/sock",
-                "--transport",
-                "relay"
-            ])
-        );
-        for bad in [
-            &["attach"][..],
-            &["attach", "--address", "/a"],
-            &["attach", "--pane", "2-abcdefghij"],
-            &["attach", "--address", "/a", "--pane", "2"],
-            &[
-                "attach",
-                "--address",
-                "/a",
-                "--pane",
-                "2-abcdefghij",
-                "--pane",
-            ],
-            &[
-                "attach",
-                "--address",
-                "/a",
-                "--address",
-                "/b",
-                "--pane",
-                "2-abcdefghij",
-            ],
-            &[
-                "attach",
-                "--address",
-                "/a",
-                "--pane",
-                "2-abcdefghij",
-                "--transport",
-                "x",
-            ],
-            &[
-                "attach",
-                "--address",
-                "/a",
-                "--pane",
-                "2-abcdefghij",
-                "file",
-            ],
-        ] {
-            assert_eq!(Some(Helper::Usage), helper(bad), "{bad:?}");
-        }
-        assert_eq!(None, helper(&["debug-keys"]));
-    }
+/// Prints the usage error and exits 2.
+fn usage_error(err: UsageError) -> ExitCode {
+    eprintln!("{err}");
+    ExitCode::from(2)
 }

@@ -3,6 +3,7 @@
 #![warn(unreachable_pub)]
 
 pub mod attach;
+pub mod cli;
 pub mod daemon;
 pub mod debug;
 pub mod log;

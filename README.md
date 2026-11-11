@@ -122,8 +122,8 @@ ways:
   comes from `TabLineFill`.
 - A wide character the close button cuts in half is drawn blank.
 
-`neorex help` lists the debug commands, which run each layer on its own:
-keys, Neovim's redraw events, the renderer, and pane hand-off.
+`neorex help debug` lists the debug commands, which run each layer on its
+own: keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 ## How it runs
 
@@ -149,10 +149,10 @@ pane's terminal only. A terminal left over from an older daemon, which ran
 `neorex pane`, exits with `neorex: pane was replaced by attach --pane (this
 came from an older daemon)`.
 
-If stdin isn't a terminal, `neorex` prints `error: NotATerminal` and exits. In
-a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
-`neorex: run it in a Rex pane`, then `error: NotInRex`, and exits. The
-`debug-rex` command reads the same three variables.
+If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
+to start a daemon without one, use --detach` and exits 1. In a terminal but
+without `REX_SERVER` or `REX_SESSION`, it prints `neorex: run it in a Rex
+pane` and exits 1. The `debug-rex` command reads the same three variables.
 
 The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
 private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
@@ -161,7 +161,7 @@ to the file `log` there. On a clean exit (Neovim quits or crashes, the last
 pane closes, or a signal) the daemon removes the log and the directory, unless
 `NEOREX_LOG` is `debug`. When
 the daemon itself fails, they stay, and if it failed to start, neorex prints
-the log's path. `neorex help` says the same.
+the log's path. `neorex --help` says the same.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
@@ -170,6 +170,87 @@ there, or in a terminal started with `REX_SESSION` set to that session's id
 panes inherits that pane's `REX_BLOCK`, which the daemon would use as the first
 window's pane, in your session: unset `REX_BLOCK`, or set it to a block in the
 new session.
+
+## Command reference
+
+`neorex --help` (also `-h`, `help`, or `-h` after any command) prints:
+
+```text
+neorex: one Neovim in the background, shown in every terminal attached to it.
+
+Usage:
+  neorex [OPTIONS] [NVIM-ARGS...]
+  neorex attach [--name N | --address A] [--provider P] [+LINE] [FILE]
+  neorex list [--json]
+  neorex status [--name N | --address A] [--json]
+  neorex kill [--name N | --address A | --all] [--force]
+  neorex provider check [--config FILE] [--provider P] [--daemon-name N]
+                        [--no-find] [--full] [--json]
+  neorex provider show [NAME]
+  neorex provider types [--config FILE]
+  …
+```
+
+Not built yet: `attach` (but for the hidden `attach --pane` of a Rex pane),
+`list`, `status`, `kill`, `provider`, and the `--name`, `--address`,
+`--detach` and `--no-wait` options exit 1 with `neorex: list isn't built
+yet`. `--provider` is accepted and does nothing.
+
+### Own options first, then Neovim's
+
+`neorex` reads its own options only from the front of the command line
+([ADR 0014](docs/adr/0014-own-options-come-first-and-command-words-never-name-files.md)).
+Long ones take ` VALUE` or `=VALUE`, and none can be abbreviated. The first
+word that isn't one of them, and every word after it, goes to Neovim as
+typed, a `--` included: `neorex -- --name` opens a file named `--name`. One of
+`neorex`'s options after Neovim's have begun is a usage error saying where it
+goes.
+
+Only the first argument can be a command word (`attach`, `list`, `status`,
+`kill`, `provider`, `help`, `version`), and it runs the command even when a
+file of that name exists, with a note on stderr; `neorex ./list` opens the
+file. `detach` is held for a later command.
+
+### Version
+
+`neorex -v` (also `--version`, `version`) prints the build, then the
+protocols it speaks:
+
+```text
+neorex 0.0.0 (a1b2c3d, 2026-11-09)
+attach protocol 1
+pane provider protocols 1
+```
+
+### Refused Neovim arguments
+
+These can't work under a daemon, so `neorex` refuses them, saying why, and
+starts nothing:
+
+| Word | Why |
+|---|---|
+| `--embed`, `--headless`, `--listen…` | the daemon starts Neovim with them itself |
+| `--server…`, `--remote…` | they talk to another Neovim |
+| `--help`, `--version`, `--api-info`, `-h`, `-?`, `-v` after other arguments | Neovim would print and exit |
+| `-l`, `-es`, `-Es` | they run Neovim without a screen |
+| `-V`, or `-V2` and up, without a file | Neovim wouldn't start |
+| `-` | the daemon's Neovim can't read stdin |
+| `-r` or `-L` with no file | it only lists swap files |
+
+Anything else Neovim itself rejects fails the start.
+
+### Output and exit statuses
+
+What was asked for (help, version) goes to stdout; everything else goes to
+stderr as one `neorex: …` line. A usage error is one line ending
+`(see neorex --help)`. A reader that closes the pipe early ends `neorex`
+quietly.
+
+| Status | Meaning |
+|---|---|
+| 0 | success |
+| 1 | a failure or refusal |
+| 2 | a usage error, or a refused Neovim argument |
 
 ## Troubleshooting
 

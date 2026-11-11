@@ -9,22 +9,29 @@ use super::pane_helper;
 use super::serve;
 use crate::attach::Transport;
 use crate::log::{self, LogLevel, Point, Traces};
-use crate::name::NAME;
 
 /// The launcher is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Why the launcher gave up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Error {
     NotATerminal,
     NotInRex,
-    DaemonFailed,
+    /// The daemon didn't start; its log is at this path.
+    DaemonFailed(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Error::NotATerminal => write!(
+                f,
+                "stdin isn't a terminal; to start a daemon without one, use --detach"
+            ),
+            Error::NotInRex => write!(f, "run it in a Rex pane"),
+            Error::DaemonFailed(log) => write!(f, "the daemon didn't start; see {log}"),
+        }
     }
 }
 
@@ -41,7 +48,6 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     }
     // each window becomes a Rex pane
     if std::env::var_os("REX_SERVER").is_none() || std::env::var_os("REX_SESSION").is_none() {
-        eprintln!("{NAME}: run it in a Rex pane");
         return Err(Error::NotInRex.into());
     }
 
@@ -79,8 +85,7 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     };
     drop(stdout);
     if n != 1 {
-        eprintln!("{NAME}: the daemon didn't start; see {log_path}");
-        return Err(Error::DaemonFailed.into());
+        return Err(Error::DaemonFailed(log_path.to_string()).into());
     }
     // the daemon outlives us; it's never waited for here
     Ok(pane_helper::run(
