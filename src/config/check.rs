@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use super::tree::{Limit, Tree};
+use super::tree::Tree;
 use super::wire::{Answer, Called, Ran};
 use crate::cli::PANE_PROVIDER_PROTOCOLS;
 use crate::name::NAME;
