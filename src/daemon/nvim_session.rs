@@ -122,8 +122,8 @@ impl NvimSession {
         fwd.takes_focus(bytes)
     }
 
-    /// Sends `bytes`, typed into pane `pane`, to Neovim after the window
-    /// switches before it. `panes.aim_forwarder(pane)` finds the pane's `Forwarder`.
+    /// As `type_into_at`, for a read that came now.
+    #[cfg(test)]
     pub(crate) fn type_into(
         &mut self,
         panes: &mut impl AimForwarder,
@@ -133,8 +133,9 @@ impl NvimSession {
         self.gate.send(&mut self.client, panes, pane, bytes)
     }
 
-    /// As `type_into`, for a read that came at `at`.
-    #[cfg(test)]
+    /// Sends `bytes`, typed into pane `pane` and read at `at`, to Neovim
+    /// after the window switches before it. `panes.aim_forwarder(pane)` finds
+    /// the pane's `Forwarder`.
     pub(crate) fn type_into_at(
         &mut self,
         panes: &mut impl AimForwarder,

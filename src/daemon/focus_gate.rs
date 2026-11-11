@@ -32,6 +32,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+use crate::log::{self, Point};
 use crate::nvim::forwarder::{self, Forwarder};
 use crate::nvim::msgpack::Decoder;
 use crate::nvim::nvim::Nvim;
@@ -112,6 +113,7 @@ impl FocusGate {
     /// Sends `bytes`, typed into `pane`, through the forwarder
     /// `panes.aim_forwarder(pane)` finds, once the switches asked for so far
     /// are made. Dropped if it finds none.
+    #[cfg(test)]
     pub(crate) fn send(
         &mut self,
         nvim: &mut Nvim,
@@ -144,7 +146,9 @@ impl FocusGate {
             let Some(fwd) = panes.aim_forwarder(pane) else {
                 return Ok(());
             };
-            fwd.feed(nvim, bytes)?;
+            if fwd.feed(nvim, bytes)?.sent_input {
+                log::trace_since(Point::Input, u64::from(pane), at);
+            }
             // An ESC left waiting starts the clock for a read held behind a
             // switch begun before the escape timer fires.
             if fwd.escape_pending() {
@@ -157,6 +161,7 @@ impl FocusGate {
             && is_lone_interrupt(fwd, &self.queue, self.last_held, pane, bytes, at)
         {
             forwarder::interrupt(nvim)?;
+            log::trace_since(Point::HeldInput, u64::from(pane), at);
             self.went_ahead();
             self.queue.push(Item::Input {
                 pane,
@@ -230,8 +235,8 @@ impl FocusGate {
                     let rest = &bytes[read..];
                     if failed && pane == switching.pane {
                         fwd.discard(nvim, rest)?;
-                    } else {
-                        fwd.feed(nvim, rest)?;
+                    } else if fwd.feed(nvim, rest)?.sent_input {
+                        log::trace_since(Point::HeldInput, u64::from(pane), at);
                     }
                 }
             }
@@ -295,6 +300,7 @@ impl FocusGate {
             });
             if lone {
                 forwarder::interrupt(nvim)?;
+                log::trace_since(Point::HeldInput, u64::from(*pane), *at);
                 sent = true;
                 if let Item::Input { bytes, .. } = &mut self.queue[i] {
                     bytes.clear();
@@ -353,6 +359,9 @@ impl FocusGate {
             }
             self.last_held = Some((*pane, *at));
             let fed = fwd.feed_key(nvim, &bytes[*read..])?;
+            if fed.sent_input {
+                log::trace_since(Point::HeldInput, u64::from(*pane), *at);
+            }
             *read += fed.read;
             if *read >= bytes.len() {
                 self.queue.remove(i);

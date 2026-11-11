@@ -114,7 +114,7 @@ fn drive<S: AsRef<OsStr>>(
             if n == 0 {
                 return Ok(());
             }
-            if !forwarder.feed(&mut nvim, &buf[..n as usize])? {
+            if !forwarder.feed(&mut nvim, &buf[..n as usize])?.more {
                 return Ok(());
             }
         }
