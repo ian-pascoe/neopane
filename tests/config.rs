@@ -880,6 +880,14 @@ fn run_is_cut_to_the_configs_time() {
 }
 
 #[test]
+fn run_takes_a_huge_timeout() {
+    assert_eq!(
+        run_result("{ 'true' }, { timeout = 1e20 }"),
+        "true\t0\tnil\t\t"
+    );
+}
+
+#[test]
 fn run_reports_a_signal() {
     assert_eq!(
         run_result("{ 'sh', '-c', 'kill -9 $$' }"),

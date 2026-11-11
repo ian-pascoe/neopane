@@ -322,10 +322,11 @@ fn run(
             error: Some(format!("no time left (the config has {} s)", seconds(time))),
         }
     } else {
-        let asked = opts
-            .timeout
-            .map_or(Duration::from_secs(1), Duration::from_secs_f64);
-        run_command(&argv, &opts, asked.min(left))
+        // cut in seconds first: a huge timeout has no Duration
+        let timeout = opts.timeout.map_or(Duration::from_secs(1).min(left), |t| {
+            Duration::from_secs_f64(t.min(left.as_secs_f64()))
+        });
+        run_command(&argv, &opts, timeout)
     };
     let t = lua.create_table()?;
     t.raw_set("ok", result.code == Some(0) && result.error.is_none())?;
