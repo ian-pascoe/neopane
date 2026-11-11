@@ -53,7 +53,10 @@ fn run(command: Command) -> Result<ExitCode> {
             detach,
             nvim_args,
         } => done(serve::run(&name, dedup, detach, &nvim_args)),
-        Command::ConfigChild => Ok(fail("config-child isn't built yet")),
+        Command::ConfigChild => match neorex::config::child::main() {
+            Ok(()) => Ok(ExitCode::SUCCESS),
+            Err(why) => Ok(fail(&why)),
+        },
         Command::AttachPane {
             address,
             pane,

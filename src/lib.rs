@@ -4,6 +4,7 @@
 
 pub mod attach;
 pub mod cli;
+pub mod config;
 pub mod daemon;
 pub mod debug;
 pub mod log;
