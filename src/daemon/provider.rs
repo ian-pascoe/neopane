@@ -203,14 +203,18 @@ pub(crate) enum Ask {
         attach: Vec<String>,
         title: String,
         origin: TerminalId,
-        /// The float group's top-left, cells from `origin`'s top-left.
+        /// The float group's top-left and size, in cells. Until #111 these
+        /// are cells of Neovim's screen (grid 1), and `origin_cols` x
+        /// `origin_rows` is the screen's size, not `origin`'s; #111 makes
+        /// them relative to `origin`, as ADR 0006 has them.
         x: i32,
         y: i32,
         cols: u32,
         rows: u32,
         origin_cols: u32,
         origin_rows: u32,
-        /// The float as fractions of `origin`'s layout area, in a live layout.
+        /// The float as fractions of `origin`'s layout area, in a live
+        /// layout. None until #111.
         area_bounds: Option<[f64; 4]>,
     },
     OpenTabPage {
