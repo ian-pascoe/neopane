@@ -2795,6 +2795,15 @@ mod tests {
                 separator: '|',
                 statuslines: false,
             })));
+        // 3 is 2 while neorex runs: every window has its own statusline
+        h.input(":set laststatus=3<CR>");
+        assert!(h.until(|x| last_options(x).is_some_and(|o| o.statuslines)));
+        assert_eq!(
+            2,
+            h.eval_str("return tostring(vim.go.laststatus)")
+                .parse::<i64>()
+                .unwrap()
+        );
     }
 
     #[test]
