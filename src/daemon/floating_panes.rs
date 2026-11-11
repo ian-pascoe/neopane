@@ -1,21 +1,19 @@
 //! The floating-pane lifecycle: a Rex floating pane for each group of floats
-//! that took focus. It matches panes to groups, asks Rex for new ones, works
-//! out their bounds, and moves the floats to follow a pane the user moved.
+//! that took focus. It matches panes to groups, says what to ask the pane
+//! provider for (`open_float` and `close`), works out their bounds, and moves
+//! the floats to follow a pane the user moved.
 //!
 //! `FloatingPanes` holds separate borrows of the daemon's parts, since the
 //! daemon can't be borrowed whole while its Neovim session is.
 
-use serde_json::json;
-
-use super::daemon::{Result, block_str};
+use super::asks;
 use super::dir::Address;
 use super::event_loop::Loop;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
+use super::provider::{Ask, TerminalId};
 use super::rex_layout;
-use crate::name::NAME;
 use crate::nvim::windows;
-use crate::rex::session::{Conn, Session as RexSession};
 use crate::screen::float_groups::{self, Group};
 use crate::screen::grids::{Grids, WinKind};
 
@@ -32,7 +30,6 @@ pub(crate) struct FloatingPanes<'a> {
     pub grids: &'a Grids,
     pub panes: &'a mut Panes,
     pub event_loop: &'a Loop,
-    pub rex: &'a mut RexSession,
     pub nvim: &'a mut NvimSession,
 }
 
@@ -40,7 +37,7 @@ impl FloatingPanes<'_> {
     /// A floating layer of ours somewhere else: the user moved it, so its
     /// floats follow.
     pub(crate) fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
-        let Some(p) = self.panes.by_block(moved.block.as_bytes()) else {
+        let Some(p) = self.panes.by_terminal(&moved.block) else {
             return false;
         };
         let Some(l) = p.layer else {
@@ -59,9 +56,16 @@ impl FloatingPanes<'_> {
 
     /// Matches floating panes to groups of floats: new groups get one, and
     /// those whose group closed hang up. A floating pane's size is Rex's: it's
-    /// never moved to follow its floats, they follow it.
-    pub(crate) fn reconcile_layers(&mut self) -> Result<()> {
-        let groups = if self.rex.conn != Conn::Closed {
+    /// never moved to follow its floats, they follow it. Floating panes are
+    /// only made if the pane provider can `open_float`, from `origin`, the
+    /// current pane's terminal. What to ask for, it returns.
+    pub(crate) fn reconcile_layers(
+        &mut self,
+        open_float: bool,
+        origin: Option<TerminalId>,
+    ) -> Vec<Ask> {
+        let mut out = Vec::new();
+        let groups = if open_float {
             float_groups::find(self.grids, self.nvim.entered_floats())
         } else {
             Vec::new()
@@ -77,9 +81,9 @@ impl FloatingPanes<'_> {
                 l.group = *g;
                 continue;
             }
-            // without an id Rex hasn't answered yet: the answer closes it
-            if let Some(id) = l.id {
-                self.rex.close_layer(&block_str(&id))?;
+            // without a terminal its open isn't answered yet: the answer closes it
+            if let Some(t) = p.terminal.clone() {
+                out.push(asks::close(t));
             }
             if p.closing.is_none() {
                 p.closing = Some(Close::WindowClosed);
@@ -87,31 +91,40 @@ impl FloatingPanes<'_> {
             self.panes.remove(i, self.event_loop);
         }
         for g in groups {
-            if self.panes.by_layer_key(g.key).is_none() {
-                self.new_layer(g)?;
+            if self.panes.by_layer_key(g.key).is_none()
+                && let Some(ask) = self.new_layer(g, origin.as_ref())
+            {
+                out.push(ask);
             }
         }
-        Ok(())
+        out
     }
 
-    fn new_layer(&mut self, g: Group) -> Result<()> {
-        let Some(bounds) = layer_bounds(self.grids, &g) else {
-            return Ok(());
-        };
+    /// A floating pane for `g`, and its `open_float`; None while there's no
+    /// screen or no `origin` to open it from.
+    fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>) -> Option<Ask> {
+        let origin = origin?.clone();
+        let screen = self.grids.get(1)?;
+        let (origin_cols, origin_rows) = (screen.width, screen.height);
+        let bounds = layer_bounds(self.grids, &g)?;
         let pane = self.panes.add_for_group(g);
         pane.layer.as_mut().unwrap().bounds = bounds;
-        let pane_id = pane.id;
-        let command = pane::attach_words(self.exe, self.sock, pane);
-        self.rex.new_layer(
-            pane_id,
-            bounds,
-            json!({ "block": {
-                "flavor": "com.superlogical.terminal.shell",
-                "label": NAME,
-                "options": { "shell": "none", "command": command },
-            } }),
-        )?;
-        Ok(())
+        let id = pane.attach_id.expect("a requested pane");
+        let attach = pane::attach_words(self.exe, self.sock, pane);
+        // until #111, cells on the screen, which spans the Rex window
+        Some(Ask::OpenFloat {
+            pane: id,
+            attach,
+            title: pane::title(&id),
+            origin,
+            x: g.col,
+            y: g.row,
+            cols: g.width,
+            rows: g.height,
+            origin_cols,
+            origin_rows,
+            area_bounds: None,
+        })
     }
 
     /// Fits a floating pane's floats to where it is and the size Rex gave it.
@@ -160,17 +173,31 @@ impl FloatingPanes<'_> {
 /// leaving room for the frame Rex draws around it.
 pub(crate) fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
     let screen = grids.get(1)?;
-    if screen.width == 0 || screen.height == 0 {
+    bounds_around(g.col, g.row, g.width, g.height, screen.width, screen.height)
+}
+
+/// Bounds for a floating pane around `cols` x `rows` cells at `x`, `y` on a
+/// screen of `screen_cols` x `screen_rows`, as fractions of it, leaving room
+/// for the frame Rex draws around it. None on an empty screen.
+pub(crate) fn bounds_around(
+    x: i32,
+    y: i32,
+    cols: u32,
+    rows: u32,
+    screen_cols: u32,
+    screen_rows: u32,
+) -> Option<[f64; 4]> {
+    if screen_cols == 0 || screen_rows == 0 {
         return None;
     }
-    let sw = f64::from(screen.width);
-    let sh = f64::from(screen.height);
+    let sw = f64::from(screen_cols);
+    let sh = f64::from(screen_rows);
     let fw = LAYER_FRAME[0];
     let fh = LAYER_FRAME[1];
-    let w = ((i64::from(g.width) + i64::from(fw)) as f64 / sw).min(1.0);
-    let h = ((i64::from(g.height) + i64::from(fh)) as f64 / sh).min(1.0);
-    let x = (f64::from(g.col - fw.div_euclid(2)) / sw).clamp(0.0, 1.0 - w);
-    let y = (f64::from(g.row - fh.div_euclid(2)) / sh).clamp(0.0, 1.0 - h);
+    let w = ((i64::from(cols) + i64::from(fw)) as f64 / sw).min(1.0);
+    let h = ((i64::from(rows) + i64::from(fh)) as f64 / sh).min(1.0);
+    let x = (f64::from(x - fw.div_euclid(2)) / sw).clamp(0.0, 1.0 - w);
+    let y = (f64::from(y - fh.div_euclid(2)) / sh).clamp(0.0, 1.0 - h);
     Some([x, y, w, h])
 }
 

@@ -114,16 +114,17 @@ impl Panes {
         self.list.iter_mut().find(|p| p.holds(win))
     }
 
-    pub(crate) fn by_block(&self, block: &[u8]) -> Option<&Pane> {
+    /// The pane of the pane provider's terminal `t`.
+    pub(crate) fn by_terminal(&self, t: &str) -> Option<&Pane> {
         self.list
             .iter()
-            .find(|p| p.rex_block.is_some_and(|b| b == block))
+            .find(|p| p.terminal.as_ref().is_some_and(|x| x.as_str() == t))
     }
 
-    pub(crate) fn by_block_mut(&mut self, block: &[u8]) -> Option<&mut Pane> {
+    pub(crate) fn by_terminal_mut(&mut self, t: &str) -> Option<&mut Pane> {
         self.list
             .iter_mut()
-            .find(|p| p.rex_block.is_some_and(|b| b == block))
+            .find(|p| p.terminal.as_ref().is_some_and(|x| x.as_str() == t))
     }
 
     pub(crate) fn by_layer_key(&self, key: i64) -> Option<&Pane> {
@@ -141,7 +142,8 @@ impl Drop for Panes {
 
 #[cfg(test)]
 mod tests {
-    use super::super::pane::{self, Close};
+    use super::super::pane::Close;
+    use super::super::provider::TerminalId;
     use super::super::surface::Surface;
     use super::*;
     use crate::attach::Refusal;
@@ -181,15 +183,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_a_pane_by_id_window_or_block() {
+    fn finds_a_pane_by_id_window_or_terminal() {
         let mut panes = Panes::default();
-        let block = pane::rex_block(b"block:01a1891d-7ec1-77ef-b35e-a77e39f0e0e1").unwrap();
         let p = panes.add_for_window(1000);
-        p.rex_block = Some(block);
+        p.terminal = Some(TerminalId::from("block:b"));
         let id = p.id;
         assert_eq!(id, panes.by_id(id).unwrap().id);
         assert_eq!(id, panes.by_win(1000).unwrap().id);
-        assert_eq!(id, panes.by_block(&block).unwrap().id);
+        assert_eq!(id, panes.by_terminal("block:b").unwrap().id);
+        assert!(panes.by_terminal("block:c").is_none());
         assert!(panes.by_win(0).is_none());
         assert!(panes.by_win(1001).is_none());
     }

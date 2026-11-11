@@ -245,8 +245,8 @@ impl Daemon {
             self.panes.ids.expire(&pane);
             let p = self.panes.by_id_mut(id).unwrap();
             p.closing = Some(Close::RequestFailed);
-            if let Some(b) = p.rex_block {
-                self.rex.close_block(&block_str(&b))?;
+            if let Some(t) = p.terminal.clone() {
+                self.act(asks::close(t));
             }
             self.reconcile()?;
             self.draw()?;
@@ -256,7 +256,7 @@ impl Daemon {
     }
 
     /// Shows `message` in Neovim as a warning, kept in its message history.
-    fn warn_in_nvim(&mut self, message: &str) {
+    pub(super) fn warn_in_nvim(&mut self, message: &str) {
         let c = &mut self.nvim.client;
         let _ = c.request("nvim_echo", 3);
         let w = c.writer();

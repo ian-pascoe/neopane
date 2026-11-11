@@ -1,3 +1,4 @@
+pub(crate) mod asks;
 pub(crate) mod attach_conn;
 pub(crate) mod backlog;
 #[allow(clippy::module_inception)]
@@ -14,6 +15,7 @@ pub(crate) mod pane;
 pub mod pane_helper;
 pub(crate) mod pane_layout;
 pub(crate) mod panes;
+pub(crate) mod provider;
 pub(crate) mod rex_layout;
 pub mod serve;
 pub(crate) mod surface;
