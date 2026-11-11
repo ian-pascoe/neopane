@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::dir::Address;
 use super::fdpass;
+use crate::attach::frame;
 use crate::attach::{
     End, Ending, Frame, Hello, Message, PaneId, Purpose, Refusal, Size, Terminal, Transport,
 };
@@ -267,6 +268,7 @@ fn attach_with(
         loop {
             match reader.decoded() {
                 Ok(Some(Message::Undo(undo))) => restore.undo = undo,
+                Ok(Some(Message::Output(o))) => write_blocking(tty, &o),
                 Ok(Some(Message::End(z))) => {
                     restore.end(z.cut);
                     return ended(want, &z);
@@ -276,25 +278,35 @@ fn attach_with(
                 Err(()) => return gone(&restore),
             }
         }
+        // the socket, the signals, and under `relay` the terminal
         let mut fds = [libc::pollfd {
-            fd: stream.as_raw_fd(),
+            fd: -1,
             events: libc::POLLIN,
             revents: 0,
-        }; 2];
-        let mut n = 1;
+        }; 3];
+        fds[0].fd = stream.as_raw_fd();
         if let Some(s) = &signals {
             fds[1].fd = s.read_fd;
-            n = 2;
         }
-        // SAFETY: the first `n` pollfds are valid.
-        if unsafe { libc::poll(fds.as_mut_ptr(), n as libc::nfds_t, -1) } < 0 {
+        if transport == Transport::Relay {
+            fds[2].fd = tty;
+        }
+        // SAFETY: valid pollfds; those of fd -1 are ignored.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) } < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return gone(&restore);
         }
-        if n == 2
-            && fds[1].revents != 0
+        if fds[2].revents != 0 {
+            match relay_input(tty, &mut stream) {
+                Relayed::Sent => {}
+                // nothing left to restore it for
+                Relayed::TerminalGone => return Exit::ok(),
+                Relayed::DaemonGone => return gone(&restore),
+            }
+        }
+        if fds[1].revents != 0
             && let Some(s) = signals.as_deref_mut()
         {
             let fired = s.drain().unwrap_or_default();
@@ -318,6 +330,7 @@ fn attach_with(
             while let Ok(Some(m)) = reader.decoded() {
                 match m {
                     Message::Undo(undo) => restore.undo = undo,
+                    Message::Output(o) => write_blocking(tty, &o),
                     Message::End(z) => {
                         restore.end(z.cut);
                         return ended(want, &z);
@@ -327,6 +340,40 @@ fn attach_with(
             }
             return gone(&restore);
         }
+    }
+}
+
+/// What relaying the terminal's input did.
+enum Relayed {
+    Sent,
+    /// The terminal hung up.
+    TerminalGone,
+    /// The daemon's socket failed.
+    DaemonGone,
+}
+
+/// Sends what was typed on terminal `tty`, which has some, in `i` frames,
+/// waiting for room.
+fn relay_input(tty: RawFd, stream: &mut UnixStream) -> Relayed {
+    let mut buf = [0u8; 16 << 10];
+    let n = loop {
+        // SAFETY: `buf` is valid for its length.
+        let n = unsafe { libc::read(tty, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            break n as usize;
+        }
+        match io::Error::last_os_error().kind() {
+            _ if n == 0 => return Relayed::TerminalGone,
+            io::ErrorKind::Interrupted => {}
+            io::ErrorKind::WouldBlock => return Relayed::Sent,
+            _ => return Relayed::TerminalGone,
+        }
+    };
+    let mut frames = Vec::new();
+    frame::encode_split(b'i', &buf[..n], &mut frames).expect("split to fit");
+    match stream.write_all(&frames) {
+        Ok(()) => Relayed::Sent,
+        Err(_) => Relayed::DaemonGone,
     }
 }
 
@@ -819,8 +866,16 @@ mod tests {
     struct Fake {
         s: UnixStream,
         hello: Hello,
-        tty: OwnedFd,
+        /// None under the relay.
+        tty: Option<OwnedFd>,
         master: RawFd,
+    }
+
+    impl Fake {
+        /// The terminal handed over.
+        fn tty(&self) -> RawFd {
+            self.tty.as_ref().expect("the terminal came").as_raw_fd()
+        }
     }
 
     /// What a helper run against a fake daemon did.
@@ -837,8 +892,8 @@ mod tests {
         left: Vec<u8>,
     }
 
-    /// Takes the hello and the terminal from `theirs`.
-    fn take_hello(theirs: &UnixStream) -> (Hello, OwnedFd) {
+    /// Takes the hello and the terminal, if handed over, from `theirs`.
+    fn take_hello(theirs: &UnixStream) -> (Hello, Option<OwnedFd>) {
         let mut buf = vec![0u8; 1 << 20];
         let mut got = Vec::new();
         let mut tty = None;
@@ -851,7 +906,7 @@ mod tests {
             got.extend_from_slice(&buf[..r.len]);
             if let Some((f, _)) = Frame::decode(&got).unwrap() {
                 let hello = Message::decode_hello(&f).unwrap();
-                return (hello, tty.expect("the terminal came"));
+                return (hello, tty);
             }
         }
     }
@@ -968,17 +1023,17 @@ mod tests {
     #[test]
     fn the_hello_carries_the_pane_and_the_terminal_already_raw() {
         let run = against(Want::Requested(pane()), |f| {
-            let Purpose::Requested { pane: p, terminal } = f.hello.purpose else {
+            let Purpose::Requested { pane: p, terminal } = &f.hello.purpose else {
                 panic!("{:?}", f.hello)
             };
-            assert_eq!(pane(), p);
+            assert_eq!(pane(), *p);
             assert_eq!(Transport::Fd, terminal.transport);
             assert_eq!((80, 24), (terminal.size.cols, terminal.size.rows));
             assert_eq!(std::process::id(), terminal.pid);
             assert!(terminal.tty.starts_with(b"/dev/"), "{:?}", terminal.tty);
             assert!(terminal.env.iter().any(|(k, _)| k == b"PATH"));
-            assert_eq!(1, unsafe { libc::isatty(f.tty.as_raw_fd()) });
-            let now = raw::settings(f.tty.as_raw_fd());
+            assert_eq!(1, unsafe { libc::isatty(f.tty()) });
+            let now = raw::settings(f.tty());
             assert_eq!(0, now.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG));
             send(&f.s, accept());
             send(&f.s, end(Ending::Closed, "closed", false));
@@ -996,7 +1051,7 @@ mod tests {
             });
             send(&f.s, accept());
             let mut buf = [0u8; 8];
-            let n = unsafe { libc::read(f.tty.as_raw_fd(), buf.as_mut_ptr().cast(), 8) };
+            let n = unsafe { libc::read(f.tty(), buf.as_mut_ptr().cast(), 8) };
             assert_eq!(b"abc", &buf[..n as usize]);
             send(&f.s, end(Ending::Closed, "", false));
         });
@@ -1032,7 +1087,7 @@ mod tests {
             send(&f.s, undo(b"<undo>"));
             // as killed mid-write: half a sequence, the file left non-blocking
             unsafe {
-                let fd = f.tty.as_raw_fd();
+                let fd = f.tty();
                 libc::fcntl(
                     fd,
                     libc::F_SETFL,
@@ -1062,7 +1117,7 @@ mod tests {
             return;
         }
         let s = unsafe { UnixStream::from_raw_fd(3) };
-        let (_, tty) = take_hello(&s);
+        let tty = take_hello(&s).1.expect("the terminal came");
         send(&s, accept());
         send(&s, undo(b"<undo>"));
         unsafe {
@@ -1495,5 +1550,69 @@ mod tests {
             send(&f.s, end(Ending::Closed, "", false));
         });
         assert_eq!(Exit::ok(), run.exit);
+    }
+
+    fn relayed(want: Want, daemon: impl FnOnce(Fake) + Send + 'static) -> Run {
+        against_with(Attach::new(want, Transport::Relay), None, daemon)
+    }
+
+    /// What the helper relays in `i` frames on `theirs`, until `n` bytes.
+    fn next_input(theirs: &UnixStream, n: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; 1 << 16];
+        let mut got = Vec::new();
+        let mut typed = Vec::new();
+        while typed.len() < n {
+            if let Some((f, used)) = Frame::decode(&got).unwrap() {
+                got.drain(..used);
+                if let Some(Message::Input(i)) = Message::decode(&f).unwrap() {
+                    typed.extend_from_slice(&i);
+                }
+                continue;
+            }
+            let r = fdpass::recv(theirs, &mut buf).unwrap();
+            assert!(r.len > 0, "hung up");
+            got.extend_from_slice(&buf[..r.len]);
+        }
+        typed
+    }
+
+    #[test]
+    fn relayed_typing_goes_in_i_frames_and_output_comes_in_o_frames() {
+        let run = relayed(Want::Requested(pane()), |f| {
+            assert!(f.tty.is_none(), "no terminal is handed over");
+            let Purpose::Requested { terminal, .. } = &f.hello.purpose else {
+                panic!("{:?}", f.hello)
+            };
+            assert_eq!(Transport::Relay, terminal.transport);
+            // typed before the answer, and after
+            assert_eq!(1, unsafe { libc::write(f.master, b"a".as_ptr().cast(), 1) });
+            send(&f.s, accept());
+            send(&f.s, undo(b"<undo>"));
+            assert_eq!(2, unsafe {
+                libc::write(f.master, b"bc".as_ptr().cast(), 2)
+            });
+            assert_eq!(b"abc".to_vec(), next_input(&f.s, 3));
+            send(&f.s, Message::Output(b"drawn".to_vec()));
+            send(&f.s, Message::Output(b" more".to_vec()));
+            send(&f.s, end(Ending::Closed, "", false));
+        });
+        assert_eq!(Exit::ok(), run.exit);
+        // the output, then the undo bytes; nothing echoed
+        assert_eq!(b"drawn more<undo>", &run.shown[..]);
+        assert!(run.restored && run.blocking);
+    }
+
+    #[test]
+    fn a_relaying_daemon_gone_has_its_last_output_shown_before_cancel() {
+        let run = relayed(Want::Requested(pane()), |f| {
+            send(&f.s, accept());
+            send(&f.s, undo(b"<undo>"));
+            send(&f.s, Message::Output(b"\x1b[38;2;".to_vec()));
+            // and half an `o`
+            (&f.s).write_all(b"o\0\0\0\x09\x1b[").unwrap();
+        });
+        assert_eq!(Exit::fail("the daemon went away; see /tmp/log"), run.exit);
+        assert_eq!(b"\x1b[38;2;\x18\x1b\\<undo>", &run.shown[..]);
+        assert!(run.restored && run.blocking);
     }
 }
