@@ -145,8 +145,13 @@ impl RexProvider {
                 self.float_asks.push(tag);
                 self.session.new_layer(tag, bounds, layout)?;
             }
-            // right of or below `{origin}`, as the daemon only asks; Rex's
-            // ratio is the anchor's share, the ask's the placed terminal's
+            // `session.move_block` puts it only right of or below `{origin}`
+            Ask::PlaceBeside { dir, .. } if dir.before() => {
+                let why = "Rex places a terminal only right of or below another";
+                self.answer(tag, Outcome::Failed(why.into()));
+                return Ok(true);
+            }
+            // Rex's ratio is the anchor's share, the ask's the placed terminal's
             Ask::PlaceBeside {
                 terminal,
                 origin,

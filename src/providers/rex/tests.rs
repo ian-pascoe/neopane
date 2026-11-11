@@ -272,6 +272,26 @@ fn method_not_found_is_unsupported_and_any_other_error_fails() {
 }
 
 #[test]
+fn place_beside_left_or_above_fails_unasked() {
+    let (mut p, theirs) = rex();
+    for (n, dir) in [(1, Direction::Left), (2, Direction::Up)] {
+        p.ask(
+            AskId(n),
+            Ask::PlaceBeside {
+                terminal: TerminalId::from("block:p"),
+                origin: TerminalId::from("block:a"),
+                dir,
+                size: 20,
+                ratio: 0.25,
+            },
+        );
+    }
+    let why = || Outcome::Failed("Rex places a terminal only right of or below another".into());
+    assert_eq!(vec![answered(1, why()), answered(2, why())], events(&mut p));
+    assert!(requests(p, theirs).is_empty());
+}
+
+#[test]
 fn place_beside_and_resize_are_move_block_after_and_resize_pane_with_the_anchors_share() {
     let (mut p, mut theirs) = rex();
     assert!(p.capabilities().has(Capability::PlaceBeside));
