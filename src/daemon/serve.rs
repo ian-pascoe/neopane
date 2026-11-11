@@ -33,7 +33,7 @@ use super::nvim_session::NvimSession;
 use super::pane::Pane;
 use super::provider::TerminalId;
 use super::surface::Surface;
-use crate::attach::{End, Ending, Purpose, Refusal};
+use crate::attach::{End, Ending, Purpose, Refusal, Transport};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
@@ -804,8 +804,10 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let tty = a.tty.expect("checked").into_raw_fd();
-    let mut surface = Surface::create(a.stream, tty, terminal.size);
+    let mut surface = match (terminal.transport, a.tty) {
+        (Transport::Fd, Some(tty)) => Surface::create(a.stream, tty.into_raw_fd(), terminal.size),
+        _ => Surface::relayed(a.stream, terminal.size),
+    };
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     log::trace_at(Point::Hello, 0, a.at);
     log::trace(Point::Accepted, 0);

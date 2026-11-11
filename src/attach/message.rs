@@ -126,6 +126,34 @@ impl Transport {
     pub fn from_name(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|t| t.name() == s)
     }
+
+    /// The variable that picks a helper's transport, and the daemon's
+    /// requested panes': `<NAME>_TRANSPORT`.
+    pub fn env_var() -> String {
+        format!("{}_TRANSPORT", crate::name::upper())
+    }
+
+    /// The transport `<NAME>_TRANSPORT`'s `value` picks: `fd` when it's
+    /// unset or empty. Any other value is `fd` too, with a warning to show.
+    pub fn from_env(value: Option<&std::ffi::OsStr>) -> (Transport, Option<String>) {
+        let Some(value) = value.filter(|v| !v.is_empty()) else {
+            return (Transport::Fd, None);
+        };
+        match value.to_str().and_then(Transport::from_name) {
+            Some(t) => (t, None),
+            None => {
+                let var = Transport::env_var();
+                let shown = value.to_string_lossy();
+                let warning = format!("ignoring {var}={shown} (use fd or relay)");
+                (Transport::Fd, Some(warning))
+            }
+        }
+    }
+
+    /// `from_env` of this process's environment.
+    pub fn from_environment() -> (Transport, Option<String>) {
+        Transport::from_env(std::env::var_os(Transport::env_var()).as_deref())
+    }
 }
 
 /// A terminal's size: in cells, and its text area in pixels when known.
@@ -1359,5 +1387,35 @@ mod tests {
             .filter(|n| !doc.contains(&format!("`{n}`")))
             .collect();
         assert!(missing.is_empty(), "not in the doc: {missing:?}");
+    }
+
+    #[test]
+    fn the_transport_variable_is_fd_unless_set_to_relay() {
+        use std::ffi::OsStr;
+        let from = |v: &str| Transport::from_env(Some(OsStr::new(v)));
+        assert_eq!((Transport::Fd, None), Transport::from_env(None));
+        assert_eq!((Transport::Fd, None), from(""));
+        assert_eq!((Transport::Fd, None), from("fd"));
+        assert_eq!((Transport::Relay, None), from("relay"));
+    }
+
+    #[test]
+    fn an_unknown_transport_warns_and_is_fd() {
+        use std::os::unix::ffi::OsStrExt;
+        let var = format!("{}_TRANSPORT", crate::name::upper());
+        assert_eq!(var, Transport::env_var());
+        for (value, shown) in [
+            (&b"x"[..], "x"),
+            (b"RELAY", "RELAY"),
+            (b"relay ", "relay "),
+            (b"\xff", "\u{fffd}"),
+        ] {
+            let (t, warning) = Transport::from_env(Some(std::ffi::OsStr::from_bytes(value)));
+            assert_eq!(Transport::Fd, t);
+            assert_eq!(
+                Some(format!("ignoring {var}={shown} (use fd or relay)")),
+                warning
+            );
+        }
     }
 }

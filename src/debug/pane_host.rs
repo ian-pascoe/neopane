@@ -7,7 +7,9 @@ use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use super::Result;
-use crate::attach::{End, Ending, Message, PaneId, PaneIdRegistry, Purpose, Refusal, Size};
+use crate::attach::{
+    End, Ending, Message, PaneId, PaneIdRegistry, Purpose, Refusal, Size, Transport,
+};
 use crate::daemon::attach_conn::{self, HELLO_TIMEOUT, Pending, Step};
 use crate::daemon::event_loop::Loop;
 use crate::name::NAME;
@@ -151,6 +153,10 @@ impl PaneHost {
             let m = format!("{} takes only requested panes", self.name);
             return refuse(a.stream, End::refusal(Refusal::Hello, m));
         };
+        if terminal.transport == Transport::Relay {
+            let m = format!("{} takes only the fd transport", self.name);
+            return refuse(a.stream, End::refusal(Refusal::Transport, m));
+        }
         if let Err(z) = attach_conn::check_terminal(&terminal, a.tty.as_ref()) {
             return refuse(a.stream, z);
         }

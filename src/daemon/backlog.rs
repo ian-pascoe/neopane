@@ -112,6 +112,13 @@ impl Backlog {
     pub(crate) fn cut(&self) -> bool {
         self.written > 0
     }
+
+    /// The frame the terminal has part of, and how much: what ending now
+    /// would cut short.
+    pub(crate) fn in_flight(&self) -> Option<(&[u8], usize)> {
+        let first = self.frames.front().filter(|_| self.cut())?;
+        Some((first, self.written))
+    }
 }
 
 /// Writes as much of `bytes` to `fd` as it takes without waiting; how much.

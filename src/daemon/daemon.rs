@@ -538,7 +538,7 @@ impl Daemon {
             .by_id_mut(id)
             .and_then(|p| p.terminal_surface.as_deref_mut())
             .expect("a pane with events has a terminal");
-        let fd = s.terminal.fd;
+        let fd = s.output_fd();
         let Ok(finished) = s.backlog.drain(fd) else {
             return self.pane_gone(id);
         };
@@ -581,17 +581,23 @@ impl Daemon {
         self.draw()
     }
 
+    /// Pane `id`'s terminal, handed over, has input.
     fn on_input(&mut self, id: u32) -> Result<()> {
         let mut buf = [0u8; 4096];
-        let fd = self.surface_of(id).terminal.fd;
+        let Some(fd) = self.surface_of(id).io.input_fd() else {
+            return Ok(());
+        };
         let n = read_fd(fd, &mut buf);
         if n == 0 {
             return self.pane_gone(id);
         }
+        self.on_keys(id, &buf[..n])
+    }
+
+    /// What was typed in pane `id`'s terminal, read or relayed.
+    fn on_keys(&mut self, id: u32, bytes: &[u8]) -> Result<()> {
         // the key's latency is timed from here
         let at = Instant::now();
-
-        let bytes = &buf[..n];
         let pane = self.panes.by_id(id).unwrap();
         let (win, terminal) = (pane.neovim_window_handle, pane.terminal.clone());
         let rex_focused = self
@@ -1795,7 +1801,7 @@ impl Daemon {
                         &mut self.grids,
                         &members,
                         [l.group.row, l.group.col],
-                        &mut s.terminal.writer,
+                        &mut s.writer,
                     )
             } else if caught_up && p.layout.is_some() {
                 let (wins, separators) = self.laid_out_view(p);
@@ -1821,7 +1827,7 @@ impl Daemon {
                         tabline_col: tabline.col,
                         tabline_dirty,
                     },
-                    &mut s.terminal.writer,
+                    &mut s.writer,
                 )
             } else if caught_up {
                 let grid = geometry::grid_of_pane(&self.grids, p);
@@ -1838,7 +1844,7 @@ impl Daemon {
                         tabline_col: tabline.col,
                         tabline_dirty,
                     },
-                    &mut s.terminal.writer,
+                    &mut s.writer,
                 )
             } else {
                 false
@@ -1856,7 +1862,7 @@ impl Daemon {
             match s.send_frame() {
                 Err(_) => self.pane_gone(id)?,
                 // traced once the rest goes out (see `on_writable`)
-                Ok(Sent::Waiting) => self.event_loop.add_write(s.terminal.fd, token)?,
+                Ok(Sent::Waiting) => self.event_loop.add_write(s.output_fd(), token)?,
                 Ok(Sent::All) => log::trace(Point::Frame, u64::from(id)),
             }
         }
@@ -2384,6 +2390,72 @@ mod tests {
         assert!(fx.d.pending.is_empty());
     }
 
+    /// Pane `pane`'s terminal of `size`, attached over the relay by the
+    /// relay test tool, with no pty; its hello is read as it comes.
+    fn attach_relayed(
+        fx: &mut Fixture,
+        at: &Address,
+        pane: crate::attach::PaneId,
+        size: crate::attach::Size,
+    ) -> crate::debug::relay::RelayPane {
+        let stream = UnixStream::connect(&at.path).unwrap();
+        let mut term = crate::debug::relay::RelayPane::on(stream, pane, size).unwrap();
+        fx.d.accept(&at.server).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some(&(token, _)) = fx.d.pending.first() {
+            assert!(Instant::now() < deadline, "no hello");
+            term.flush().unwrap();
+            fx.d.on_pending(token).unwrap();
+        }
+        term
+    }
+
+    /// A pane attached over the relay, by the relay test tool: no pty.
+    #[test]
+    fn a_pane_attached_over_the_relay_round_trips_typing_and_drawing() {
+        use crate::debug::relay::RelayPane;
+        let mut fx = fixture();
+        fx.d.nvim.ready = true;
+        fx.d.nvim.current_win = 1000;
+        let (id, pane) = requested_pane(&mut fx);
+        let g = fx.d.grids.get_mut(2).unwrap();
+        for (i, c) in "drawn".chars().enumerate() {
+            g.cells[i] = Cell::init(c.to_string(), 0);
+        }
+        let at = Address::new("relay");
+        let mut term = attach_relayed(&mut fx, &at, pane, surface::cells(80, 24));
+
+        // drawn, in `o` frames
+        let shown = |t: &RelayPane| String::from_utf8_lossy(t.output()).contains("drawn");
+        assert!(term.read_until(Duration::from_secs(2), shown).unwrap());
+        assert!(term.accepted().is_some());
+        assert_eq!(&crate::term::modes::undo(), term.undo());
+        let p = fx.d.panes.by_id(id).unwrap();
+        let v = &p.terminal_surface.as_ref().unwrap().view;
+        assert_eq!((80, 24), (v.cols, v.rows));
+
+        // typed, in `i` frames, and sized, in an `s` frame
+        let _ = sent_to_nvim(&mut fx);
+        term.type_bytes(b"typed").unwrap();
+        term.resize(surface::cells(100, 30)).unwrap();
+        fx.d.on_helper(id).unwrap();
+        let sent = sent_to_nvim(&mut fx);
+        assert!(sent.contains("typed"), "{sent:?}");
+        let v = &fx.d.surface_of(id).view;
+        assert_eq!((100, 30), (v.cols, v.rows));
+
+        // the end: a `z`, after the last `o`
+        fx.d.stop(StopReason::PaneGone);
+        drop(fx);
+        let ended = |t: &RelayPane| t.end().is_some();
+        assert!(term.read_until(Duration::from_secs(2), ended).unwrap());
+        let z = term.end().unwrap();
+        assert_eq!(
+            (crate::attach::Ending::Closed, false),
+            (z.as_ending(), z.cut)
+        );
+    }
+
     #[test]
     fn an_s_frame_resizes_the_window() {
         let mut fx = fixture();
@@ -2617,36 +2689,9 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_or_a_file_thats_no_terminal_is_refused_and_its_pane_given_up() {
+    fn a_file_thats_no_terminal_is_refused_and_its_pane_given_up() {
         use crate::attach::Refusal;
-        use crate::daemon::attach_conn::{requested_hello, test_terminal};
         let at = Address::new("terminal");
-        // the relay comes with #103
-        let mut fx = fixture();
-        let (id, pane) = requested_pane(&mut fx);
-        let mut t = test_terminal(80, 24);
-        t.transport = crate::attach::Transport::Relay;
-        let helper = at.send(&requested_hello(pane, t), None);
-        fx.d.accept(&at.server).unwrap();
-        assert_eq!(Some(Refusal::Transport), refusal(&helper).as_refusal());
-        assert_eq!(
-            Some(Close::RequestFailed),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
-        // its id is no good after
-        assert_eq!(Err(Refusal::PaneExpired), fx.d.panes.ids.take(&pane));
-        // Neovim was warned
-        fx.nvim_end
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let mut sent = vec![0u8; 4096];
-        let n = fx.nvim_end.read(&mut sent).unwrap();
-        let sent = String::from_utf8_lossy(&sent[..n]);
-        assert!(
-            sent.contains("nvim_echo") && sent.contains("relay"),
-            "{sent:?}"
-        );
-
         // under fd: none at all, or a pipe
         for tty in [false, true] {
             let mut fx = fixture();
@@ -2903,7 +2948,7 @@ mod tests {
             let (master, slave) = surface::open_pty(cols as u16, rows as u16);
             let (socket, helper) = UnixStream::pair().unwrap();
             let mut s = Surface::create(socket, slave, surface::cells(cols as u16, rows as u16));
-            s.terminal.writer.clear();
+            s.writer.clear();
             self.terminals.push(TerminalEnd {
                 master,
                 _helper: helper,

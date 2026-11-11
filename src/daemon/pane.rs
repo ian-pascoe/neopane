@@ -6,8 +6,6 @@
 //! a `u32` looked up in `Panes`, which a borrow of `Panes` couldn't outlive
 //! anyway.
 
-use std::os::fd::RawFd;
-
 use super::dir::Address;
 use super::event_loop::{self, Loop};
 use super::live_layout::Area;
@@ -112,6 +110,8 @@ pub(crate) const TOKEN_BASE: usize = 16;
 #[repr(u8)]
 pub(crate) enum PaneFd {
     HelperSocket = 0,
+    /// The terminal's input under `fd`, and the room its output waits for,
+    /// on the terminal or, under `relay`, the helper socket.
     Terminal = 1,
 }
 
@@ -274,8 +274,10 @@ impl Pane {
     pub(crate) fn register_with(&self, event_loop: &Loop) -> event_loop::Result<()> {
         let surface = self.terminal_surface.as_ref().expect("no terminal surface");
         event_loop.add_read(surface.helper_fd(), self.token(PaneFd::HelperSocket))?;
-        let terminal_fd: RawFd = surface.terminal.fd;
-        event_loop.add_read(terminal_fd, self.token(PaneFd::Terminal))
+        match surface.io.input_fd() {
+            Some(fd) => event_loop.add_read(fd, self.token(PaneFd::Terminal)),
+            None => Ok(()),
+        }
     }
 
     /// Takes the helper and terminal fds off the loop. Call it before the pane
@@ -285,7 +287,9 @@ impl Pane {
     pub(crate) fn unregister_from(&self, event_loop: &Loop) {
         if let Some(surface) = &self.terminal_surface {
             let _ = event_loop.remove(surface.helper_fd());
-            let _ = event_loop.remove(surface.terminal.fd);
+            if let Some(fd) = surface.io.input_fd() {
+                let _ = event_loop.remove(fd);
+            }
         }
     }
 }
