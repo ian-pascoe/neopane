@@ -205,10 +205,11 @@ struct Tabline {
     col: u32,
 }
 
-/// The terminals of the panes a move is between.
-struct Blocks {
+/// The terminals of the panes a move is between: the one placed, and the
+/// one it is placed beside.
+struct Terminals {
     moved: TerminalId,
-    anchor: TerminalId,
+    origin: TerminalId,
 }
 
 /// The panes, as `NvimSession` needs them to send input: borrowed apart from the daemon's `nvim`.
@@ -574,10 +575,10 @@ impl Daemon {
 
         let bytes = &buf[..n];
         let pane = self.panes.by_id(id).unwrap();
-        let (win, block) = (pane.neovim_window_handle, pane.terminal.clone());
+        let (win, terminal) = (pane.neovim_window_handle, pane.terminal.clone());
         let rex_focused = self
             .rex_ref()
-            .is_some_and(|r| r.has_focused(block.as_ref()));
+            .is_some_and(|r| r.has_focused(terminal.as_ref()));
         let mut fwds = PaneForwarders {
             panes: &mut self.panes,
             grids: &self.grids,
@@ -587,7 +588,7 @@ impl Daemon {
             .takes_focus(&mut fwds, id, win, rex_focused, bytes)
         {
             self.make_current(id)?;
-            self.focus_in_rex(block.as_ref())?;
+            self.focus_in_rex(terminal.as_ref())?;
         }
         // behind the switch above, if any: sent straight, the keys would reach the old window
         let mut fwds = PaneForwarders {
@@ -620,18 +621,21 @@ impl Daemon {
             return Ok(());
         }
         let sp = self.changes.split_of(win);
-        // beside the window it came from, else any pane with a terminal; None
-        // for a tab page's floating pane
-        let anchor: Option<TerminalId> = if sp.tab != 0 {
-            match self.tab_anchor(sp) {
-                Some(b) => Some(b),
+        // a window opens beside its origin pane's terminal: the pane it came
+        // from, else any with a terminal. A tab page's first window opens its
+        // Rex floating pane (`open_tab_page`) from the pane it came from.
+        let (origin, beside) = if sp.tab != 0 {
+            match self.tab_origin(sp) {
+                Some(t) => (Some(t), true),
                 None => {
-                    // its tab page's floating pane is on its way: split that once
-                    // it's made, or ask for its own if the request failed
+                    // its tab page's Rex floating pane is on its way: open
+                    // beside that once it's made, or ask for its own if the
+                    // open failed
                     if self.tab_floating_pane_pending(sp.tab) {
                         return Ok(());
                     }
-                    None
+                    let from = self.split_from(sp).and_then(|f| f.terminal.clone());
+                    (from.or_else(|| self.any_terminal(|_| true)), false)
                 }
             }
         } else {
@@ -639,25 +643,9 @@ impl Daemon {
                 .split_from(sp)
                 .filter(|f| f.tab == 0)
                 .and_then(|f| f.terminal.clone());
-            let any = || {
-                self.panes
-                    .list
-                    .iter()
-                    .filter(|q| q.layer.is_none() && q.tab == 0)
-                    .find_map(|q| q.terminal.clone())
-            };
-            match from.or_else(any) {
-                Some(b) => Some(b),
-                None => return Ok(()), // no anchor yet: next flush
-            }
+            let any = || self.any_terminal(|q| q.layer.is_none() && q.tab == 0);
+            (from.or_else(any), true)
         };
-        // a window opens beside its anchor; a tab page's floating pane opens
-        // from the pane its window came from, else any with a terminal
-        let origin = anchor.clone().or_else(|| {
-            self.split_from(sp)
-                .and_then(|f| f.terminal.clone())
-                .or_else(|| self.panes.list.iter().find_map(|q| q.terminal.clone()))
-        });
         let Some(origin) = origin else {
             return Ok(()); // no origin yet: next flush
         };
@@ -676,7 +664,7 @@ impl Daemon {
         let title = pane::title(&id);
         self.changes.forget_split(win);
 
-        if anchor.is_none() {
+        if !beside {
             self.act(Ask::OpenTabPage {
                 pane: id,
                 attach,
@@ -747,25 +735,30 @@ impl Daemon {
         }
     }
 
-    /// Where a window of a tab page made after setup splits: beside a pane of
-    /// its tab page, the one it came from if it can. Neovim shows the tab page
+    /// The origin of a window of a tab page made after setup: a pane of its
+    /// tab page, the one it came from if it can. Neovim shows the tab page
     /// over every other window, so they share a Rex floating pane over theirs;
     /// None for the first.
-    fn tab_anchor(&self, sp: windows::Split) -> Option<TerminalId> {
+    fn tab_origin(&self, sp: windows::Split) -> Option<TerminalId> {
         if let Some(f) = self.panes.by_win(sp.from)
             && f.tab == sp.tab
-            && let Some(b) = &f.terminal
+            && let Some(t) = &f.terminal
         {
-            return Some(b.clone());
+            return Some(t.clone());
         }
+        self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none())
+    }
+
+    /// The terminal of the first pane `keep` keeps that has one.
+    fn any_terminal(&self, keep: impl Fn(&Pane) -> bool) -> Option<TerminalId> {
         self.panes
             .list
             .iter()
-            .filter(|q| q.tab == sp.tab && q.layer.is_none())
+            .filter(|q| keep(q))
             .find_map(|q| q.terminal.clone())
     }
 
-    /// True while a pane of tab page `tab` asked Rex for its floating pane
+    /// True while a pane of tab page `tab` asked for its Rex floating pane
     /// and has no answer: a refused request is no longer on its way.
     fn tab_floating_pane_pending(&self, tab: i64) -> bool {
         self.panes
@@ -946,8 +939,8 @@ impl Daemon {
         self.nvim.fit_ui_to(p)?;
         self.draw()?;
         // (looked up again: drawing can remove a pane whose terminal is gone)
-        let block = self.panes.by_id(id).and_then(|p| p.terminal.clone());
-        self.focus_in_rex(block.as_ref())
+        let terminal = self.panes.by_id(id).and_then(|p| p.terminal.clone());
+        self.focus_in_rex(terminal.as_ref())
     }
 
     /// The options a split or close goes by changed. A new separator is drawn
@@ -1048,8 +1041,8 @@ impl Daemon {
         let Some(p) = floating_panes::layer_of_win(&self.grids, &self.panes, win) else {
             return Ok(());
         };
-        let block = p.terminal.clone();
-        self.focus_in_rex(block.as_ref())
+        let terminal = p.terminal.clone();
+        self.focus_in_rex(terminal.as_ref())
     }
 
     /// A float took focus. Usually before it's drawn, so the next flush gives
@@ -1233,15 +1226,15 @@ impl Daemon {
                 Action::Rearrange(plan) => {
                     tab.placed = Some(plan);
                     for m in plan.items() {
-                        let Some(blocks) = self.blocks_of(m) else {
+                        let Some(terminals) = self.terminals_of(m) else {
                             continue;
                         };
                         let Some(r) = self.provider.as_mut().and_then(Held::rex) else {
                             continue;
                         };
                         r.session.move_block(
-                            blocks.moved.as_str(),
-                            blocks.anchor.as_str(),
+                            terminals.moved.as_str(),
+                            terminals.origin.as_str(),
                             m.side_by_side,
                             m.ratio,
                         )?;
@@ -1250,15 +1243,15 @@ impl Daemon {
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
                     for m in plan.items() {
-                        let Some(blocks) = self.blocks_of(m) else {
+                        let Some(terminals) = self.terminals_of(m) else {
                             continue;
                         };
                         let Some(r) = self.provider.as_mut().and_then(Held::rex) else {
                             continue;
                         };
                         r.session.resize_pane(
-                            blocks.anchor.as_str(),
-                            blocks.moved.as_str(),
+                            terminals.origin.as_str(),
+                            terminals.moved.as_str(),
                             m.side_by_side,
                             m.ratio,
                         )?;
@@ -1270,10 +1263,10 @@ impl Daemon {
     }
 
     /// The terminals of the panes a move is between, if both have one.
-    fn blocks_of(&self, m: &PaneMove) -> Option<Blocks> {
+    fn terminals_of(&self, m: &PaneMove) -> Option<Terminals> {
         let moved = self.panes.by_win(m.win)?.terminal.clone()?;
-        let anchor = self.panes.by_win(m.anchor)?.terminal.clone()?;
-        Some(Blocks { moved, anchor })
+        let origin = self.panes.by_win(m.anchor)?.terminal.clone()?;
+        Some(Terminals { moved, origin })
     }
 
     /// Window `new` reopened `old`, closing: it takes `old`'s pane, which
@@ -1302,8 +1295,8 @@ impl Daemon {
     /// A guess at a new split's terminal size, cols x rows: half the pane it splits.
     fn new_pane_size(&self, win: i64) -> [u32; 2] {
         let sp = self.changes.split_of(win);
-        // a tab page's first: its floating pane's size
-        let first_of_tab = sp.tab != 0 && self.tab_anchor(sp).is_none();
+        // a tab page's first: its Rex floating pane's size
+        let first_of_tab = sp.tab != 0 && self.tab_origin(sp).is_none();
         self.geometry()
             .new_pane_size(sp, self.split_from(sp), first_of_tab)
     }
@@ -1348,14 +1341,14 @@ impl Daemon {
         self.asks.act(p, ask, Instant::now());
     }
 
-    /// Matches floating panes to groups of floats (see `floating_panes`).
+    /// Matches float group panes to groups of floats (see `floating_panes`).
     fn reconcile_layers(&mut self) {
         let p = self.provider.as_ref().map(Held::seam_ref);
         let open_float = self.asks.may_ask(p, Capability::OpenFloat);
         let origin = self
             .focused_pane()
             .and_then(|f| f.terminal.clone())
-            .or_else(|| self.panes.list.iter().find_map(|q| q.terminal.clone()));
+            .or_else(|| self.any_terminal(|_| true));
         for ask in self.floating().reconcile_layers(open_float, origin) {
             self.act(ask);
         }
@@ -1461,6 +1454,10 @@ impl Daemon {
         let p = self.panes.by_id_mut(pane_id).unwrap();
         p.terminal = Some(t.clone());
         let handle = p.neovim_window_handle;
+        // a layout that came before the terminal's id placed it already
+        if let Some(snapshot) = self.rex_layout.clone() {
+            self.on_layout(snapshot)?;
+        }
         match ask {
             Ask::OpenBeside { .. } => {
                 if handle == Some(self.nvim.current_win) {
@@ -1495,7 +1492,7 @@ impl Daemon {
     }
 
     /// An act that couldn't be done. A pane whose open failed is given up,
-    /// as before the seam: a floating pane's floats stay drawn in the pane,
+    /// as before the seam: a float group pane's floats stay drawn in the pane,
     /// and a tab page's other windows ask for their own (#112 draws a window
     /// in its origin pane instead).
     fn fall_back(&mut self, ask: Ask) -> Result<()> {
@@ -2092,6 +2089,7 @@ mod tests {
     use crate::nvim::nvim::for_test_on;
     use crate::nvim::windows::{Kind, Node};
     use crate::rex::client::Client;
+    use crate::rex::session::tests::server_frame;
     use crate::rex::session::{Conn, Session as RexSession};
     use crate::screen::float_groups::Group;
     use crate::screen::grids::{Float, Win};
@@ -3233,7 +3231,7 @@ mod tests {
 
     /// A daemon whose windows 1 and 2 are drawn, in tab page 2, and don't have
     /// panes yet. Window 9's pane, of no tab page, has the terminal
-    /// `block_id(9)` to open the tab page's floating pane from.
+    /// `block_id(9)` to open the tab page's Rex floating pane from.
     fn two_windows_of_a_tab_page() -> Fixture {
         let mut fx = fixture();
         pane_in_block(&mut fx.d, 9, 0, 9);
@@ -3271,9 +3269,9 @@ mod tests {
     }
 
     #[test]
-    fn a_window_waiting_for_its_tab_pages_floating_pane_asks_for_its_own_once_its_open_fails() {
+    fn a_window_waiting_for_its_tab_pages_rex_floating_pane_asks_for_its_own_once_its_open_fails() {
         let mut fx = two_windows_of_a_tab_page();
-        // the first window asks for the floating pane; the second waits for it
+        // the first window asks for the Rex floating pane; the second waits for it
         fx.d.new_pane(1).unwrap();
         fx.d.reconcile().unwrap();
         assert_eq!(2, fx.d.panes.list.len());
@@ -3402,7 +3400,7 @@ mod tests {
             },
         );
         d.nvim.note_entered(1002);
-        // the current pane, whose terminal a floating pane opens from
+        // the current pane, whose terminal a float group pane opens from
         if d.panes.by_win(999).is_none() {
             let p = d.panes.add(Pane::from_neovim_window(90, 999));
             p.terminal = Some(TerminalId::from("block:o"));
@@ -3410,7 +3408,7 @@ mod tests {
         }
     }
 
-    /// The floating pane's id.
+    /// The float group pane's id.
     fn picker_pane(d: &Daemon) -> u32 {
         d.panes.list.iter().find(|p| p.layer.is_some()).unwrap().id
     }
@@ -3584,7 +3582,7 @@ mod tests {
     }
 
     #[test]
-    fn a_float_group_asks_for_a_floating_pane_at_its_bounds_and_its_close_closes_it() {
+    fn a_float_group_asks_for_a_float_group_pane_at_its_bounds_and_its_close_closes_it() {
         let Fixture { mut d, .. } = fixture();
         show_picker(&mut d);
         d.reconcile_layers();
@@ -3680,7 +3678,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unentered_float_or_no_open_float_gets_no_floating_pane() {
+    fn an_unentered_float_or_no_open_float_gets_no_float_group_pane() {
         let Fixture { mut d, .. } = fixture();
         show_picker(&mut d);
         d.nvim = NvimSession::new(for_test_on(UnixStream::pair().unwrap().0));
@@ -3851,6 +3849,42 @@ mod tests {
     }
 
     #[test]
+    fn a_layout_rex_sends_before_an_open_is_done_still_places_its_pane() {
+        let (mut fx, mut rex_end) = rex_fixture();
+        let id = opening(&mut fx.d);
+        let mut rex_says = |d: &mut Daemon, v: Value| {
+            rex_end.write_all(&server_frame(&v.to_string())).unwrap();
+            d.on_provider(Token::Provider as usize).unwrap();
+        };
+        let response = |id: u64, payload: Value| json!({ "type": "response", "id": id.to_string(), "seq": 0, "payload": payload });
+        // 1: new_split, answered; 2: disown_block, not yet
+        rex_says(
+            &mut fx.d,
+            response(1, json!({ "block_ids": [block_id(5)] })),
+        );
+        // the view changes, and 3, its fetch, is answered with the new block in it
+        rex_says(
+            &mut fx.d,
+            json!({ "type": "event", "seq": 0, "payload": {
+                "type": "session_view_changed", "payload": { "revision": 1 } } }),
+        );
+        let view = json!({ "revision": 1, "active_window_id": window_id(1),
+            "windows": [ { "window_id": window_id(1), "focused_block_id": block_id(5),
+                "layers": [ { "kind": "tiled", "layout": {
+                    "block_id": block_id(5), "rect": [0.5, 0.0, 0.5, 1.0] } } ] } ] });
+        rex_says(&mut fx.d, response(3, view));
+        assert_eq!(None, fx.d.panes.by_id(id).unwrap().rect);
+        // the disown answered: the open is done, and the pane where the view has it
+        rex_says(&mut fx.d, response(2, json!({})));
+        let p = fx.d.panes.by_id(id).unwrap();
+        assert_eq!(
+            Some(block_id(5).as_str()),
+            p.terminal.as_ref().map(TerminalId::as_str)
+        );
+        assert_eq!(Some([0.5, 0.0, 0.5, 1.0]), p.rect);
+    }
+
+    #[test]
     fn a_failed_open_gives_its_pane_up_and_warns_in_neovim_once() {
         let mut fx = fixture();
         let (one, two) = (opening(&mut fx.d), opening(&mut fx.d));
@@ -3878,8 +3912,30 @@ mod tests {
         assert!(fx.d.provider.is_none());
         assert_given_up(&fx.d, id);
         assert_eq!(None, fx.d.stopped);
-        // later windows are drawn in their origin pane
         assert_eq!(0, fx.d.asks.waiting());
+
+        // a later window is drawn in its origin pane, nothing asked
+        let origin = fx.d.panes.add(Pane::from_neovim_window(90, 1000)).id;
+        note_split_from(&mut fx.d, 1002, 1000, true, false);
+        fx.d.new_pane(1002).unwrap();
+        assert_eq!(Some(origin), fx.d.panes.by_win(1002).map(|p| p.id));
+        assert!(fx.d.panes.by_id(origin).unwrap().layout.is_some());
+    }
+
+    #[test]
+    fn a_failed_write_to_rex_on_the_direct_focus_path_drops_rex_and_gives_up_its_opens() {
+        let (mut fx, rex_end) = rex_fixture();
+        let id = opening(&mut fx.d);
+        drop(rex_end); // writes to a socket nobody holds fail
+        fx.d.on_direction(windows::Move {
+            dir: windows::Direction::Left,
+            count: 1,
+        })
+        .unwrap();
+        fx.d.after_batch().unwrap();
+        assert!(fx.d.provider.is_none());
+        assert_given_up(&fx.d, id);
+        assert_eq!(None, fx.d.stopped);
     }
 
     #[test]
@@ -4068,7 +4124,7 @@ mod tests {
         let mut fx = two_windows_of_a_tab_page();
         fx.d.new_pane(1).unwrap();
         let first = fx.d.panes.by_win(1).unwrap().id;
-        // the floating pane opens: the next window opens beside it, as the
+        // the Rex floating pane opens: the next window opens beside it, as the
         // daemon reconciles
         let f = fake(&mut fx.d);
         f.opened(f.last_id(), &block_id(4));

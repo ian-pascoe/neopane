@@ -1,7 +1,8 @@
-//! The floating-pane lifecycle: a Rex floating pane for each group of floats
-//! that took focus. It matches panes to groups, says what to ask the pane
-//! provider for (`open_float` and `close`), works out their bounds, and moves
-//! the floats to follow a pane the user moved.
+//! The float group pane lifecycle: a float group pane, which Rex shows as a
+//! Rex floating pane, for each group of floats that took focus. It matches
+//! panes to groups, says what to ask the pane provider for (`open_float` and
+//! `close`), works out their bounds, and moves the floats to follow a pane the
+//! user moved.
 //!
 //! `FloatingPanes` holds separate borrows of the daemon's parts, since the
 //! daemon can't be borrowed whole while its Neovim session is.
@@ -54,11 +55,11 @@ impl FloatingPanes<'_> {
         true
     }
 
-    /// Matches floating panes to groups of floats: new groups get one, and
-    /// those whose group closed hang up. A floating pane's size is Rex's: it's
-    /// never moved to follow its floats, they follow it. Floating panes are
-    /// only made if the pane provider can `open_float`, from `origin`, the
-    /// current pane's terminal. What to ask for, it returns.
+    /// Matches float group panes to groups of floats: new groups get one, and
+    /// those whose group closed hang up. A float group pane's size is Rex's:
+    /// it's never moved to follow its floats, they follow it. Float group
+    /// panes are only made if the pane provider can `open_float`, from
+    /// `origin`, the current pane's terminal. What to ask for, it returns.
     pub(crate) fn reconcile_layers(
         &mut self,
         open_float: bool,
@@ -100,7 +101,7 @@ impl FloatingPanes<'_> {
         out
     }
 
-    /// A floating pane for `g`, and its `open_float`; None while there's no
+    /// A float group pane for `g`, and its `open_float`; None while there's no
     /// screen or no `origin` to open it from.
     fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>) -> Option<Ask> {
         let origin = origin?.clone();
@@ -127,7 +128,7 @@ impl FloatingPanes<'_> {
         })
     }
 
-    /// Fits a floating pane's floats to where it is and the size Rex gave it.
+    /// Fits a float group pane's floats to where it is and the size Rex gave it.
     /// Returns the request's id, if it sent one.
     pub(crate) fn follow_layer(&mut self, id: u32) -> Option<u32> {
         let p = self.panes.by_id(id)?;
@@ -169,14 +170,14 @@ impl FloatingPanes<'_> {
     }
 }
 
-/// Bounds for a floating pane around `g`, as fractions of the window,
+/// Bounds for a Rex floating pane around `g`, as fractions of the window,
 /// leaving room for the frame Rex draws around it.
 pub(crate) fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
     let screen = grids.get(1)?;
     bounds_around(g.col, g.row, g.width, g.height, screen.width, screen.height)
 }
 
-/// Bounds for a floating pane around `cols` x `rows` cells at `x`, `y` on a
+/// Bounds for a Rex floating pane around `cols` x `rows` cells at `x`, `y` on a
 /// screen of `screen_cols` x `screen_rows`, as fractions of it, leaving room
 /// for the frame Rex draws around it. None on an empty screen.
 pub(crate) fn bounds_around(
@@ -218,7 +219,7 @@ pub(crate) fn same_bounds(grids: &Grids, a: [f64; 4], b: [f64; 4]) -> bool {
     true
 }
 
-/// The floating pane showing float `win`, if one does.
+/// The float group pane showing float `win`, if one does.
 pub(crate) fn layer_of_win<'a>(grids: &Grids, panes: &'a Panes, win: i64) -> Option<&'a Pane> {
     let grid = grids.grid_of(win)?;
     let top = grids.place(grid)?.top;

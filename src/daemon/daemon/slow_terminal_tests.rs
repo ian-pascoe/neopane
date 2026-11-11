@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-const BLOCK: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+const TERMINAL: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
 
 /// The timer that bounds each of the rig's waits on the loop, so it checks
 /// whether it's done: its id, and the token it fires with.
@@ -170,7 +170,7 @@ impl Rig {
         let (master0, slave0) = open_pty(200, 60);
         let (socket0, helper0) = UnixStream::pair().unwrap();
         let startup = Pane::startup(
-            Some(TerminalId::from(BLOCK)),
+            Some(TerminalId::from(TERMINAL)),
             Surface::create(socket0, slave0, cells(200, 60)).unwrap(),
         );
         let pane0 = Emulator::start(master0);
