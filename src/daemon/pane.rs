@@ -9,6 +9,7 @@
 use std::os::fd::RawFd;
 
 use super::event_loop::{self, Loop};
+use super::pane_layout::PaneLayout;
 use super::surface::{Restore, Surface};
 use crate::screen::float_groups::Group;
 
@@ -25,7 +26,13 @@ pub(crate) struct Pane {
     pub id: u32,
     pub rex_block: Option<RexBlock>,
     /// None for a floating pane of floats, and the startup pane before setup.
+    /// Of a pane showing several windows, the one last current in it.
     pub neovim_window_handle: Option<NeovimWindowHandle>,
+    /// The windows it shows, laid out as Neovim lays out splits, once it shows
+    /// more than one: windows that had no terminal of their own (ADR 0009).
+    pub layout: Option<PaneLayout>,
+    /// The size each window of `layout` was last asked to be.
+    pub layout_asked: Vec<(NeovimWindowHandle, LastAskedWinSize)>,
     /// Owned.
     pub terminal_surface: Option<Box<Surface>>,
     pub closing: Option<Close>,
@@ -124,6 +131,20 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
 }
 
 impl Pane {
+    /// Whether it shows window `win`, alone or among others.
+    pub(crate) fn holds(&self, win: NeovimWindowHandle) -> bool {
+        self.neovim_window_handle == Some(win)
+            || self.layout.as_ref().is_some_and(|l| l.contains(win))
+    }
+
+    /// The windows it shows.
+    pub(crate) fn windows(&self) -> Vec<NeovimWindowHandle> {
+        match &self.layout {
+            Some(l) => l.windows(),
+            None => self.neovim_window_handle.into_iter().collect(),
+        }
+    }
+
     /// When the ESC that ended the pane's last read, if one waits, is due to
     /// be the Escape key.
     pub(crate) fn escape_deadline(&self) -> Option<std::time::Instant> {
@@ -138,6 +159,8 @@ impl Pane {
             id,
             rex_block: None,
             neovim_window_handle: None,
+            layout: None,
+            layout_asked: Vec::new(),
             terminal_surface: None,
             closing: None,
             tab: 0,

@@ -12,7 +12,7 @@ use neorex::nvim::rpc;
 use neorex::nvim::windows::{self, Note};
 use neorex::screen::grid::{Cell, Grid};
 use neorex::screen::grids::{Grids, Placed, WinKind};
-use neorex::screen::pane_view::{Opts, PaneView};
+use neorex::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown};
 use neorex::screen::render;
 use neorex::screen::style::{Attr, Shape, Style, Underline};
 
@@ -669,7 +669,9 @@ impl Multi {
                                 | Note::Entered(_)
                                 | Note::Tabline(_)
                                 | Note::Direction(_)
-                                | Note::Layout(_) => {}
+                                | Note::Layout(_)
+                                | Note::Options(_)
+                                | Note::Resized { .. } => {}
                             }
                         }
                     }
@@ -1001,4 +1003,334 @@ fn pane_per_window(cmdheight: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Several windows in one pane, as Neovim lays out splits: each grid at its
+// rect, its statusline included, and separators between windows side by
+// side. What each must look like is written out cell by cell below.
+
+/// Highlights of the split frames: text, a statusline, a separator.
+const TEXT: u32 = 0;
+const STL: u32 = 1;
+const SEP: u32 = 2;
+
+fn split_style() -> Style {
+    let mut style = Style {
+        default_fg: Some(0xdddddd),
+        default_bg: Some(0x101010),
+        ..Style::default()
+    };
+    style.attrs.extend_from_slice(&[
+        Attr::default(),
+        Attr {
+            reverse: true,
+            bold: true,
+            ..Attr::default()
+        },
+        Attr {
+            fg: Some(0x5f87af),
+            ..Attr::default()
+        },
+    ]);
+    style
+}
+
+/// Window grid `id`, `w` wide: `text` rows of `letter` lines, then a
+/// statusline naming it.
+fn add_window(gs: &mut Grids, id: u32, w: u32, text: u32, letter: char) {
+    let mut g = Grid::default();
+    g.resize(w, text + 1);
+    for r in 0..text {
+        let line = format!("{letter}{r}");
+        for (c, ch) in line.chars().enumerate() {
+            g.cells[(r * w) as usize + c] = Cell::init(ch.to_string(), TEXT);
+        }
+    }
+    let stl = format!("[{letter}]");
+    for c in 0..w as usize {
+        let ch = stl.chars().nth(c).unwrap_or(' ');
+        g.cells[(text * w) as usize + c] = Cell::init(ch.to_string(), STL);
+    }
+    gs.grids.insert(id, g);
+}
+
+/// The screen the frame must show: each row's text and, under it, a mark
+/// per cell: `.` text, `S` statusline, `|` separator.
+fn expect_written(t: &Vt, style: &Style, rows: &[(&str, &str)]) -> Result<()> {
+    for (r, (text, marks)) in rows.iter().enumerate() {
+        let text: Vec<char> = text.chars().collect();
+        let marks: Vec<char> = marks.chars().collect();
+        assert_eq!(text.len(), marks.len(), "row {r} of the expected screen");
+        for (c, (&ch, &m)) in text.iter().zip(&marks).enumerate() {
+            let hl = match m {
+                'S' => STL,
+                '|' => SEP,
+                _ => TEXT,
+            };
+            let pc = t.cell(c as u32, r as u32)?;
+            if let Err(err) = expect_cell(&pc, style, Cell::init(ch.to_string(), hl)) {
+                eprintln!(
+                    "golden: row {r} col {c}: want {ch:?}\nghostty:\n{}",
+                    t.plain_string()?
+                );
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn separator() -> Cell {
+    Cell::init("│", SEP)
+}
+
+#[test]
+fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    add_window(&mut gs, 2, 6, 3, 'a');
+    add_window(&mut gs, 3, 5, 3, 'b');
+    gs.cursor_grid = 3;
+    gs.get_mut(3).unwrap().cursor_row = 1;
+    gs.get_mut(3).unwrap().cursor_col = 1;
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 6,
+            rows: 4,
+            statusline: None,
+        },
+        Shown {
+            grid: 3,
+            row: 0,
+            col: 7,
+            cols: 5,
+            rows: 4,
+            statusline: None,
+        },
+    ];
+    let seps = [Separator {
+        row: 0,
+        col: 6,
+        rows: 4,
+    }];
+    let mut view = PaneView::init(12, 5);
+    let mut t = test_terminal(12, 5)?;
+    let mut out = Vec::new();
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &seps,
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("a0    │b0   ", "......|....."),
+            ("a1    │b1   ", "......|....."),
+            ("a2    │b2   ", "......|....."),
+            ("[a]   │[b]  ", "SSSSSS|SSSSS"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 1, col: 8 }))?;
+
+    // one window changes: only its rows, and the rest still shows
+    gs.get_mut(2).unwrap().cells[0] = Cell::init("z", TEXT);
+    gs.get_mut(2).unwrap().dirty.set(0);
+    out.clear();
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(&t, &gs.style, &[("z0    │b0   ", "......|.....")])?;
+    // nothing changed: nothing drawn
+    out.clear();
+    assert!(!view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    Ok(())
+}
+
+#[test]
+fn three_windows_under_the_tabline_one_beside_two_stacked() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    add_window(&mut gs, 2, 5, 4, 'a');
+    add_window(&mut gs, 3, 6, 1, 'b');
+    add_window(&mut gs, 4, 6, 2, 'c');
+    gs.cursor_grid = 4;
+    gs.get_mut(4).unwrap().cursor_row = 1;
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 5,
+            rows: 5,
+            statusline: None,
+        },
+        Shown {
+            grid: 3,
+            row: 0,
+            col: 6,
+            cols: 6,
+            rows: 2,
+            statusline: None,
+        },
+        Shown {
+            grid: 4,
+            row: 2,
+            col: 6,
+            cols: 6,
+            rows: 3,
+            statusline: None,
+        },
+    ];
+    let seps = [Separator {
+        row: 0,
+        col: 5,
+        rows: 5,
+    }];
+    let tabline: Vec<Cell> = "1 tab"
+        .chars()
+        .map(|c| Cell::init(c.to_string(), STL))
+        .collect();
+    let mut view = PaneView::init(12, 7);
+    let mut t = test_terminal(12, 7)?;
+    let mut out = Vec::new();
+    let opts = Opts {
+        tabline: Some(&tabline),
+        ..Opts::default()
+    };
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &seps,
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, opts, &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("1 tab", "SSSSS"),
+            ("a0   │b0    ", ".....|......"),
+            ("a1   │[b]   ", ".....|SSSSSS"),
+            ("a2   │c0    ", ".....|......"),
+            ("a3   │c1    ", ".....|......"),
+            ("[a]  │[c]   ", "SSSSS|SSSSSS"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 4, col: 6 }))
+}
+
+#[test]
+fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // Neovim keeps a row of text in each: the pane shows less
+    add_window(&mut gs, 2, 8, 1, 'a');
+    add_window(&mut gs, 3, 8, 1, 'b');
+    add_window(&mut gs, 4, 8, 1, 'c');
+    gs.cursor_grid = 3;
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 8,
+            rows: 1,
+            statusline: None,
+        },
+        Shown {
+            grid: 3,
+            row: 1,
+            col: 0,
+            cols: 8,
+            rows: 2,
+            statusline: None,
+        },
+        Shown {
+            grid: 4,
+            row: 3,
+            col: 0,
+            cols: 8,
+            rows: 1,
+            statusline: None,
+        },
+    ];
+    let mut view = PaneView::init(8, 5);
+    let mut t = test_terminal(8, 5)?;
+    let mut out = Vec::new();
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &[],
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("[a]     ", "SSSSSSSS"),
+            ("b0      ", "........"),
+            ("[b]     ", "SSSSSSSS"),
+            ("[c]     ", "SSSSSSSS"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 1, col: 0 }))
+}
+
+#[test]
+fn with_laststatus_0_the_window_above_shows_a_blank_statusline_drawn_for_it() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // Neovim draws neither a statusline: each grid is text only
+    add_window(&mut gs, 2, 6, 2, 'a');
+    add_window(&mut gs, 3, 6, 2, 'b');
+    for id in [2, 3] {
+        gs.get_mut(id).unwrap().resize(6, 2);
+    }
+    gs.cursor_grid = 3;
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 6,
+            rows: 3,
+            statusline: Some(STL),
+        },
+        Shown {
+            grid: 3,
+            row: 3,
+            col: 0,
+            cols: 6,
+            rows: 2,
+            statusline: None,
+        },
+    ];
+    let mut view = PaneView::init(6, 6);
+    let mut t = test_terminal(6, 6)?;
+    let mut out = Vec::new();
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &[],
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("a0    ", "......"),
+            ("a1    ", "......"),
+            ("      ", "SSSSSS"),
+            ("b0    ", "......"),
+            ("b1    ", "......"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
 }

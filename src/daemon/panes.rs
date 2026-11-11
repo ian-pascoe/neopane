@@ -86,18 +86,14 @@ impl Panes {
         if win == 0 {
             return None;
         }
-        self.list
-            .iter()
-            .find(|p| p.neovim_window_handle == Some(win))
+        self.list.iter().find(|p| p.holds(win))
     }
 
     pub(crate) fn by_win_mut(&mut self, win: i64) -> Option<&mut Pane> {
         if win == 0 {
             return None;
         }
-        self.list
-            .iter_mut()
-            .find(|p| p.neovim_window_handle == Some(win))
+        self.list.iter_mut().find(|p| p.holds(win))
     }
 
     pub(crate) fn by_block(&self, block: &[u8]) -> Option<&Pane> {

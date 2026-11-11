@@ -130,6 +130,13 @@ end
 -- it also has `fight`: `restored`, when we put it back (ms), `off_until`,
 -- until when we leave it alone, and `off_for`, how long that was the last time.
 local panes = {}
+-- window -> { w, h }, statusline included: the size Neovim gave it itself, as
+-- last told the daemon, until the daemon sizes it again
+local reported_sizes = {}
+-- window -> { w, h }: the size Neovim gave a window not yet external as
+-- windows split or the screen changed. Another size when it's adopted is one
+-- Neovim gave it as asked, as `:split | resize 8` does, and is told.
+local laid_sizes = {}
 -- when the user last typed, or a pane was resized (ms)
 local last_activity = 0
 -- statusline formats we've set, to tell them from ones the user set
@@ -240,6 +247,7 @@ function M.size(win, w, h)
   if p.w ~= w or p.h ~= h then last_activity = now_ms() end
   -- remembered while we wait, for when the window goes back in its pane
   p.w, p.h = w, h
+  reported_sizes[win] = nil
   if waiting(win) then return end
   give_statusline(win)
   local th = text_height(win, h)
@@ -455,9 +463,27 @@ local function schedule_layout(tab)
   end)
 end
 
+-- The sizes of the windows not yet external, after Neovim has laid them out
+-- again: for a new window, a new screen size, or one made external.
+local function note_laid_sizes()
+  for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+    if shown(win) and not api.nvim_win_get_config(win).external then
+      laid_sizes[win] = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
+    end
+  end
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or waiting(win) or api.nvim_win_get_config(win).external then return end
+  local was = laid_sizes[win]
+  laid_sizes[win] = nil
+  local cols, rows = 0, 0
+  if was then
+    local now = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
+    if now[1] ~= was[1] then cols = now[1] end
+    if now[2] ~= was[2] then rows = now[2] end
+  end
   keep_edgy_out(win)
   local tab = api.nvim_win_get_tabpage(win)
   -- before it leaves winlayout()
@@ -471,7 +497,25 @@ function M.adopt(win, w, h)
   api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
   local p = pane_of(win)
   p.w, p.h = w, h
+  if cols ~= 0 or rows ~= 0 then
+    if rows ~= 0 then rows = rows + (has_statusline(win) and 1 or 0) end
+    note('resized', win, cols, rows)
+  end
+  -- the windows left in the layout took its place: no size asked of them
+  note_laid_sizes()
 end
+
+api.nvim_create_autocmd({ 'WinNew', 'VimResized' }, { group = group, callback = note_laid_sizes })
+-- options that take or give rows of the screen
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'cmdheight', 'showtabline', 'laststatus' },
+  callback = note_laid_sizes,
+})
+api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  callback = function(ev) laid_sizes[tonumber(ev.match)] = nil end,
+})
 
 -- Layout plugins such as edgy.nvim move windows back into Neovim's own
 -- layout, as `wincmd J` does, on every resize. A window with a pane that has
@@ -564,6 +608,7 @@ function M.close(win)
   closing_ours = true
   pcall(api.nvim_win_close, win, true)
   closing_ours = false
+  note_laid_sizes()
 end
 
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
@@ -1162,6 +1207,49 @@ end
 -- OptionSet, and a tab page change brings its own. Not scheduled: SafeState
 -- fires again after every scheduled callback.
 api.nvim_create_autocmd('SafeState', { group = group, callback = report_cmdheight })
+
+-- 'equalalways', 'splitbelow', 'splitright', the separator 'fillchars' draws
+-- and 'laststatus', as last reported: a pane laying out several windows splits and closes
+-- them as these say. Looked at whenever Neovim waits for input, as for
+-- 'cmdheight'.
+local reported_options
+local function report_options()
+  local vert = vim.opt_global.fillchars:get().vert or '│'
+  local now = table.concat({ tostring(vim.go.equalalways), tostring(vim.go.splitbelow), tostring(vim.go.splitright), vert, vim.go.laststatus }, ' ')
+  if now == reported_options then return end
+  reported_options = now
+  note('options', vim.go.equalalways, vim.go.splitbelow, vim.go.splitright, vert, vim.go.laststatus)
+end
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_options })
+
+-- Neovim sized an external window itself, as `:resize`, `<C-w>+` and
+-- `:vertical resize` do: a pane laying out several windows gives it that size.
+-- Each size is told once (see `reported_sizes`).
+local function report_resized()
+  -- a statusline that came or went changed the text's height, not the
+  -- window's: the refit on its way puts it back
+  if refit_pending then return end
+  for win, p in pairs(panes) do
+    local w, h
+    if p.w and api.nvim_win_is_valid(win) and not waiting(win) and api.nvim_win_get_config(win).external then
+      w = api.nvim_win_get_width(win)
+      h = api.nvim_win_get_height(win)
+      if w == p.w and h == text_height(win, p.h) then w = nil end
+    end
+    if not w then
+      reported_sizes[win] = nil
+    else
+      h = h + (has_statusline(win) and 1 or 0)
+      local r = reported_sizes[win]
+      if not r or r[1] ~= w or r[2] ~= h then
+        reported_sizes[win] = { w, h }
+        note('resized', win, w, h)
+      end
+    end
+  end
+end
+-- WinResized too: Neovim may size an external window only as it redraws it
+api.nvim_create_autocmd({ 'SafeState', 'WinResized' }, { group = group, callback = report_resized })
 
 -- A floating tab page's windows may have been resized or moved, with nothing
 -- to say so but this. Looked at here, not scheduled: SafeState fires again

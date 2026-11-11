@@ -126,6 +126,38 @@ pub enum Note {
     Direction(Move),
     /// Where the windows of a tab page made after setup sit in it.
     Layout(Layout),
+    /// The options a pane layout splits and closes windows by.
+    Options(SplitOptions),
+    /// Neovim sized window `win` itself, as `:resize` does, to `cols` x
+    /// `rows`, its statusline included; 0 for a way it didn't size it. Told
+    /// as it's made external too, for a size asked before.
+    Resized { win: i64, cols: u32, rows: u32 },
+}
+
+/// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
+/// draws separators with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct SplitOptions {
+    pub(crate) equalalways: bool,
+    pub(crate) splitbelow: bool,
+    pub(crate) splitright: bool,
+    pub(crate) separator: char,
+    /// `'laststatus'` isn't 0: Neovim draws windows their statuslines.
+    pub(crate) statuslines: bool,
+}
+
+impl Default for SplitOptions {
+    /// Neovim's defaults.
+    fn default() -> SplitOptions {
+        SplitOptions {
+            equalalways: true,
+            splitbelow: false,
+            splitright: false,
+            separator: '│',
+            statuslines: true,
+        }
+    }
 }
 
 /// The layout of a tab page's windows: nested rows, columns and windows,
@@ -313,6 +345,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         Tabline,
         Cmdheight,
         Layout,
+        Resized,
     }
     // `<name>_<method>`
     let Some(method) = method
@@ -324,6 +357,9 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
     if method == b"direction" {
         return parse_direction(params).map(Some);
     }
+    if method == b"options" {
+        return parse_options(params).map(Some);
+    }
     let tag = match method {
         b"win" => Tag::Current,
         b"reopen" => Tag::Reopen,
@@ -334,10 +370,12 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         b"tabline" => Tag::Tabline,
         b"cmdheight" => Tag::Cmdheight,
         b"layout" => Tag::Layout,
+        b"resized" => Tag::Resized,
         _ => return Ok(None),
     };
     let want: u32 = match tag {
         Tag::Split => 5,
+        Tag::Resized => 3,
         Tag::Reopened | Tag::Layout => 2,
         _ => 1,
     };
@@ -373,6 +411,15 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             }
             Note::Layout(layout)
         }
+        Tag::Resized => {
+            let mut size =
+                || u32::try_from(rpc::expect_int(params)?).map_err(|_| rpc::Error::BadMessage);
+            Note::Resized {
+                win,
+                cols: size()?,
+                rows: size()?,
+            }
+        }
         Tag::Split => Note::Split(Split {
             win,
             side_by_side: rpc::expect_bool(params)?,
@@ -380,6 +427,30 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             from: rpc::expect_handle(params)?,
             tab: rpc::expect_handle(params)?,
         }),
+    }))
+}
+
+/// `[equalalways, splitbelow, splitright, vert, laststatus]`: three booleans,
+/// the one character separators are drawn with, and a number.
+fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
+    if rpc::expect_array(params)? < 5 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let equalalways = rpc::expect_bool(params)?;
+    let splitbelow = rpc::expect_bool(params)?;
+    let splitright = rpc::expect_bool(params)?;
+    let vert = std::str::from_utf8(rpc::expect_str(params)?).map_err(|_| rpc::Error::BadMessage)?;
+    let mut chars = vert.chars();
+    let (Some(separator), None) = (chars.next(), chars.next()) else {
+        return Err(rpc::Error::BadMessage);
+    };
+    let laststatus = rpc::expect_int(params)?;
+    Ok(Note::Options(SplitOptions {
+        equalalways,
+        splitbelow,
+        splitright,
+        separator,
+        statuslines: laststatus != 0,
     }))
 }
 
@@ -2700,6 +2771,235 @@ mod tests {
         assert!(h.until(|x| x.last_cmdheight() == Some(1)));
         h.input(":tabprevious<CR>");
         assert!(h.until(|x| x.last_cmdheight() == Some(2)));
+    }
+
+    fn last_options(h: &Harness) -> Option<SplitOptions> {
+        h.notes.iter().rev().find_map(|n| match n {
+            Note::Options(o) => Some(*o),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn split_options_are_reported_at_setup_and_when_they_change() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        assert!(h.until(|x| last_options(x) == Some(SplitOptions::default())));
+        h.input(":set noequalalways splitbelow splitright fillchars=vert:\\| laststatus=0<CR>");
+        assert!(h.until(|x| last_options(x)
+            == Some(SplitOptions {
+                equalalways: false,
+                splitbelow: true,
+                splitright: true,
+                separator: '|',
+                statuslines: false,
+            })));
+        // 3 is 2 while neorex runs: every window has its own statusline
+        h.input(":set laststatus=3<CR>");
+        assert!(h.until(|x| last_options(x).is_some_and(|o| o.statuslines)));
+        assert_eq!(
+            2,
+            h.eval_str("return tostring(vim.go.laststatus)")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_size_neovim_gives_an_external_window_is_reported_once_statusline_included() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let win = h.wins[0];
+        let resized = |x: &Harness, cols: u32, rows: u32| {
+            x.notes.contains(&Note::Resized { win, cols, rows })
+        };
+        // 40 x 9 at setup: 8 rows of text and the statusline
+        h.input(":resize 5<CR>");
+        assert!(h.until(|x| resized(x, 40, 6)));
+        h.input(":vertical resize 30<CR>");
+        assert!(h.until(|x| resized(x, 30, 6)));
+        // told once: the barrier is all that follows
+        h.notes.clear();
+        h.barrier();
+        h.expect_notes(&[]);
+        // fitted to its pane again, the same size again is told again
+        size(&mut h.nvim, win, 40, 9);
+        h.nvim.flush().unwrap();
+        // (typed keys can overtake a request)
+        h.sync("");
+        h.notes.clear();
+        h.barrier();
+        h.expect_notes(&[]);
+        h.notes.clear();
+        h.input(":vertical resize 30 | resize 5<CR>");
+        assert!(h.until(|x| resized(x, 30, 6)));
+    }
+
+    /// Types `keys`, which make a new window and leave it current, and adopts
+    /// it as a 40 x 4 pane, as the daemon would after the flush. Returns it.
+    fn adopt_new_window(h: &mut Harness, keys: &str) -> i64 {
+        h.notes.clear();
+        let first = h.wins[0];
+        h.input(keys);
+        h.want = first;
+        assert!(h.until(|x| {
+            let cur = x.last_current();
+            cur != 0 && cur != x.want && x.kind(cur) == Some(WinKind::Ordinary)
+        }));
+        let win = h.last_current();
+        adopt(&mut h.nvim, win, 40, 4);
+        h.nvim.flush().unwrap();
+        h.want = win;
+        assert!(h.until(|x| x.kind(x.want) == Some(WinKind::External)));
+        win
+    }
+
+    #[test]
+    fn a_statusline_coming_or_going_is_no_size_neovim_gave() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        for set in [":set laststatus=0<CR>", ":set laststatus=2<CR>"] {
+            h.notes.clear();
+            h.input(set);
+            h.barrier();
+            h.barrier();
+            assert!(
+                !h.notes.iter().any(|n| matches!(n, Note::Resized { .. })),
+                "{set}: {:?}",
+                h.notes
+            );
+        }
+    }
+
+    #[test]
+    fn windows_made_together_are_told_no_size_as_each_is_adopted() {
+        for later_first in [false, true] {
+            let Some(mut h) = Harness::start() else {
+                return;
+            };
+            h.notes.clear();
+            h.input(":split | split<CR>");
+            assert!(h.until(|x| {
+                x.notes
+                    .iter()
+                    .filter(|n| matches!(n, Note::Split(_)))
+                    .count()
+                    == 2
+            }));
+            let mut wins: Vec<i64> = h
+                .notes
+                .iter()
+                .filter_map(|n| match n {
+                    Note::Split(s) => Some(s.win),
+                    _ => None,
+                })
+                .collect();
+            if later_first {
+                wins.reverse();
+            }
+            // as the daemon adopts them, one after the other
+            for &win in &wins {
+                adopt(&mut h.nvim, win, 40, 4);
+                h.nvim.flush().unwrap();
+                h.want = win;
+                assert!(h.until(|x| x.kind(x.want) == Some(WinKind::External)));
+            }
+            h.barrier();
+            assert!(
+                !h.notes.iter().any(|n| matches!(n, Note::Resized { .. })),
+                "{:?}",
+                h.notes
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_given_a_new_window_before_its_adopted_is_told_as_it_is() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // asked in the same breath as the split: kept, with its statusline
+        let win = adopt_new_window(&mut h, ":split | resize 3<CR>");
+        let resized = |x: &Harness, cols: u32, rows: u32| {
+            x.notes.contains(&Note::Resized {
+                win: x.want,
+                cols,
+                rows,
+            })
+        };
+        assert!(h.until(|x| resized(x, 0, 4)));
+        // a plain split: Neovim's own size for it is no size asked
+        let plain = adopt_new_window(&mut h, ":split<CR>");
+        h.barrier();
+        assert!(
+            !h.notes
+                .iter()
+                .any(|n| matches!(n, Note::Resized { win, .. } if *win == plain)),
+            "{:?}",
+            h.notes
+        );
+        assert_ne!(win, plain);
+    }
+
+    #[test]
+    fn options_and_resized_notes_are_read_and_bad_ones_are_errors() {
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 5);
+        msgpack::write_bool(&mut buf, false);
+        msgpack::write_bool(&mut buf, true);
+        msgpack::write_bool(&mut buf, false);
+        msgpack::write_str(&mut buf, "\u{2503}");
+        msgpack::write_int(&mut buf, 2);
+        assert_eq!(
+            Some(Note::Options(SplitOptions {
+                equalalways: false,
+                splitbelow: true,
+                splitright: false,
+                separator: '\u{2503}',
+                statuslines: true,
+            })),
+            parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf)).unwrap()
+        );
+        // a separator of two characters, or none
+        for vert in ["ab", ""] {
+            let mut buf = Vec::new();
+            msgpack::write_array_header(&mut buf, 5);
+            for _ in 0..3 {
+                msgpack::write_bool(&mut buf, true);
+            }
+            msgpack::write_str(&mut buf, vert);
+            msgpack::write_int(&mut buf, 2);
+            assert_eq!(
+                Err(rpc::Error::BadMessage),
+                parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf))
+            );
+        }
+
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        msgpack::write_int(&mut buf, 1000);
+        msgpack::write_int(&mut buf, 30);
+        msgpack::write_int(&mut buf, 6);
+        assert_eq!(
+            Some(Note::Resized {
+                win: 1000,
+                cols: 30,
+                rows: 6
+            }),
+            parse_note(format!("{NAME}_resized").as_bytes(), &mut Decoder::of(&buf)).unwrap()
+        );
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        msgpack::write_int(&mut buf, 1000);
+        msgpack::write_int(&mut buf, -1);
+        msgpack::write_int(&mut buf, 6);
+        assert_eq!(
+            Err(rpc::Error::BadMessage),
+            parse_note(format!("{NAME}_resized").as_bytes(), &mut Decoder::of(&buf))
+        );
     }
 
     #[test]

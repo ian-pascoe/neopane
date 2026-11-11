@@ -10,6 +10,7 @@ pub mod launch;
 pub(crate) mod nvim_session;
 pub(crate) mod pane;
 pub mod pane_helper;
+pub(crate) mod pane_layout;
 pub(crate) mod panes;
 pub(crate) mod rex_layout;
 pub mod serve;

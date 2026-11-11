@@ -22,6 +22,11 @@ pub struct Grids {
     /// The message grid, drawn over grid 1 from `msg_row` down.
     pub msg_grid: Option<u32>,
     pub(crate) msg_row: u32,
+    /// The highlight Neovim draws WinSeparator in, as `hl_group_set` says.
+    pub separator_hl: u32,
+    /// The highlights of StatusLine and StatusLineNC, likewise.
+    pub statusline_hl: u32,
+    pub statusline_nc_hl: u32,
 }
 
 impl Default for Grids {
@@ -33,6 +38,9 @@ impl Default for Grids {
             cursor_grid: 1,
             msg_grid: None,
             msg_row: 0,
+            separator_hl: 0,
+            statusline_hl: 0,
+            statusline_nc_hl: 0,
         }
     }
 }
@@ -464,6 +472,23 @@ impl Grids {
                 Ok(2)
             }
             Event::HlAttrDefine => self.style.apply(style::Event::HlAttrDefine, d, len),
+            Event::HlGroupSet => {
+                if len < 2 {
+                    return Err(rpc::Error::BadMessage);
+                }
+                let name = rpc::expect_str(d)?;
+                let which = match name {
+                    b"WinSeparator" => Some(&mut self.separator_hl),
+                    b"StatusLine" => Some(&mut self.statusline_hl),
+                    b"StatusLineNC" => Some(&mut self.statusline_nc_hl),
+                    _ => None,
+                };
+                let hl = expect_int::<u32>(d)?;
+                if let Some(at) = which {
+                    *at = hl;
+                }
+                Ok(2)
+            }
             Event::DefaultColorsSet => self.style.apply(style::Event::DefaultColorsSet, d, len),
             Event::ModeInfoSet => self.style.apply(style::Event::ModeInfoSet, d, len),
             Event::ModeChange => self.style.apply(style::Event::ModeChange, d, len),
@@ -497,6 +522,7 @@ enum Event {
     WinClose,
     MsgSetPos,
     HlAttrDefine,
+    HlGroupSet,
     DefaultColorsSet,
     ModeInfoSet,
     ModeChange,
@@ -522,6 +548,7 @@ impl Event {
             b"win_close" => Event::WinClose,
             b"msg_set_pos" => Event::MsgSetPos,
             b"hl_attr_define" => Event::HlAttrDefine,
+            b"hl_group_set" => Event::HlGroupSet,
             b"default_colors_set" => Event::DefaultColorsSet,
             b"mode_info_set" => Event::ModeInfoSet,
             b"mode_change" => Event::ModeChange,
@@ -610,6 +637,26 @@ mod tests {
         write_str(w, text);
         write_int(w, 0);
         write_bool(w, false);
+    }
+
+    #[test]
+    fn the_highlight_set_for_win_separator_is_kept_and_other_groups_ignored() {
+        let mut gs = Grids::default();
+        let group = |w: &mut Vec<u8>, name: &str, hl: i64| {
+            write_array_header(w, 2);
+            write_str(w, "hl_group_set");
+            write_array_header(w, 2);
+            write_str(w, name);
+            write_int(w, hl);
+        };
+        apply_test(&mut gs, |w| {
+            write_array_header(w, 3);
+            group(w, "StatusLine", 3);
+            group(w, "WinSeparator", 7);
+            group(w, "VertSplit", 9);
+        });
+        assert_eq!(7, gs.separator_hl);
+        assert_eq!(3, gs.statusline_hl);
     }
 
     #[test]
@@ -891,6 +938,10 @@ mod tests {
         assert_eq!(WinKind::Ordinary, gs.win_on(first).unwrap().kind);
         assert_eq!(first, gs.cursor_grid);
         assert_eq!(4, gs.get(first).unwrap().cursor_col);
+        // a highlight to draw separators in
+        assert_ne!(0, gs.separator_hl);
+        assert_ne!(0, gs.statusline_hl);
+        assert_ne!(0, gs.statusline_nc_hl);
 
         // a split gets another grid; the first window, made external, keeps its own
         nvim.exec_lua(

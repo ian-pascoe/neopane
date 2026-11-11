@@ -28,6 +28,7 @@ use super::geometry::{self, Geometry, REX_DEFAULT_SIZE, TAB_LAYER_BOUNDS};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
 use super::pane_helper;
+use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::rex_layout::{self, LayoutSnapshot};
 use super::surface::{self, Sent, Surface};
@@ -42,7 +43,7 @@ use crate::rex::session::{self as rex_session, Conn, Request, Session as RexSess
 use crate::screen::float_groups;
 use crate::screen::grid::{Cell, Grid, blank_cut_wide};
 use crate::screen::grids::{Grids, WinKind};
-use crate::screen::pane_view::{Opts, Rect};
+use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown};
 use crate::term::input;
 
 /// The daemon is a top layer: any error will do.
@@ -64,6 +65,11 @@ pub(crate) struct Daemon {
     /// those of other tab pages, and of a tab page's floating pane, too. Messages
     /// that show beyond them are drawn over the window, in the focused pane.
     pub msg_rows: u32,
+    /// The options panes laying out several windows split and close them by.
+    pub split_options: windows::SplitOptions,
+    /// Sizes Neovim gave windows not yet in a pane: window, cols, rows, as a
+    /// `Resized` note has them. A window that joins a pane layout takes its.
+    pub pending_sizes: Vec<(i64, u32, u32)>,
     /// Where Neovim has the windows of each tab page made after setup, as it
     /// last said, and what was done to place their panes to match.
     pub tab_layouts: IndexMap<i64, Tab>,
@@ -156,6 +162,9 @@ const MAX_DIRECTION_COUNT: u32 = 20;
 /// More rows than any terminal has: a 'cmdheight' past it is as good.
 const MAX_MSG_ROWS: u32 = 1000;
 
+/// Most sizes kept for windows not yet in a pane.
+const MAX_PENDING_SIZES: usize = 16;
+
 /// Most cells of the tabline one pane draws.
 const TABLINE_MAX: usize = 256;
 
@@ -222,6 +231,8 @@ impl Daemon {
             changes: WindowChanges::default(),
             tabline_rows: 0,
             msg_rows: 1,
+            split_options: windows::SplitOptions::default(),
+            pending_sizes: Vec::new(),
             tab_layouts: IndexMap::new(),
             rex_layout: None,
             escape_timer_due: None,
@@ -597,8 +608,17 @@ impl Daemon {
     }
 
     fn new_pane(&mut self, win: i64) -> Result<()> {
+        // a size asked of it before it was external counts only in a pane
+        // layout; a pane of its own is its size
+        let size = self
+            .pending_sizes
+            .iter()
+            .position(|&(w, ..)| w == win)
+            .map(|i| self.pending_sizes.swap_remove(i));
         if self.rex.conn == Conn::Closed {
-            return Ok(()); // no Rex: the window stays in Neovim
+            // no Rex: the window is drawn in its origin pane
+            self.lay_out_in_origin(win, size);
+            return Ok(());
         }
         let sp = self.changes.split_of(win);
         // beside the window it came from, else any pane Rex knows; None for a
@@ -669,6 +689,42 @@ impl Daemon {
         Ok(())
     }
 
+    /// Window `win` had no pane of its own: it joins its origin pane's layout,
+    /// else the current pane's, beside its origin window as Neovim put it,
+    /// at `size` if Neovim gave it one. A window of a tab page made after
+    /// setup stays unshown (#118).
+    fn lay_out_in_origin(&mut self, win: i64, size: Option<(i64, u32, u32)>) {
+        let sp = self.changes.split_of(win);
+        if sp.tab != 0 {
+            return;
+        }
+        let from = self
+            .panes
+            .by_win(sp.from)
+            .or_else(|| self.focused_pane())
+            .filter(|p| p.layer.is_none() && p.tab == 0);
+        let Some(id) = from.map(|p| p.id) else {
+            return;
+        };
+        let equalalways = self.split_options.equalalways;
+        let p = self.panes.by_id_mut(id).unwrap();
+        let Some(shown) = p.neovim_window_handle else {
+            return; // before setup: no window to split
+        };
+        let origin = if p.holds(sp.from) { sp.from } else { shown };
+        p.layout
+            .get_or_insert_with(|| PaneLayout::new(shown))
+            .split(win, origin, sp.side_by_side, sp.before, equalalways);
+        // Neovim said it was current before it was drawn
+        if self.nvim.current_win == win {
+            p.neovim_window_handle = Some(win);
+        }
+        self.changes.forget_split(win);
+        if let Some((_, cols, rows)) = size {
+            self.resize_in_layout(id, win, cols, rows);
+        }
+    }
+
     /// Where a window of a tab page made after setup splits: beside a pane of
     /// its tab page, the one it came from if it can. Neovim shows the tab page
     /// over every other window, so they share a Rex floating pane over theirs;
@@ -721,14 +777,15 @@ impl Daemon {
             self.stop(StopReason::PaneGone);
             return Ok(());
         }
-        let maybe_win = self.panes.list[i].neovim_window_handle;
+        let wins = self.panes.list[i].windows();
         self.panes.remove(i, &self.event_loop);
-        let Some(win) = maybe_win else {
-            return Ok(());
-        };
-        self.changes.mark_closing(win);
-        windows::close(&mut self.nvim.client, win);
-        self.nvim.client.flush()?;
+        for &win in &wins {
+            self.changes.mark_closing(win);
+            windows::close(&mut self.nvim.client, win);
+        }
+        if !wins.is_empty() {
+            self.nvim.client.flush()?;
+        }
         Ok(())
     }
 
@@ -787,6 +844,8 @@ impl Daemon {
                 }
             }
             windows::Note::Layout(l) => self.on_tab_layout(l)?,
+            windows::Note::Options(o) => self.on_split_options(o)?,
+            windows::Note::Resized { win, cols, rows } => self.on_resized(win, cols, rows)?,
         }
         Ok(())
     }
@@ -850,16 +909,96 @@ impl Daemon {
         }
         self.nvim.current_float = 0;
         self.nvim.current_win = win;
-        let Some(p) = self.panes.by_win(win) else {
+        let Some(p) = self.panes.by_win_mut(win) else {
             return Ok(());
         };
         let id = p.id;
+        // of several in a pane: it keeps a row, and isn't cut
+        if p.layout.is_some() && p.neovim_window_handle != Some(win) {
+            p.neovim_window_handle = Some(win);
+            self.size_window(id);
+        }
+        let p = self.panes.by_id(id).unwrap();
         self.nvim.fit_ui_to(p)?;
         self.draw()?;
         // (looked up again: drawing can remove a pane whose terminal is gone)
         let block = self.panes.by_id(id).and_then(|p| p.rex_block);
         self.rex.focus(block)?;
         Ok(())
+    }
+
+    /// The options a split or close goes by changed. A new separator is drawn
+    /// in every pane laying out several windows.
+    fn on_split_options(&mut self, o: windows::SplitOptions) -> Result<()> {
+        let redraw = o.separator != self.split_options.separator;
+        let refit = o.statuslines != self.split_options.statuslines;
+        self.split_options = o;
+        if !redraw && !refit {
+            return Ok(());
+        }
+        for p in self.panes.list.iter_mut() {
+            if p.layout.is_some()
+                && let Some(s) = &mut p.terminal_surface
+            {
+                s.view.full = true;
+            }
+        }
+        if refit {
+            // statuslines of ours came or went: windows above others resize
+            self.size_windows();
+            self.nvim.client.flush()?;
+        }
+        self.draw()
+    }
+
+    /// Neovim sized window `win` itself, `cols` x `rows` with its statusline,
+    /// as `:resize` does: in a pane laying out several windows, it takes that
+    /// size there, and every window is fitted again. Elsewhere its pane's size
+    /// is its size.
+    fn on_resized(&mut self, win: i64, cols: u32, rows: u32) -> Result<()> {
+        let Some(p) = self.panes.by_win(win) else {
+            // not in a pane yet: for when it joins one
+            self.pending_sizes.retain(|&(w, ..)| w != win);
+            if self.pending_sizes.len() < MAX_PENDING_SIZES {
+                self.pending_sizes.push((win, cols, rows));
+            }
+            return Ok(());
+        };
+        if p.layout.is_none() {
+            return Ok(());
+        }
+        let id = p.id;
+        self.resize_in_layout(id, win, cols, rows);
+        self.size_window(id);
+        self.nvim.client.flush()?;
+        self.draw()
+    }
+
+    /// Window `win` of pane `id`'s layout takes `cols` x `rows` there, a
+    /// way given as 0 left as it is. Its windows are asked their sizes again.
+    fn resize_in_layout(&mut self, id: u32, win: i64, cols: u32, rows: u32) {
+        let p = self.panes.by_id(id).unwrap();
+        let Some(layout) = &p.layout else {
+            return;
+        };
+        let area = self.geometry().window_size(p);
+        let current = p.neovim_window_handle.unwrap_or(win);
+        let was = layout.lay_out(area, current).of(win);
+        // told without the statusline neorex draws it
+        let rows = match was {
+            Some(w) if rows != 0 && self.draws_statusline(&w, area) => rows + 1,
+            _ => rows,
+        };
+        let p = self.panes.by_id_mut(id).unwrap();
+        let layout = p.layout.as_mut().unwrap();
+        if cols != 0 && was.is_none_or(|w| w.cols != cols) {
+            layout.resize(win, Axis::Cols, cols, area, current);
+        }
+        if rows != 0 && was.is_none_or(|w| w.rows != rows) {
+            layout.resize(win, Axis::Rows, rows, area, current);
+        }
+        // asked again, at least the window Neovim sized
+        p.layout_asked.clear();
     }
 
     /// `<C-w>h/j/k/l`: Rex moves focus to the pane that way, if any. Its view
@@ -920,6 +1059,9 @@ impl Daemon {
         let mut i = self.panes.list.len();
         while i > 0 {
             i -= 1;
+            if self.close_laid_out_windows(i) {
+                continue;
+            }
             let p = &mut self.panes.list[i];
             let Some(win) = p.neovim_window_handle else {
                 continue;
@@ -945,6 +1087,9 @@ impl Daemon {
             return Ok(());
         }
         self.changes.forget_gone(&self.grids);
+        let grids = &self.grids;
+        self.pending_sizes
+            .retain(|&(w, ..)| grids.grid_of(w).is_some());
 
         // a copy: making panes below doesn't touch the grids, but borrows all of `self`
         let wins: Vec<_> = self.grids.wins.values().copied().collect();
@@ -975,6 +1120,43 @@ impl Daemon {
         self.place_tabs()?;
         self.nvim.client.flush()?;
         Ok(())
+    }
+
+    /// Takes the windows that closed out of pane `i`'s layout, if it lays out
+    /// several. True if it still shows a window; else its last window is
+    /// `neovim_window_handle` and it is left to end as a pane of one does.
+    fn close_laid_out_windows(&mut self, i: usize) -> bool {
+        let opts = pane_layout::Options {
+            equalalways: self.split_options.equalalways,
+            splitbelow: self.split_options.splitbelow,
+            splitright: self.split_options.splitright,
+        };
+        let p = &mut self.panes.list[i];
+        let Some(layout) = &mut p.layout else {
+            return false;
+        };
+        let gone = |w: i64| self.grids.grid_of(w).is_none() && !self.changes.awaits_reopen(w);
+        for w in layout.windows() {
+            if gone(w) && !layout.close(w, opts) {
+                // its last window: the pane ends with it
+                p.neovim_window_handle = Some(w);
+                p.layout = None;
+                p.layout_asked.clear();
+                return false;
+            }
+        }
+        let left = layout.windows();
+        if !p.neovim_window_handle.is_some_and(|w| left.contains(&w)) {
+            p.neovim_window_handle = left.first().copied();
+        }
+        p.layout_asked.retain(|(w, _)| left.contains(w));
+        if !layout.is_split() {
+            // one window again: it fills the pane
+            p.layout = None;
+            p.layout_asked.clear();
+            p.last_asked_win_size = LastAskedWinSize::default();
+        }
+        true
     }
 
     /// Neovim has a new layout for a tab page's windows, or none.
@@ -1354,6 +1536,32 @@ impl Daemon {
                         [l.group.row, l.group.col],
                         &mut s.terminal.writer,
                     )
+            } else if caught_up && p.layout.is_some() {
+                let (wins, separators) = self.laid_out_view(p);
+                let origin = self.geometry().pane_origin(p);
+                let mut buf = [0u8; 4];
+                let separator = Cell::init(
+                    self.split_options.separator.encode_utf8(&mut buf),
+                    self.grids.separator_hl,
+                );
+                let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
+                s.view.frame_laid_out(
+                    &mut self.grids,
+                    LaidOut {
+                        wins: &wins,
+                        separators: &separators,
+                        separator,
+                    },
+                    Opts {
+                        focused: focused == Some(id),
+                        origin,
+                        skip: &skip,
+                        tabline: tabline.cells.as_deref(),
+                        tabline_col: tabline.col,
+                        tabline_dirty,
+                    },
+                    &mut s.terminal.writer,
+                )
             } else if caught_up {
                 let grid = geometry::grid_of_pane(&self.grids, p);
                 let origin = self.geometry().pane_origin(p);
@@ -1421,6 +1629,9 @@ impl Daemon {
         if p.terminal_surface.is_none() || p.awaiting_layout {
             return;
         }
+        if p.layout.is_some() {
+            return self.size_laid_out_windows(id);
+        }
         let Some(win) = p.neovim_window_handle else {
             return;
         };
@@ -1438,6 +1649,76 @@ impl Daemon {
             rows: size[1],
         };
         windows::size(&mut self.nvim.client, win, size[0], size[1]);
+    }
+
+    /// Asks Neovim for each window of pane `id`'s layout to fit its place,
+    /// unless it already was. A window cut for want of room keeps its size.
+    fn size_laid_out_windows(&mut self, id: u32) {
+        let p = self.panes.by_id(id).unwrap();
+        let area = self.geometry().window_size(p);
+        let laid = p
+            .layout
+            .as_ref()
+            .unwrap()
+            .lay_out(area, p.neovim_window_handle.unwrap_or(0));
+        let mut asks = Vec::new();
+        for w in &laid.wins {
+            let Some(grid) = self.grids.grid_of(w.win) else {
+                continue;
+            };
+            // a statusline of ours takes the last row
+            let ours = u32::from(self.draws_statusline(w, area));
+            let want = LastAskedWinSize {
+                grid,
+                cols: w.cols,
+                rows: (w.rows - ours).max(1),
+            };
+            if !p.layout_asked.contains(&(w.win, want)) {
+                asks.push((w.win, want));
+            }
+        }
+        let p = self.panes.by_id_mut(id).unwrap();
+        for &(win, want) in &asks {
+            p.layout_asked.retain(|(w, _)| *w != win);
+            p.layout_asked.push((win, want));
+            windows::size(&mut self.nvim.client, win, want.cols, want.rows);
+        }
+    }
+
+    /// The windows of pane `p`'s layout as drawn, and the separators between.
+    fn laid_out_view(&self, p: &Pane) -> (Vec<Shown>, Vec<Separator>) {
+        let Some(layout) = &p.layout else {
+            return (Vec::new(), Vec::new());
+        };
+        let area = self.geometry().window_size(p);
+        let laid = layout.lay_out(area, p.neovim_window_handle.unwrap_or(0));
+        let wins = laid
+            .wins
+            .iter()
+            .filter_map(|w| {
+                let hl = if w.win == self.nvim.current_win {
+                    self.grids.statusline_hl
+                } else {
+                    self.grids.statusline_nc_hl
+                };
+                Some(Shown {
+                    grid: self.grids.grid_of(w.win)?,
+                    row: w.row,
+                    col: w.col,
+                    cols: w.cols,
+                    rows: w.rows,
+                    statusline: self.draws_statusline(w, area).then_some(hl),
+                })
+            })
+            .collect();
+        (wins, laid.separators)
+    }
+
+    /// Whether neorex draws window `w`, laid out in `area`, its statusline: a
+    /// window with another below it always has one, and with `'laststatus'`
+    /// 0 Neovim draws it none.
+    fn draws_statusline(&self, w: &pane_layout::Placed, area: [u32; 2]) -> bool {
+        !self.split_options.statuslines && w.row + w.rows < area[1]
     }
 
     /// `size_window` for every pane.
@@ -2887,6 +3168,7 @@ mod tests {
     struct Sent {
         rex: Vec<String>,
         nvim: String,
+        nvim_bytes: Vec<u8>,
     }
 
     impl Sent {
@@ -2919,6 +3201,7 @@ mod tests {
         Sent {
             rex: client_frames(&rex),
             nvim: String::from_utf8_lossy(&nvim).into_owned(),
+            nvim_bytes: nvim,
         }
     }
 
@@ -3019,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn with_rex_closed_a_new_window_stays_in_neovim() {
+    fn with_rex_closed_a_tab_pages_window_or_one_with_no_pane_to_join_stays_unshown() {
         let mut fx = two_windows_of_a_tab_page();
         fx.d.rex.conn = Conn::Closed;
         fx.d.new_pane(1).unwrap();
@@ -3029,6 +3312,310 @@ mod tests {
         let sent = sent_by(fx);
         assert!(sent.rex.is_empty());
         assert_eq!(0, sent.neorex_closes());
+    }
+
+    /// The sizes a daemon asked Neovim to give windows, in order: window,
+    /// cols, rows.
+    fn sizes_sent(all: &[u8]) -> Vec<[i64; 3]> {
+        let call = format!("{NAME}.size(...)");
+        let call = call.as_bytes();
+        let mut sent = Vec::new();
+        let mut at = 0;
+        while let Some(i) = all[at..].windows(call.len()).position(|w| w == call) {
+            at += i + call.len();
+            let mut args = msgpack::Decoder::of(&all[at..]);
+            assert_eq!(Some(msgpack::Token::Array(3)), args.next().unwrap());
+            let mut n = || match args.next().unwrap() {
+                Some(msgpack::Token::Int(n)) => n,
+                t => panic!("not a size: {t:?}"),
+            };
+            sent.push([n(), n(), n()]);
+        }
+        sent
+    }
+
+    /// Window `win`, external, drawn on grid `grid` of `cols` x `rows`.
+    fn draw_external(d: &mut Daemon, grid: u32, win: i64, cols: u32, rows: u32) {
+        d.grids.wins.insert(
+            grid,
+            Win {
+                win,
+                kind: WinKind::External,
+                float: Float::default(),
+            },
+        );
+        d.grids.grids.insert(grid, Grid::default());
+        d.grids.get_mut(grid).unwrap().resize(cols, rows);
+    }
+
+    #[test]
+    fn with_rex_closed_vsplit_draws_both_windows_side_by_side_in_one_pane_and_q_gives_the_space_back()
+     {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        // the pane neorex was run in, 81 x 24: its window 81 x 23, over the
+        // command line
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(81, 24));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 81, 23);
+        fx.d.reconcile().unwrap();
+
+        // :vsplit, without 'splitright': the new window on the left, current
+        // before it's drawn
+        note_split_from(&mut fx.d, 1001, 1000, true, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        draw_external(&mut fx.d, 3, 1001, 40, 23);
+        fx.d.reconcile().unwrap();
+        assert_eq!(vec![id], pane_ids(&fx.d));
+        let pane = fx.d.panes.by_id(id).unwrap();
+        assert_eq!(vec![1001, 1000], pane.windows());
+        // keys typed in the pane go to it, not back to the window it came from
+        assert_eq!(Some(1001), pane.neovim_window_handle);
+        // 40 columns each, the separator between
+        let (wins, separators) = fx.d.laid_out_view(pane);
+        assert_eq!(
+            vec![
+                Shown {
+                    grid: 3,
+                    row: 0,
+                    col: 0,
+                    cols: 40,
+                    rows: 23,
+                    statusline: None
+                },
+                Shown {
+                    grid: 2,
+                    row: 0,
+                    col: 41,
+                    cols: 40,
+                    rows: 23,
+                    statusline: None
+                },
+            ],
+            wins
+        );
+        assert_eq!(
+            vec![Separator {
+                row: 0,
+                col: 40,
+                rows: 23
+            }],
+            separators
+        );
+
+        // :q in the new window: the other gets the pane back
+        fx.d.grids.wins.swap_remove(&3);
+        fx.d.reconcile().unwrap();
+        assert_eq!(vec![id], pane_ids(&fx.d));
+        let pane = fx.d.panes.by_id(id).unwrap();
+        assert_eq!(vec![1000], pane.windows());
+        assert!(pane.layout.is_none());
+        assert_eq!(None, fx.d.stopped);
+
+        // and :q in the last ends the pane
+        fx.d.grids.wins.swap_remove(&2);
+        fx.d.reconcile().unwrap();
+        assert!(fx.d.panes.list.is_empty());
+        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+
+        let sent = sent_by(fx);
+        assert!(sent.rex.is_empty());
+        assert_eq!(
+            vec![
+                [1000, 81, 23],
+                [1001, 40, 23],
+                [1000, 40, 23],
+                [1000, 81, 23]
+            ],
+            sizes_sent(&sent.nvim_bytes)
+        );
+    }
+
+    #[test]
+    fn with_rex_closed_a_pane_of_two_windows_draws_both_and_the_separator_between() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        // a terminal whose output the test reads
+        let (master, slave) = surface::open_pty(81, 24);
+        let (socket, _helper) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::create(socket, slave).unwrap());
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 81, 23);
+        note_split_from(&mut fx.d, 1001, 1000, true, true);
+        draw_external(&mut fx.d, 3, 1001, 40, 23);
+        fx.d.reconcile().unwrap();
+        for (grid, text) in [(2, "right"), (3, "left")] {
+            let g = fx.d.grids.get_mut(grid).unwrap();
+            for (i, c) in text.chars().enumerate() {
+                g.cells[i] = Cell::init(c.to_string(), 0);
+            }
+        }
+        fx.d.grids.get_mut(2).unwrap().resize(40, 23);
+
+        fx.d.draw().unwrap();
+        assert!(fx.d.panes.by_id(id).is_some());
+        // SAFETY: reads what the frame wrote from the pty's master, without
+        // waiting, then closes it.
+        let written = unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = libc::read(master, buf.as_mut_ptr().cast(), buf.len());
+                if n <= 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+            libc::close(master);
+            String::from_utf8_lossy(&all).into_owned()
+        };
+        // the left window from the first column, the right after the separator
+        assert!(written.contains("\x1b[1;1Hleft"), "{written:?}");
+        assert!(written.contains("\u{2502}right"), "{written:?}");
+    }
+
+    #[test]
+    fn with_rex_closed_a_resize_neovim_makes_in_a_pane_of_several_windows_is_kept() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        // :split, without 'splitbelow': the new window above
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        draw_external(&mut fx.d, 3, 1001, 80, 10);
+        fx.d.reconcile().unwrap();
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        // :resize 5 in it: 4 rows of text and its statusline
+        fx.d.on_note(windows::Note::Resized {
+            win: 1001,
+            cols: 80,
+            rows: 5,
+        })
+        .unwrap();
+        let pane = fx.d.panes.by_id(id).unwrap();
+        let (wins, _) = fx.d.laid_out_view(pane);
+        assert_eq!(
+            vec![(3, 0, 5), (2, 5, 15)],
+            wins.iter()
+                .map(|w| (w.grid, w.row, w.rows))
+                .collect::<Vec<_>>()
+        );
+        let sent = sent_by(fx);
+        let sizes = sizes_sent(&sent.nvim_bytes);
+        assert_eq!(&[[1001, 80, 5], [1000, 80, 15]], &sizes[sizes.len() - 2..]);
+    }
+
+    #[test]
+    fn with_rex_closed_a_size_asked_before_a_window_joins_its_pane_is_kept_as_it_joins() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        // `:split | resize 5`, told as the new window is made external
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        draw_external(&mut fx.d, 3, 1001, 80, 4);
+        fx.d.on_note(windows::Note::Resized {
+            win: 1001,
+            cols: 0,
+            rows: 5,
+        })
+        .unwrap();
+        fx.d.reconcile().unwrap();
+        let pane = fx.d.panes.by_id(id).unwrap();
+        let (wins, _) = fx.d.laid_out_view(pane);
+        assert_eq!(
+            vec![(3, 0, 80, 5), (2, 5, 80, 15)],
+            wins.iter()
+                .map(|w| (w.grid, w.row, w.cols, w.rows))
+                .collect::<Vec<_>>()
+        );
+        assert!(fx.d.pending_sizes.is_empty());
+    }
+
+    #[test]
+    fn with_laststatus_0_a_window_above_another_gets_a_statusline_drawn_for_it() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        fx.d.grids.statusline_hl = 7;
+        fx.d.grids.statusline_nc_hl = 8;
+        fx.d.on_note(windows::Note::Options(windows::SplitOptions {
+            statuslines: false,
+            ..windows::SplitOptions::default()
+        }))
+        .unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        // :split, the new window above and current
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        draw_external(&mut fx.d, 3, 1001, 80, 9);
+        fx.d.reconcile().unwrap();
+        let pane = fx.d.panes.by_id(id).unwrap();
+        let (wins, _) = fx.d.laid_out_view(pane);
+        // the one above: its last row a statusline of ours, in StatusLine as
+        // it's current; the one below has none, as in Neovim
+        assert_eq!(
+            vec![(3, 0, 10, Some(7)), (2, 10, 10, None)],
+            wins.iter()
+                .map(|w| (w.grid, w.row, w.rows, w.statusline))
+                .collect::<Vec<_>>()
+        );
+        let sent = sent_by(fx);
+        let sizes = sizes_sent(&sent.nvim_bytes);
+        // Neovim's window above is a row short of its place
+        assert_eq!(&[[1001, 80, 9], [1000, 80, 10]], &sizes[sizes.len() - 2..]);
+    }
+
+    #[test]
+    fn a_size_asked_before_a_window_is_external_goes_once_it_gets_a_pane_or_none() {
+        let told = |d: &mut Daemon, win: i64| {
+            d.on_note(windows::Note::Resized {
+                win,
+                cols: 0,
+                rows: 5,
+            })
+            .unwrap();
+            assert_eq!(1, d.pending_sizes.len());
+        };
+        // Rex gives it a pane of its own
+        let mut fx = fixture();
+        pane_in_block(&mut fx.d, 1000, 0, 1);
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        told(&mut fx.d, 1001);
+        fx.d.new_pane(1001).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
+        // with Rex closed, a window of a later tab page stays unshown
+        let mut fx = two_windows_of_a_tab_page();
+        fx.d.rex.conn = Conn::Closed;
+        told(&mut fx.d, 1);
+        fx.d.new_pane(1).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
+        // and with no pane to join
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        told(&mut fx.d, 1001);
+        fx.d.new_pane(1001).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
     }
 
     #[test]
