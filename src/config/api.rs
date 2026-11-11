@@ -40,6 +40,7 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
     package.raw_set("path", lua.create_string(&path)?)?;
     package.raw_set("cpath", "")?;
     package.raw_set("loadlib", Value::Nil)?;
+    // Lua 5.1's C loaders: a C module, and a C module's submodule
     let loaders: Table = package.raw_get("loaders")?;
     loaders.raw_set(3, Value::Nil)?;
     loaders.raw_set(4, Value::Nil)?;

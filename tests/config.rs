@@ -803,13 +803,15 @@ fn stdin_is_empty() {
 }
 
 #[test]
-fn no_debug_library_and_no_c_modules() {
+fn every_library_but_no_c_modules() {
+    // no sandbox (ADR 0007): only require is limited
     assert_eq!(
         printed(
-            "print(debug, package.cpath, package.loadlib, #package.loaders, \
-             type(os.exit), type(io.popen), type(dofile), type(string.dump)) return {}"
+            "print(type(debug), type(debug.traceback), package.cpath, package.loadlib, \
+             #package.loaders, type(os.exit), type(io.popen), type(dofile), \
+             type(string.dump)) return {}"
         ),
-        ["nil\t\tnil\t2\tfunction\tfunction\tfunction\tfunction"]
+        ["table\tfunction\t\tnil\t2\tfunction\tfunction\tfunction\tfunction"]
     );
 }
 

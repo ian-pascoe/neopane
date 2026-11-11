@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Instant;
 
-use mlua::{Lua, MultiValue, Table, Value};
+use mlua::{Lua, LuaOptions, MultiValue, StdLib, Table, Value};
 
 use super::api;
 use super::tree::{Limit, MAX_BYTES, MAX_LEVELS, Marker, Tree, sort_pairs};
@@ -65,7 +65,11 @@ fn run_file(request: &Request, started: Instant) -> Ran {
         Ok(s) => s,
         Err(e) => return Ran::CantRead(e.to_string()),
     };
-    let lua = Lua::new();
+    // every library, debug too: no sandbox (ADR 0007); api::install keeps
+    // require to the config's lua/ directory and refuses C modules
+    // SAFETY: mlua's "unsafe" is only that C modules could load, and
+    // api::install removes every way to load one before any config runs.
+    let lua = unsafe { Lua::unsafe_new_with(StdLib::ALL, LuaOptions::default()) };
     let deadline = started + request.time;
     let file_name = path
         .file_name()
