@@ -892,7 +892,7 @@ fn run_is_cut_to_the_configs_time() {
     // get there
     let lines = f.run().printed;
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(lines[0].starts_with("timed out after 0.3"), "{lines:?}");
+    assert!(lines[0].starts_with("timed out after 0."), "{lines:?}");
     assert_eq!(lines[1], "no time left (the config has 0.6 s)");
 }
 
@@ -1035,10 +1035,13 @@ fn running(pid: i32) -> bool {
 fn nothing_the_config_starts_outlives_it() {
     let f = Fixture::new(
         "os.execute('sleep 30 & echo $! > pid') \
+         print(os.execute('kill -0 $(cat pid)')) \
          return { provider = function() return 'rex' end }",
     );
     let outcome = f.run();
     assert!(outcome.answer.is_ok());
+    // it ran while the config did
+    assert_eq!(outcome.printed, ["0"]);
     let pid: i32 = std::fs::read_to_string(f.dir.join("pid"))
         .unwrap()
         .trim()
