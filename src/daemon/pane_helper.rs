@@ -831,7 +831,10 @@ mod tests {
         /// The settings are as before, and the file is blocking.
         restored: bool,
         blocking: bool,
+        /// Since `how.started`, as the minimum life counts.
         took: Duration,
+        /// Input left for whatever reads the terminal next, read raw.
+        left: Vec<u8>,
     }
 
     /// Takes the hello and the terminal from `theirs`.
@@ -871,6 +874,26 @@ mod tests {
         out
     }
 
+    /// What terminal `fd` has to read now, read raw so a part line counts;
+    /// its settings and flags are put back after.
+    fn unread(fd: RawFd) -> Vec<u8> {
+        let saved = Saved::raw(fd).unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 64];
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+            loop {
+                let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+                if n <= 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n as usize]);
+            }
+        }
+        saved.restore();
+        out
+    }
+
     fn is_blocking(fd: RawFd) -> bool {
         unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK == 0 }
     }
@@ -894,16 +917,20 @@ mod tests {
                 master,
             })
         });
-        let started = Instant::now();
         let exit = attach_on(ours, slave, &how, signals);
-        let took = started.elapsed();
+        // from the start the minimum life counts from
+        let took = how.started.elapsed();
         fake.join().unwrap();
+        let restored = raw::same(&before, &raw::settings(slave));
+        let blocking = is_blocking(slave);
+        // before the master closes: on Linux the slave is hung up then
         let run = Run {
             exit,
             shown: drain(master),
-            restored: raw::same(&before, &raw::settings(slave)),
-            blocking: is_blocking(slave),
+            restored,
+            blocking,
             took,
+            left: unread(slave),
         };
         unsafe {
             libc::close(master);
@@ -1233,8 +1260,7 @@ mod tests {
             min_life: Duration::from_secs(1),
             ..Attach::new(Want::SelfAttach, Transport::Fd)
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let run = against_with(how, None, move |f| {
+        let run = against_with(how, None, |f| {
             send(&f.s, accept());
             send(&f.s, end(Ending::Failed, "it broke", false));
             std::thread::sleep(Duration::from_millis(200));
@@ -1242,19 +1268,11 @@ mod tests {
             assert_eq!(5, unsafe {
                 libc::write(f.master, reply.as_ptr().cast(), 5)
             });
-            tx.send(f.tty).unwrap();
         });
         assert_eq!(Exit::fail("it broke"), run.exit);
         assert!(run.restored);
         // nothing is left to read, raw or not
-        let tty = rx.recv().unwrap();
-        let fd = tty.as_raw_fd();
-        let saved = Saved::raw(fd).unwrap();
-        unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
-        let mut buf = [0u8; 8];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), 8) };
-        saved.restore();
-        assert!(n <= 0, "{:?}", &buf[..n.max(0) as usize]);
+        assert!(run.left.is_empty(), "{:?}", run.left);
     }
 
     #[test]
