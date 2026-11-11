@@ -2402,6 +2402,43 @@ mod tests {
         requested_hello(pane, test_terminal(cols, rows))
     }
 
+    /// Whether a split's pane, opened beside its origin, still waits for its
+    /// layout once its terminal attached saying `cols` x `rows`, the fake
+    /// starting its terminals at `unlaid`.
+    fn waits_for_layout(unlaid: Option<[u32; 2]>, cols: u16, rows: u16) -> Fixture {
+        let mut fx = fixture();
+        fake(&mut fx.d).unlaid = unlaid;
+        let (id, pane) = requested_pane(&mut fx);
+        fx.d.panes.by_id_mut(id).unwrap().awaiting_size = true;
+        let at = Address::new(&format!("wait-{cols}"));
+        let pty = Pty::new(cols, rows);
+        let helper = at.send(&hello_for(pane, cols, rows), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        let crate::attach::Message::Accept(_) = answer(&helper) else {
+            panic!("not accepted")
+        };
+        fx
+    }
+
+    fn awaiting(fx: &Fixture) -> bool {
+        fx.d.panes.list.iter().any(|p| p.awaiting_size)
+    }
+
+    #[test]
+    fn a_split_waits_for_its_layout_only_at_the_pane_providers_unlaid_size_until_it_is_dropped() {
+        assert!(awaiting(&waits_for_layout(Some([80, 24]), 80, 24)));
+        // laid out already, or a pane provider whose terminals start at no size
+        assert!(!awaiting(&waits_for_layout(Some([80, 24]), 70, 20)));
+        assert!(!awaiting(&waits_for_layout(None, 80, 24)));
+        // the pane provider dropped: nothing will lay it out
+        let mut fx = waits_for_layout(Some([80, 24]), 80, 24);
+        fake(&mut fx.d).push(ProviderEvent::Gone {
+            reason: "hung up".into(),
+        });
+        fx.d.drain_provider().unwrap();
+        assert!(!awaiting(&fx));
+    }
+
     #[test]
     fn a_requested_attach_is_accepted_at_its_hellos_size() {
         let mut fx = fixture();

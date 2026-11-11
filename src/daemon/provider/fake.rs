@@ -12,6 +12,8 @@ pub(crate) struct FakeProvider {
     pub caps: CapabilitySet,
     /// Every ask, oldest first.
     pub asks: Vec<(AskId, Ask)>,
+    /// The size its terminals start at before they're laid out, if any.
+    pub unlaid: Option<[u32; 2]>,
     events: VecDeque<ProviderEvent>,
 }
 
@@ -89,7 +91,7 @@ impl PaneProvider for FakeProvider {
     }
 
     fn unlaid_size(&self) -> Option<[u32; 2]> {
-        None
+        self.unlaid
     }
 
     fn context_vars(&self) -> &[&str] {
