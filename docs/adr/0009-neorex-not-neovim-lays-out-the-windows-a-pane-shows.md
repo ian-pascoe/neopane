@@ -10,8 +10,11 @@ closed by its helper exiting as well as by `close`.
 Amended by #92 before implementation: windows at the first attach get
 terminals of their own where they can.
 
-Amended by #107: `'equalalways'` evens the whole pane that way, as Neovim
-does, rather than only the row or column split.
+Amended by #107: with `'equalalways'`, a split or close evens every window
+across the pane in the split's direction, as Neovim does, rather than only
+the row or column split. A size Neovim gives a window is kept as its share
+of the pane. A statusline neorex draws, at `'laststatus'` 0, is blank for
+now.
 
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
@@ -57,11 +60,13 @@ resizes and draws as Neovim would.
   - A closing window's space goes to the next window, or with `'splitbelow'`
     or `'splitright'` to the previous one.
   - A size Neovim gives a window (`:resize`, `<C-w>+`, `<C-w>_`, `<C-w>|`)
-    is kept, and its neighbours give or take the difference.
+    is kept, as its share of the pane, and its neighbours give or take the
+    difference.
   - Side-by-side windows get a separator, drawn with `'fillchars'` in
     WinSeparator.
   - A window with another below it always has a statusline, whatever
-    `'laststatus'` says.
+    `'laststatus'` says. Where Neovim draws it none, neorex draws one, blank
+    for now.
   - `<C-w>h`, `j`, `k` and `l` move within the pane first, then to the pane
     that way when the layout provider can focus in a direction.
   - A click goes to the window under it.

@@ -49,7 +49,8 @@ impl Dir {
 /// The options that decide where space goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Options {
-    /// `'equalalways'`: a split or close evens out its row or column.
+    /// `'equalalways'`: a split or close evens out every window across the
+    /// layout in its direction, as Neovim's `win_equal` does.
     pub equalalways: bool,
     /// `'splitbelow'`: a closing window's rows go to the window above it.
     pub splitbelow: bool,
@@ -137,8 +138,9 @@ impl PaneLayout {
     }
 
     /// Window `new` takes half of `origin`'s place, side by side or one above
-    /// the other, before or after it. With `'equalalways'` its row or column
-    /// is then evened out. An origin not in the layout splits the whole of it.
+    /// the other, before or after it. With `'equalalways'` every window
+    /// across the layout that way is then evened out. An origin not in the
+    /// layout splits the whole of it.
     pub(crate) fn split(
         &mut self,
         new: i64,
@@ -196,9 +198,9 @@ impl PaneLayout {
 
     /// Takes window `win` out. Its space goes to the next window, or the one
     /// before with `'splitbelow'` down a column or `'splitright'` along a row,
-    /// or when there's no next; with `'equalalways'` its row or column is then
-    /// evened out. False once the layout has no window left (it keeps the
-    /// last one's).
+    /// or when there's no next; with `'equalalways'` every window across the
+    /// layout its way is then evened out. False once the layout has no window
+    /// left (it keeps the last one's).
     pub(crate) fn close(&mut self, win: i64, opts: Options) -> bool {
         let Some(path) = path_to(&self.root, win) else {
             return true;
@@ -654,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn a_split_takes_half_its_origins_place_and_equalalways_evens_the_row() {
+    fn a_split_takes_half_its_origins_place_and_equalalways_evens_the_windows_that_way() {
         let mut l = PaneLayout::new(1);
         l.split(2, 1, true, false, UNEVEN);
         l.split(3, 2, true, false, UNEVEN);
