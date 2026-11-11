@@ -295,3 +295,118 @@ fn a_daemon_says_ok_with_its_name_and_a_live_name_gets_a_number() {
     third.wait().unwrap();
     std::fs::remove_dir_all(&tmp).unwrap();
 }
+
+#[test]
+fn an_unknown_transport_is_warned_of_and_fd_used() {
+    let var = format!("{}_TRANSPORT", NAME.to_ascii_uppercase());
+    let out = Command::new(exe())
+        .args([
+            "attach",
+            "--address",
+            "/nonexistent/sock",
+            "--pane",
+            "1-abcdefghij",
+        ])
+        .env(&var, "carrier-pigeon")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // stdin isn't a terminal: the attach fails after the warning
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "{NAME}: ignoring {var}=carrier-pigeon (use fd or relay)\n{NAME}: not a terminal\n"
+        )
+    );
+    // `--transport` overrides it, unread
+    let out = Command::new(exe())
+        .args([
+            "attach",
+            "--address",
+            "/x",
+            "--pane",
+            "1-abcdefghij",
+            "--transport",
+            "fd",
+        ])
+        .env(&var, "carrier-pigeon")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stderr), format!("{NAME}: not a terminal\n"));
+}
+
+/// `debug-relay {attach}`, the relay test tool: a requested pane relayed
+/// over its stdin and stdout, against a fake daemon.
+#[test]
+fn the_relay_test_tool_relays_stdin_and_stdout() {
+    use neorex::attach::{Accept, End, Ending, Frame, Message, Purpose, Transport};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let sock = std::env::temp_dir().join(format!("{NAME}-relay-tool-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let server = UnixListener::bind(&sock).unwrap();
+    let mut tool = Command::new(exe())
+        .arg("debug-relay")
+        .arg(exe())
+        .args(["attach", "--address"])
+        .arg(&sock)
+        .args(["--pane", "1-abcdefghij", "--transport", "relay"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (mut s, _) = server.accept().unwrap();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64 << 10];
+    let mut next = |s: &mut std::os::unix::net::UnixStream| loop {
+        if let Some((f, n)) = Frame::decode(&buf).unwrap() {
+            buf.drain(..n);
+            if f.kind == b'h' {
+                return Message::Hello(Message::decode_hello(&f).unwrap());
+            }
+            return Message::decode(&f).unwrap().unwrap();
+        }
+        let n = s.read(&mut chunk).unwrap();
+        assert!(n > 0, "the tool hung up");
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let Message::Hello(h) = next(&mut s) else {
+        panic!("no hello")
+    };
+    let Purpose::Requested { pane, terminal } = h.purpose else {
+        panic!("{h:?}")
+    };
+    assert_eq!("1-abcdefghij", pane.to_string());
+    assert_eq!(Transport::Relay, terminal.transport);
+    let accept = Message::Accept(Accept {
+        v: neorex::attach::ATTACH_PROTOCOL_VERSION,
+        build: neorex::attach::build().to_string(),
+        daemon: "d".into(),
+        log: b"/l".to_vec(),
+        features: vec![],
+    });
+    s.write_all(&accept.encode().unwrap()).unwrap();
+    tool.stdin.as_mut().unwrap().write_all(b"typed").unwrap();
+    let mut typed = Vec::new();
+    while typed.len() < 5 {
+        match next(&mut s) {
+            Message::Input(i) => typed.extend_from_slice(&i),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(b"typed", &typed[..]);
+    for m in [
+        Message::Output(b"drawn".to_vec()),
+        Message::End(End::ending(Ending::Closed, "closed", false)),
+    ] {
+        s.write_all(&m.encode().unwrap()).unwrap();
+    }
+    drop(s);
+    let out = tool.wait_with_output().unwrap();
+    let _ = std::fs::remove_file(&sock);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "drawn");
+}

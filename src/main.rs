@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
+use neorex::attach::Transport;
 use neorex::cli::{self, Command, Start, UsageError};
 use neorex::daemon::dir::Address;
 use neorex::daemon::{launch, pane_helper, serve};
@@ -64,6 +65,7 @@ fn run(command: Command) -> Result<ExitCode> {
         } => {
             let want = pane_helper::Want::Requested(pane);
             let address = Address::from_arg(address);
+            let transport = transport.unwrap_or_else(transport_from_env);
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
         Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
@@ -73,7 +75,21 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::DebugPanes(socket) => done(debug::panes::run(&socket)),
         Command::DebugRex(socket) => done(debug::rex::run(&socket)),
         Command::DebugLatency(path) => done(debug::latency::run(&path)),
+        Command::DebugRelay { address, pane } => Ok(helper_exit(debug::relay::run(
+            &Address::from_arg(address),
+            pane,
+        ))),
     }
+}
+
+/// The transport `<NAME>_TRANSPORT` picks, warning of a value it can't
+/// take.
+fn transport_from_env() -> Transport {
+    let (transport, warning) = Transport::from_environment();
+    if let Some(w) = warning {
+        eprintln!("{NAME}: {w}");
+    }
+    transport
 }
 
 /// The first of `start`'s options that does nothing yet.

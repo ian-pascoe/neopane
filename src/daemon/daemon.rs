@@ -33,7 +33,7 @@ use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, Termina
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
-use crate::attach::{Ending, Size};
+use crate::attach::{Ending, Size, Transport};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::forwarder::{self, Forwarder};
@@ -60,6 +60,9 @@ pub(crate) struct Daemon {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: String,
     pub sock: super::dir::Address,
+    /// How requested panes' helpers attach: `<NAME>_TRANSPORT` as the
+    /// daemon started (ADR 0013).
+    pub transport: Transport,
     /// The daemon's name and its log's path, as an accepted attach is told.
     pub name: String,
     pub log: String,
@@ -268,6 +271,7 @@ impl Daemon {
         Daemon {
             exe,
             sock,
+            transport: Transport::Fd,
             name: String::new(),
             log: String::new(),
             pending: Vec::new(),
@@ -684,7 +688,7 @@ impl Daemon {
         let pane = self.panes.add_for_window(win);
         pane.tab = sp.tab;
         let (pane_id, id) = (pane.id, pane.attach_id.expect("a requested pane"));
-        let attach = pane::attach_words(&self.exe, &self.sock, pane);
+        let attach = pane::attach_words(&self.exe, &self.sock, self.transport, pane);
         let title = pane::title(&id);
         self.changes.forget_split(win);
 
@@ -1741,6 +1745,7 @@ impl Daemon {
         FloatingPanes {
             exe: &self.exe,
             sock: &self.sock,
+            transport: self.transport,
             grids: &self.grids,
             panes: &mut self.panes,
             event_loop: &self.event_loop,

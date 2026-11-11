@@ -550,6 +550,11 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         .canonicalize()?
         .to_string_lossy()
         .into_owned();
+    // requested panes' helpers relay too under the diagnostic
+    let (transport, warning) = Transport::from_environment();
+    if let Some(w) = warning {
+        log_warn!("{NAME} daemon: {w}");
+    }
 
     // open until we exit: every new pane's helper connects here
     let server = dir.bind()?;
@@ -616,6 +621,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         dir.address(),
     );
     d.name = name;
+    d.transport = transport;
     d.log = log.clone();
     d.start(startup.release())?;
 

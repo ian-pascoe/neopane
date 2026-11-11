@@ -135,13 +135,18 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
 }
 
 /// The command a requested pane's terminal runs: `{attach}`, with the pane
-/// id minted for it.
-pub(crate) fn attach_words(exe: &str, address: &Address, pane: &Pane) -> Vec<String> {
+/// id minted for it, and `--transport relay` under the relay diagnostic.
+pub(crate) fn attach_words(
+    exe: &str,
+    address: &Address,
+    transport: Transport,
+    pane: &Pane,
+) -> Vec<String> {
     let id = pane
         .attach_id
         .as_ref()
         .expect("a requested pane has a pane id");
-    attach::attach_command(exe.as_ref(), address.as_arg(), id, Transport::Fd)
+    attach::attach_command(exe.as_ref(), address.as_arg(), id, transport)
         .iter()
         .map(|w| w.to_string_lossy().into_owned())
         .collect()
@@ -315,6 +320,21 @@ mod tests {
 
         let without_block = Pane::startup(None, Surface::for_test(80, 24));
         assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
+    }
+
+    /// `{attach}` ends in `--transport relay` when the daemon started
+    /// under the relay diagnostic.
+    #[test]
+    fn a_requested_panes_command_carries_the_daemons_transport() {
+        let pane = Pane {
+            attach_id: PaneId::parse("4-abcdefghij"),
+            ..Pane::blank(4)
+        };
+        let address = Address::from_arg("/run/d/sock".into());
+        let words = |t| attach_words("/bin/x", &address, t, &pane).join(" ");
+        let fd = "/bin/x attach --address /run/d/sock --pane 4-abcdefghij";
+        assert_eq!(fd, words(Transport::Fd));
+        assert_eq!(format!("{fd} --transport relay"), words(Transport::Relay));
     }
 
     #[test]
