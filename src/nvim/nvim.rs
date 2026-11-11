@@ -1,13 +1,13 @@
-//! A connection to Neovim speaking msgpack-RPC: an embedded child's stdin
-//! and stdout, or a socket to a Neovim started with `--listen`.
+//! A connection to Neovim speaking msgpack-RPC over an embedded child's stdin
+//! and stdout.
 
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+#[cfg(test)]
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use super::framer::{self, Framer};
 use super::msgpack;
@@ -19,8 +19,6 @@ pub enum Error {
     Io(io::Error),
     Framer(framer::Error),
     Rpc(rpc::Error),
-    /// `connect_retry` gave up.
-    Timeout,
 }
 
 impl From<io::Error> for Error {
@@ -47,14 +45,11 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Framer(e) => write!(f, "{e}"),
             Error::Rpc(e) => write!(f, "{e}"),
-            Error::Timeout => write!(f, "Timeout"),
         }
     }
 }
 
 impl std::error::Error for Error {}
-
-pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// One whole message's bytes, owned, so handling it doesn't borrow the
 /// `Nvim` it came from.
@@ -71,13 +66,13 @@ impl Frame {
 
 #[doc(hidden)]
 pub struct Nvim {
-    /// None when connected to a socket.
+    /// None when someone else owns Neovim's process (`from_pipes`).
     pub(crate) child: Option<Child>,
-    /// Neovim's stdout, or the socket.
+    /// Neovim's stdout.
     reader: File,
-    /// Neovim's stdin, or the socket. None once closed.
+    /// Neovim's stdin. None once closed.
     writer: Option<File>,
-    /// Buffered writes to Neovim's stdin or the socket. Send with `flush`.
+    /// Buffered writes to Neovim's stdin. Send with `flush`.
     out: Vec<u8>,
     /// Splits Neovim's stdout into messages.
     framer: Framer,
@@ -126,26 +121,15 @@ impl Nvim {
         ))
     }
 
-    /// Connects to the socket of a Neovim started with `--listen`.
-    pub(crate) fn connect(path: impl AsRef<std::path::Path>) -> io::Result<Nvim> {
-        let stream = UnixStream::connect(path)?;
-        let writer = OwnedFd::from(stream.try_clone()?);
-        Ok(Nvim::new(
+    /// Talks to an embedded Neovim over its `stdin` and `stdout`, its process
+    /// owned by the caller. Dropping it closes the channel, which makes
+    /// Neovim exit.
+    pub(crate) fn from_pipes(stdin: ChildStdin, stdout: ChildStdout) -> Nvim {
+        Nvim::new(
             None,
-            File::from(OwnedFd::from(stream)),
-            File::from(writer),
-        ))
-    }
-
-    /// `connect`, retrying for up to 2 s: Neovim makes its socket a moment after starting.
-    pub(crate) fn connect_retry(path: impl AsRef<std::path::Path>) -> Result<Nvim> {
-        for _ in 0..200 {
-            match Nvim::connect(path.as_ref()) {
-                Ok(nvim) => return Ok(nvim),
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        Err(Error::Timeout)
+            File::from(OwnedFd::from(stdout)),
+            File::from(OwnedFd::from(stdin)),
+        )
     }
 
     /// Writes a request's header and returns its id. Write `param_count` params
@@ -260,8 +244,8 @@ impl Nvim {
 }
 
 impl Drop for Nvim {
-    /// Embedded: closes Neovim's stdin, which makes it exit, then waits for it.
-    /// Socket: closes the socket; Neovim keeps running.
+    /// Closes Neovim's stdin, which makes it exit, then waits for it if it's
+    /// ours.
     fn drop(&mut self) {
         let _ = self.flush();
         // close stdin ourselves; wait closes the rest
@@ -282,7 +266,7 @@ fn nvim_required(ci: Option<&OsStr>) -> bool {
 /// What a test does when `nvim` isn't installed: skip (None) after a note,
 /// or panic when `CI` is set, so a CI run can't pass without Neovim.
 #[cfg(test)]
-fn nvim_missing<T>() -> Option<T> {
+pub(crate) fn nvim_missing<T>() -> Option<T> {
     if nvim_required(std::env::var_os("CI").as_deref()) {
         panic!("nvim isn't installed, and CI is set: the tests that need Neovim can't be skipped");
     }
@@ -335,8 +319,6 @@ pub(crate) fn wait_response(nvim: &mut Nvim, id: u32) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::name::NAME;
-    use std::process::Child;
 
     /// The error and result of the response in `frame`.
     fn response(frame: &Frame) -> (Option<&[u8]>, msgpack::Decoder<'_>) {
@@ -398,56 +380,6 @@ mod tests {
         assert!(nvim_required(Some(OsStr::new("1"))));
         assert!(!nvim_required(Some(OsStr::new(""))));
         assert!(!nvim_required(None));
-    }
-
-    /// A headless Neovim listening on `path`, hung up and reaped on drop.
-    struct Server(Child, String);
-
-    impl Server {
-        fn start(path: &str, extra: &[&str]) -> Option<Server> {
-            let child = Command::new("nvim")
-                .args(["--clean", "--headless", "--listen", path])
-                .args(extra)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            match child {
-                Ok(c) => Some(Server(c, path.to_string())),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => nvim_missing(),
-                Err(e) => panic!("{e}"),
-            }
-        }
-    }
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGHUP) };
-            let _ = self.0.wait();
-            let _ = std::fs::remove_file(&self.1);
-        }
-    }
-
-    #[test]
-    fn connect_to_a_listening_neovim() {
-        let path = format!("/tmp/{NAME}-test-connect-{}.sock", std::process::id());
-        let Some(_server) = Server::start(&path, &[]) else {
-            return;
-        };
-        let mut nvim = Nvim::connect_retry(&path).unwrap();
-        eval_1_plus_2(&mut nvim);
-    }
-
-    #[test]
-    fn a_config_slower_than_connect_retrys_wait_still_starts() {
-        // Neovim listens before it runs the config, so the connect doesn't wait for it
-        let path = format!("/tmp/{NAME}-test-slow-{}.sock", std::process::id());
-        let Some(_server) = Server::start(&path, &["--cmd", "lua vim.uv.sleep(2500)"]) else {
-            return;
-        };
-        let mut nvim = Nvim::connect_retry(&path).unwrap();
-        // it answers once the config has run
-        eval_1_plus_2(&mut nvim);
     }
 
     #[test]

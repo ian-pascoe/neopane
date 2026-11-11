@@ -163,7 +163,7 @@ impl Rig {
         rex.conn = Conn::Attached;
         let event_loop = Loop::init().unwrap();
         event_loop
-            .add_read(nvim.read_fd(), Token::NvimSocket as usize)
+            .add_read(nvim.read_fd(), Token::NvimChannel as usize)
             .unwrap();
         let mut d = Daemon::new(
             event_loop,
