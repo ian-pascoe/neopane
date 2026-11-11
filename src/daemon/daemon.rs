@@ -704,7 +704,7 @@ impl Daemon {
             });
             return Ok(());
         }
-        // SPI-663/#114: a pane opened by `open` and then moved by
+        // SPI-663 (#125): a pane opened by `open` and then moved by
         // `place_beside` should wait the same way, while its placement is
         // pending and its hello says the unlaid size; nothing asks `open` yet
         self.panes.by_id_mut(pane_id).unwrap().awaiting_size = true;
@@ -1328,7 +1328,7 @@ impl Daemon {
     /// The terminals of the panes a move is between, if both have one.
     fn terminals_of(&self, m: &PaneMove) -> Option<Terminals> {
         let moved = self.panes.by_win(m.win)?.terminal.clone()?;
-        let origin = self.panes.by_win(m.anchor)?.terminal.clone()?;
+        let origin = self.panes.by_win(m.beside)?.terminal.clone()?;
         Some(Terminals { moved, origin })
     }
 
