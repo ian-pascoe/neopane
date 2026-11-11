@@ -252,15 +252,20 @@ pub fn flush_traces() {
     let _ = lock_traces().write_into(&mut io::stderr().lock());
 }
 
-/// The monotonic clock in nanoseconds: the same in every process, so the
-/// launcher's traces line up with the daemon's.
+/// The monotonic clock `Instant` reads, in nanoseconds: the same in every
+/// process, so the launcher's traces line up with the daemon's. (macOS's
+/// `CLOCK_MONOTONIC` counts only microseconds.)
 pub fn now_ns() -> u64 {
+    #[cfg(target_vendor = "apple")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_vendor = "apple"))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: `ts` is a valid timespec to fill.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    unsafe { libc::clock_gettime(CLOCK, &mut ts) };
     (ts.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64)

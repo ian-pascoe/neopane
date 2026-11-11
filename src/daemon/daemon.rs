@@ -1433,9 +1433,13 @@ impl Daemon {
     }
 
     /// Traces focus moving to pane `id` from a pane of tab page `from_tab`, if
-    /// that's another tab page's: its panes are to be drawn.
+    /// that's another tab page's: its panes are to be drawn. Not from a pane
+    /// that's gone.
     fn trace_tab_move(&self, from_tab: Option<i64>, id: u32) {
-        if log::tracing() && self.panes.by_id(id).map(|p| p.tab) != from_tab {
+        if log::tracing()
+            && let Some(from) = from_tab
+            && self.panes.by_id(id).is_some_and(|p| p.tab != from)
+        {
             log::trace(Point::TabMove, u64::from(id));
         }
     }

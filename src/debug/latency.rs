@@ -14,6 +14,9 @@ use crate::log::Point;
 /// A start further back than this pairs with nothing: it was for something else.
 const WINDOW_NS: u64 = 1_000_000_000;
 
+/// A key read this soon before a move to another tab page made the move.
+const MOVE_KEY_NS: u64 = 100_000_000;
+
 pub fn run(path: &OsStr) -> Result<()> {
     let bytes = std::fs::read(path)?;
     let traces = parse(&String::from_utf8_lossy(&bytes));
@@ -230,19 +233,30 @@ fn next_key_after_focus(traces: &[Trace]) -> Vec<u64> {
 }
 
 /// From each move to another tab page's pane to the last frame written before
-/// the next move, within the window.
+/// the next key or move, within the window. A move made by a key, such as
+/// `gt`, is traced once Neovim says so, after it has drawn: it's timed from
+/// the key's read.
 fn tab_move_to_last_frame(traces: &[Trace]) -> Vec<u64> {
     let mut out = Vec::new();
     for (i, m) in traces.iter().enumerate() {
         if m.point != Point::TabMove {
             continue;
         }
-        let last = traces[i + 1..]
+        let key = (0..i).rev().find(|&k| is_input(&traces[k]));
+        let (from, start) = match key.and_then(|k| Some((k, traces[k].from?))) {
+            Some((k, read)) if m.t.saturating_sub(read) <= MOVE_KEY_NS => (k, read),
+            _ => (i, m.t),
+        };
+        let last = traces[from + 1..]
             .iter()
-            .take_while(|e| e.point != Point::TabMove && e.t - m.t <= WINDOW_NS)
-            .filter(|e| e.point == Point::Frame)
+            .enumerate()
+            .take_while(|&(j, e)| {
+                let other_move = e.point == Point::TabMove && from + 1 + j != i;
+                !is_input(e) && !other_move && e.t.saturating_sub(start) <= WINDOW_NS
+            })
+            .filter(|(_, e)| e.point == Point::Frame)
             .last();
-        out.extend(last.map(|e| e.t - m.t));
+        out.extend(last.map(|(_, e)| e.t.saturating_sub(start)));
     }
     out
 }
@@ -422,6 +436,18 @@ n trace frame 1 3100
 n trace frame 2 2000000000
 ";
         assert_eq!(vec![1600, 100], samples(log, "L3"));
+
+        // `gt`: Neovim draws, then says its current window changed
+        let log = "\
+n trace input 0 1000 900
+n trace frame 0 1100
+n trace frame 3 1300
+n trace tab_move 3 1400
+n trace frame 3 1500
+n trace input 3 9000 8000
+n trace frame 3 9100
+";
+        assert_eq!(vec![600], samples(log, "L3"));
     }
 
     #[test]
@@ -459,6 +485,22 @@ n trace placed 0 350
 n trace placed 0 400
 ";
         assert_eq!(vec![150], samples(log, "L8"));
+    }
+
+    /// A log of `scripts/latency.sh focus 55`, from the baseline's build.
+    #[test]
+    fn a_captured_log_reads_as_its_table() {
+        let log = include_str!("../../tests/fixtures/latency-focus.log");
+        let table = report(&measure(&parse(log)));
+        let row = |name: &str| -> Vec<String> {
+            let line = table.lines().find(|l| l.starts_with(name)).unwrap();
+            let cols = line[name.len()..].split_whitespace().take(3);
+            cols.map(str::to_string).collect()
+        };
+        assert_eq!(["56", "0.809", "1.390"], row("L2 focus")[..], "{table}");
+        assert_eq!(["56", "0.008", "0.019"], row("L2 next")[..], "{table}");
+        assert_eq!(["114", "0.009", "0.018"], row("L4")[..], "{table}");
+        assert_eq!(["0", "-", "-"], row("L3")[..], "{table}");
     }
 
     #[test]
