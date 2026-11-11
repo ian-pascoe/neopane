@@ -305,8 +305,7 @@ impl PaneLayout {
             Dir::Column => extent[1],
         };
         let floors: Vec<u32> = kids.iter().map(|k| floor(&k.node, *dir, current)).collect();
-        let mut sizes = share_out(kids, &floors, total, current_kid(kids, current));
-        if sizes.contains(&0) {
+        if share_out(kids, &floors, total, current_kid(kids, current)).contains(&0) {
             // some are cut: no room to give
             return;
         }
@@ -320,23 +319,30 @@ impl PaneLayout {
             .filter(|&(i, _)| i != at)
             .map(|(_, f)| f)
             .sum();
-        let want = slot.clamp(floors[at], total.saturating_sub(others).max(floors[at]));
+        let want = f64::from(slot.clamp(floors[at], total.saturating_sub(others).max(floors[at])));
+        // in shares of the cells, not cells as squeezed: a window at its floor
+        // gives nothing, and keeps its share for when the pane grows
+        let weight: f64 = kids.iter().map(|k| k.weight).sum();
+        let mut ideal: Vec<f64> = kids
+            .iter()
+            .map(|k| f64::from(total) * k.weight / weight)
+            .collect();
         let order: Vec<usize> = (at + 1..kids.len()).chain((0..at).rev()).collect();
-        if want > sizes[at] {
-            let mut need = want - sizes[at];
+        if want > ideal[at] {
+            let mut need = want - ideal[at];
             for &i in &order {
-                let give = need.min(sizes[i] - floors[i]);
-                sizes[i] -= give;
-                sizes[at] += give;
+                let give = need.min((ideal[i] - f64::from(floors[i])).max(0.0));
+                ideal[i] -= give;
+                ideal[at] += give;
                 need -= give;
             }
         } else {
-            let spare = sizes[at] - want;
-            sizes[at] = want;
-            sizes[order[0]] += spare;
+            let spare = ideal[at] - want;
+            ideal[at] = want;
+            ideal[order[0]] += spare;
         }
-        for (k, s) in kids.iter_mut().zip(sizes) {
-            k.weight = f64::from(s);
+        for (k, s) in kids.iter_mut().zip(ideal) {
+            k.weight = s;
         }
     }
 
@@ -919,6 +925,36 @@ mod tests {
         let laid = l.lay_out([1, 3], 2);
         assert_eq!(vec![2], laid.wins.iter().map(|p| p.win).collect::<Vec<_>>());
         assert!(laid.separators.is_empty());
+    }
+
+    #[test]
+    fn a_resize_while_squeezed_leaves_the_shares_of_windows_at_their_floor() {
+        let mut l = PaneLayout::new(1);
+        l.split(2, 1, false, false, UNEVEN);
+        l.split(3, 2, false, false, UNEVEN);
+        // 3 a sliver: 20, 10 and 10 of 40, then 3 down to 4
+        l.resize(3, Axis::Rows, 4, [80, 40], 3);
+        assert_eq!(
+            vec![
+                (1, [0, 0, 80, 20]),
+                (2, [0, 20, 80, 16]),
+                (3, [0, 36, 80, 4])
+            ],
+            rects(&l, [80, 40], 1)
+        );
+        // squeezed to 8 rows, 3 at its floor
+        assert_eq!(
+            vec![(1, [0, 0, 80, 4]), (2, [0, 4, 80, 3]), (3, [0, 7, 80, 1])],
+            rects(&l, [80, 8], 1)
+        );
+        // Neovim gives 1 five rows: 2 gives them up, 3 has none to give
+        l.resize(1, Axis::Rows, 5, [80, 8], 1);
+        assert_eq!(
+            vec![(1, [0, 0, 80, 5]), (2, [0, 5, 80, 2]), (3, [0, 7, 80, 1])],
+            rects(&l, [80, 8], 1)
+        );
+        // grown back, 3 has its share again
+        assert_eq!(4, rects(&l, [80, 40], 1)[2].1[3]);
     }
 
     #[test]
