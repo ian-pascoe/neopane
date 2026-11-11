@@ -184,8 +184,11 @@ const FOCUS_OUT_DELAY_MS: u32 = 80;
 const SWITCH_RECHECK_MS: u32 = 100;
 
 /// How long a new split waits for the app to size it before trusting its
-/// terminal's size; and how long a pane whose terminal attached with its id
-/// waits for the live layout to report it, before it is its own layout area.
+/// terminal's size.
+const SPLIT_SIZE_WAIT_MS: u32 = 1000;
+
+/// How long a requested pane whose terminal attached with its id waits for
+/// the live layout to report it, before it is its own layout area.
 const LAYOUT_WAIT_MS: u32 = 1000;
 
 /// A count on a directional window command repeats the move this many times
@@ -305,7 +308,10 @@ impl Daemon {
         if let Some(r) = self.rex() {
             r.session.attach()?;
         }
-        self.wait_for_report(STARTUP_PANE_ID, Instant::now())
+        // no requested pane: its own area until a live layout places it,
+        // drawn and fitted as before there was any
+        self.panes.by_id_mut(STARTUP_PANE_ID).unwrap().area = Area::Own;
+        Ok(())
     }
 
     /// Runs the loop until something calls `stop`, returns why.
@@ -450,7 +456,7 @@ impl Daemon {
     /// Tells Neovim the tabline width when it changed. While the current
     /// pane is in no layout area, it stays.
     fn sync_tabline_width(&mut self) -> Result<()> {
-        let Some(current) = self.focused_pane() else {
+        let Some(current) = self.current_pane() else {
             return Ok(());
         };
         if current.area == Area::Unreported {
@@ -565,7 +571,7 @@ impl Daemon {
             .resize(u32::from(size.cols), u32::from(size.rows));
         let asked = self.size_window(id);
         let _ = self.floating().follow_layer(id);
-        if self.focused_pane_id() == Some(id) {
+        if self.current_pane_id() == Some(id) {
             self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         }
         self.nvim.client.flush()?;
@@ -723,7 +729,7 @@ impl Daemon {
         let from = self
             .panes
             .by_win(sp.from)
-            .or_else(|| self.focused_pane())
+            .or_else(|| self.current_pane())
             .filter(|p| p.layer.is_none() && p.tab == 0);
         let Some(id) = from.map(|p| p.id) else {
             return;
@@ -919,7 +925,7 @@ impl Daemon {
             }
             self.nvim.ready = true;
             // its window is in its pane now: the editor can span the Rex window
-            if let Some(f) = self.focused_pane_id() {
+            if let Some(f) = self.current_pane_id() {
                 self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
             }
             self.reconcile()?;
@@ -934,7 +940,7 @@ impl Daemon {
         if self.nvim.switch_in_flight().is_some() {
             return Ok(());
         }
-        let from_tab = self.focused_pane().map(|p| p.tab);
+        let from_tab = self.current_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.nvim.current_win = win;
         let Some(p) = self.panes.by_win_mut(win) else {
@@ -1320,7 +1326,7 @@ impl Daemon {
         {
             return Some(p);
         }
-        self.focused_pane()
+        self.current_pane()
     }
 
     // The pane provider
@@ -1358,7 +1364,7 @@ impl Daemon {
         let p = self.provider.as_ref().map(Held::seam_ref);
         let open_float = self.asks.may_ask(p, Capability::OpenFloat);
         let origin = self
-            .focused_pane()
+            .current_pane()
             .and_then(|f| f.terminal.clone())
             .or_else(|| self.any_terminal(|_| true));
         for ask in self.floating().reconcile_layers(open_float, origin) {
@@ -1408,18 +1414,7 @@ impl Daemon {
         self.provider = None;
         self.asks.gone();
         self.live_layout = None;
-        let mut any = false;
-        for p in self.panes.list.iter_mut() {
-            p.report_due = None;
-            if p.area == Area::Unreported {
-                p.area = Area::Own;
-                any = true;
-            }
-        }
-        if any {
-            self.refit_to_areas()?;
-        }
-        Ok(())
+        self.make_own(|p| p.area == Area::Unreported)
     }
 
     /// The ask timer fired: the acts whose time is up fail.
@@ -1567,7 +1562,7 @@ impl Daemon {
         if win == self.nvim.current_win && self.nvim.current_float == 0 {
             return Ok(());
         }
-        let from_tab = self.focused_pane().map(|p| p.tab);
+        let from_tab = self.current_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.make_current(id)?;
         self.trace_tab_move(from_tab, id);
@@ -1632,7 +1627,7 @@ impl Daemon {
     /// everything is drawn.
     fn refit_to_areas(&mut self) -> Result<()> {
         self.size_windows();
-        if let Some(f) = self.focused_pane_id() {
+        if let Some(f) = self.current_pane_id() {
             self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
         }
         self.nvim.client.flush()?;
@@ -1686,17 +1681,21 @@ impl Daemon {
     /// terminal attached with its id is its own layout area.
     fn time_out_reports(&mut self, now: Instant) -> Result<()> {
         self.area_timer_due = None;
+        self.make_own(|p| p.area == Area::Unreported && p.report_due.is_some_and(|d| d <= now))?;
+        self.arm_area_timer()
+    }
+
+    /// Makes each pane `pick` picks its own layout area, waiting for no
+    /// report, and fits everything again if any changed.
+    fn make_own(&mut self, pick: impl Fn(&Pane) -> bool) -> Result<()> {
         let mut any = false;
-        for p in self.panes.list.iter_mut() {
-            if p.report_due.is_some_and(|due| due <= now) {
-                p.report_due = None;
-                if p.area == Area::Unreported {
-                    p.area = Area::Own;
-                    any = true;
-                }
+        for p in self.panes.list.iter_mut().filter(|p| pick(p)) {
+            p.report_due = None;
+            if p.area != Area::Own {
+                p.area = Area::Own;
+                any = true;
             }
         }
-        self.arm_area_timer()?;
         if any {
             self.refit_to_areas()?;
         }
@@ -1728,11 +1727,7 @@ impl Daemon {
             return Ok(());
         }
         self.live_layout = None;
-        for p in self.panes.list.iter_mut() {
-            p.area = Area::Own;
-            p.report_due = None;
-        }
-        self.refit_to_areas()
+        self.make_own(|_| true)
     }
 
     /// The borrows of the floating panes' lifecycle (see `floating_panes`).
@@ -1751,7 +1746,7 @@ impl Daemon {
 
     /// Draws every pane that changed.
     fn draw(&mut self) -> Result<()> {
-        let focused = self.focused_pane_id();
+        let focused = self.current_pane_id();
         // floats in floating panes stay out of the others
         let mut skip: Vec<u32> = Vec::with_capacity(SKIP_MAX);
         for p in &self.panes.list {
@@ -2019,15 +2014,15 @@ impl Daemon {
     }
 
     /// The pane showing Neovim's current window; before setup, the launcher's.
-    fn focused_pane(&self) -> Option<&Pane> {
+    fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
             return self.panes.by_id(STARTUP_PANE_ID);
         }
         self.panes.by_win(self.nvim.current_win)
     }
 
-    fn focused_pane_id(&self) -> Option<u32> {
-        self.focused_pane().map(|p| p.id)
+    fn current_pane_id(&self) -> Option<u32> {
+        self.current_pane().map(|p| p.id)
     }
 
     /// What pane `id` draws of the screen's tabline: its slice of grid 1's top
@@ -3024,10 +3019,11 @@ mod tests {
         fx.add(0, 50, live("w", [0.0, 0.0, 0.25, 0.5]));
         fx.add(1, 70, live("w", [0.25, 0.0, 0.35, 0.5]));
         fx.add(2, 80, live("w", [0.6, 0.0, 0.4, 0.5]));
-        // under them, and floating: neither shows it, or takes room
+        // under them: it shows none, and takes no room
         fx.add(3, 90, live("w", [0.0, 0.5, 1.0, 0.5]));
         assert_eq!(None, fx.start(3));
         assert_eq!(Some(120), fx.start(2));
+        // floating: the same
         fx.d().panes.list[1].area = floating_in("w", [0.25, 0.0, 0.35, 0.5]);
         assert_eq!(None, fx.start(1));
         assert_eq!(Some(50), fx.start(2));
@@ -3183,7 +3179,7 @@ mod tests {
             set_block(fx.d(), id, n);
         }
         fx.d().nvim.current_win = 1000;
-        // two Rex windows, say: a and b side by side; c over a foreign pane
+        // two layout areas: a and b side by side; c over a foreign pane
         let l = layout_of(&[
             (
                 "w1",
@@ -3224,6 +3220,91 @@ mod tests {
         // no terminal was moved for it
         assert!(fake(fx.d()).asks.is_empty());
         assert_eq!(vec![Some(60), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn the_launch_pane_is_its_own_area_until_a_live_layout_places_it() {
+        let mut fx = TablineFixture::init();
+        let s = fx.surface(80, 24);
+        fx.d()
+            .start(Pane::startup(Some(TerminalId::from("t0")), s))
+            .unwrap();
+        // no wait for a report: a tabline pane, the screen its size
+        let d = fx.d();
+        assert_eq!(Area::Own, d.panes.list[0].area);
+        assert_eq!(None, d.panes.list[0].report_due);
+        assert_eq!(None, d.area_timer_due);
+        assert_eq!(Some([80, 24]), geometry::area_size(&d.panes.list[0]));
+        assert!(fake(d).asks.is_empty());
+        assert_eq!(Some(0), fx.start(0));
+
+        let rect = [0.0, 0.0, 0.5, 1.0];
+        fake(fx.d()).push(ProviderEvent::Layout(layout_of(&[(
+            "w",
+            &[("t0", rect, false)],
+        )])));
+        fx.d().drain_provider().unwrap();
+        let d = fx.d();
+        assert_eq!(live("w", rect), d.panes.list[0].area);
+        assert_eq!(Some([160, 24]), geometry::area_size(&d.panes.list[0]));
+    }
+
+    #[test]
+    fn each_areas_tabline_panes_slice_the_screens_tabline_from_its_start() {
+        let mut fx = TablineFixture::init();
+        {
+            let screen = fx.d().grids.get_mut(1).unwrap();
+            screen.resize(20, 10);
+            for (c, ch) in "1:one 2:two 3:three ".chars().enumerate() {
+                screen.cells[c] = Cell::init(ch.to_string(), 0);
+            }
+        }
+        let a = fx.add(0, 12, live("w1", [0.0, 0.0, 0.6, 1.0]));
+        let b = fx.add(1, 8, live("w1", [0.6, 0.0, 0.4, 1.0]));
+        let c = fx.add(2, 8, live("w2", [0.0, 0.0, 0.3, 1.0]));
+        let d = fx.add(3, 26, Area::Own);
+        let shown = |fx: &mut TablineFixture, id: u32| {
+            let t = fx.d().prepare_tabline(id);
+            let text: String = t
+                .cells
+                .unwrap()
+                .iter()
+                .map(|c| String::from_utf8_lossy(c.str()).into_owned())
+                .collect();
+            (t.col, text)
+        };
+        // the current area's, end to end: every tab, once
+        assert_eq!((0, "1:one 2:two ".to_string()), shown(&mut fx, a));
+        assert_eq!((12, "3:three ".to_string()), shown(&mut fx, b));
+        // another area's, from its start: cut at its width, or ending with
+        // the screen's row, past which the pane shows it blank
+        assert_eq!((0, "1:one 2:".to_string()), shown(&mut fx, c));
+        assert_eq!((0, "1:one 2:two 3:three ".to_string()), shown(&mut fx, d));
+    }
+
+    #[test]
+    fn the_area_timer_fires_once_the_report_wait_is_over_and_not_before() {
+        let mut fx = with_provider(Some(Held::Fake(FakeProvider::telling())));
+        let (id, pane) = requested_pane(&mut fx);
+        fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        let _attached = attach_terminal(&mut fx, pane, 70, 20);
+        let due = fx.d.panes.by_id(id).unwrap().report_due.unwrap();
+        assert_eq!(Some(due), fx.d.area_timer_due);
+        let mut events = [Event::default(); 8];
+        let fired = loop {
+            let n = fx.d.event_loop.wait(&mut events).unwrap().len();
+            if let Some(e) = events[..n]
+                .iter()
+                .find(|e| Token::of(e.token) == Some(Token::AreaTimer))
+            {
+                break *e;
+            }
+        };
+        // rounded up: never early
+        assert!(Instant::now() >= due);
+        fx.d.handle(fired).unwrap();
+        assert_eq!(Area::Own, area_of(&fx, id));
+        assert_eq!(None, fx.d.area_timer_due);
     }
 
     #[test]

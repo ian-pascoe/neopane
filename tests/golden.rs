@@ -1378,7 +1378,10 @@ fn a_fitted_tabline_in_the_current_area_and_a_cut_one_in_another() -> Result<()>
     add_window(&mut gs, 4, 8, 2, 'c');
     add_window(&mut gs, 5, 26, 2, 'd');
 
-    // the current area's tabline panes, 12 and 8 wide: every tab, once
+    // the current area's tabline panes, 12 and 8 wide: every tab, once. The
+    // columns are those `Geometry::tabline_start` gives each area's panes, as
+    // the daemon's `each_areas_tabline_panes_slice_the_screens_tabline_from_its_start`
+    // checks for this same screen
     pane_under_the_tabline(
         &mut gs,
         2,

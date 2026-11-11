@@ -151,20 +151,15 @@ impl RexProvider {
         Ok(true)
     }
 
-    /// New layers open in the Rex window of terminal `origin`, if the last
-    /// view had it.
+    /// New layers open in the Rex window of terminal `origin`, as the last
+    /// view had it; in Rex's active window if it didn't.
     fn in_window_of(&mut self, origin: &TerminalId) {
-        let Some(l) = &self.layout else {
-            return;
-        };
-        let window = l
-            .areas
-            .iter()
-            .find(|a| a.terminals.iter().any(|t| t.terminal == *origin))
-            .and_then(|a| a.id.as_bytes().try_into().ok());
-        if window.is_some() {
-            self.session.window = window;
-        }
+        self.session.window = self.layout.as_ref().and_then(|l| {
+            l.areas
+                .iter()
+                .find(|a| a.terminals.iter().any(|t| t.terminal == *origin))
+                .and_then(|a| a.id.as_bytes().try_into().ok())
+        });
     }
 
     fn answer(&mut self, tag: u64, outcome: Outcome) {

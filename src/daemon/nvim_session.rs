@@ -230,12 +230,13 @@ impl NvimSession {
         self.client.flush()
     }
 
-    /// Neovim's screen spans pane `p`'s layout area, in its cells (ADR 0008),
-    /// so screen floats such as pickers can too; only when that size changes.
-    /// Messages show in the focused pane. Not before setup: the first
-    /// window still fills the editor, and growing it to the Rex window then
-    /// shrinking it to its pane leaves it scrolled, as a dashboard drawn for
-    /// the bigger size would be.
+    /// Sizes Neovim's screen to current pane `p`'s layout area, in `p`'s
+    /// cells (ADR 0008), so screen floats such as pickers can span it; only
+    /// when that size changes, and not while `p` is in no layout area. The
+    /// command line and messages show in `p`. Not before setup: the first
+    /// window still fills the screen, and growing the screen to the layout
+    /// area then shrinking the window to its pane leaves it scrolled, as a
+    /// dashboard drawn for the bigger size would be.
     pub(crate) fn fit_ui_to(&mut self, p: &Pane) -> io::Result<()> {
         if !self.ready {
             return Ok(());

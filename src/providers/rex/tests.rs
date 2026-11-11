@@ -370,6 +370,8 @@ fn a_float_groups_block_is_framed_and_a_layer_opens_in_its_origins_window() {
             rows: 21,
         },
     );
+    // an origin the last view didn't have: Rex's active window, not the last
+    p.ask(AskId(4), open_float("block:gone"));
     let reqs = requests(p, theirs);
     let layers: Vec<&Value> = reqs
         .iter()
@@ -377,7 +379,12 @@ fn a_float_groups_block_is_framed_and_a_layer_opens_in_its_origins_window() {
         .map(|(_, v)| &v["window_id"])
         .collect();
     assert_eq!(
-        vec![&Value::Null, &json!(window_id(1)), &json!(window_id(2))],
+        vec![
+            &Value::Null,
+            &json!(window_id(1)),
+            &json!(window_id(2)),
+            &Value::Null
+        ],
         layers
     );
 }

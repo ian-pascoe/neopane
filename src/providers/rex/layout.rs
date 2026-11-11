@@ -4,14 +4,24 @@
 
 use serde_json::Value;
 
+use crate::daemon::floating_panes::LAYER_FRAME;
 use crate::daemon::live_layout::{LayoutArea, LiveLayout, PlacedTerminal};
 use crate::daemon::provider::TerminalId;
 use crate::rex::client;
 
 /// The cells of a Rex floating pane's frame at each edge: left, top, right,
-/// bottom. Its 3 across and 2 down (`LAYER_FRAME`), as neorex has always
-/// guessed them.
-pub(crate) const FRAME_INSET: [u16; 4] = [1, 1, 2, 1];
+/// bottom. `LAYER_FRAME`'s cells across and down, as neorex has always
+/// guessed them, the lesser half before.
+pub(crate) const FRAME_INSET: [u16; 4] = {
+    let [across, down] = LAYER_FRAME;
+    let (left, top) = (across.div_euclid(2), down.div_euclid(2));
+    [
+        left as u16,
+        top as u16,
+        (across - left) as u16,
+        (down - top) as u16,
+    ]
+};
 
 /// The layout `wins` says, its focused block being `current`. A block in
 /// `float_blocks`, opened for a float group, is placed at its floating
@@ -156,6 +166,11 @@ mod tests {
             id: id.to_string(),
             terminals,
         }
+    }
+
+    #[test]
+    fn the_frame_inset_is_the_frame_split_with_the_lesser_half_before() {
+        assert_eq!([1, 1, 2, 1], FRAME_INSET);
     }
 
     #[test]
