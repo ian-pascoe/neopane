@@ -47,14 +47,17 @@ nobody threw away.
   `preserve_exit()`: VimLeavePre and VimLeave run, ShaDa is written, swap files
   are kept for changed buffers and deleted for the rest. A change made in the
   last moment goes to swap, never away.
-- Neovim runs as `nvim --embed --headless --listen …` with the daemon's RPC on
-  stdio, so a daemon that dies, even by SIGKILL, takes Neovim with it, its
-  swap kept, on every platform. Every fd the daemon holds is close-on-exec,
-  so nothing it spawns keeps Neovim alive. `:detach` closes that channel and
-  nothing can veto it over RPC: the daemon treats it as Neovim exiting and
-  sends Neovim SIGHUP. `windows.lua` refuses a typed `:detach`, but a
-  plugin's `vim.cmd('detach')` gets past that, so the SIGHUP rule isn't
-  redundant with it.
+- Neovim runs as `nvim --embed --headless --listen …` with the daemon's RPC
+  on stdio, so a daemon that dies, even by SIGKILL, takes Neovim with it,
+  its swap kept, on every platform. Every fd the daemon holds is
+  close-on-exec, so nothing it spawns keeps Neovim alive. `:detach` closes
+  that channel and nothing can veto it over RPC: the daemon treats it as
+  Neovim exiting and sends Neovim SIGHUP, once Neovim hasn't exited within
+  500 ms of closing the channel. A Neovim quitting normally closes it a
+  moment before it exits, and a SIGHUP in that moment could keep swap files
+  it is deleting. `windows.lua` refuses a typed `:detach`, but a plugin's
+  `vim.cmd('detach')` gets past that, so the SIGHUP rule isn't redundant
+  with it.
 - A daemon that goes unattached drops its pane provider, and the next
   self-attach chooses again from its own context (ADR 0007), so a resumed
   daemon never opens windows where nobody is looking.
