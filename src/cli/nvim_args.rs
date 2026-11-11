@@ -135,9 +135,10 @@ pub(super) fn read(words: &[OsString]) -> Result<Reading, String> {
                     j += rest.iter().take_while(|b| b.is_ascii_digit()).count();
                 }
                 b'l' => return Err(without_a_screen(&shown)),
-                b's' if let Some(ex) = &ex_mode => {
+                b's' if ex_mode.is_some() => {
                     // -es as typed, or -e -s across words
-                    let typed = if *ex == shown {
+                    let ex = ex_mode.unwrap_or_default();
+                    let typed = if ex == shown {
                         shown.to_string()
                     } else {
                         format!("{ex} {shown}")
