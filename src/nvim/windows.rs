@@ -2874,7 +2874,11 @@ mod tests {
             h.notes.clear();
             h.input(":split | split<CR>");
             assert!(h.until(|x| {
-                x.notes.iter().filter(|n| matches!(n, Note::Split(_))).count() == 2
+                x.notes
+                    .iter()
+                    .filter(|n| matches!(n, Note::Split(_)))
+                    .count()
+                    == 2
             }));
             let mut wins: Vec<i64> = h
                 .notes

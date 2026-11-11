@@ -608,9 +608,16 @@ impl Daemon {
     }
 
     fn new_pane(&mut self, win: i64) -> Result<()> {
+        // a size asked of it before it was external counts only in a pane
+        // layout; a pane of its own is its size
+        let size = self
+            .pending_sizes
+            .iter()
+            .position(|&(w, ..)| w == win)
+            .map(|i| self.pending_sizes.swap_remove(i));
         if self.rex.conn == Conn::Closed {
             // no Rex: the window is drawn in its origin pane
-            self.lay_out_in_origin(win);
+            self.lay_out_in_origin(win, size);
             return Ok(());
         }
         let sp = self.changes.split_of(win);
@@ -683,9 +690,10 @@ impl Daemon {
     }
 
     /// Window `win` had no pane of its own: it joins its origin pane's layout,
-    /// else the current pane's, beside its origin window as Neovim put it. A
-    /// window of a tab page made after setup stays unshown (#118).
-    fn lay_out_in_origin(&mut self, win: i64) {
+    /// else the current pane's, beside its origin window as Neovim put it,
+    /// at `size` if Neovim gave it one. A window of a tab page made after
+    /// setup stays unshown (#118).
+    fn lay_out_in_origin(&mut self, win: i64, size: Option<(i64, u32, u32)>) {
         let sp = self.changes.split_of(win);
         if sp.tab != 0 {
             return;
@@ -712,8 +720,7 @@ impl Daemon {
             p.neovim_window_handle = Some(win);
         }
         self.changes.forget_split(win);
-        if let Some(i) = self.pending_sizes.iter().position(|&(w, ..)| w == win) {
-            let (_, cols, rows) = self.pending_sizes.swap_remove(i);
+        if let Some((_, cols, rows)) = size {
             self.resize_in_layout(id, win, cols, rows);
         }
     }
@@ -3576,6 +3583,39 @@ mod tests {
         let sizes = sizes_sent(&sent.nvim_bytes);
         // Neovim's window above is a row short of its place
         assert_eq!(&[[1001, 80, 9], [1000, 80, 10]], &sizes[sizes.len() - 2..]);
+    }
+
+    #[test]
+    fn a_size_asked_before_a_window_is_external_goes_once_it_gets_a_pane_or_none() {
+        let told = |d: &mut Daemon, win: i64| {
+            d.on_note(windows::Note::Resized {
+                win,
+                cols: 0,
+                rows: 5,
+            })
+            .unwrap();
+            assert_eq!(1, d.pending_sizes.len());
+        };
+        // Rex gives it a pane of its own
+        let mut fx = fixture();
+        pane_in_block(&mut fx.d, 1000, 0, 1);
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        told(&mut fx.d, 1001);
+        fx.d.new_pane(1001).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
+        // with Rex closed, a window of a later tab page stays unshown
+        let mut fx = two_windows_of_a_tab_page();
+        fx.d.rex.conn = Conn::Closed;
+        told(&mut fx.d, 1);
+        fx.d.new_pane(1).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
+        // and with no pane to join
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        told(&mut fx.d, 1001);
+        fx.d.new_pane(1001).unwrap();
+        assert!(fx.d.pending_sizes.is_empty());
     }
 
     #[test]
