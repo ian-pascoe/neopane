@@ -493,45 +493,40 @@ fn start_nvim<S: AsRef<OsStr>>(
         .spawn()
         .map_err(StartFailure::CantRun)?;
     let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+    // declared in this order so that, on a return, the channel closes before
+    // Neovim is waited for
     let mut child = NvimChild::new(child);
     let mut nvim = Nvim::from_pipes(stdin.unwrap(), stdout.unwrap());
 
     match first_answer(&mut nvim, timeout) {
-        Ok(frame) => {
-            if let Err(failure) = check_version(&frame) {
-                drop(nvim);
-                return Err(failure);
-            }
-        }
-        Err(None) => return Err(child.exited_at_once()),
-        Err(Some(failure)) => {
-            drop(nvim);
-            return Err(failure);
-        }
+        Ok(frame) => check_version(&frame)?,
+        Err(NoAnswer::Closed) => return Err(child.exited_at_once()),
+        Err(NoAnswer::Failed(failure)) => return Err(failure),
     }
     // Neovim makes its socket under its umask, which its files need. It's
     // there once Neovim answers.
-    if let Err(err) = owner_only(&nvim_sock) {
-        drop(nvim);
-        return Err(StartFailure::Nvim(format!("{nvim_sock}: {err}")));
-    }
+    owner_only(&nvim_sock).map_err(|err| StartFailure::Nvim(format!("{nvim_sock}: {err}")))?;
     Ok((child, nvim))
 }
 
+/// Why Neovim's first answer didn't come.
+enum NoAnswer {
+    /// Neovim closed the channel first.
+    Closed,
+    Failed(StartFailure),
+}
+
 /// Asks Neovim for `nvim_get_api_info` and waits up to `timeout` for the
-/// answer. Err(None) when Neovim closes the channel first.
-fn first_answer(
-    nvim: &mut Nvim,
-    timeout: Duration,
-) -> std::result::Result<Frame, Option<StartFailure>> {
+/// answer.
+fn first_answer(nvim: &mut Nvim, timeout: Duration) -> std::result::Result<Frame, NoAnswer> {
     let id = nvim.request("nvim_get_api_info", 0);
     // only a Neovim that has closed its stdin refuses it
-    nvim.flush().map_err(|_| None)?;
+    nvim.flush().map_err(|_| NoAnswer::Closed)?;
     let deadline = Instant::now() + timeout;
     loop {
         while let Some(frame) = nvim
             .next()
-            .map_err(|e| Some(StartFailure::Nvim(e.to_string())))?
+            .map_err(|e| NoAnswer::Failed(StartFailure::Nvim(e.to_string())))?
         {
             if matches!(frame.message(), Ok(rpc::Message::Response { id: got, .. }) if got == id) {
                 return Ok(frame);
@@ -549,12 +544,12 @@ fn first_answer(
             continue;
         }
         if n <= 0 {
-            return Err(Some(StartFailure::NoAnswer));
+            return Err(NoAnswer::Failed(StartFailure::NoAnswer));
         }
         match nvim.read() {
             Ok(true) => {}
-            Ok(false) => return Err(None),
-            Err(e) => return Err(Some(StartFailure::Nvim(e.to_string()))),
+            Ok(false) => return Err(NoAnswer::Closed),
+            Err(e) => return Err(NoAnswer::Failed(StartFailure::Nvim(e.to_string()))),
         }
     }
 }
@@ -608,20 +603,25 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         launch: Some(Pane::startup(rex_block, take_pane(&server)?)),
     };
 
-    // declared in this order so the channel closes before Neovim is waited for
+    // Rex is connected to while Neovim starts. Declared in this order so
+    // that, on a return, the channel closes before Neovim is waited for.
     let mut child;
     let nvim;
-    match start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout) {
+    let (started, rex) = std::thread::scope(|s| {
+        let rex = s.spawn(|| Client::connect(config.rex_url, NAME));
+        let started = start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout);
+        let rex = rex
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (started, rex)
+    });
+    match started {
         Ok(started) => (child, nvim) = started,
         Err(failure) => return Err(startup.give_up(failure)),
     }
-    let rex = match Client::connect(config.rex_url, NAME) {
+    let rex = match rex {
         Ok(rex) => rex,
-        Err(err) => {
-            let failure = startup.give_up(StartFailure::Rex(err.to_string()));
-            drop(nvim);
-            return Err(failure);
-        }
+        Err(err) => return Err(startup.give_up(StartFailure::Rex(err.to_string()))),
     };
 
     let mut event_loop = Loop::init()?;
@@ -871,6 +871,8 @@ mod tests {
             marker.display()
         );
         let (mut child, _stdin) = sh_child(&script, Duration::from_secs(3));
+        // far longer than it takes: a loaded machine mustn't make it SIGHUP
+        child.exiting = Duration::from_secs(3);
         child.closed_by_nvim();
         drop(child);
         let sent_sighup = marker.exists();
@@ -902,19 +904,18 @@ mod tests {
 
     #[test]
     fn an_inherited_fd_is_made_close_on_exec() {
-        let mut pipe = [-1; 2];
-        // SAFETY: room for two fds; neither is close-on-exec.
-        assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
+        // a copy of stderr, not close-on-exec: one that reaches another test's
+        // child in the moment before it's fixed holds nothing open
+        // SAFETY: dup of an open fd.
+        let fd = unsafe { libc::dup(libc::STDERR_FILENO) };
+        assert!(fd > libc::STDERR_FILENO);
         let inherited = inherited_fds();
-        for fd in pipe {
-            assert!(inherited.contains(&fd), "{fd} in {inherited:?}");
-            close_on_exec(fd);
-            // SAFETY: reading the flags of our pipe, then closing it.
-            unsafe {
-                assert_ne!(0, libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC);
-                libc::close(fd);
-            }
-        }
+        close_on_exec(fd);
+        // SAFETY: reading the flags of our fd, then closing it.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        unsafe { libc::close(fd) };
+        assert!(inherited.contains(&fd), "{fd} in {inherited:?}");
+        assert_ne!(0, flags & libc::FD_CLOEXEC);
         assert!(!inherited.contains(&libc::STDERR_FILENO));
     }
 
@@ -1173,13 +1174,15 @@ mod tests {
         let sock = path(&dir, "sock");
         let nvim_sock = path(&dir, "nvim.sock");
 
-        // Rex, for this test: notes Neovim's socket's mode once the daemon is
-        // connected to Neovim and calls, then hangs up
+        // Rex, for this test: once the daemon calls, which it does as Neovim
+        // starts, waits up to 5 s for Neovim's socket to be made 0600, notes
+        // its mode, then hangs up
         let rex_dir = private_dir().unwrap();
         let rex_sock = path(&rex_dir, "rex.sock");
         let rex = UnixListener::bind(&rex_sock).unwrap();
         let rex = std::thread::spawn(move || {
             let (_hung_up, _) = rex.accept().unwrap();
+            eventually(|| exists(&nvim_sock) && mode(&nvim_sock) == 0o600);
             mode(&nvim_sock)
         });
 
@@ -1209,7 +1212,7 @@ mod tests {
     fn a_start_whose_neovim_doesnt_answer_says_it_didnt_start_in_time() {
         expect_failed_start(
             &["sh", "-c", "exec sleep 30", "--"],
-            Duration::from_millis(300),
+            Duration::from_secs(1),
             "Neovim didn't start in time",
         );
     }
@@ -1262,7 +1265,7 @@ mod tests {
             let directory = format!("set directory={swap}//");
             let mut all = vec!["--cmd", &directory];
             all.extend_from_slice(args);
-            match start_nvim(&["nvim", "--clean"], &dir, &all, Duration::from_secs(10)) {
+            match start_nvim(&["nvim", "--clean"], &dir, &all, NVIM_START_TIMEOUT) {
                 Ok((child, mut nvim)) => {
                     // it answered nvim_get_api_info as soon as it could; this
                     // waits for the main loop, its files read
@@ -1345,6 +1348,139 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// Rex, for a test: greets the client at `rex_sock`, then reads all it's
+    /// sent and answers nothing.
+    fn silent_rex(rex_sock: &str) -> std::thread::JoinHandle<()> {
+        use crate::rex::{client::PROTOCOL, web_socket};
+        let listener = UnixListener::bind(rex_sock).unwrap();
+        std::thread::spawn(move || {
+            let (mut rex, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while web_socket::head_end(&head).is_none() {
+                rex.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let key = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            let accept = web_socket::accept_for(key.as_bytes().try_into().unwrap());
+            let accept = std::str::from_utf8(&accept).unwrap();
+            write!(
+                rex,
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
+                 Sec-WebSocket-Protocol: {PROTOCOL}\r\n\r\n"
+            )
+            .unwrap();
+            let welcome = format!(
+                r#"{{"type":"welcome","protocol":"{PROTOCOL}","limits":{{"max_message_bytes":65536}}}}"#
+            );
+            // a server frame is unmasked
+            let mut frame = vec![0x81, 126];
+            frame.extend_from_slice(&(welcome.len() as u16).to_be_bytes());
+            frame.extend_from_slice(welcome.as_bytes());
+            rex.write_all(&frame).unwrap();
+            let mut buf = [0u8; 4096];
+            while matches!(rex.read(&mut buf), Ok(n) if n > 0) {}
+        })
+    }
+
+    #[test]
+    fn a_plugins_detach_ends_the_daemon_as_neovim_exiting() {
+        if !have_nvim() {
+            return;
+        }
+        let dir = private_dir().unwrap();
+        let sock = path(&dir, "sock");
+        let rex_dir = private_dir().unwrap();
+        let rex_sock = path(&rex_dir, "rex.sock");
+        let rex = silent_rex(&rex_sock);
+        let swap = private_dir().unwrap();
+        let file = temp_file("plugin-detach");
+
+        // the pane neorex was run in, read until it closes
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            // SAFETY: `buf` is valid for its length.
+            while unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+            // SAFETY: closing the pty's master.
+            unsafe { libc::close(master) };
+        });
+        let mut launcher: Option<UnixStream> = None;
+
+        // a plugin that detaches once windows.lua runs and the daemon is
+        // attached: past windows.lua's refusal of a typed :detach
+        let plugin = format!(
+            "lua local t = vim.uv.new_timer() \
+             t:start(50, 50, vim.schedule_wrap(function() \
+               if _G.{NAME} and #vim.api.nvim_list_uis() > 0 then \
+                 t:stop() vim.cmd('detach') \
+               end \
+             end))"
+        );
+        let directory = format!("set directory={swap}//");
+        let args = [
+            "--cmd",
+            &directory,
+            file.to_str().unwrap(),
+            "-c",
+            "normal! ichanged",
+            "-c",
+            &plugin,
+        ];
+        let rex_url = format!("unix://{rex_sock}");
+        let started = Instant::now();
+        let result = serve(
+            &dir,
+            &args,
+            Config {
+                nvim_command: &["nvim", "--clean"],
+                ready: Box::new(|| {
+                    launcher = Some(fake_launcher_ready(&sock, slave)?);
+                    Ok(())
+                }),
+                ..Config::new(&rex_url, "session:s")
+            },
+        );
+        let took = started.elapsed();
+        drop(launcher);
+        reader.join().unwrap();
+        rex.join().unwrap();
+        // Neovim was sent SIGHUP: its changed buffer's swap is kept
+        let swap_files = fs::read_dir(&swap).unwrap().count();
+        let _ = fs::remove_dir_all(&swap);
+        let _ = fs::remove_dir_all(&rex_dir);
+        let _ = fs::remove_file(&file);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert!(!exists(&dir), "the daemon's files are left");
+        assert_eq!(1, swap_files);
+    }
+
+    #[test]
+    fn a_config_slower_than_a_moment_still_starts() {
+        // Neovim answers only once its config has run
+        let Some(mut nvim) = TestNvim::start(&["--cmd", "lua vim.uv.sleep(1500)"]) else {
+            return;
+        };
+        let id = nvim.nvim().request("nvim_eval", 1);
+        msgpack::write_str(nvim.nvim().writer(), "1+2");
+        nvim.nvim().flush().unwrap();
+        let frame = crate::nvim::nvim::wait_response(nvim.nvim(), id);
+        let rpc::Message::Response {
+            err, mut result, ..
+        } = frame.message().unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(None, err);
+        assert_eq!(Ok(3), rpc::expect_int(&mut result));
     }
 
     #[test]
