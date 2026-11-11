@@ -265,10 +265,19 @@ pub struct Problem {
 pub struct Problems(pub Vec<Problem>);
 
 impl Problems {
+    /// Adds a problem while there is room. An error always goes in, in
+    /// place of the last warning if there is no room, so the cap never
+    /// turns a malformed config into an accepted one.
     fn push(&mut self, severity: Severity, text: String) {
-        if self.0.len() < MAX_PROBLEMS {
-            self.0.push(Problem { severity, text });
+        if self.0.len() >= MAX_PROBLEMS {
+            if severity != Severity::Error {
+                return;
+            }
+            if let Some(at) = self.0.iter().rposition(|p| p.severity != Severity::Error) {
+                self.0.remove(at);
+            }
         }
+        self.0.push(Problem { severity, text });
     }
 
     pub fn has_error(&self) -> bool {

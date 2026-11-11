@@ -655,6 +655,23 @@ fn at_most_twenty_problems() {
     );
 }
 
+#[test]
+fn an_error_after_twenty_warnings_is_kept() {
+    // a01..a20 sort before open, so twenty warnings come first
+    let fields: Vec<String> = (1..=20).map(|i| format!("a{i:02} = 1")).collect();
+    let problems = Fixture::new(&returning(&format!(
+        "{{ {}, open = 5 }}",
+        fields.join(", ")
+    )))
+    .choose()
+    .unwrap_err();
+    assert_eq!(problems.0.len(), 20);
+    assert_eq!(
+        problems.errors(),
+        ["provider().open: expected a list of strings, got number"]
+    );
+}
+
 // The plain tree
 
 #[test]
