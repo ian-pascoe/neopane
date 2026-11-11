@@ -463,6 +463,16 @@ local function schedule_layout(tab)
   end)
 end
 
+-- The sizes of the windows not yet external, after Neovim has laid them out
+-- again: for a new window, a new screen size, or one made external.
+local function note_laid_sizes()
+  for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+    if shown(win) and not api.nvim_win_get_config(win).external then
+      laid_sizes[win] = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
+    end
+  end
+end
+
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or waiting(win) or api.nvim_win_get_config(win).external then return end
@@ -491,18 +501,17 @@ function M.adopt(win, w, h)
     if rows ~= 0 then rows = rows + (has_statusline(win) and 1 or 0) end
     note('resized', win, cols, rows)
   end
+  -- the windows left in the layout took its place: no size asked of them
+  note_laid_sizes()
 end
 
--- The sizes of the windows not yet external, after Neovim has laid them out
--- again for a new window or a new screen size.
-local function note_laid_sizes()
-  for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
-    if shown(win) and not api.nvim_win_get_config(win).external then
-      laid_sizes[win] = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
-    end
-  end
-end
 api.nvim_create_autocmd({ 'WinNew', 'VimResized' }, { group = group, callback = note_laid_sizes })
+-- options that take or give rows of the screen
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'cmdheight', 'showtabline', 'laststatus' },
+  callback = note_laid_sizes,
+})
 api.nvim_create_autocmd('WinClosed', {
   group = group,
   callback = function(ev) laid_sizes[tonumber(ev.match)] = nil end,
@@ -599,6 +608,7 @@ function M.close(win)
   closing_ours = true
   pcall(api.nvim_win_close, win, true)
   closing_ours = false
+  note_laid_sizes()
 end
 
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,

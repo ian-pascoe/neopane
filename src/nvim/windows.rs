@@ -2866,6 +2866,44 @@ mod tests {
     }
 
     #[test]
+    fn windows_made_together_are_told_no_size_as_each_is_adopted() {
+        for later_first in [false, true] {
+            let Some(mut h) = Harness::start() else {
+                return;
+            };
+            h.notes.clear();
+            h.input(":split | split<CR>");
+            assert!(h.until(|x| {
+                x.notes.iter().filter(|n| matches!(n, Note::Split(_))).count() == 2
+            }));
+            let mut wins: Vec<i64> = h
+                .notes
+                .iter()
+                .filter_map(|n| match n {
+                    Note::Split(s) => Some(s.win),
+                    _ => None,
+                })
+                .collect();
+            if later_first {
+                wins.reverse();
+            }
+            // as the daemon adopts them, one after the other
+            for &win in &wins {
+                adopt(&mut h.nvim, win, 40, 4);
+                h.nvim.flush().unwrap();
+                h.want = win;
+                assert!(h.until(|x| x.kind(x.want) == Some(WinKind::External)));
+            }
+            h.barrier();
+            assert!(
+                !h.notes.iter().any(|n| matches!(n, Note::Resized { .. })),
+                "{:?}",
+                h.notes
+            );
+        }
+    }
+
+    #[test]
     fn a_size_given_a_new_window_before_its_adopted_is_told_as_it_is() {
         let Some(mut h) = Harness::start() else {
             return;
