@@ -22,7 +22,7 @@ fn pane() -> PaneId {
 }
 
 fn attach() -> Vec<String> {
-    vec!["neorex".into(), "attach".into()]
+    vec!["exe".into(), "attach".into()]
 }
 
 fn open_beside() -> Ask {
@@ -116,7 +116,7 @@ fn the_opens_become_rex_requests_with_no_focus_key() {
         let mut b = json!({
             "flavor": "com.superlogical.terminal.shell",
             "label": NAME,
-            "options": { "shell": "none", "command": ["neorex", "attach"] },
+            "options": { "shell": "none", "command": ["exe", "attach"] },
         });
         if !size.is_null() {
             b["options"]["size"] = size;
