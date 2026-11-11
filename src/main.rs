@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -14,10 +14,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// `<name>: …` line on stderr), 2 on a usage error.
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    if let Some(note) = cli::file_note(&args, |word| Path::new(word).symlink_metadata().is_ok()) {
+    if let Err(err) = cli::started_by_us(&args, stdout_is_terminal()) {
+        return usage_error(err);
+    }
+    let parsed = cli::parse(&args);
+    let exists = |word: &OsStr| Path::new(word).symlink_metadata().is_ok();
+    if let Some(note) = cli::file_note(&args, &parsed, exists) {
         eprintln!("{note}");
     }
-    let command = match cli::parse(&args) {
+    let command = match parsed {
         Ok(command) => command,
         Err(err) => return usage_error(err),
     };
@@ -41,14 +46,7 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::Version => Ok(print(&cli::version())),
         Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
         // started by the launcher, not by people
-        Command::Daemon { .. } if stdout_is_terminal() => Ok(usage_error(UsageError(format!(
-            "daemon is started by {NAME} itself; to start one without a terminal, run {NAME} \
-             --detach"
-        )))),
         Command::Daemon { dir, nvim_args } => done(serve::run(&dir.to_string_lossy(), &nvim_args)),
-        Command::ConfigChild if stdout_is_terminal() => Ok(usage_error(UsageError(format!(
-            "config-child is started by {NAME} itself"
-        )))),
         Command::ConfigChild => Ok(fail("config-child isn't built yet")),
         Command::AttachPane {
             address,

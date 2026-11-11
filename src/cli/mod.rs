@@ -95,7 +95,9 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
     };
     let rest = &args[1..];
     let word = first.as_encoded_bytes();
-    let asks_help = |words: &[OsString]| words.iter().any(|w| is_help(w));
+    // a -h after -- is a file
+    let asks_help =
+        |words: &[OsString]| words.iter().take_while(|w| *w != "--").any(|w| is_help(w));
     let debug_asks_help = rest.first().is_some_and(|w| is_help(w));
     let one = |what: &str| match rest {
         [only] => Ok(only.clone()),
@@ -157,13 +159,76 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
     }
 }
 
-/// The note for a command word that names a file too, given whether a file
-/// or directory of that name exists.
-pub fn file_note(args: &[OsString], exists: impl FnOnce(&OsStr) -> bool) -> Option<String> {
+/// The note for a command word that names a file too, given what `args`
+/// parsed to and whether a file or directory of that name exists. The
+/// daemon's own `attach --pane` gets none.
+pub fn file_note(
+    args: &[OsString],
+    parsed: &Result<Command, UsageError>,
+    exists: impl FnOnce(&OsStr) -> bool,
+) -> Option<String> {
+    if matches!(parsed, Ok(Command::AttachPane { .. })) {
+        return None;
+    }
     let first = args.first()?;
     let word = COMMAND_WORDS.into_iter().find(|w| first == *w)?;
     exists(first)
         .then(|| format!("{NAME}: {word} is a command; to open the file, run {NAME} ./{word}"))
+}
+
+/// The hidden commands only `<name>` itself starts: refused when a person
+/// typed them, which `stdout_is_terminal` tells. Checked before [`parse`],
+/// so a person gets this whatever follows the word.
+pub fn started_by_us(args: &[OsString], stdout_is_terminal: bool) -> Result<(), UsageError> {
+    if !stdout_is_terminal {
+        return Ok(());
+    }
+    match args.first().map(|w| w.as_encoded_bytes()) {
+        Some(b"daemon") => Err(UsageError(format!(
+            "daemon is started by {NAME} itself; to start one without a terminal, run {NAME} \
+             --detach"
+        ))),
+        Some(b"config-child") => Err(UsageError(format!(
+            "config-child is started by {NAME} itself"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// `word` as one of the long `options`, as `--opt` or `--opt=VALUE`: the
+/// option, and its attached value if any.
+fn long_option<'a>(word: &OsStr, options: &[&'a str]) -> Option<(&'a str, Option<OsString>)> {
+    let bytes = word.as_encoded_bytes();
+    options.iter().find_map(|&option| {
+        let rest = bytes.strip_prefix(option.as_bytes())?;
+        match rest {
+            [] => Some((option, None)),
+            // SAFETY: split right after an ASCII `=`, from an OsStr.
+            [b'=', value @ ..] => Some((
+                option,
+                Some(unsafe { OsStr::from_encoded_bytes_unchecked(value) }.to_os_string()),
+            )),
+            _ => None,
+        }
+    })
+}
+
+/// The value of `option` in `words[*i]`: attached, or else the next word,
+/// which `i` then moves to.
+fn option_value(
+    option: &str,
+    attached: Option<OsString>,
+    words: &[OsString],
+    i: &mut usize,
+) -> Result<OsString, UsageError> {
+    if let Some(value) = attached {
+        return Ok(value);
+    }
+    *i += 1;
+    words
+        .get(*i)
+        .cloned()
+        .ok_or_else(|| UsageError(format!("{option} needs a value")))
 }
 
 /// What `what`'s one argument is called in its error.
@@ -190,28 +255,19 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
             b"--detach" => start.detach = true,
             b"--no-wait" => start.no_wait = true,
             _ => {
-                let Some((option, slot)) = [
-                    ("--name", &mut start.name),
-                    ("--address", &mut start.address),
-                    ("--provider", &mut start.provider),
-                ]
-                .into_iter()
-                .find(|(option, _)| {
-                    bytes
-                        .strip_prefix(option.as_bytes())
-                        .is_some_and(|r| r.is_empty() || r[0] == b'=')
-                }) else {
+                if let Some((flag, Some(_))) = long_option(word, &["--detach", "--no-wait"]) {
+                    return Err(UsageError(format!("{flag} takes no value")));
+                }
+                let Some((option, attached)) =
+                    long_option(word, &["--name", "--address", "--provider"])
+                else {
                     break;
                 };
-                let value = if bytes.len() == option.len() {
-                    i += 1;
-                    args.get(i)
-                        .cloned()
-                        .ok_or_else(|| UsageError(format!("{option} needs a value")))?
-                } else {
-                    let value = &bytes[option.len() + 1..];
-                    // SAFETY: split right after an ASCII `=`, from an OsString.
-                    unsafe { OsStr::from_encoded_bytes_unchecked(value) }.to_os_string()
+                let value = option_value(option, attached, args, &mut i)?;
+                let slot = match option {
+                    "--name" => &mut start.name,
+                    "--address" => &mut start.address,
+                    _ => &mut start.provider,
                 };
                 if slot.replace(value).is_some() {
                     return Err(UsageError(format!("{option} is given twice")));
@@ -232,11 +288,7 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
 
 /// `attach`'s words. Only the hidden `--pane` form is built yet.
 fn attach(words: &[OsString]) -> Result<Command, UsageError> {
-    let is_pane = |w: &OsString| {
-        let w = w.as_encoded_bytes();
-        w == b"--pane" || w.starts_with(b"--pane=")
-    };
-    if !words.iter().any(is_pane) {
+    if !words.iter().any(|w| long_option(w, &["--pane"]).is_some()) {
         return Ok(Command::NotBuilt("attach".to_string()));
     }
     let only =
@@ -244,28 +296,11 @@ fn attach(words: &[OsString]) -> Result<Command, UsageError> {
     let (mut address, mut pane, mut transport) = (None, None, None);
     let mut i = 0;
     while let Some(word) = words.get(i) {
-        let bytes = word.as_encoded_bytes();
-        let Some(option) = ["--address", "--pane", "--transport"]
-            .into_iter()
-            .find(|o| {
-                bytes
-                    .strip_prefix(o.as_bytes())
-                    .is_some_and(|r| r.is_empty() || r[0] == b'=')
-            })
+        let Some((option, attached)) = long_option(word, &["--address", "--pane", "--transport"])
         else {
             return Err(only());
         };
-        let value = if bytes.len() == option.len() {
-            i += 1;
-            words
-                .get(i)
-                .cloned()
-                .ok_or_else(|| UsageError(format!("{option} needs a value")))?
-        } else {
-            // SAFETY: split right after an ASCII `=`, from an OsString.
-            unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[option.len() + 1..]) }
-                .to_os_string()
-        };
+        let value = option_value(option, attached, words, &mut i)?;
         let twice = || UsageError(format!("{option} is given twice"));
         let text = value.to_str();
         match option {

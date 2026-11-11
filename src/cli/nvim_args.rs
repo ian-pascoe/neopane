@@ -30,6 +30,8 @@ pub(super) fn read(words: &[OsString]) -> Result<Reading, String> {
     let mut reading = Reading::default();
     // the word that asked for recovery, as typed
     let mut recover = None;
+    // the word that started Ex mode: Neovim's flag holds for later words too
+    let mut ex_mode: Option<String> = None;
     let mut i = 0;
     while i < words.len() {
         let word = words[i].as_encoded_bytes();
@@ -89,7 +91,6 @@ pub(super) fn read(words: &[OsString]) -> Result<Reading, String> {
         let next_is_option = words
             .get(i)
             .is_some_and(|w| w.as_encoded_bytes().first() == Some(&b'-'));
-        let mut ex_mode = false;
         let mut j = 1;
         while j < word.len() {
             let letter = word[j];
@@ -134,7 +135,15 @@ pub(super) fn read(words: &[OsString]) -> Result<Reading, String> {
                     j += rest.iter().take_while(|b| b.is_ascii_digit()).count();
                 }
                 b'l' => return Err(without_a_screen(&shown)),
-                b's' if ex_mode => return Err(without_a_screen(&shown)),
+                b's' if let Some(ex) = &ex_mode => {
+                    // -es as typed, or -e -s across words
+                    let typed = if *ex == shown {
+                        shown.to_string()
+                    } else {
+                        format!("{ex} {shown}")
+                    };
+                    return Err(without_a_screen(&typed));
+                }
                 b'u' | b'U' | b'i' | b'W' | b's' => {
                     i += 1;
                     break;
@@ -145,7 +154,7 @@ pub(super) fn read(words: &[OsString]) -> Result<Reading, String> {
                     }
                     break;
                 }
-                b'e' | b'E' => ex_mode = true,
+                b'e' | b'E' => ex_mode = Some(shown.to_string()),
                 b'h' | b'?' | b'v' => return Err(prints_and_exits(&shown)),
                 b'r' | b'L' => recover = Some(shown.clone()),
                 _ => {}

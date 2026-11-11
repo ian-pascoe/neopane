@@ -119,6 +119,18 @@ fn every_refusal_says_why() {
             "-Es runs Neovim without a screen: run nvim -Es".to_string(),
         ),
         (
+            "-e -s f",
+            "-e -s runs Neovim without a screen: run nvim -e -s".to_string(),
+        ),
+        (
+            "-E -n -s",
+            "-E -s runs Neovim without a screen: run nvim -E -s".to_string(),
+        ),
+        (
+            "-Rens",
+            "-Rens runs Neovim without a screen: run nvim -Rens".to_string(),
+        ),
+        (
             "-l x.lua",
             "-l runs Neovim without a screen: run nvim -l".to_string(),
         ),
@@ -189,6 +201,9 @@ fn our_options_are_read_from_the_front() {
     // a value may look like an option
     assert_eq!(started("--name --detach").name, Some("--detach".into()));
     // no abbreviations
+    let start = started("--provider p f");
+    assert_eq!(start.provider, Some("p".into()));
+    assert_eq!(start.nvim_args, args("f"));
     let start = started("--nam x");
     assert_eq!(start.name, None);
     assert_eq!(start.nvim_args, args("--nam x"));
@@ -271,17 +286,84 @@ fn detach_is_held() {
 
 #[test]
 fn a_command_word_naming_a_file_gets_a_note() {
-    let note = |line: &str, exists: bool| file_note(&args(line), |_| exists);
+    let note = |line: &str, exists: bool| {
+        let words = args(line);
+        file_note(&words, &parse(&words), |_| exists)
+    };
     assert_eq!(
         note("list", true),
         Some(format!(
             "{NAME}: list is a command; to open the file, run {NAME} ./list"
         ))
     );
+    assert_eq!(
+        note("provider", true),
+        Some(format!(
+            "{NAME}: provider is a command; to open the file, run {NAME} ./provider"
+        ))
+    );
     assert_eq!(note("list", false), None);
     assert_eq!(note("f", true), None);
     assert_eq!(note("debug-keys", true), None);
     assert_eq!(note("", true), None);
+    // the daemon's own attach --pane, run wherever the shell was
+    assert_eq!(note("attach --address /a --pane 2-abcdefghij", true), None);
+    assert!(note("attach f", true).is_some());
+}
+
+#[test]
+fn hidden_commands_typed_by_a_person_are_refused() {
+    let daemon = format!(
+        "daemon is started by {NAME} itself; to start one without a terminal, run {NAME} --detach"
+    );
+    let config_child = format!("config-child is started by {NAME} itself");
+    for (line, why) in [
+        ("daemon", &daemon),
+        ("daemon /tmp/d -O a", &daemon),
+        ("config-child", &config_child),
+    ] {
+        assert_eq!(
+            started_by_us(&args(line), true),
+            Err(UsageError(why.clone())),
+            "{line}"
+        );
+        assert_eq!(started_by_us(&args(line), false), Ok(()), "{line}");
+    }
+    for line in ["", "list", "f daemon", "./daemon"] {
+        assert_eq!(started_by_us(&args(line), true), Ok(()), "{line}");
+    }
+}
+
+#[test]
+fn every_command_word_is_a_command() {
+    for word in COMMAND_WORDS {
+        assert!(
+            !matches!(parse(&args(word)), Ok(Command::Start(_))),
+            "{word}"
+        );
+    }
+}
+
+#[test]
+fn flags_take_no_value() {
+    for flag in ["--detach", "--no-wait"] {
+        assert_eq!(
+            refused(&format!("{flag}=x f")),
+            format!("{flag} takes no value")
+        );
+    }
+}
+
+#[test]
+fn help_after_dashdash_is_a_file() {
+    assert_eq!(
+        parsed("attach -- -h"),
+        Ok(Command::NotBuilt("attach".into()))
+    );
+    assert_eq!(
+        parsed("list -- --help"),
+        Ok(Command::NotBuilt("list".into()))
+    );
 }
 
 #[test]

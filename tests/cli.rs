@@ -153,10 +153,16 @@ fn a_command_word_naming_a_file_says_so() {
 
 #[test]
 fn starting_without_a_terminal_says_how() {
-    let out = run(&["f.txt"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        text(&out.stderr),
-        format!("{NAME}: stdin isn't a terminal; to start a daemon without one, use --detach\n")
-    );
+    // --provider does nothing yet, but is no usage error
+    for args in [&["f.txt"][..], &["--provider", "p", "f.txt"]] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            text(&out.stderr),
+            format!(
+                "{NAME}: stdin isn't a terminal; to start a daemon without one, use --detach\n"
+            ),
+            "{args:?}"
+        );
+    }
 }

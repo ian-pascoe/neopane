@@ -38,7 +38,7 @@ pub fn help() -> String {
         ),
         (
             "REX_BLOCK".to_string(),
-            "the Rex pane it runs in, which shows the first window",
+            "the Rex block it runs in, which shows the first window",
         ),
     ];
     let width = env.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
