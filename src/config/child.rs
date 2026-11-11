@@ -91,7 +91,12 @@ fn run_file(request: &Request, started: Instant) -> Ran {
         Err(e) => return Ran::Failed(message(&e)),
     };
     let first = returned.into_iter().next().unwrap_or(Value::Nil);
-    let file = top_level(&first);
+    // the keys together can be over the limits too: Answer::encode sends
+    // that as Ran::FileOver
+    let file = match top_level(&first) {
+        Ok(file) => file,
+        Err(limit) => return Ran::FileOver(limit),
+    };
     let provider = match &first {
         Value::Table(t) => match t.raw_get::<Value>("provider") {
             Ok(Value::Function(f)) => call_provider(&lua, &f, &request.attach),
@@ -154,28 +159,27 @@ pub(super) fn message(e: &mlua::Error) -> String {
 }
 
 /// The file's first value, one level deep: the checker reads only its keys
-/// and the types of their values, so tables in it go empty and strings
-/// short.
-fn top_level(value: &Value) -> Tree {
+/// and the types of their values, so tables in it go empty and string
+/// values short. Its keys can still be over the limits.
+fn top_level(value: &Value) -> Result<Tree, Limit> {
     let Value::Table(t) = value else {
         return leaf(value, true);
     };
-    let mut pairs: Vec<(Tree, Tree)> = t
-        .pairs::<Value, Value>()
-        .filter_map(Result::ok)
-        .map(|(k, v)| (leaf(&k, false), leaf(&v, true)))
-        .collect();
+    let mut pairs = Vec::new();
+    for (k, v) in t.pairs::<Value, Value>().filter_map(Result::ok) {
+        pairs.push((leaf(&k, false)?, leaf(&v, true)?));
+    }
     sort_pairs(&mut pairs);
-    Tree::Table(pairs)
+    Ok(Tree::Table(pairs))
 }
 
 /// A value without what it holds: a table goes empty; with `short`, a
 /// string too.
-fn leaf(value: &Value, short: bool) -> Tree {
+fn leaf(value: &Value, short: bool) -> Result<Tree, Limit> {
     match value {
-        Value::Table(_) => Tree::Table(vec![]),
-        Value::String(_) if short => Tree::String(vec![]),
-        other => to_tree(other).unwrap_or(Tree::Nil),
+        Value::Table(_) => Ok(Tree::Table(vec![])),
+        Value::String(_) if short => Ok(Tree::String(vec![])),
+        other => to_tree(other),
     }
 }
 

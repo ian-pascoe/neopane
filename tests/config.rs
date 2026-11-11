@@ -378,6 +378,13 @@ fn the_files_table_is_too_big() {
     assert_eq!(
         error_of("return { provider = function() return 'rex' end, [string.rep('k', 2^20)] = 1 }"),
         "init.lua returned a table of more than 1 MiB"
+    ); // many keys, each short
+    assert_eq!(
+        error_of(
+            "local t = { provider = function() return 'rex' end } \
+             for i = 1, 20000 do t[string.rep('k', 60) .. i] = 1 end return t"
+        ),
+        "init.lua returned a table of more than 1 MiB"
     );
 }
 
