@@ -1685,7 +1685,8 @@ impl Daemon {
 
     /// Asks Neovim for each window of pane `id`'s layout to fit its place,
     /// unless it already was. A window cut for want of room keeps its size.
-    fn size_laid_out_windows(&mut self, id: u32) {
+    /// Whether it asked for any.
+    fn size_laid_out_windows(&mut self, id: u32) -> bool {
         let p = self.panes.by_id(id).unwrap();
         let area = self.geometry().window_size(p);
         let laid = p
@@ -1715,6 +1716,7 @@ impl Daemon {
             p.layout_asked.push((win, want));
             windows::size(&mut self.nvim.client, win, want.cols, want.rows);
         }
+        !asks.is_empty()
     }
 
     /// The windows of pane `p`'s layout as drawn, and the separators between.
