@@ -93,11 +93,18 @@ impl Daemon {
     /// A hello arrived whole: answer it.
     fn on_hello(&mut self, a: Arrived) -> Result<()> {
         match &a.hello {
-            Err(e) => {
-                // a requested pane's, if it can still be told, is given up
+            // a requested pane's warns, and its pane, if it can still be
+            // told, is given up
+            Err(e) if a.requested => {
                 let z = attach_conn::refusal_of(e);
                 let failed = a.pane.and_then(|p| self.waiting_pane(&p).map(|id| (id, p)));
                 self.refuse_requested(a.stream, z, failed)
+            }
+            Err(e) => {
+                let z = attach_conn::refusal_of(e);
+                log_warn!("{NAME} daemon: refused a hello: {}", z.message);
+                attach_conn::refuse(a.stream, z);
+                Ok(())
             }
             Ok(Hello {
                 purpose: Purpose::Requested { .. },

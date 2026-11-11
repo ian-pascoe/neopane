@@ -36,7 +36,9 @@ pub(crate) struct Arrived {
     pub(crate) stream: UnixStream,
     pub(crate) tty: Option<OwnedFd>,
     pub(crate) hello: Result<Hello, attach::Error>,
-    /// The pane a hello that can't be read names, if it can still be told.
+    /// Whether a hello that can't be read still says it is a requested
+    /// pane's, and the pane it names, if that can still be told.
+    pub(crate) requested: bool,
     pub(crate) pane: Option<PaneId>,
     /// When its last byte was read, as `log::trace_now` has it: L9 is
     /// timed from here.
@@ -105,14 +107,18 @@ impl Pending {
                     let at = log::trace_now();
                     let rest = self.buf.split_off(n);
                     let hello = Message::decode_hello(&frame);
-                    let pane = match &hello {
-                        Err(_) if frame.kind == b'h' => Hello::requested_pane(&frame.payload),
-                        _ => None,
+                    let unreadable = hello.is_err() && frame.kind == b'h';
+                    let requested = unreadable && Hello::reads_requested(&frame.payload);
+                    let pane = if requested {
+                        Hello::requested_pane(&frame.payload)
+                    } else {
+                        None
                     };
                     return Step::Arrived(Arrived {
                         stream: self.stream,
                         tty: self.tty,
                         hello,
+                        requested,
                         pane,
                         at,
                         rest,
@@ -123,6 +129,7 @@ impl Pending {
                         stream: self.stream,
                         tty: self.tty,
                         hello: Err(e),
+                        requested: false,
                         pane: None,
                         at: log::trace_now(),
                         rest: Vec::new(),

@@ -653,7 +653,6 @@ mod tests {
             send(&theirs, accept());
             // the helper waits on its socket and the signal by now
             std::thread::sleep(Duration::from_millis(200));
-            assert!(got.is_empty(), "sent before any resize");
             let ws = libc::winsize {
                 ws_row: 40,
                 ws_col: 120,

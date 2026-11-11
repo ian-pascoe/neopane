@@ -2236,19 +2236,45 @@ mod tests {
     }
 
     #[test]
-    fn a_hello_naming_no_pane_still_warns() {
+    fn a_requested_hello_naming_no_pane_still_warns() {
         use crate::attach::Frame;
         let mut fx = fixture();
         let (id, _) = requested_pane(&mut fx);
         let at = Address::new("nopane");
+        let mut payload = vec![0x81];
+        crate::nvim::msgpack::write_str(&mut payload, "purpose");
+        crate::nvim::msgpack::write_str(&mut payload, "requested");
         let mut bytes = Vec::new();
-        Frame::encode_into(b'h', b"\x80", &mut bytes).unwrap();
+        Frame::encode_into(b'h', &payload, &mut bytes).unwrap();
         let helper = at.send(&bytes, None);
         fx.d.accept(&at.server).unwrap();
         refusal(&helper);
         assert!(sent_to_nvim(&mut fx).contains("missing field v"));
         // no pane to give up
         assert!(fx.d.panes.by_id(id).unwrap().closing.is_none());
+    }
+
+    #[test]
+    fn a_hello_not_a_requested_panes_is_refused_and_only_logged() {
+        use crate::attach::Frame;
+        let mut fx = fixture();
+        let at = Address::new("notreq");
+        let mut self_without_fields = vec![0x81];
+        crate::nvim::msgpack::write_str(&mut self_without_fields, "purpose");
+        crate::nvim::msgpack::write_str(&mut self_without_fields, "self");
+        for (kind, payload) in [
+            (b'h', &b"\x80"[..]),
+            (b'h', &self_without_fields[..]),
+            (b'h', &b"\xc1"[..]),
+            (b's', &b"\x80"[..]),
+        ] {
+            let mut bytes = Vec::new();
+            Frame::encode_into(kind, payload, &mut bytes).unwrap();
+            let helper = at.send(&bytes, None);
+            fx.d.accept(&at.server).unwrap();
+            refusal(&helper);
+        }
+        assert_eq!("", sent_to_nvim(&mut fx));
     }
 
     #[test]
