@@ -5,15 +5,14 @@
 use super::*;
 use crate::daemon::attach_conn;
 use crate::daemon::fdpass;
+use crate::daemon::provider::fake::FakeProvider;
 use crate::daemon::surface::{cells, open_pty};
 use crate::nvim::nvim::spawn_for_test_with;
-use crate::rex::client::Client;
-use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-const BLOCK: &[u8] = b"block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+const TERMINAL: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
 
 /// The timer that bounds each of the rig's waits on the loop, so it checks
 /// whether it's done: its id, and the token it fires with.
@@ -122,7 +121,7 @@ impl Drop for Emulator {
     }
 }
 
-/// A daemon over a real Neovim and a Rex that nothing answers, with the
+/// A daemon over a real Neovim and a pane provider that answers nothing, with the
 /// startup pane (`panes[0]`) and a pane for a split beside it (`panes[1]`).
 struct Rig {
     /// Dropped first: its panes are restored while the emulators still read.
@@ -155,14 +154,6 @@ impl Rig {
             "--cmd",
             "set noswapfile",
         ])?;
-        let (rex_ours, mut rex_end) = UnixStream::pair().unwrap();
-        // Rex reads everything and answers nothing
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while matches!(rex_end.read(&mut buf), Ok(n) if n > 0) {}
-        });
-        let mut rex = RexSession::new(Client::from_stream(rex_ours), "session:s".to_string());
-        rex.conn = Conn::Attached;
         let event_loop = Loop::init().unwrap();
         event_loop
             .add_read(nvim.read_fd(), Token::NvimChannel as usize)
@@ -170,7 +161,7 @@ impl Rig {
         let mut d = Daemon::new(
             event_loop,
             NvimSession::new(nvim),
-            rex,
+            Some(Held::Fake(FakeProvider::opening())),
             String::new(),
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
@@ -178,9 +169,8 @@ impl Rig {
         // the startup pane: big, so a frame of it is bigger than a pty holds
         let (master0, slave0) = open_pty(200, 60);
         let (socket0, helper0) = UnixStream::pair().unwrap();
-        let block = pane::rex_block(BLOCK).unwrap();
         let startup = Pane::startup(
-            Some(block),
+            Some(TerminalId::from(TERMINAL)),
             Surface::create(socket0, slave0, cells(200, 60)).unwrap(),
         );
         let pane0 = Emulator::start(master0);
@@ -203,8 +193,8 @@ impl Rig {
         };
         rig.pump(|r| r.d.nvim.ready);
 
-        // a split: Neovim's new window asks Rex for a pane, whose helper
-        // connects as Rex would run it
+        // a split: Neovim's new window asks for a pane, whose helper connects
+        // as its terminal would run it
         rig.lua("vim.cmd('vsplit | enew')");
         rig.pump(|r| r.d.panes.by_id(1).is_some());
         let (master1, slave1) = open_pty(100, 30);

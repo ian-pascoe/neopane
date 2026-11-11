@@ -30,14 +30,18 @@ use super::daemon::{Daemon, StopReason, Token};
 use super::dir::{self, Claimed, MAX_PATH};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
-use super::pane::{self, Pane, RexBlock};
+use super::pane::Pane;
+use super::provider::TerminalId;
 use super::surface::Surface;
 use crate::attach::{End, Purpose, Refusal};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
+use crate::providers::Held;
+use crate::providers::rex::RexProvider;
 use crate::rex::client::Client;
+use crate::rex::ids;
 use crate::rex::session::Session as RexSession;
 
 /// `serve` is a top layer: any error will do.
@@ -555,9 +559,9 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     (config.ready)()?;
 
-    let rex_block: Option<RexBlock> = match env("REX_BLOCK") {
-        Some(b) => match pane::rex_block(b.as_bytes()) {
-            Ok(block) => Some(block),
+    let rex_block: Option<TerminalId> = match env("REX_BLOCK") {
+        Some(b) => match ids::block(b.as_bytes()) {
+            Ok(_) => Some(TerminalId::from(b.as_str())),
             Err(_) => {
                 log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
                 None
@@ -598,13 +602,16 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     }
     event_loop.add_read(nvim.read_fd(), Token::NvimChannel as usize)?;
     event_loop.add_read(server.as_raw_fd(), Token::HelperListener as usize)?;
-    event_loop.add_read(rex.fd(), Token::RexSocket as usize)?;
+    event_loop.add_read(rex.fd(), Token::Provider as usize)?;
 
     // dropped first: terminals restored and panes hung up before anything else ends
     let mut d = Daemon::new(
         event_loop,
         NvimSession::new(nvim),
-        RexSession::new(rex, config.session_id.to_string()),
+        Some(Held::Rex(Box::new(RexProvider::new(RexSession::new(
+            rex,
+            config.session_id.to_string(),
+        ))))),
         exe,
         dir.address(),
     );

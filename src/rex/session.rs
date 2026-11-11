@@ -9,20 +9,20 @@ use super::web_socket::Close;
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 
-/// What a request asked for; tags match Rex's methods.
+/// What a request asked for; tags match Rex's methods. A request made for
+/// someone else's purpose carries their number for it, and its answer comes
+/// back to them as `Update::Answered`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Request {
     Attach,
-    /// pane
-    NewSplit(u32),
-    /// pane
-    NewLayer(u32),
+    NewSplit(u64),
+    NewLayer(u64),
     FocusBlock,
     FocusDirection,
     View,
-    DisownBlock,
-    CloseBlock,
-    CloseLayer,
+    DisownBlock(u64),
+    CloseBlock(u64),
+    CloseLayer(u64),
     MoveBlock,
     ResizePane,
 }
@@ -37,9 +37,9 @@ impl Request {
             Request::FocusBlock => "focus_block",
             Request::FocusDirection => "focus_direction",
             Request::View => "view",
-            Request::DisownBlock => "disown_block",
-            Request::CloseBlock => "close_block",
-            Request::CloseLayer => "close_layer",
+            Request::DisownBlock(_) => "disown_block",
+            Request::CloseBlock(_) => "close_block",
+            Request::CloseLayer(_) => "close_layer",
             Request::MoveBlock => "move_block",
             Request::ResizePane => "resize_pane",
         }
@@ -115,33 +115,28 @@ pub(crate) struct Session {
 
     /// A focus change from the same view as a `layout` update, sent after it.
     pub queued_focus: Option<String>,
+
+    /// Why Rex closed, once it has; told once as `Update::Closed`.
+    pub closed: Option<String>,
+    closed_told: bool,
 }
 
 /// What the daemon has to act on. (Owned, so it outlives the next call to
 /// `next`.)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Update {
-    /// The split asked for `pane` exists, as `block`.
-    SplitMade { pane: u32, block: String },
-    /// Rex refused the split asked for this pane.
-    SplitFailed(Failed),
-    /// The floating layer asked for `pane` exists, as `layer` holding `block`.
-    LayerMade {
-        pane: u32,
-        block: String,
-        layer: Option<String>,
+    /// Rex answered a request that carries its asker's number.
+    Answered {
+        req: Request,
+        result: client::ResponseResult,
     },
-    /// Rex refused the floating layer asked for this pane.
-    LayerFailed(Failed),
     /// A newer view's windows, to read where our panes sit.
     Layout(Vec<Value>),
     /// The user focused this block in Rex.
     FocusMoved(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Failed {
-    pub pane: u32,
+    /// Rex closed or failed, for the reason in `closed`: nothing more will be
+    /// answered.
+    Closed,
 }
 
 /// Which way `focus_direction` moves; Rex's names.
@@ -198,6 +193,8 @@ impl Session {
             focused_block: FocusedBlock::Unknown,
             window: None,
             queued_focus: None,
+            closed: None,
+            closed_told: false,
         }
     }
 
@@ -224,6 +221,7 @@ impl Session {
     fn close_rex(&mut self, reason: &str) {
         log_warn!("{NAME} daemon: Rex {reason}, treating it as closed");
         self.conn = Conn::Closed;
+        self.closed.get_or_insert_with(|| format!("Rex {reason}"));
     }
 
     /// The next update for the daemon, or None when there are none.
@@ -251,8 +249,10 @@ impl Session {
                 client::Message::Closed(c) => self.on_closed(&c),
             }
         }
-        if self.conn == Conn::Closed {
-            return Ok(self.fail_pending_split());
+        if self.conn == Conn::Closed && !self.closed_told {
+            self.closed_told = true;
+            self.pending_requests.clear();
+            return Ok(Some(Update::Closed));
         }
         Ok(None)
     }
@@ -325,19 +325,43 @@ impl Session {
         ids::same_block(focused_block, block)
     }
 
-    /// The creator owns a block and sizes it; this lets the app size it instead.
-    pub(crate) fn disown(&mut self, block: &str) -> Result<(), ClientError> {
+    /// Asks for a split beside `anchor`, holding `layout`: to its left or
+    /// right if `side_by_side`, else above or below it; before it if `before`.
+    /// It never takes focus.
+    pub(crate) fn new_split(
+        &mut self,
+        tag: u64,
+        anchor: &str,
+        side_by_side: bool,
+        before: bool,
+        layout: Value,
+    ) -> Result<(), ClientError> {
         self.request(
-            Request::DisownBlock,
+            Request::NewSplit(tag),
+            "session.new_split",
+            json!({
+                "session_id": self.session_id,
+                "anchor_id": anchor,
+                "direction": if side_by_side { "horizontal" } else { "vertical" },
+                "side": if before { "before" } else { "after" },
+                "layout": layout,
+            }),
+        )
+    }
+
+    /// The creator owns a block and sizes it; this lets the app size it instead.
+    pub(crate) fn disown(&mut self, tag: u64, block: &str) -> Result<(), ClientError> {
+        self.request(
+            Request::DisownBlock(tag),
             "session.disown_block",
             json!({ "session_id": self.session_id, "block_ids": [block] }),
         )
     }
 
     /// Closes a block we made. Its helper, if it ever connects, finds no pane and leaves.
-    pub(crate) fn close_block(&mut self, block: &str) -> Result<(), ClientError> {
+    pub(crate) fn close_block(&mut self, tag: u64, block: &str) -> Result<(), ClientError> {
         self.request(
-            Request::CloseBlock,
+            Request::CloseBlock(tag),
             "block.close",
             json!({ "session_id": self.session_id, "block_id": block }),
         )
@@ -389,9 +413,9 @@ impl Session {
     }
 
     /// Closes a floating layer we made.
-    pub(crate) fn close_layer(&mut self, layer: &str) -> Result<(), ClientError> {
+    pub(crate) fn close_layer(&mut self, tag: u64, layer: &str) -> Result<(), ClientError> {
         self.request(
-            Request::CloseLayer,
+            Request::CloseLayer(tag),
             "session.close_layer",
             json!({ "session_id": self.session_id, "layer_id": layer }),
         )
@@ -401,7 +425,7 @@ impl Session {
     /// (`layout` is a JSON value.)
     pub(crate) fn new_layer(
         &mut self,
-        pane_id: u32,
+        tag: u64,
         bounds: [f64; 4],
         layout: Value,
     ) -> Result<(), ClientError> {
@@ -419,7 +443,7 @@ impl Session {
         );
         payload.insert("layout".into(), layout);
         self.request(
-            Request::NewLayer(pane_id),
+            Request::NewLayer(tag),
             "session.new_layer",
             Value::Object(payload),
         )
@@ -458,8 +482,16 @@ impl Session {
             log_request_error(req, e);
         }
         match req {
-            Request::NewSplit(pane) => return Ok(Some(on_new_split_result(pane, &res.result))),
-            Request::NewLayer(pane) => return Ok(Some(on_new_layer_result(pane, &res.result))),
+            Request::NewSplit(_)
+            | Request::NewLayer(_)
+            | Request::DisownBlock(_)
+            | Request::CloseBlock(_)
+            | Request::CloseLayer(_) => {
+                return Ok(Some(Update::Answered {
+                    req,
+                    result: res.result,
+                }));
+            }
             Request::View => return self.on_view_result(&res.result),
             Request::FocusBlock => self.on_focus_block_result(&res.result)?,
             Request::Attach => self.on_attach_result(&res.result)?,
@@ -468,10 +500,7 @@ impl Session {
                     log::trace(Point::Placed, 0);
                 }
             }
-            Request::FocusDirection
-            | Request::DisownBlock
-            | Request::CloseBlock
-            | Request::CloseLayer => {}
+            Request::FocusDirection => {}
         }
         Ok(None)
     }
@@ -498,29 +527,13 @@ impl Session {
     }
 
     fn on_closed(&mut self, c: &Close) {
-        match c.code {
-            Some(code) => log_info!(
-                "{NAME} daemon: Rex closed {code} {}",
-                String::from_utf8_lossy(&c.reason)
-            ),
-            None => log_info!(
-                "{NAME} daemon: Rex closed null {}",
-                String::from_utf8_lossy(&c.reason)
-            ),
-        }
+        let reason = match c.code {
+            Some(code) => format!("Rex closed {code} {}", String::from_utf8_lossy(&c.reason)),
+            None => format!("Rex closed null {}", String::from_utf8_lossy(&c.reason)),
+        };
+        log_info!("{NAME} daemon: {reason}");
+        self.closed.get_or_insert(reason);
         self.conn = Conn::Closed;
-    }
-
-    /// Closed: no answers will come, so fail the splits still waiting.
-    fn fail_pending_split(&mut self) -> Option<Update> {
-        while let Some(p) = self.pending_requests.pop() {
-            match p.req {
-                Request::NewSplit(pane) => return Some(Update::SplitFailed(Failed { pane })),
-                Request::NewLayer(pane) => return Some(Update::LayerFailed(Failed { pane })),
-                _ => {}
-            }
-        }
-        None
     }
 
     /// Removes and returns the request `id` answers.
@@ -682,41 +695,8 @@ impl Session {
     }
 }
 
-/// Always an update: the pane is waiting either way.
-pub(crate) fn on_new_split_result(pane_id: u32, result: &client::ResponseResult) -> Update {
-    let ok = match result {
-        client::ResponseResult::Ok(val) => val,
-        client::ResponseResult::Err(_) => return Update::SplitFailed(Failed { pane: pane_id }),
-    };
-    let Some(block) = new_block_id(ok) else {
-        log_unexpected_response(Request::NewSplit(pane_id), "block_ids");
-        return Update::SplitFailed(Failed { pane: pane_id });
-    };
-    Update::SplitMade {
-        pane: pane_id,
-        block: block.to_string(),
-    }
-}
-
-/// Always an update: the pane is waiting either way.
-fn on_new_layer_result(pane_id: u32, result: &client::ResponseResult) -> Update {
-    let ok = match result {
-        client::ResponseResult::Ok(val) => val,
-        client::ResponseResult::Err(_) => return Update::LayerFailed(Failed { pane: pane_id }),
-    };
-    let Some(block) = new_block_id(ok) else {
-        log_unexpected_response(Request::NewLayer(pane_id), "block_ids");
-        return Update::LayerFailed(Failed { pane: pane_id });
-    };
-    Update::LayerMade {
-        pane: pane_id,
-        block: block.to_string(),
-        layer: client::get_str(ok, "layer_id").map(str::to_string),
-    }
-}
-
-/// The block a split made.
-fn new_block_id(ok: &Value) -> Option<&str> {
+/// The block a split or layer made.
+pub(crate) fn new_block_id(ok: &Value) -> Option<&str> {
     let Value::Array(block_ids) = client::get(ok, "block_ids")? else {
         return None;
     };
@@ -745,35 +725,29 @@ fn find_focused_block(snapshot: &Value) -> Option<ids::Block> {
 
 /// Rex refused a request.
 pub(crate) fn log_request_error(req: Request, e: &client::Error) {
-    match req {
-        Request::NewSplit(pane) => log_warn!(
-            "{NAME} daemon: Rex new_split for pane {pane} failed: {}: {}",
-            e.code,
-            e.message
-        ),
-        _ => log_warn!(
-            "{NAME} daemon: Rex {} failed: {}: {}",
-            req.tag_name(),
-            e.code,
-            e.message
-        ),
-    }
+    log_warn!(
+        "{NAME} daemon: Rex {} failed: {}: {}",
+        req.tag_name(),
+        e.code,
+        e.message
+    );
 }
 
 /// Rex said yes, in a shape we can't read.
-fn log_unexpected_response(req: Request, what: &str) {
+pub(crate) fn log_unexpected_response(req: Request, what: &str) {
     log_warn!("{NAME} daemon: Rex {} answer has no {what}", req.tag_name());
 }
 
-// These check the JSON written to Rex and the view/focus flow.
+// These check the JSON written to Rex and the view/focus flow. Rex's pane
+// provider's tests reuse the helpers.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 
     /// The text frames the client wrote to `theirs`, unmasked.
-    fn sent(mut theirs: UnixStream) -> Vec<String> {
+    pub(crate) fn sent(mut theirs: UnixStream) -> Vec<String> {
         let mut bytes = Vec::new();
         theirs.read_to_end(&mut bytes).unwrap();
         let mut out = Vec::new();
@@ -795,7 +769,21 @@ mod tests {
         out
     }
 
-    fn session() -> (Session, UnixStream) {
+    /// The text frame a Rex server sends: unmasked.
+    pub(crate) fn server_frame(text: &str) -> Vec<u8> {
+        let mut f = vec![0x81];
+        match text.len() {
+            n if n < 126 => f.push(n as u8),
+            n => {
+                f.push(126);
+                f.extend((n as u16).to_be_bytes());
+            }
+        }
+        f.extend(text.as_bytes());
+        f
+    }
+
+    pub(crate) fn session() -> (Session, UnixStream) {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let mut s = Session::new(Client::from_stream(ours), "session:s".to_string());
         s.conn = Conn::Attached;
@@ -815,7 +803,7 @@ mod tests {
         s.focus_direction(Direction::Left).unwrap();
         s.move_block("block:a", "block:b", true, 0.5).unwrap();
         s.resize_pane("block:a", "block:b", false, 1.0).unwrap();
-        s.disown("block:a").unwrap();
+        s.disown(0, "block:a").unwrap();
         s.new_layer(3, [1.0, 2.5, 80.0, 24.0], json!({ "kind": "leaf" }))
             .unwrap();
         let mut window = [b'0'; 43];
@@ -858,21 +846,8 @@ mod tests {
     }
 
     #[test]
-    fn split_and_view_results() {
+    fn view_results() {
         let (mut s, _theirs) = session();
-        let ok = |v: Value| client::ResponseResult::Ok(v);
-        assert_eq!(
-            Update::SplitMade {
-                pane: 1,
-                block: "block:x".into()
-            },
-            on_new_split_result(1, &ok(json!({ "block_ids": ["block:x"] })))
-        );
-        assert_eq!(
-            Update::SplitFailed(Failed { pane: 2 }),
-            on_new_split_result(2, &ok(json!({})))
-        );
-
         let (a, b) = (block('a'), block('b'));
         let view = |rev: i64, focused: &ids::Block| {
             json!({
@@ -900,11 +875,11 @@ mod tests {
         );
     }
 
-    fn ok(v: Value) -> client::ResponseResult {
+    pub(crate) fn ok(v: Value) -> client::ResponseResult {
         client::ResponseResult::Ok(v)
     }
 
-    fn refused() -> client::ResponseResult {
+    pub(crate) fn refused() -> client::ResponseResult {
         client::ResponseResult::Err(client::Error {
             code: "refused".into(),
             message: "no".into(),
@@ -913,7 +888,7 @@ mod tests {
     }
 
     /// The ids of the requests still waiting for `kind`, oldest first.
-    fn pending(s: &Session, kind: Request) -> Vec<u64> {
+    pub(crate) fn pending(s: &Session, kind: Request) -> Vec<u64> {
         s.pending_requests
             .iter()
             .filter(|p| p.req == kind)
@@ -921,7 +896,11 @@ mod tests {
             .collect()
     }
 
-    fn answer(s: &mut Session, id: u64, result: client::ResponseResult) -> Option<Update> {
+    pub(crate) fn answer(
+        s: &mut Session,
+        id: u64,
+        result: client::ResponseResult,
+    ) -> Option<Update> {
         s.on_response(client::Response { id, seq: 0, result })
             .unwrap()
     }
@@ -1096,29 +1075,30 @@ mod tests {
     }
 
     #[test]
-    fn rex_closing_fails_each_pending_split_and_layer_once() {
+    fn an_answer_to_a_request_made_for_someone_comes_back_to_them() {
         let (mut s, _theirs) = session();
-        s.request(Request::NewSplit(1), "session.new_split", json!({}))
-            .unwrap();
-        s.request(Request::NewLayer(2), "session.new_layer", json!({}))
-            .unwrap();
-        s.request(Request::View, "session.view", json!({})).unwrap();
-        s.request(Request::NewSplit(3), "session.new_split", json!({}))
-            .unwrap();
+        s.new_split(7, "block:a", true, false, json!({})).unwrap();
+        let id = pending(&s, Request::NewSplit(7))[0];
+        assert_eq!(
+            Some(Update::Answered {
+                req: Request::NewSplit(7),
+                result: ok(json!({ "block_ids": ["block:x"] })),
+            }),
+            answer(&mut s, id, ok(json!({ "block_ids": ["block:x"] })))
+        );
+    }
+
+    #[test]
+    fn rex_closing_is_told_once_and_drops_what_was_pending() {
+        let (mut s, _theirs) = session();
+        s.new_split(1, "block:a", true, false, json!({})).unwrap();
         s.on_closed(&Close {
             code: Some(1000),
             reason: Vec::new(),
         });
-
-        let mut failures = Vec::new();
-        while let Some(update) = s.next().unwrap() {
-            failures.push(update);
-        }
-        let has = |u: Update| failures.iter().filter(|f| **f == u).count();
-        assert_eq!(3, failures.len());
-        assert_eq!(1, has(Update::SplitFailed(Failed { pane: 1 })));
-        assert_eq!(1, has(Update::LayerFailed(Failed { pane: 2 })));
-        assert_eq!(1, has(Update::SplitFailed(Failed { pane: 3 })));
+        assert_eq!(Some(Update::Closed), s.next().unwrap());
+        assert_eq!(Some("Rex closed 1000 "), s.closed.as_deref());
+        assert!(s.pending_requests.is_empty());
         assert_eq!(None, s.next().unwrap());
     }
 }

@@ -1,4 +1,4 @@
-//! Links a Rex pane to a Neovim window. The three parts arrive in any
+//! Links a pane provider's terminal to a Neovim window. The three parts arrive in any
 //! order.
 //!
 //! A `Pane` is a plain value whose Surface is boxed (only the Surface needs a
@@ -11,17 +11,14 @@ use std::os::fd::RawFd;
 use super::dir::Address;
 use super::event_loop::{self, Loop};
 use super::pane_layout::PaneLayout;
+use super::provider::TerminalId;
 use super::surface::{Restore, Surface};
 use crate::attach::{self, End, Ending, PaneId, Transport};
+use crate::name::NAME;
 use crate::screen::float_groups::Group;
-
-pub(crate) use crate::rex::ids::{block as rex_block, layer as rex_layer};
 
 /// Never 0: Neovim's API reads 0 as the current window.
 pub(crate) type NeovimWindowHandle = i64;
-
-pub(crate) type RexBlock = crate::rex::ids::Block;
-pub(crate) type RexLayer = crate::rex::ids::Layer;
 
 pub(crate) struct Pane {
     /// The daemon's own number for it, for its loop tokens. 0 is the startup
@@ -29,7 +26,8 @@ pub(crate) struct Pane {
     pub id: u32,
     /// The pane id its helper's hello names, for a requested pane.
     pub attach_id: Option<PaneId>,
-    pub rex_block: Option<RexBlock>,
+    /// Its terminal's id, from the pane provider: Rex's is its block.
+    pub terminal: Option<TerminalId>,
     /// None for a floating pane of floats, and the startup pane before setup.
     /// Of a pane showing several windows, the one last current in it.
     pub neovim_window_handle: Option<NeovimWindowHandle>,
@@ -74,8 +72,6 @@ pub(crate) enum Fit {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Layer {
     pub group: Group,
-    /// Rex's id for it, once made.
-    pub id: Option<RexLayer>,
     /// Its floats being refitted to its first size: not drawn until Neovim
     /// has answered and redrawn them, so the guessed size never shows.
     pub fit: Fit,
@@ -89,7 +85,6 @@ impl Layer {
     pub(crate) fn new(group: Group) -> Layer {
         Layer {
             group,
-            id: None,
             fit: Fit::None,
             bounds: [0.0, 0.0, 0.0, 0.0],
         }
@@ -98,8 +93,8 @@ impl Layer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Close {
-    /// The terminal is already gone, so it isn't restored.
-    RexPaneClosed,
+    /// The terminal hung up, so it isn't restored.
+    TerminalHungUp,
     WindowClosed,
     RequestFailed,
     Shutdown,
@@ -148,6 +143,12 @@ pub(crate) fn attach_words(exe: &str, address: &Address, pane: &Pane) -> Vec<Str
         .collect()
 }
 
+/// The pane title of the pane with id `id` (ADR 0006): `<name>-` and its
+/// token.
+pub(crate) fn title(id: &PaneId) -> String {
+    format!("{NAME}-{}", id.token())
+}
+
 /// The line an ending carries when nothing failed.
 fn ending_message(ending: Ending) -> &'static str {
     match ending {
@@ -187,7 +188,7 @@ impl Pane {
         Pane {
             id,
             attach_id: None,
-            rex_block: None,
+            terminal: None,
             neovim_window_handle: None,
             layout: None,
             layout_asked: Vec::new(),
@@ -218,10 +219,10 @@ impl Pane {
         }
     }
 
-    /// The pane `neorex` was run in. `block` is None without REX_BLOCK.
-    pub(crate) fn startup(block: Option<RexBlock>, surface: Box<Surface>) -> Pane {
+    /// The pane the daemon was started from, with its terminal's id if known.
+    pub(crate) fn startup(terminal: Option<TerminalId>, surface: Box<Surface>) -> Pane {
         Pane {
-            rex_block: block,
+            terminal,
             terminal_surface: Some(surface),
             ..Pane::blank(0)
         }
@@ -253,7 +254,7 @@ impl Pane {
     /// daemon ends, `ending`.
     pub(crate) fn deinit(self, ending: Ending) {
         let (restore, ending) = match self.closing {
-            Some(Close::RexPaneClosed) => (Restore::No, Ending::Closed),
+            Some(Close::TerminalHungUp) => (Restore::No, Ending::Closed),
             Some(Close::WindowClosed | Close::RequestFailed) => (Restore::Now, Ending::Closed),
             Some(Close::Shutdown) | None => (Restore::Waiting, ending),
         };
@@ -298,12 +299,6 @@ mod tests {
     use super::super::event_loop::Kind;
     use super::*;
 
-    const TEST_ID: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
-
-    fn test_block() -> RexBlock {
-        TEST_ID.as_bytes()[..42].try_into().unwrap()
-    }
-
     // A Surface here is a real one over a pty, closed as it drops.
 
     #[test]
@@ -311,30 +306,15 @@ mod tests {
         let from_window = Pane::from_neovim_window(3, 1000);
         assert_eq!(3, from_window.id);
         assert_eq!(1000, from_window.neovim_window_handle.unwrap());
-        assert!(from_window.rex_block.is_none() && from_window.terminal_surface.is_none());
+        assert!(from_window.terminal.is_none() && from_window.terminal_surface.is_none());
 
-        let at_startup = Pane::startup(Some(test_block()), Surface::for_test(80, 24));
+        let at_startup = Pane::startup(Some(TerminalId::from("t")), Surface::for_test(80, 24));
         assert_eq!(0, at_startup.id);
-        assert!(at_startup.rex_block.is_some() && at_startup.terminal_surface.is_some());
+        assert!(at_startup.terminal.is_some() && at_startup.terminal_surface.is_some());
         assert!(at_startup.neovim_window_handle.is_none());
 
         let without_block = Pane::startup(None, Surface::for_test(80, 24));
-        assert!(without_block.rex_block.is_none() && without_block.terminal_surface.is_some());
-    }
-
-    #[test]
-    fn rex_block_takes_42_byte_ids_only() {
-        let block = rex_block(TEST_ID.as_bytes()).unwrap();
-        assert_eq!(TEST_ID.as_bytes(), &block);
-        assert_eq!(
-            Err(crate::rex::ids::Error::BadRexBlock),
-            rex_block(&TEST_ID.as_bytes()[..41])
-        );
-        assert_eq!(
-            Err(crate::rex::ids::Error::BadRexBlock),
-            rex_block(format!("{TEST_ID}0").as_bytes())
-        );
-        assert_eq!(Err(crate::rex::ids::Error::BadRexBlock), rex_block(b""));
+        assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
     }
 
     #[test]
