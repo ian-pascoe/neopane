@@ -5,18 +5,14 @@
 //! `Geometry` holds separate borrows of the daemon's parts, since the daemon
 //! can't be borrowed whole while its Neovim session is.
 
-use super::floating_panes::LAYER_FRAME;
 use super::live_layout::Area;
 use super::pane::Pane;
 use super::panes::Panes;
 use crate::nvim::windows;
 use crate::screen::grids::Grids;
 
-/// A new Rex terminal's size, cols x rows, until the app lays it out.
-pub(crate) const REX_DEFAULT_SIZE: [u32; 2] = [80, 24];
-
-/// Where a new tab page's floating pane sits, as fractions of the window: x, y, w, h.
-pub(crate) const TAB_LAYER_BOUNDS: [f64; 4] = [0.05, 0.05, 0.9, 0.9];
+/// A guess at a terminal's size, cols x rows, with nothing to go by.
+pub(crate) const GUESS_SIZE: [u32; 2] = [80, 24];
 
 /// The grid showing the pane's window, if it has one yet.
 pub(crate) fn grid_of_pane(grids: &Grids, pane: &Pane) -> Option<u32> {
@@ -35,7 +31,8 @@ pub(crate) struct Geometry<'a> {
 
 impl Geometry<'_> {
     /// A guess at a new split's terminal size, cols x rows: half the pane it
-    /// splits (`from`). The first of a tab page gets its floating pane's size.
+    /// splits (`from`). The first of a tab page gets its origin's layout
+    /// area's, which `open_tab_page` is given.
     pub(crate) fn new_pane_size(
         &self,
         sp: windows::Split,
@@ -43,13 +40,13 @@ impl Geometry<'_> {
         first_of_tab: bool,
     ) -> [u32; 2] {
         if first_of_tab {
-            return self.tab_pane_size();
+            return self.screen_size();
         }
         let Some(p) = from else {
-            return REX_DEFAULT_SIZE;
+            return GUESS_SIZE;
         };
         let Some(s) = &p.terminal_surface else {
-            return REX_DEFAULT_SIZE;
+            return GUESS_SIZE;
         };
         let cols = s.view.cols.max(1);
         let rows = s.view.rows.max(2);
@@ -59,17 +56,12 @@ impl Geometry<'_> {
         [cols, (rows / 2).max(2)]
     }
 
-    /// A guess at a new tab page's floating pane's terminal size, cols x rows.
-    pub(crate) fn tab_pane_size(&self) -> [u32; 2] {
-        let Some(screen) = self.grids.get(1) else {
-            return REX_DEFAULT_SIZE;
-        };
-        let w = (f64::from(screen.width) * TAB_LAYER_BOUNDS[2]) as i64;
-        let h = (f64::from(screen.height) * TAB_LAYER_BOUNDS[3]) as i64;
-        [
-            (w - i64::from(LAYER_FRAME[0])).max(1) as u32,
-            (h - i64::from(LAYER_FRAME[1])).max(2) as u32,
-        ]
+    /// Neovim's screen, the current pane's layout area, cols x rows.
+    pub(crate) fn screen_size(&self) -> [u32; 2] {
+        match self.grids.get(1) {
+            Some(s) if s.width > 0 && s.height > 0 => [s.width, s.height],
+            _ => GUESS_SIZE,
+        }
     }
 
     /// Where pane `p`'s top left sits on grid 1, which spans its layout

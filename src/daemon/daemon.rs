@@ -23,7 +23,7 @@ use super::attach_conn::Pending;
 use super::event_loop::{Event, Kind, Loop};
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
-use super::geometry::{self, Geometry, REX_DEFAULT_SIZE};
+use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd};
@@ -500,13 +500,14 @@ impl Daemon {
 
     // panes
 
-    /// The app never resized a new split: its terminal's size is the real one.
+    /// The pane provider never laid a new split out, in a second, or is gone:
+    /// its terminal's size is the real one.
     fn layout_wait_over(&mut self) -> Result<()> {
         let mut any = false;
         for i in 0..self.panes.list.len() {
             let p = &mut self.panes.list[i];
-            if p.awaiting_layout && p.terminal_surface.is_some() {
-                p.awaiting_layout = false;
+            if p.awaiting_size && p.terminal_surface.is_some() {
+                p.awaiting_size = false;
                 any = true;
                 let id = p.id;
                 self.size_window(id);
@@ -568,7 +569,7 @@ impl Daemon {
     fn handle_resize(&mut self, id: u32, size: Size) -> Result<()> {
         log::trace(Point::Resize, u64::from(id));
         let pane = self.panes.by_id_mut(id).unwrap();
-        pane.awaiting_layout = false;
+        pane.awaiting_size = false;
         let surface = pane.terminal_surface.as_mut().unwrap();
         surface
             .view
@@ -703,7 +704,7 @@ impl Daemon {
             });
             return Ok(());
         }
-        self.panes.by_id_mut(pane_id).unwrap().awaiting_layout = true;
+        self.panes.by_id_mut(pane_id).unwrap().awaiting_size = true;
         let dir = Direction::of_split(sp.side_by_side, sp.before);
         let axis = usize::from(!dir.across());
         let along = size[axis];
@@ -1453,6 +1454,8 @@ impl Daemon {
         self.provider = None;
         self.asks.gone();
         self.live_layout = None;
+        // nothing will lay a new split out now: its size is its own
+        self.layout_wait_over()?;
         self.make_own(|p| p.area == Area::Unreported)
     }
 
@@ -1658,10 +1661,15 @@ impl Daemon {
                 continue;
             }
             let (id, layer, rect) = (p.id, p.layer.is_some(), area.rect());
+            let inset = p
+                .terminal
+                .as_ref()
+                .and_then(|t| l.placed(t))
+                .map_or([0; 4], |(_, t)| t.inset);
             p.area = area;
             changed = true;
             if layer && let Some(rect) = rect {
-                self.floating().follow_moved_layer(id, rect);
+                self.floating().follow_moved_terminal(id, rect, inset);
             }
         }
         changed
@@ -1935,7 +1943,7 @@ impl Daemon {
         let Some(p) = self.panes.by_id(id) else {
             return false;
         };
-        if p.terminal_surface.is_none() || p.awaiting_layout {
+        if p.terminal_surface.is_none() || p.awaiting_size {
             return false;
         }
         if p.layout.is_some() {
@@ -2244,7 +2252,6 @@ mod tests {
     use crate::rex::client::Client;
     use crate::rex::session::tests::server_frame;
     use crate::rex::session::{Conn, Session as RexSession};
-    use crate::screen::float_groups::Group;
     use crate::screen::grid::Grid;
     use crate::screen::grids::{Float, Win};
     use serde_json::Value;
@@ -4024,8 +4031,9 @@ mod tests {
         d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from(block_id(n).as_str()));
     }
 
-    fn layer_bounds_of(d: &Daemon, id: u32) -> [f64; 4] {
-        d.panes.by_id(id).unwrap().layer.as_ref().unwrap().bounds
+    /// Where the live layout last had float group pane `id`'s terminal.
+    fn layer_rect_of(d: &Daemon, id: u32) -> Option<[f64; 4]> {
+        d.panes.by_id(id).unwrap().layer.as_ref().unwrap().rect
     }
 
     /// Applies live layout `l`, and sends what that asked of Neovim.
@@ -4044,21 +4052,6 @@ mod tests {
         let id = format!("window:00000000-0000-0000-0000-{n:0>12}");
         assert_eq!(43, id.len());
         id
-    }
-
-    /// A group at row 4, column 10 of grid 1, 60 x 20 cells.
-    fn picker_group() -> Group {
-        let mut g = Group {
-            key: 1002,
-            row: 4,
-            col: 10,
-            width: 60,
-            height: 20,
-            ..Group::default()
-        };
-        g.tops[0] = 3;
-        g.tops_len = 1;
-        g
     }
 
     /// Grid 1 of 200 x 50, and an entered picker float, as one group, on top.
@@ -4090,52 +4083,6 @@ mod tests {
     /// The float group pane's id.
     fn picker_pane(d: &Daemon) -> u32 {
         d.panes.list.iter().find(|p| p.layer.is_some()).unwrap().id
-    }
-
-    #[test]
-    fn a_floating_panes_bounds_are_fractions_of_the_screen_around_its_group_and_its_frame() {
-        let mut fx = TablineFixture::init();
-        let d = fx.d();
-        // 3 x 2 cells of frame: half of each around the group
-        approx(
-            [0.045, 0.06, 0.315, 0.44],
-            floating_panes::layer_bounds(&d.grids, &picker_group()).unwrap(),
-        );
-
-        // too big for the screen: it fills it
-        let mut big = picker_group();
-        big.width = 300;
-        big.height = 80;
-        approx(
-            [0.0, 0.0, 1.0, 1.0],
-            floating_panes::layer_bounds(&d.grids, &big).unwrap(),
-        );
-
-        // at the right and bottom edges: pulled back in, so it's whole
-        let mut edge = picker_group();
-        edge.col = 190;
-        edge.row = 45;
-        let b = floating_panes::layer_bounds(&d.grids, &edge).unwrap();
-        approx([1.0 - b[2], 1.0 - b[3], 63.0 / 200.0, 22.0 / 50.0], b);
-
-        // off the top left: pulled in to it
-        let mut off = picker_group();
-        off.col = 0;
-        off.row = 0;
-        let b = floating_panes::layer_bounds(&d.grids, &off).unwrap();
-        assert_eq!([0.0, 0.0], [b[0], b[1]]);
-
-        // no screen to measure by, or an empty one
-        d.grids.get_mut(1).unwrap().resize(0, 0);
-        assert_eq!(
-            None,
-            floating_panes::layer_bounds(&d.grids, &picker_group())
-        );
-        d.grids.grids.swap_remove(&1);
-        assert_eq!(
-            None,
-            floating_panes::layer_bounds(&d.grids, &picker_group())
-        );
     }
 
     #[test]
@@ -4219,10 +4166,8 @@ mod tests {
         d.reconcile_layers();
         assert_eq!(2, d.panes.list.len());
         let id = picker_pane(&d);
-        approx(
-            [0.045, 0.06, 0.315, 0.44],
-            d.panes.by_id(id).unwrap().layer.as_ref().unwrap().bounds,
-        );
+        // nowhere until the live layout says
+        assert_eq!(None, layer_rect_of(&d, id));
         let asked = fake(&mut d).asked();
         assert_eq!(1, asked.len());
         let Ask::OpenFloat {
@@ -4241,7 +4186,8 @@ mod tests {
         else {
             panic!("{asked:?}");
         };
-        // its group's cells on the 200 x 50 screen, from the current pane
+        // its group's cells from the current pane, in no live area: from the
+        // 200 x 50 screen's top left, the screen its size
         assert_eq!(
             (10, 4, 60, 20, 200, 50, None),
             (
@@ -4285,6 +4231,43 @@ mod tests {
             asks::close(TerminalId::from("block:5")),
             fake(&mut d).asked()[1]
         );
+    }
+
+    #[test]
+    fn a_float_groups_cells_are_from_its_origin_pane_with_its_bounds_in_their_area() {
+        let Fixture { mut d, .. } = fixture();
+        show_picker(&mut d);
+        // the current pane is the right half of the screen's area, 100 x 50
+        let origin = d.panes.by_win_mut(999).unwrap();
+        origin.area = Area::Live {
+            id: "w".into(),
+            rect: [0.5, 0.0, 0.5, 1.0],
+            floating: false,
+        };
+        origin.terminal_surface = Some(Surface::for_test(100, 50));
+        d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 110]);
+        d.reconcile_layers();
+        let asked = fake(&mut d).asked();
+        let [
+            Ask::OpenFloat {
+                x,
+                y,
+                cols,
+                rows,
+                origin_cols,
+                origin_rows,
+                area_bounds: Some(b),
+                ..
+            },
+        ] = &asked[..]
+        else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(
+            (10, 4, 60, 20, 100, 50),
+            (*x, *y, *cols, *rows, *origin_cols, *origin_rows)
+        );
+        approx([0.55, 0.08, 0.3, 0.4], *b);
     }
 
     #[test]
@@ -4338,10 +4321,17 @@ mod tests {
         id
     }
 
-    /// A live layout with the float group pane's terminal at `bounds`.
+    /// A live layout with the float group pane's terminal at `bounds`, a
+    /// frame of 3 x 2 cells around it, as Rex's.
     fn floating_layer_at(bounds: [f64; 4]) -> LiveLayout {
-        layout_of(&[("w", &[(block_id(7).as_str(), bounds, true)])])
+        let mut l = layout_of(&[("w", &[(block_id(7).as_str(), bounds, true)])]);
+        l.areas[0].terminals[0].inset = [1, 1, 2, 1];
+        l
     }
+
+    /// Where Rex puts the picker's float group pane on the 200 x 50 screen:
+    /// a cell left of and above it, 3 x 2 cells bigger.
+    const PICKER_RECT: [f64; 4] = [0.045, 0.06, 0.315, 0.44];
 
     /// How many times the daemon asked Neovim to place floats, as it wrote them.
     fn place_group_requests(mut nvim_end: UnixStream) -> usize {
@@ -4356,19 +4346,19 @@ mod tests {
     fn a_floating_pane_the_user_moved_moves_its_floats_once_and_doesnt_oscillate() {
         let Fixture { mut d, nvim_end } = fixture();
         let id = made_picker_pane(&mut d, 60, 20);
-        let asked = layer_bounds_of(&d, id);
+        let asked = PICKER_RECT;
 
-        // Rex reports the bounds we asked for: nothing to follow
+        // Rex reports it around its floats: nothing to follow
         apply_and_flush(&mut d, &floating_layer_at(asked));
         // within half a cell: the same
         let near = [asked[0] + 0.002, asked[1], asked[2], asked[3]];
         apply_and_flush(&mut d, &floating_layer_at(near));
-        assert_eq!(asked, layer_bounds_of(&d, id));
+        assert_eq!(Some(asked), layer_rect_of(&d, id));
 
         // the user moves it 20 columns right: its floats follow, once
         let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
         apply_and_flush(&mut d, &floating_layer_at(moved));
-        assert_eq!(moved, layer_bounds_of(&d, id));
+        assert_eq!(Some(moved), layer_rect_of(&d, id));
         // Neovim has put them there: the next flush's group, and Rex's view again
         d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 30]);
         d.reconcile_layers();
@@ -4389,10 +4379,10 @@ mod tests {
         let id = made_picker_pane(&mut d, 60, 20);
         // a change of size beyond a half cell, but not of its place: the
         // floats' size is the pane's, which is theirs already
-        let asked = layer_bounds_of(&d, id);
+        let asked = PICKER_RECT;
         let wider = [asked[0], asked[1], asked[2] + 0.1, asked[3]];
         apply_and_flush(&mut d, &floating_layer_at(wider));
-        assert_eq!(wider, layer_bounds_of(&d, id));
+        assert_eq!(Some(wider), layer_rect_of(&d, id));
         drop(d);
         assert_eq!(0, place_group_requests(nvim_end));
     }
@@ -4401,14 +4391,14 @@ mod tests {
     fn a_floating_terminal_that_isnt_a_float_group_panes_moves_no_floats() {
         let Fixture { mut d, nvim_end } = fixture();
         let id = made_picker_pane(&mut d, 60, 20);
-        let asked = layer_bounds_of(&d, id);
+        let asked = PICKER_RECT;
         let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
         // another terminal, unknown, floating where it would have moved to
         apply_and_flush(
             &mut d,
             &layout_of(&[("w", &[(block_id(8).as_str(), moved, true)])]),
         );
-        assert_eq!(asked, layer_bounds_of(&d, id));
+        assert_eq!(None, layer_rect_of(&d, id));
 
         // a window's pane of ours, floating: no float group pane
         let w = d.panes.add(Pane::from_neovim_window(50, 1000)).id;
@@ -4419,7 +4409,7 @@ mod tests {
         );
         assert_eq!(floating_in("w", moved), d.panes.by_id(w).unwrap().area);
         assert!(d.panes.by_id(w).unwrap().layer.is_none());
-        assert_eq!(asked, layer_bounds_of(&d, id));
+        assert_eq!(None, layer_rect_of(&d, id));
         drop(d);
         assert_eq!(0, place_group_requests(nvim_end));
     }
@@ -4428,7 +4418,7 @@ mod tests {
     fn opening(d: &mut Daemon) -> u32 {
         let p = d.panes.add_for_window(1001);
         let (id, pane) = (p.id, p.attach_id.unwrap());
-        p.awaiting_layout = true;
+        p.awaiting_size = true;
         d.act(Ask::OpenBeside {
             pane,
             attach: Vec::new(),
@@ -4677,7 +4667,7 @@ mod tests {
 
             let new = fx.d.panes.by_win(3).unwrap();
             assert_eq!(0, new.tab);
-            assert!(new.awaiting_layout);
+            assert!(new.awaiting_size);
             let new = new.id;
             assert_eq!(vec![first, from, new], pane_ids(&fx.d));
             let sent = sent_by(fx);

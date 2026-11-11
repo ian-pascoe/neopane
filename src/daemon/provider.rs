@@ -7,8 +7,8 @@
 //! ready (`on_ready`). What the daemon does with acts, their queue, deadlines
 //! and fallbacks, is `asks.rs`'s.
 //!
-//! Until #109 and #111 move focus and placement onto the seam, only the
-//! opens, `close` and `report_layout` are asked through it.
+//! Until #109 moves focus onto the seam, the opens, `close`,
+//! `place_beside`, `resize` and `report_layout` are asked through it.
 
 use std::fmt;
 
@@ -174,7 +174,7 @@ impl Direction {
 /// One ask of a pane provider: a variant per capability, its fields named
 /// after ADR 0006's inputs (#92 decision 2).
 #[derive(Debug, Clone, PartialEq)]
-// only the opens and `close` are asked until #109–#114
+// `open`, `find` and focus are asked from #109–#114
 #[allow(dead_code)]
 pub(crate) enum Ask {
     Open {
@@ -203,18 +203,16 @@ pub(crate) enum Ask {
         attach: Vec<String>,
         title: String,
         origin: TerminalId,
-        /// The float group's top-left and size, in cells. Until #111 these
-        /// are cells of Neovim's screen (grid 1), and `origin_cols` x
-        /// `origin_rows` is the screen's size, not `origin`'s; #111 makes
-        /// them relative to `origin`, as ADR 0006 has them.
+        /// The float group's top-left, in cells from `origin`'s top left,
+        /// and its size; `origin_cols` x `origin_rows` is `origin`'s size.
         x: i32,
         y: i32,
         cols: u32,
         rows: u32,
         origin_cols: u32,
         origin_rows: u32,
-        /// The float as fractions of `origin`'s layout area, in a live
-        /// layout. None until #111.
+        /// The float as fractions of `origin`'s layout area, if that's a
+        /// live one.
         area_bounds: Option<[f64; 4]>,
     },
     OpenTabPage {
@@ -322,7 +320,7 @@ pub(crate) enum ProviderEvent {
 
 /// A pane provider: Rex's, built in, and later the command runner; in
 /// tests, `FakeProvider` (#92 decision 1).
-// `unlaid_size` and `context_vars` are read from #111 and #114
+// `context_vars` is read from #114
 #[allow(dead_code)]
 pub(crate) trait PaneProvider {
     /// Its name, as warnings and the log show it.

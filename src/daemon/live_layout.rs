@@ -32,8 +32,7 @@ pub(crate) struct PlacedTerminal {
     /// pane.
     pub floating: bool,
     /// The cells at each edge of `rect` that aren't the terminal's, such as a
-    /// floating pane's frame: left, top, right, bottom. Read from #111.
-    #[allow(dead_code)]
+    /// floating pane's frame: left, top, right, bottom.
     pub inset: [u16; 4],
 }
 
@@ -57,15 +56,22 @@ impl LiveLayout {
     /// Where terminal `t` is, if the layout names it; the last place it is
     /// named wins.
     pub(crate) fn area_of(&self, t: &TerminalId) -> Option<Area> {
+        let (a, p) = self.placed(t)?;
+        Some(Area::Live {
+            id: a.id.clone(),
+            rect: p.rect,
+            floating: p.floating,
+        })
+    }
+
+    /// Terminal `t` as the layout places it, and its area; the last place it
+    /// is named wins.
+    pub(crate) fn placed(&self, t: &TerminalId) -> Option<(&LayoutArea, &PlacedTerminal)> {
         let mut found = None;
         for a in &self.areas {
             for p in &a.terminals {
                 if &p.terminal == t {
-                    found = Some(Area::Live {
-                        id: a.id.clone(),
-                        rect: p.rect,
-                        floating: p.floating,
-                    });
+                    found = Some((a, p));
                 }
             }
         }

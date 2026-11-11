@@ -48,8 +48,10 @@ pub(crate) struct Pane {
     /// When an `Unreported` pane becomes its own area: a second after its
     /// terminal attached with its id.
     pub report_due: Option<std::time::Instant>,
-    /// A new split's terminal starts at Rex's default size: keep the guessed window size until the app's first resize.
-    pub awaiting_layout: bool,
+    /// A new split's terminal said the size the pane provider gives one it
+    /// hasn't laid out yet: its window keeps the guessed size until the first
+    /// size message, a second, or the pane provider is dropped.
+    pub awaiting_size: bool,
     pub last_asked_win_size: LastAskedWinSize,
 }
 
@@ -77,18 +79,22 @@ pub(crate) struct Layer {
     /// Its floats being refitted to its first size: not drawn until Neovim
     /// has answered and redrawn them, so the guessed size never shows.
     pub fit: Fit,
-    /// Where it sits in the window, as fractions: x, y, w, h. What we asked
-    /// for, until the user moves it.
-    pub bounds: [f64; 4],
+    /// Its terminal's rect in its layout area, as the live layout last said:
+    /// x, y, w, h. None until it says.
+    pub rect: Option<[f64; 4]>,
+    /// The cells at each edge of `rect` that aren't its terminal's, such as
+    /// a frame: left, top, right, bottom.
+    pub inset: [u16; 4],
 }
 
 impl Layer {
-    /// A layer for `group`, not yet made in Rex.
+    /// A layer for `group`, not yet placed.
     pub(crate) fn new(group: Group) -> Layer {
         Layer {
             group,
             fit: Fit::None,
-            bounds: [0.0, 0.0, 0.0, 0.0],
+            rect: None,
+            inset: [0; 4],
         }
     }
 }
@@ -207,7 +213,7 @@ impl Pane {
             layer: None,
             area: Area::Unreported,
             report_due: None,
-            awaiting_layout: false,
+            awaiting_size: false,
             last_asked_win_size: LastAskedWinSize::default(),
         }
     }

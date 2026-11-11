@@ -1,8 +1,9 @@
-//! The float group pane lifecycle: a float group pane, which Rex shows as a
-//! Rex floating pane, for each group of floats that took focus. It matches
-//! panes to groups, says what to ask the pane provider for (`open_float` and
-//! `close`), works out their bounds, and moves the floats to follow a pane the
-//! user moved.
+//! The float group pane lifecycle: a float group pane, such as a Rex
+//! floating pane, for each group of floats that took focus. It matches panes
+//! to groups, says what to ask the pane provider for (`open_float`, with the
+//! group's cells relative to its origin pane, and `close`), and moves the
+//! floats to follow a pane the user moved: to its rect in its layout area,
+//! inside its inset.
 //!
 //! `FloatingPanes` holds separate borrows of the daemon's parts, since the
 //! daemon can't be borrowed whole while its Neovim session is.
@@ -20,10 +21,6 @@ use crate::screen::grids::{Grids, WinKind};
 
 use super::nvim_session::NvimSession;
 
-/// About how many cells a Rex floating pane's frame takes, across and down.
-/// Only a first guess: once made, its floats fit whatever size it is.
-pub(crate) const LAYER_FRAME: [i32; 2] = [3, 2];
-
 pub(crate) struct FloatingPanes<'a> {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: &'a str,
@@ -36,17 +33,24 @@ pub(crate) struct FloatingPanes<'a> {
 }
 
 impl FloatingPanes<'_> {
-    /// Float group pane `id` is at `bounds` in the live layout: if that's
-    /// somewhere else, the user moved it, so its floats follow. Whether it was.
-    pub(crate) fn follow_moved_layer(&mut self, id: u32, bounds: [f64; 4]) -> bool {
+    /// Float group pane `id`'s terminal is at `rect` in the live layout,
+    /// `inset` of it not its own: the first time, or if that's somewhere
+    /// else, the user moved it, so its floats follow. Whether it was.
+    pub(crate) fn follow_moved_terminal(
+        &mut self,
+        id: u32,
+        rect: [f64; 4],
+        inset: [u16; 4],
+    ) -> bool {
         let Some(l) = self.panes.by_id(id).and_then(|p| p.layer) else {
             return false;
         };
-        if same_bounds(self.grids, bounds, l.bounds) {
+        if l.rect.is_some_and(|r| same_bounds(self.grids, rect, r)) {
             return false;
         }
         if let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer {
-            l.bounds = bounds;
+            l.rect = Some(rect);
+            l.inset = inset;
         }
         let _ = self.follow_layer(id);
         true
@@ -102,26 +106,22 @@ impl FloatingPanes<'_> {
     /// screen or no `origin` to open it from.
     fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>) -> Option<Ask> {
         let origin = origin?.clone();
-        let screen = self.grids.get(1)?;
-        let (origin_cols, origin_rows) = (screen.width, screen.height);
-        let bounds = layer_bounds(self.grids, &g)?;
+        let b = group_bounds(self.grids, self.panes.by_terminal(origin.as_str()), &g)?;
         let pane = self.panes.add_for_group(g);
-        pane.layer.as_mut().unwrap().bounds = bounds;
         let id = pane.attach_id.expect("a requested pane");
         let attach = pane::attach_words(self.exe, self.sock, self.transport, pane);
-        // until #111, cells on the screen, which spans the Rex window
         Some(Ask::OpenFloat {
             pane: id,
             attach,
             title: pane::title(&id),
             origin,
-            x: g.col,
-            y: g.row,
+            x: b.at[0],
+            y: b.at[1],
             cols: g.width,
             rows: g.height,
-            origin_cols,
-            origin_rows,
-            area_bounds: None,
+            origin_cols: b.origin_size[0],
+            origin_rows: b.origin_size[1],
+            area_bounds: b.area_bounds,
         })
     }
 
@@ -132,11 +132,15 @@ impl FloatingPanes<'_> {
         let l = p.layer.as_ref()?;
         let s = p.terminal_surface.as_ref()?;
         let screen = self.grids.get(1)?;
-        let row =
-            (l.bounds[1] * f64::from(screen.height)).round() as i32 + LAYER_FRAME[1].div_euclid(2);
-        let col =
-            (l.bounds[0] * f64::from(screen.width)).round() as i32 + LAYER_FRAME[0].div_euclid(2);
         let g = l.group;
+        // where the live layout has it, else where its floats are
+        let [col, row] = match l.rect {
+            Some(r) => [
+                (r[0] * f64::from(screen.width)).round() as i32 + i32::from(l.inset[0]),
+                (r[1] * f64::from(screen.height)).round() as i32 + i32::from(l.inset[1]),
+            ],
+            None => [g.col, g.row],
+        };
         let (cols, rows) = (s.view.cols, s.view.rows);
         if row == g.row && col == g.col && cols == g.width && rows == g.height {
             return None;
@@ -167,36 +171,50 @@ impl FloatingPanes<'_> {
     }
 }
 
-/// Bounds for a Rex floating pane around `g`, as fractions of the window,
-/// leaving room for the frame Rex draws around it.
-pub(crate) fn layer_bounds(grids: &Grids, g: &Group) -> Option<[f64; 4]> {
-    let screen = grids.get(1)?;
-    bounds_around(g.col, g.row, g.width, g.height, screen.width, screen.height)
+/// Where a float group is, as `open_float` asks for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GroupBounds {
+    /// Its top left in cells from its origin pane's: x, y.
+    pub at: [i32; 2],
+    /// The origin pane's terminal's size, cols x rows.
+    pub origin_size: [u32; 2],
+    /// The group as fractions of the origin's layout area, if that's a
+    /// live one.
+    pub area_bounds: Option<[f64; 4]>,
 }
 
-/// Bounds for a Rex floating pane around `cols` x `rows` cells at `x`, `y` on a
-/// screen of `screen_cols` x `screen_rows`, as fractions of it, leaving room
-/// for the frame Rex draws around it. None on an empty screen.
-pub(crate) fn bounds_around(
-    x: i32,
-    y: i32,
-    cols: u32,
-    rows: u32,
-    screen_cols: u32,
-    screen_rows: u32,
-) -> Option<[f64; 4]> {
-    if screen_cols == 0 || screen_rows == 0 {
+/// Where float group `g` is relative to pane `origin`, the one its pane
+/// opens from: on grid 1, which spans `origin`'s layout area while it's the
+/// current pane. Without the pane, its terminal or a live area, its top left
+/// is the screen's, and its size the screen's. None with no screen.
+pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> Option<GroupBounds> {
+    let screen = grids.get(1)?;
+    let (sw, sh) = (f64::from(screen.width), f64::from(screen.height));
+    if screen.width == 0 || screen.height == 0 {
         return None;
     }
-    let sw = f64::from(screen_cols);
-    let sh = f64::from(screen_rows);
-    let fw = LAYER_FRAME[0];
-    let fh = LAYER_FRAME[1];
-    let w = ((i64::from(cols) + i64::from(fw)) as f64 / sw).min(1.0);
-    let h = ((i64::from(rows) + i64::from(fh)) as f64 / sh).min(1.0);
-    let x = (f64::from(x - fw.div_euclid(2)) / sw).clamp(0.0, 1.0 - w);
-    let y = (f64::from(y - fh.div_euclid(2)) / sh).clamp(0.0, 1.0 - h);
-    Some([x, y, w, h])
+    let rect = origin.and_then(|p| p.area.rect());
+    let top_left = rect.map_or([0, 0], |r| {
+        [(r[0] * sw).round() as i32, (r[1] * sh).round() as i32]
+    });
+    let origin_size = origin
+        .and_then(|p| p.terminal_surface.as_ref())
+        .map_or([screen.width, screen.height], |s| {
+            [s.view.cols, s.view.rows]
+        });
+    let area_bounds = rect.map(|_| {
+        [
+            f64::from(g.col) / sw,
+            f64::from(g.row) / sh,
+            f64::from(g.width) / sw,
+            f64::from(g.height) / sh,
+        ]
+    });
+    Some(GroupBounds {
+        at: [g.col - top_left[0], g.row - top_left[1]],
+        origin_size,
+        area_bounds,
+    })
 }
 
 /// Within half a cell of each other on grid 1.

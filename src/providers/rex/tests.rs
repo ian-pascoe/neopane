@@ -84,6 +84,7 @@ fn requests(p: RexProvider, theirs: UnixStream) -> Vec<(String, Value)> {
 fn the_opens_become_rex_requests_with_no_focus_key() {
     let (mut p, theirs) = rex();
     p.ask(AskId(1), open_beside());
+    // asked with the origin's Rex window, 200 x 50
     p.ask(
         AskId(2),
         Ask::OpenTabPage {
@@ -91,8 +92,8 @@ fn the_opens_become_rex_requests_with_no_focus_key() {
             attach: attach(),
             title: String::new(),
             origin: TerminalId::from("block:o"),
-            cols: 72,
-            rows: 21,
+            cols: 200,
+            rows: 50,
         },
     );
     p.ask(
@@ -140,7 +141,8 @@ fn the_opens_become_rex_requests_with_no_focus_key() {
                 json!({
                     "session_id": "session:s",
                     "bounds": [0.05, 0.05, 0.9, 0.9],
-                    "layout": { "block": block(json!({ "columns": 72, "rows": 21 })) },
+                    // 0.9 of it, less the frame
+                    "layout": { "block": block(json!({ "columns": 177, "rows": 43 })) },
                 })
             ),
             (
@@ -157,6 +159,34 @@ fn the_opens_become_rex_requests_with_no_focus_key() {
         reqs
     );
     assert!(reqs.iter().all(|(_, v)| !v.to_string().contains("focus")));
+}
+
+#[test]
+fn a_floats_layer_is_at_its_area_bounds_frame_included() {
+    let (mut p, theirs) = rex();
+    // a picker 10 cells into a pane that is the right half of a 200 x 50 window
+    p.ask(
+        AskId(1),
+        open_float_at(
+            "block:o",
+            [10, 4],
+            [60, 20],
+            [100, 50],
+            Some([110.0 / 200.0, 4.0 / 50.0, 60.0 / 200.0, 20.0 / 50.0]),
+        ),
+    );
+    let reqs = requests(p, theirs);
+    let bounds: Vec<f64> = reqs[0].1["bounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    // one cell left of and above the group, 3 x 2 cells bigger
+    let want = [109.0 / 200.0, 3.0 / 50.0, 63.0 / 200.0, 22.0 / 50.0];
+    for (w, b) in want.iter().zip(&bounds) {
+        assert!((w - b).abs() < 1e-9, "{want:?} != {bounds:?}");
+    }
 }
 
 #[test]
@@ -379,18 +409,30 @@ fn each_view_is_told_as_a_live_layout_and_report_layout_answers_the_last() {
 }
 
 fn open_float(origin: &str) -> Ask {
+    open_float_at(origin, [11, 6], [37, 18], [100, 40], None)
+}
+
+/// An `open_float` from `origin` of a group `size` cells at `at` from its
+/// top left, the origin `origin_size`.
+fn open_float_at(
+    origin: &str,
+    at: [i32; 2],
+    size: [u32; 2],
+    origin_size: [u32; 2],
+    area_bounds: Option<[f64; 4]>,
+) -> Ask {
     Ask::OpenFloat {
         pane: pane(),
         attach: attach(),
         title: String::new(),
         origin: TerminalId::from(origin),
-        x: 11,
-        y: 6,
-        cols: 37,
-        rows: 18,
-        origin_cols: 100,
-        origin_rows: 40,
-        area_bounds: None,
+        x: at[0],
+        y: at[1],
+        cols: size[0],
+        rows: size[1],
+        origin_cols: origin_size[0],
+        origin_rows: origin_size[1],
+        area_bounds,
     }
 }
 
