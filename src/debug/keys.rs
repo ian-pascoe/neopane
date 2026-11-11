@@ -5,6 +5,7 @@ use std::io::{self, Write};
 
 use super::Result;
 use crate::term::input::{self, Event, Key};
+use crate::term::raw::Saved;
 use crate::term::signals::Signals;
 use crate::term::terminal::Terminal;
 
@@ -26,10 +27,12 @@ const MODES_OFF: &str = concat!(
 );
 
 pub fn run() -> Result<()> {
-    let mut term = Terminal::init(libc::STDIN_FILENO)?;
+    let saved = Saved::raw(libc::STDIN_FILENO)?;
+    let mut term = Terminal::new(libc::STDIN_FILENO);
     let result = run_in(&mut term);
     // after the modes are off (run_in wrote them), the terminal's settings come back
-    term.deinit();
+    let _ = term.flush();
+    saved.restore();
     result
 }
 

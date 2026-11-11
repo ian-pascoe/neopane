@@ -11,7 +11,6 @@
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::RawFd;
-use std::time::{Duration, Instant};
 
 /// Most bytes a pane keeps waiting: a few full frames of a big terminal.
 pub(crate) const CAP: usize = 1 << 20;
@@ -60,15 +59,17 @@ impl Backlog {
         if frame.is_empty() {
             return Ok(());
         }
+        let mut n = 0;
         if self.is_empty() {
-            let n = write_some(fd, frame)?;
+            n = write_some(fd, frame)?;
             if n == frame.len() {
                 frame.clear();
                 return Ok(());
             }
-            frame.drain(..n);
+            // the first frame waiting, perhaps begun
+            self.written = n;
         }
-        self.len += frame.len();
+        self.len += frame.len() - n;
         self.frames.push_back(std::mem::take(frame));
         if self.len > self.cap && self.frames.len() > 1 {
             self.frames.truncate(1);
@@ -106,48 +107,10 @@ impl Backlog {
         repaint
     }
 
-    /// The rest of the frame being written, for the terminal to get before
-    /// it's restored; the frames after it are forgotten.
-    pub(crate) fn take_unfinished(&mut self) -> Vec<u8> {
-        let rest = match self.frames.pop_front() {
-            Some(first) => first[self.written..].to_vec(),
-            None => Vec::new(),
-        };
-        *self = Backlog {
-            cap: self.cap,
-            ..Backlog::default()
-        };
-        rest
-    }
-}
-
-/// Writes `bytes` to `fd`, waiting at most `wait` for room; what doesn't fit
-/// by then is dropped. For a terminal being restored as its pane goes: a
-/// terminal nobody reads mustn't hold the daemon up.
-pub(crate) fn write_within(fd: RawFd, bytes: &[u8], wait: Duration) {
-    let deadline = Instant::now() + wait;
-    let mut done = 0;
-    loop {
-        match write_some(fd, &bytes[done..]) {
-            Ok(n) => done += n,
-            Err(_) => return,
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if done == bytes.len() || left.is_zero() {
-            return;
-        }
-        let mut fds = [libc::pollfd {
-            fd,
-            events: libc::POLLOUT,
-            revents: 0,
-        }];
-        let ms = left.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
-        // SAFETY: one valid pollfd.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } < 0
-            && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
-        {
-            return;
-        }
+    /// The terminal has part of a frame, and waits for the rest: ending
+    /// now cuts it short.
+    pub(crate) fn cut(&self) -> bool {
+        self.written > 0
     }
 }
 
@@ -199,7 +162,7 @@ fn write_some(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
 
@@ -232,6 +195,29 @@ mod tests {
         assert!(done && b.is_empty());
         // nothing waits: a drain writes no last of anything
         assert!(!b.drain(fd).unwrap());
+    }
+
+    #[test]
+    fn a_frame_begun_and_not_finished_is_cut() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let fd = ours.as_raw_fd();
+        let mut b = Backlog::default();
+        assert!(!b.cut());
+        let mut frame = vec![b'x'; 4 << 20];
+        b.send(fd, &mut frame).unwrap();
+        assert!(b.cut());
+        while !b.is_empty() {
+            read_all(&mut theirs);
+            b.drain(fd).unwrap();
+        }
+        assert!(!b.cut());
+
+        // a frame none of which the terminal took isn't cut
+        ours.set_nonblocking(true).unwrap();
+        while (&ours).write(&[b'x'; 4096]).is_ok() {}
+        let mut whole = b"z".to_vec();
+        b.send(fd, &mut whole).unwrap();
+        assert!(!b.is_empty() && !b.cut());
     }
 
     #[test]

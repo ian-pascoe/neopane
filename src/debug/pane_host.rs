@@ -164,13 +164,8 @@ impl PaneHost {
             return refuse(a.stream, End::refusal(reason, m));
         }
         let tty = a.tty.expect("checked").into_raw_fd();
-        let term = match Terminal::init(tty) {
-            Ok(term) => term,
-            Err(e) => {
-                close_fd(tty);
-                return Err(e.into());
-            }
-        };
+        // its helper put it in raw mode
+        let term = Terminal::new(tty);
         attach_conn::send_accept(&a.stream, &self.name, "")?;
         a.stream.set_nonblocking(true)?;
         self.panes[i] = Some(Pane {
@@ -282,7 +277,7 @@ fn print_size(p: &mut Pane) -> Result<()> {
 }
 
 /// Takes the slot's fds off `event_loop` (none when it is ending too),
-/// restores the terminal and hangs up, so the helper exits. Does nothing for
+/// and hangs up, so the helper restores the terminal and exits. Does nothing for
 /// an empty slot.
 fn close(slot: &mut Option<Pane>, event_loop: Option<&Loop>) {
     if let Some(mut p) = slot.take() {
@@ -291,7 +286,7 @@ fn close(slot: &mut Option<Pane>, event_loop: Option<&Loop>) {
             let _ = event_loop.remove(p.stream.as_raw_fd());
             let _ = event_loop.remove(p.term.fd);
         }
-        p.term.deinit();
+        let _ = p.term.flush();
         close_fd(p.term.fd);
         attach_conn::send_end(
             &p.stream,

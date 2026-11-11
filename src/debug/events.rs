@@ -11,6 +11,7 @@ use crate::nvim::msgpack::{Decoder, Token};
 use crate::nvim::nvim::{Nvim, UiOptions};
 use crate::nvim::rpc;
 use crate::term::input;
+use crate::term::raw::Saved;
 use crate::term::signals::Signals;
 use crate::term::terminal::Terminal;
 
@@ -20,9 +21,11 @@ const MODES_OFF: &str = concat!(input::kitty_pop_literal!(), "\x1b[?1004l\x1b[?2
 
 /// Runs `nvim --embed` plus `nvim_args`.
 pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
-    let mut term = Terminal::init(libc::STDIN_FILENO)?;
+    let saved = Saved::raw(libc::STDIN_FILENO)?;
+    let mut term = Terminal::new(libc::STDIN_FILENO);
     let result = run_in(&mut term, nvim_args);
-    term.deinit();
+    let _ = term.flush();
+    saved.restore();
     result
 }
 

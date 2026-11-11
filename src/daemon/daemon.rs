@@ -2728,13 +2728,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
             fx.d.on_pending(token).unwrap();
         }
-        assert_eq!(
-            Exit {
-                status: 0,
-                message: None
-            },
-            helper.join().unwrap()
-        );
+        let exit: Exit = helper.join().unwrap();
+        assert_eq!((0, None), (exit.status, exit.message));
     }
 
     #[test]
@@ -2855,9 +2850,11 @@ mod tests {
             fx.d.stop(stopped);
             drop(fx);
             let said = crate::daemon::attach_conn::read_all_frames(&helper);
-            let [Message::Accept(_), Message::End(z)] = &said[..] else {
+            // the undo bytes come with the answer, before any mode is set
+            let [Message::Accept(_), Message::Undo(undo), Message::End(z)] = &said[..] else {
                 panic!("{said:?}")
             };
+            assert_eq!(&crate::term::modes::undo(), undo);
             assert_eq!(want, z.as_ending(), "{stopped:?}");
         }
     }
@@ -2905,8 +2902,7 @@ mod tests {
         fn surface(&mut self, cols: u32, rows: u32) -> Box<Surface> {
             let (master, slave) = surface::open_pty(cols as u16, rows as u16);
             let (socket, helper) = UnixStream::pair().unwrap();
-            let mut s =
-                Surface::create(socket, slave, surface::cells(cols as u16, rows as u16)).unwrap();
+            let mut s = Surface::create(socket, slave, surface::cells(cols as u16, rows as u16));
             s.terminal.writer.clear();
             self.terminals.push(TerminalEnd {
                 master,
@@ -4674,7 +4670,7 @@ mod tests {
         let (master, slave) = surface::open_pty(81, 24);
         let (socket, _helper) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut p = Pane::from_neovim_window(1, 1000);
-        p.terminal_surface = Some(Surface::create(socket, slave, surface::cells(81, 24)).unwrap());
+        p.terminal_surface = Some(Surface::create(socket, slave, surface::cells(81, 24)));
         let id = fx.d.panes.add(p).id;
         fx.d.nvim.current_win = 1000;
         draw_external(&mut fx.d, 2, 1000, 81, 23);

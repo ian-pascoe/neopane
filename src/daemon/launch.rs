@@ -73,8 +73,17 @@ fn ready(line: &str) -> Ready {
 
 /// Starts a daemon and attaches this terminal to it: how the attach ended,
 /// for the exit status. The daemon is named after this directory,
-/// de-duplicated.
-pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
+/// de-duplicated. A failure before the attach is held as a failed attach
+/// is, with a key wait unless a shell started it as a job.
+pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> pane_helper::Exit {
+    let started = std::time::Instant::now();
+    match start(nvim_args) {
+        Ok(exit) => exit,
+        Err(e) => pane_helper::launcher_failed(e.to_string(), started),
+    }
+}
+
+fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     // L6 is timed from here
     let started = log::now_ns();
     // SAFETY: isatty only inspects the fd.

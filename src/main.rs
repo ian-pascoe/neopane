@@ -40,7 +40,7 @@ fn run(command: Command) -> Result<ExitCode> {
             if let Some(option) = unbuilt_option(&start) {
                 return Ok(fail(&format!("{option} isn't built yet")));
             }
-            Ok(helper_exit(launch::run(&start.nvim_args)?))
+            Ok(helper_exit(launch::run(&start.nvim_args)))
         }
         Command::Help => Ok(print(&cli::help())),
         Command::DebugHelp => Ok(print(&cli::debug_help())),

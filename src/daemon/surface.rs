@@ -7,33 +7,13 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 
-use std::time::{Duration, Instant};
-
 use super::attach_conn;
-use super::backlog::{self, Backlog};
-use crate::attach::{End, Size};
+use super::backlog::Backlog;
+use crate::attach::{End, Ending, Size};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
 use crate::term::terminal::Terminal;
-
-/// How long a pane going back to its shell waits for its terminal to take
-/// the modes' undoing.
-const RESTORE_WAIT: Duration = Duration::from_secs(1);
-
-/// How `Surface::destroy` leaves the terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Restore {
-    /// Not at all: the terminal is already gone.
-    No,
-    /// Without waiting: a pane closing while the daemon runs, which Rex closes
-    /// next. Its terminal may not be read, and what it can't take at once is
-    /// dropped.
-    Now,
-    /// Waiting up to `RESTORE_WAIT` for the terminal to take it all: the
-    /// daemon is ending, and the launcher's pane goes back to its shell.
-    Waiting,
-}
 
 /// What a frame drawn into the terminal's writer did, sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,26 +38,14 @@ pub(crate) struct Surface {
 
 impl Surface {
     /// Takes over `helper_socket` and the terminal `tty`, of `size` as its
-    /// hello says: the daemon never asks a terminal its size. If it fails,
-    /// both are closed.
-    pub(crate) fn create(
-        helper_socket: UnixStream,
-        tty: RawFd,
-        size: Size,
-    ) -> std::io::Result<Box<Surface>> {
-        let mut terminal = match Terminal::init(tty) {
-            Ok(terminal) => terminal,
-            Err(e) => {
-                // SAFETY: `tty` is the fd this call was given to own.
-                unsafe { libc::close(tty) };
-                return Err(e);
-            }
-        };
-
+    /// hello says: the daemon never asks a terminal its size, nor sets its
+    /// settings, which are the helper's (ADR 0013).
+    pub(crate) fn create(helper_socket: UnixStream, tty: RawFd, size: Size) -> Box<Surface> {
+        let mut terminal = Terminal::new(tty);
         terminal
             .writer
             .extend_from_slice(modes::EDITOR_ON.as_bytes());
-        Ok(Box::new(Surface {
+        Box::new(Surface {
             helper_socket,
             helper_in: Vec::new(),
             terminal,
@@ -88,27 +56,16 @@ impl Surface {
                 ..Forwarder::default()
             },
             backlog: Backlog::default(),
-        }))
+        })
     }
 
-    /// Restores the terminal as `restore` says, then ends the attach with
-    /// `end`, which says why: a helper that is gone already gets none.
-    pub(crate) fn destroy(mut self: Box<Surface>, restore: Restore, end: End) {
-        let wait = match restore {
-            Restore::No => return, // the fds close as `self` drops
-            Restore::Now => Duration::ZERO,
-            Restore::Waiting => RESTORE_WAIT,
-        };
-        let deadline = Instant::now() + wait;
-        let left = || deadline.saturating_duration_since(Instant::now());
-        // the frame being written is finished first, so the modes' undoing
-        // isn't read as part of an escape sequence
-        let mut out = self.backlog.take_unfinished();
-        out.append(&mut self.terminal.writer);
-        out.extend_from_slice(modes::EDITOR_OFF.as_bytes());
-        let fd = self.terminal.fd;
-        backlog::write_within(fd, &out, left());
-        self.terminal.restore_now();
+    /// Ends the attach as `ending`, with `message` for the helper, and
+    /// closes the terminal and the helper socket. Nothing more is written to
+    /// the terminal: what waits is dropped, and the `z` says whether that cut
+    /// a frame short. The helper then undoes what the daemon wrote and
+    /// restores the terminal.
+    pub(crate) fn destroy(self: Box<Surface>, ending: Ending, message: &str) {
+        let end = End::ending(ending, message, self.backlog.cut());
         attach_conn::send_end(&self.helper_socket, end);
         // the terminal's fd and the helper socket are closed as `self` drops
     }
@@ -139,7 +96,7 @@ impl Surface {
 
 impl Drop for Surface {
     /// Closes the terminal's fd, then (as the field drops) the helper socket.
-    /// It doesn't restore the terminal: `destroy` does that first.
+    /// The terminal's settings are the helper's to restore.
     fn drop(&mut self) {
         // SAFETY: the surface owns the terminal's fd.
         unsafe { libc::close(self.terminal.fd) };
@@ -162,29 +119,8 @@ pub(crate) fn cells(cols: u16, rows: u16) -> Size {
     }
 }
 
-/// A pty of `cols` x `rows`: master and slave fds.
 #[cfg(test)]
-pub(crate) fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
-    let (mut master, mut slave) = (-1, -1);
-    let mut ws = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: valid out-pointers; no name or termios.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut ws,
-        )
-    };
-    assert_eq!(0, rc);
-    (master, slave)
-}
+pub(crate) use crate::term::terminal::open_pty;
 
 #[cfg(test)]
 impl Surface {
@@ -193,7 +129,7 @@ impl Surface {
     pub(crate) fn for_test(cols: u32, rows: u32) -> Box<Surface> {
         let (master, slave) = open_pty(cols as u16, rows as u16);
         let (socket, _other) = UnixStream::pair().unwrap();
-        let mut surface = Surface::create(socket, slave, cells(cols as u16, rows as u16)).unwrap();
+        let mut surface = Surface::create(socket, slave, cells(cols as u16, rows as u16));
         // SAFETY: closing the pty's master, which nothing else holds.
         unsafe { libc::close(master) };
         surface.terminal.writer.clear();
@@ -228,62 +164,59 @@ mod tests {
 
     // Runs create and destroy over a pty.
     #[test]
-    fn create_takes_the_hellos_size_and_destroy_restores_and_ends_the_attach() {
+    fn create_takes_the_hellos_size_and_destroy_ends_the_attach_writing_nothing_more() {
         let (master, slave) = open_pty(90, 30);
+        let before = crate::term::raw::settings(slave);
         let (socket, helper) = UnixStream::pair().unwrap();
         // the hello's size, not the pty's: the daemon never asks a terminal
-        let surface = Surface::create(socket, slave, cells(70, 20)).unwrap();
+        let surface = Surface::create(socket, slave, cells(70, 20));
         assert_eq!((70, 20), (surface.view.cols, surface.view.rows));
         assert!(!surface.forwarder.ctrl_q_quits);
         assert!(!surface.forwarder.send_focus);
+        // nor sets its settings
+        assert!(crate::term::raw::same(
+            &before,
+            &crate::term::raw::settings(slave)
+        ));
 
-        // `create` buffered the editor modes; destroy flushes them, then the
-        // modes' undoing. Restoring the terminal waits for its
-        // output to be read, so a thread plays the terminal emulator.
-        let reader = std::thread::spawn(move || {
-            let mut got = Vec::new();
-            let mut buf = [0u8; 1024];
-            // The slave is closed by `destroy`, so the read ends then.
-            loop {
-                // SAFETY: `buf` is valid for its length.
-                let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
-                if n <= 0 {
-                    break;
-                }
-                got.extend_from_slice(&buf[..n as usize]);
-            }
-            got
-        });
-        surface.destroy(Restore::Waiting, End::ending(Ending::Failed, "bye", false));
-        let got = reader.join().unwrap();
-        let got = String::from_utf8_lossy(&got);
-        assert!(got.contains(modes::EDITOR_ON), "{got:?}");
-        assert!(got.ends_with(modes::EDITOR_OFF), "{got:?}");
+        // `create` buffered the editor modes; destroy drops them unsent
+        assert!(!surface.terminal.writer.is_empty());
+        surface.destroy(Ending::Failed, "bye");
+        // SAFETY: plain fcntl and read calls on the pty's master.
+        unsafe {
+            let fl = libc::fcntl(master, libc::F_GETFL);
+            libc::fcntl(master, libc::F_SETFL, fl | libc::O_NONBLOCK);
+            let mut buf = [0u8; 64];
+            let n = libc::read(master, buf.as_mut_ptr().cast(), buf.len());
+            assert!(n <= 0, "{:?}", &buf[..n as usize]);
+        }
 
         // the helper is told why, then hung up on
-        let mut said = Vec::new();
-        std::io::Read::read_to_end(&mut &helper, &mut said).unwrap();
-        let (frame, n) = crate::attach::Frame::decode(&said).unwrap().unwrap();
-        assert_eq!(said.len(), n);
-        let Some(crate::attach::Message::End(z)) = crate::attach::Message::decode(&frame).unwrap()
-        else {
-            panic!("{frame:?}")
+        let said = attach_conn::read_all_frames(&helper);
+        let [crate::attach::Message::End(z)] = &said[..] else {
+            panic!("{said:?}")
         };
         assert_eq!((Ending::Failed, "bye"), (z.as_ending(), z.message.as_str()));
+        assert!(!z.cut);
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
     }
 
     #[test]
-    fn create_fails_and_closes_on_something_that_is_not_a_terminal() {
-        let mut fds = [0; 2];
-        // SAFETY: a throwaway pipe.
-        assert_eq!(0, unsafe { libc::pipe(fds.as_mut_ptr()) });
-        let (socket, _helper) = UnixStream::pair().unwrap();
-        assert!(Surface::create(socket, fds[0], cells(80, 24)).is_err());
-        // SAFETY: fds[0] was closed by `create`, so this must fail with EBADF.
-        assert_eq!(-1, unsafe { libc::close(fds[0]) });
-        // SAFETY: closing the pipe's other end.
-        unsafe { libc::close(fds[1]) };
+    fn a_frame_the_terminal_took_part_of_is_cut() {
+        let (master, slave) = open_pty(80, 24);
+        let (socket, helper) = UnixStream::pair().unwrap();
+        let mut surface = Surface::create(socket, slave, cells(80, 24));
+        // more than the pty takes: nobody reads its master
+        surface.terminal.writer = vec![b'x'; 1 << 20];
+        assert_eq!(Sent::Waiting, surface.send_frame().unwrap());
+        surface.destroy(Ending::Closed, "");
+        let said = attach_conn::read_all_frames(&helper);
+        let [crate::attach::Message::End(z)] = &said[..] else {
+            panic!("{said:?}")
+        };
+        assert!(z.cut);
+        // SAFETY: closing the pty's master.
+        unsafe { libc::close(master) };
     }
 }

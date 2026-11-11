@@ -149,10 +149,12 @@ Rex sets in every pane:
 Each window's Rex pane runs `neorex attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
 `docs/attach-protocol.md`) and waits until the daemon ends the attach; Rex then
-closes the pane. The pane id, such as `2-k3j9x2qpa8`, is good for that one
-pane's terminal only. A terminal left over from an older daemon, which ran
-`neorex pane`, exits with `neorex: pane was replaced by attach --pane (this
-came from an older daemon)`.
+closes the pane. The helper, not the daemon, puts its terminal in raw mode and
+back, so a daemon that crashes or is killed leaves every terminal usable: out
+of raw mode and the alternate screen, with a line naming the daemon's log. The
+pane id, such as `2-k3j9x2qpa8`, is good for that one pane's terminal only. A
+terminal left over from an older daemon, which ran `neorex pane`, exits with
+`neorex: pane was replaced by attach --pane (this came from an older daemon)`.
 
 If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
 to start a daemon without one, use --detach` and exits 1. In a terminal but

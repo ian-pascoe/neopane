@@ -124,7 +124,7 @@ impl Drop for Emulator {
 /// A daemon over a real Neovim and a pane provider that answers nothing, with the
 /// startup pane (`panes[0]`) and a pane for a split beside it (`panes[1]`).
 struct Rig {
-    /// Dropped first: its panes are restored while the emulators still read.
+    /// Dropped first: its panes are hung up while the emulators still read.
     d: Daemon,
     panes: Vec<Emulator>,
     /// The helpers' ends of the panes' sockets: kept open, or the panes close.
@@ -133,8 +133,7 @@ struct Rig {
 }
 
 impl Drop for Rig {
-    /// Lets every terminal be read again: restoring one waits for its output
-    /// to be taken.
+    /// Lets every terminal be read again, so nothing is left held.
     fn drop(&mut self) {
         for e in &self.panes {
             e.held.store(false, Ordering::SeqCst);
@@ -171,7 +170,7 @@ impl Rig {
         let (socket0, helper0) = UnixStream::pair().unwrap();
         let startup = Pane::startup(
             Some(TerminalId::from(TERMINAL)),
-            Surface::create(socket0, slave0, cells(200, 60)).unwrap(),
+            Surface::create(socket0, slave0, cells(200, 60)),
         );
         let pane0 = Emulator::start(master0);
         d.start(startup).unwrap();
@@ -368,8 +367,8 @@ fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again() {
     assert!(!rig.panes[0].stalled.load(Ordering::SeqCst));
 }
 
-// Closing a pane restores its terminal; for one nobody reads, that mustn't
-// wait for it either.
+// Closing a pane writes nothing more to its terminal (its helper restores
+// it), so one nobody reads mustn't hold the daemon up.
 #[test]
 fn a_pane_nobody_reads_closes_without_stopping_the_others() {
     let Some(mut rig) = Rig::start() else {
