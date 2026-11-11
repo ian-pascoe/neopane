@@ -1,6 +1,7 @@
 //! `neorex debug-rex SOCKET`: talks to Rex directly. Attaches to this
-//! session, opens a split running `neorex pane SOCKET`, takes that pane's
-//! terminal over as debug-panes does, and prints Rex's events. Ctrl+C quits.
+//! session, opens a split running `neorex attach --address SOCKET --pane ID`
+//! with an id it minted, takes that pane's terminal over as debug-panes does,
+//! and prints Rex's events. Ctrl+C quits.
 
 use std::fs;
 use std::os::unix::io::AsRawFd;
@@ -11,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::Result;
 use super::pane_host::PaneHost;
 use super::panes as debug_panes;
+use crate::attach::{Transport, attach_command};
 use crate::daemon::event_loop::{Event, Loop};
 use crate::name::NAME;
 use crate::rex::client::{self, Client, Message, ResponseResult};
@@ -148,7 +150,15 @@ fn serve(
                                             "label": NAME,
                                             "options": {
                                                 "shell": "none",
-                                                "command": [exe, "pane", socket_path],
+                                                "command": attach_command(
+                                                    exe.as_ref(),
+                                                    socket_path.as_ref(),
+                                                    &host.mint(),
+                                                    Transport::Fd,
+                                                )
+                                                .iter()
+                                                .map(|w| w.to_string_lossy())
+                                                .collect::<Vec<_>>(),
                                             },
                                         } }),
                                     );

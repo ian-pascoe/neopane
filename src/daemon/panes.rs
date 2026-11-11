@@ -7,12 +7,16 @@
 
 use super::event_loop::Loop;
 use super::pane::{NeovimWindowHandle, Pane};
+use crate::attach::{Ending, PaneId, PaneIdRegistry};
 use crate::screen::float_groups::Group;
 
 pub(crate) struct Panes {
     pub list: Vec<Pane>,
     /// Never reused, so a stale token can't reach a newer pane. 0 is the startup pane.
     pub next_id: u32,
+    /// The pane id of every requested pane, minted as it is added: good for
+    /// one attach until its pane goes.
+    pub ids: PaneIdRegistry,
 }
 
 impl Default for Panes {
@@ -20,18 +24,20 @@ impl Default for Panes {
         Panes {
             list: Vec::new(),
             next_id: 1,
+            ids: PaneIdRegistry::new(),
         }
     }
 }
 
 impl Panes {
-    /// Hangs up every pane still open. (Dropping `Panes` does the same.)
-    pub(crate) fn deinit(&mut self) {
+    /// Hangs up every pane still open, its attach ending as `ending` says.
+    /// (Dropping `Panes` does the same, as stopped.)
+    pub(crate) fn deinit(&mut self, ending: Ending) {
         for mut p in self.list.drain(..) {
             if p.closing.is_none() {
                 p.closing = Some(super::pane::Close::Shutdown);
             }
-            p.deinit();
+            p.deinit(ending);
         }
     }
 
@@ -41,18 +47,22 @@ impl Panes {
         self.list.last_mut().unwrap()
     }
 
-    /// Adds a pane for `win`, with the next id.
+    /// Adds a pane for `win`, with the next id and a new pane id.
     pub(crate) fn add_for_window(&mut self, win: NeovimWindowHandle) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
-        self.add(Pane::from_neovim_window(id, win))
+        let mut pane = Pane::from_neovim_window(id, win);
+        pane.attach_id = Some(self.ids.mint());
+        self.add(pane)
     }
 
-    /// Adds a floating pane for group `g`, with the next id.
+    /// Adds a floating pane for group `g`, with the next id and a new pane id.
     pub(crate) fn add_for_group(&mut self, g: Group) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
-        self.add(Pane::from_group(id, g))
+        let mut pane = Pane::from_group(id, g);
+        pane.attach_id = Some(self.ids.mint());
+        self.add(pane)
     }
 
     /// Takes every pane's fds off `event_loop`, for before they are hung up.
@@ -63,11 +73,19 @@ impl Panes {
     }
 
     /// Takes pane `i` off `event_loop`, hangs it up and forgets it. Set its
-    /// `closing` first.
+    /// `closing` first. Its pane id is good for no attach after.
     pub(crate) fn remove(&mut self, i: usize, event_loop: &Loop) {
         let pane = self.list.remove(i);
+        if let Some(id) = &pane.attach_id {
+            self.ids.expire(id);
+        }
         pane.unregister_from(event_loop);
-        pane.deinit();
+        pane.deinit(Ending::Closed);
+    }
+
+    /// The pane whose helper's hello names `id`.
+    pub(crate) fn by_attach_id(&self, id: &PaneId) -> Option<&Pane> {
+        self.list.iter().find(|p| p.attach_id.as_ref() == Some(id))
     }
 
     pub(crate) fn index_of(&self, id: u32) -> Option<usize> {
@@ -117,7 +135,7 @@ impl Panes {
 
 impl Drop for Panes {
     fn drop(&mut self) {
-        self.deinit();
+        self.deinit(Ending::Stopped);
     }
 }
 
@@ -126,6 +144,31 @@ mod tests {
     use super::super::pane::{self, Close};
     use super::super::surface::Surface;
     use super::*;
+    use crate::attach::Refusal;
+
+    #[test]
+    fn a_pane_id_is_good_until_an_attach_takes_it_or_its_pane_goes() {
+        let mut panes = Panes::default();
+        let taken = panes.add_for_window(1000).attach_id.unwrap();
+        let gone = panes.add_for_group(Group::default()).attach_id.unwrap();
+        assert_ne!(taken, gone);
+        assert_eq!(
+            1000,
+            panes
+                .by_attach_id(&taken)
+                .unwrap()
+                .neovim_window_handle
+                .unwrap()
+        );
+        assert_eq!(Ok(()), panes.ids.take(&taken));
+        assert_eq!(Err(Refusal::PaneTaken), panes.ids.take(&taken));
+        let i = panes
+            .index_of(panes.by_attach_id(&gone).unwrap().id)
+            .unwrap();
+        panes.remove(i, &Loop::init().unwrap());
+        assert_eq!(Err(Refusal::PaneExpired), panes.ids.take(&gone));
+        assert!(panes.by_attach_id(&gone).is_none());
+    }
 
     #[test]
     fn ids_are_never_reused() {
@@ -167,23 +210,26 @@ mod tests {
 
     #[test]
     fn deinit_hangs_up_every_pane_still_open() {
-        use std::io::Read;
         let mut panes = Panes::default();
-        let (socket, mut helper) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (socket, helper) = std::os::unix::net::UnixStream::pair().unwrap();
         let (master, slave) = super::super::surface::open_pty(80, 24);
         let mut p = Pane::from_neovim_window(5, 1000);
-        p.terminal_surface = Some(Surface::create(socket, slave).unwrap());
+        p.terminal_surface =
+            Some(Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap());
         panes.add(p);
         panes.add_for_window(1001).closing = Some(Close::WindowClosed);
 
         // with nothing to read the terminal's output, restoring it can't wait on it
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
-        panes.deinit();
+        panes.deinit(Ending::Stopped);
         assert!(panes.list.is_empty());
-        // the helper sees the hang-up
-        let mut byte = [0u8; 1];
-        assert_eq!(0, helper.read(&mut byte).unwrap());
+        // the helper is told the daemon stopped, then hung up on
+        let said = crate::daemon::attach_conn::read_all_frames(&helper);
+        let [crate::attach::Message::End(z)] = &said[..] else {
+            panic!("{said:?}")
+        };
+        assert_eq!(Ending::Stopped, z.as_ending());
     }
 
     // Dropping Panes hangs up too, and doesn't wait on a terminal nobody

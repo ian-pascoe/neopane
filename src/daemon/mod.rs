@@ -1,3 +1,4 @@
+pub(crate) mod attach_conn;
 pub(crate) mod backlog;
 #[allow(clippy::module_inception)]
 pub(crate) mod daemon;

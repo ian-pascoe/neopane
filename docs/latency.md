@@ -32,7 +32,8 @@ otherwise.
 | `place` | A tab page's panes asked to be placed (moved or resized; id: the tab page). |
 | `placed` | The last placement answered (id 0). |
 | `accept`, `found` | L7's points. Named, not yet fired: #114 fires them. |
-| `hello`, `accepted` | L9's points. Named, not yet fired: #101 fires them. |
+| `hello` | A hello read whole, its last byte read (the pane's id; the launcher's is 0). |
+| `accepted` | Its `a` written to the helper. |
 
 ## Reading a log
 
@@ -163,5 +164,16 @@ trace point and a flag the forwarder sets: no syscall and no allocation,
 which `log`'s tests check of the trace buffer. The time a read came was
 already taken for the escape timeout; it's now taken right after the read.
 
-L7 and L9 have no numbers yet: their points fire from #114 and #101, which
-record them as they land. The Linux numbers are #133's.
+L9's points fire from SPI-639 (#101). Its baseline is from that change's
+build, on the same machine, with `scripts/latency.sh split 55` run 3 times:
+each new pane's hello, from its terminal's helper.
+
+| Criterion | Scenario | N per run | Medians | p95s | Baseline median | Baseline p95 |
+|---|---|---|---|---|---|---|
+| L9 | `split` | 56 | 0.074, 0.079, 0.077 | 0.135, 0.138, 0.165 | 0.077 | 0.138 |
+
+A launcher's hello carrying a 64 KB environment as well as Rex's took 0.111
+to 0.418 ms over 5 launches.
+
+L7 has no numbers yet: its points fire from #114, which records them as it
+lands. The Linux numbers are #133's.

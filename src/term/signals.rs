@@ -197,12 +197,17 @@ impl Set {
     }
 }
 
+/// Held by each test that makes a `Signals`: one per process at a time.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn raise_then_drain() {
+        let _one = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = Signals::init(&[libc::SIGWINCH]).unwrap();
         // SAFETY: raising a signal we handle.
         unsafe {
@@ -217,6 +222,7 @@ mod tests {
 
     #[test]
     fn empty_drain() {
+        let _one = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = Signals::init(&[libc::SIGWINCH]).unwrap();
         assert_eq!(0u32, s.drain().unwrap().bits);
         s.deinit();

@@ -384,6 +384,24 @@ impl Hello {
         };
         Ok(Hello { v, build, purpose })
     }
+
+    /// Whether a hello that can't be read says it is a requested pane's.
+    pub fn reads_requested(payload: &[u8]) -> bool {
+        Fields::decode(payload)
+            .and_then(|f| f.str("purpose"))
+            .is_ok_and(|p| p == "requested")
+    }
+
+    /// The pane a hello that can't be read names, if it reads as a
+    /// requested pane's: so the daemon can give up that pane, whatever else
+    /// is wrong with the hello.
+    pub fn requested_pane(payload: &[u8]) -> Option<PaneId> {
+        if !Self::reads_requested(payload) {
+            return None;
+        }
+        let f = Fields::decode(payload).ok()?;
+        PaneId::parse(&f.str("pane").ok()?)
+    }
 }
 
 /// `line`: from 1, and only with a file.
@@ -866,6 +884,26 @@ mod tests {
         let (f, n) = Frame::decode(&m.encode().unwrap()).unwrap().unwrap();
         assert_eq!(n, m.encode().unwrap().len());
         f
+    }
+
+    #[test]
+    fn a_requested_panes_id_is_read_from_a_hello_that_cant_be() {
+        let id = PaneId::parse("4-abcdefghij").unwrap();
+        let mut w = MapWriter::default();
+        w.int("v", 99)
+            .str("purpose", "requested")
+            .str("pane", "4-abcdefghij");
+        assert_eq!(Some(id), Hello::requested_pane(&w.finish()));
+        let mut w = MapWriter::default();
+        w.str("purpose", "self").str("pane", "4-abcdefghij");
+        assert_eq!(None, Hello::requested_pane(&w.finish()));
+        assert_eq!(None, Hello::requested_pane(b"\xc1"));
+        let mut w = MapWriter::default();
+        w.str("purpose", "requested");
+        let payload = w.finish();
+        assert!(Hello::reads_requested(&payload));
+        assert_eq!(None, Hello::requested_pane(&payload));
+        assert!(!Hello::reads_requested(b"\x80"));
     }
 
     #[test]

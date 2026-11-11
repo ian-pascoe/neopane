@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use super::pane_helper;
 use super::serve;
+use crate::attach::Transport;
 use crate::log::{self, LogLevel, Point, Traces};
 use crate::name::NAME;
 
@@ -29,7 +30,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
+/// Starts the daemon and attaches this terminal to it: how the attach
+/// ended, for the exit status.
+pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     // L6 is timed from here
     let started = log::now_ns();
     // SAFETY: isatty only inspects the fd.
@@ -80,6 +83,9 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
         return Err(Error::DaemonFailed.into());
     }
     // the daemon outlives us; it's never waited for here
-    pane_helper::run(&sock, None)?;
-    Ok(())
+    Ok(pane_helper::run(
+        sock.as_ref(),
+        pane_helper::Want::SelfAttach,
+        Transport::Fd,
+    ))
 }
