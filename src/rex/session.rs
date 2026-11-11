@@ -951,6 +951,24 @@ mod tests {
     }
 
     #[test]
+    fn placing_lasts_until_the_last_move_or_resize_is_answered() {
+        let (mut s, _theirs) = session();
+        assert!(!s.placing());
+        s.move_block("block:a", "block:b", true, 0.5).unwrap();
+        s.resize_pane("block:b", "block:c", false, 0.25).unwrap();
+        s.focus(Some(block('a'))).unwrap();
+        let moved = pending(&s, Request::MoveBlock)[0];
+        let resized = pending(&s, Request::ResizePane)[0];
+        answer(&mut s, moved, refused());
+        // a refused one is answered too
+        assert!(s.placing());
+        answer(&mut s, resized, client::ResponseResult::Ok(json!({})));
+        // the focus request still waits, but no placement does
+        assert!(!s.placing());
+        assert_eq!(1, pending(&s, Request::FocusBlock).len());
+    }
+
+    #[test]
     fn only_the_last_of_two_focus_requests_settles() {
         let (mut s, _theirs) = session();
         let (a, b) = (block('a'), block('b'));

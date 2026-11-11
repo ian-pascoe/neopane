@@ -522,6 +522,8 @@ impl Daemon {
         if !s.backlog.is_empty() {
             return Ok(());
         }
+        // the rest of the frame has gone out
+        log::trace(Point::Frame, u64::from(id));
         let repaint = s.backlog.take_dropped();
         if repaint {
             s.view.full = true;
@@ -1206,15 +1208,18 @@ impl Daemon {
                     WindowState::Skipped
                 };
             }
-            match tab_placement::decide(&tab.layout, &states[..tab.layout.len], tab.placed.as_ref())
-            {
+            let action =
+                tab_placement::decide(&tab.layout, &states[..tab.layout.len], tab.placed.as_ref());
+            if matches!(action, Action::Rearrange(_) | Action::Resize(_)) {
+                log::trace(Point::Place, layout.tab as u64);
+            }
+            match action {
                 Action::Wait | Action::Nothing => {}
                 Action::Forget => {
                     self.tab_layouts.swap_remove_index(i);
                 }
                 Action::Rearrange(plan) => {
                     tab.placed = Some(plan);
-                    log::trace(Point::Place, layout.tab as u64);
                     for m in plan.items() {
                         let Some(blocks) = self.blocks_of(m) else {
                             continue;
@@ -1229,7 +1234,6 @@ impl Daemon {
                 }
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
-                    log::trace(Point::Place, layout.tab as u64);
                     for m in plan.items() {
                         let Some(blocks) = self.blocks_of(m) else {
                             continue;
@@ -1432,16 +1436,19 @@ impl Daemon {
         self.draw()
     }
 
-    /// Traces focus moving to pane `id` from a pane of tab page `from_tab`, if
-    /// that's another tab page's: its panes are to be drawn. Not from a pane
+    /// Traces pane `id` becoming the current pane after a pane of tab page
+    /// `from_tab`, if that's another tab page's: its panes are to be drawn. Not from a pane
     /// that's gone.
     fn trace_tab_move(&self, from_tab: Option<i64>, id: u32) {
-        if log::tracing()
-            && let Some(from) = from_tab
-            && self.panes.by_id(id).is_some_and(|p| p.tab != from)
-        {
+        if log::tracing() && self.moves_tab_page(from_tab, id) {
             log::trace(Point::TabMove, u64::from(id));
         }
+    }
+
+    /// Whether pane `id` is of another tab page than `from_tab`, a pane's
+    /// that's still there.
+    fn moves_tab_page(&self, from_tab: Option<i64>, id: u32) -> bool {
+        from_tab.is_some_and(|from| self.panes.by_id(id).is_some_and(|p| p.tab != from))
     }
 
     /// A newer view: where our panes sit, so the editor and floats fit. A view
@@ -1621,10 +1628,8 @@ impl Daemon {
             // never waits: what the terminal can't take yet waits until it has room
             match s.send_frame() {
                 Err(_) => self.pane_gone(id)?,
-                Ok(Sent::Waiting) => {
-                    log::trace(Point::Frame, u64::from(id));
-                    self.event_loop.add_write(s.terminal.fd, token)?
-                }
+                // traced once the rest goes out (see `on_writable`)
+                Ok(Sent::Waiting) => self.event_loop.add_write(s.terminal.fd, token)?,
                 Ok(Sent::All) => log::trace(Point::Frame, u64::from(id)),
             }
         }
@@ -2530,6 +2535,20 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn only_a_pane_of_another_tab_page_is_a_move_between_tab_pages() {
+        let mut fx = fixture();
+        fx.d.panes.add(Pane::from_neovim_window(1, 1));
+        fx.d.panes.add(Pane::from_neovim_window(2, 2)).tab = 2;
+        fx.d.panes.add(Pane::from_neovim_window(3, 3)).tab = 2;
+        assert!(fx.d.moves_tab_page(Some(0), 2));
+        assert!(fx.d.moves_tab_page(Some(2), 1));
+        assert!(!fx.d.moves_tab_page(Some(2), 3));
+        // from a pane that's gone, or to one
+        assert!(!fx.d.moves_tab_page(None, 2));
+        assert!(!fx.d.moves_tab_page(Some(0), 9));
+    }
+
     /// The text frame a Rex server sends: unmasked.
     fn server_frame(text: &str) -> Vec<u8> {
         let mut f = vec![0x81];
@@ -3380,6 +3399,39 @@ mod tests {
         );
         d.grids.grids.insert(grid, Grid::default());
         d.grids.get_mut(grid).unwrap().resize(cols, rows);
+    }
+
+    #[test]
+    fn sizing_a_window_says_whether_it_asked_neovim() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(81, 24));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 81, 23);
+        assert!(fx.d.size_window(id));
+        // already that size: nothing to ask
+        assert!(!fx.d.size_window(id));
+        let resize = |d: &mut Daemon, cols, rows| {
+            let s = d.panes.by_id_mut(id).unwrap().terminal_surface.as_mut();
+            s.unwrap().view.resize(cols, rows);
+        };
+        resize(&mut fx.d, 60, 24);
+        assert!(fx.d.size_window(id));
+
+        // two windows laid out in the pane
+        fx.d.reconcile().unwrap();
+        note_split_from(&mut fx.d, 1001, 1000, true, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        draw_external(&mut fx.d, 3, 1001, 30, 23);
+        fx.d.reconcile().unwrap();
+        assert!(fx.d.panes.by_id(id).unwrap().layout.is_some());
+        assert!(!fx.d.size_window(id));
+        resize(&mut fx.d, 81, 24);
+        assert!(fx.d.size_window(id));
+        assert!(!fx.d.size_window(id));
     }
 
     #[test]
