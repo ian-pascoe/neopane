@@ -67,6 +67,9 @@ pub(crate) struct Daemon {
     pub msg_rows: u32,
     /// The options panes laying out several windows split and close them by.
     pub split_options: windows::SplitOptions,
+    /// Sizes Neovim gave windows not yet in a pane: window, cols, rows, as a
+    /// `Resized` note has them. A window that joins a pane layout takes its.
+    pub pending_sizes: Vec<(i64, u32, u32)>,
     /// Where Neovim has the windows of each tab page made after setup, as it
     /// last said, and what was done to place their panes to match.
     pub tab_layouts: IndexMap<i64, Tab>,
@@ -159,6 +162,9 @@ const MAX_DIRECTION_COUNT: u32 = 20;
 /// More rows than any terminal has: a 'cmdheight' past it is as good.
 const MAX_MSG_ROWS: u32 = 1000;
 
+/// Most sizes kept for windows not yet in a pane.
+const MAX_PENDING_SIZES: usize = 16;
+
 /// Most cells of the tabline one pane draws.
 const TABLINE_MAX: usize = 256;
 
@@ -226,6 +232,7 @@ impl Daemon {
             tabline_rows: 0,
             msg_rows: 1,
             split_options: windows::SplitOptions::default(),
+            pending_sizes: Vec::new(),
             tab_layouts: IndexMap::new(),
             rex_layout: None,
             escape_timer_due: None,
@@ -705,6 +712,10 @@ impl Daemon {
             p.neovim_window_handle = Some(win);
         }
         self.changes.forget_split(win);
+        if let Some(i) = self.pending_sizes.iter().position(|&(w, ..)| w == win) {
+            let (_, cols, rows) = self.pending_sizes.swap_remove(i);
+            self.resize_in_layout(id, win, cols, rows);
+        }
     }
 
     /// Where a window of a tab page made after setup splits: beside a pane of
@@ -933,28 +944,43 @@ impl Daemon {
     /// is its size.
     fn on_resized(&mut self, win: i64, cols: u32, rows: u32) -> Result<()> {
         let Some(p) = self.panes.by_win(win) else {
+            // not in a pane yet: for when it joins one
+            self.pending_sizes.retain(|&(w, ..)| w != win);
+            if self.pending_sizes.len() < MAX_PENDING_SIZES {
+                self.pending_sizes.push((win, cols, rows));
+            }
             return Ok(());
         };
-        let Some(layout) = &p.layout else {
+        if p.layout.is_none() {
             return Ok(());
-        };
+        }
         let id = p.id;
+        self.resize_in_layout(id, win, cols, rows);
+        self.size_window(id);
+        self.nvim.client.flush()?;
+        self.draw()
+    }
+
+    /// Window `win` of pane `id`'s layout takes `cols` x `rows` there, a
+    /// way given as 0 left as it is. Its windows are asked their sizes again.
+    fn resize_in_layout(&mut self, id: u32, win: i64, cols: u32, rows: u32) {
+        let p = self.panes.by_id(id).unwrap();
+        let Some(layout) = &p.layout else {
+            return;
+        };
         let area = self.geometry().window_size(p);
         let current = p.neovim_window_handle.unwrap_or(win);
         let was = layout.lay_out(area, current).of(win);
         let p = self.panes.by_id_mut(id).unwrap();
         let layout = p.layout.as_mut().unwrap();
-        if was.is_none_or(|w| w.cols != cols) {
+        if cols != 0 && was.is_none_or(|w| w.cols != cols) {
             layout.resize(win, Axis::Cols, cols, area, current);
         }
-        if was.is_none_or(|w| w.rows != rows) {
+        if rows != 0 && was.is_none_or(|w| w.rows != rows) {
             layout.resize(win, Axis::Rows, rows, area, current);
         }
         // asked again, at least the window Neovim sized
         p.layout_asked.clear();
-        self.size_window(id);
-        self.nvim.client.flush()?;
-        self.draw()
     }
 
     /// `<C-w>h/j/k/l`: Rex moves focus to the pane that way, if any. Its view
@@ -1043,6 +1069,9 @@ impl Daemon {
             return Ok(());
         }
         self.changes.forget_gone(&self.grids);
+        let grids = &self.grids;
+        self.pending_sizes
+            .retain(|&(w, ..)| grids.grid_of(w).is_some());
 
         // a copy: making panes below doesn't touch the grids, but borrows all of `self`
         let wins: Vec<_> = self.grids.wins.values().copied().collect();
@@ -3403,6 +3432,37 @@ mod tests {
         let sent = sent_by(fx);
         let sizes = sizes_sent(&sent.nvim_bytes);
         assert_eq!(&[[1001, 80, 5], [1000, 80, 15]], &sizes[sizes.len() - 2..]);
+    }
+
+    #[test]
+    fn with_rex_closed_a_size_asked_before_a_window_joins_its_pane_is_kept_as_it_joins() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        // `:split | resize 5`, told as the new window is made external
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        draw_external(&mut fx.d, 3, 1001, 80, 4);
+        fx.d.on_note(windows::Note::Resized {
+            win: 1001,
+            cols: 0,
+            rows: 5,
+        })
+        .unwrap();
+        fx.d.reconcile().unwrap();
+        let pane = fx.d.panes.by_id(id).unwrap();
+        let (wins, _) = fx.d.laid_out_view(pane);
+        assert_eq!(
+            vec![(3, 0, 80, 5), (2, 5, 80, 15)],
+            wins.iter()
+                .map(|w| (w.grid, w.row, w.cols, w.rows))
+                .collect::<Vec<_>>()
+        );
+        assert!(fx.d.pending_sizes.is_empty());
     }
 
     #[test]

@@ -133,6 +133,10 @@ local panes = {}
 -- window -> { w, h }, statusline included: the size Neovim gave it itself, as
 -- last told the daemon, until the daemon sizes it again
 local reported_sizes = {}
+-- window -> { w, h }: the size Neovim gave a window not yet external as
+-- windows split or the screen changed. Another size when it's adopted is one
+-- Neovim gave it as asked, as `:split | resize 8` does, and is told.
+local laid_sizes = {}
 -- when the user last typed, or a pane was resized (ms)
 local last_activity = 0
 -- statusline formats we've set, to tell them from ones the user set
@@ -462,6 +466,14 @@ end
 --- Makes ordinary `win` external at `w` x `h`, giving its tab page an anchor first.
 function M.adopt(win, w, h)
   if not shown(win) or waiting(win) or api.nvim_win_get_config(win).external then return end
+  local was = laid_sizes[win]
+  laid_sizes[win] = nil
+  local cols, rows = 0, 0
+  if was then
+    local now = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
+    if now[1] ~= was[1] then cols = now[1] end
+    if now[2] ~= was[2] then rows = now[2] end
+  end
   keep_edgy_out(win)
   local tab = api.nvim_win_get_tabpage(win)
   -- before it leaves winlayout()
@@ -475,7 +487,26 @@ function M.adopt(win, w, h)
   api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
   local p = pane_of(win)
   p.w, p.h = w, h
+  if cols ~= 0 or rows ~= 0 then
+    if rows ~= 0 then rows = rows + (has_statusline(win) and 1 or 0) end
+    note('resized', win, cols, rows)
+  end
 end
+
+-- The sizes of the windows not yet external, after Neovim has laid them out
+-- again for a new window or a new screen size.
+local function note_laid_sizes()
+  for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+    if shown(win) and not api.nvim_win_get_config(win).external then
+      laid_sizes[win] = { api.nvim_win_get_width(win), api.nvim_win_get_height(win) }
+    end
+  end
+end
+api.nvim_create_autocmd({ 'WinNew', 'VimResized' }, { group = group, callback = note_laid_sizes })
+api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  callback = function(ev) laid_sizes[tonumber(ev.match)] = nil end,
+})
 
 -- Layout plugins such as edgy.nvim move windows back into Neovim's own
 -- layout, as `wincmd J` does, on every resize. A window with a pane that has

@@ -128,8 +128,9 @@ pub enum Note {
     Layout(Layout),
     /// The options a pane layout splits and closes windows by.
     Options(SplitOptions),
-    /// Neovim sized external window `win` itself, as `:resize` does, to
-    /// `cols` x `rows`, its statusline included.
+    /// Neovim sized window `win` itself, as `:resize` does, to `cols` x
+    /// `rows`, its statusline included; 0 for a way it didn't size it. Told
+    /// as it's made external too, for a size asked before.
     Resized { win: i64, cols: u32, rows: u32 },
 }
 
@@ -2819,6 +2820,53 @@ mod tests {
         h.notes.clear();
         h.input(":vertical resize 30 | resize 5<CR>");
         assert!(h.until(|x| resized(x, 30, 6)));
+    }
+
+    /// Types `keys`, which make a new window and leave it current, and adopts
+    /// it as a 40 x 4 pane, as the daemon would after the flush. Returns it.
+    fn adopt_new_window(h: &mut Harness, keys: &str) -> i64 {
+        h.notes.clear();
+        let first = h.wins[0];
+        h.input(keys);
+        h.want = first;
+        assert!(h.until(|x| {
+            let cur = x.last_current();
+            cur != 0 && cur != x.want && x.kind(cur) == Some(WinKind::Ordinary)
+        }));
+        let win = h.last_current();
+        adopt(&mut h.nvim, win, 40, 4);
+        h.nvim.flush().unwrap();
+        h.want = win;
+        assert!(h.until(|x| x.kind(x.want) == Some(WinKind::External)));
+        win
+    }
+
+    #[test]
+    fn a_size_given_a_new_window_before_its_adopted_is_told_as_it_is() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // asked in the same breath as the split: kept, with its statusline
+        let win = adopt_new_window(&mut h, ":split | resize 3<CR>");
+        let resized = |x: &Harness, cols: u32, rows: u32| {
+            x.notes.contains(&Note::Resized {
+                win: x.want,
+                cols,
+                rows,
+            })
+        };
+        assert!(h.until(|x| resized(x, 0, 4)));
+        // a plain split: Neovim's own size for it is no size asked
+        let plain = adopt_new_window(&mut h, ":split<CR>");
+        h.barrier();
+        assert!(
+            !h.notes
+                .iter()
+                .any(|n| matches!(n, Note::Resized { win, .. } if *win == plain)),
+            "{:?}",
+            h.notes
+        );
+        assert_ne!(win, plain);
     }
 
     #[test]
