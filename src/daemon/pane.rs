@@ -38,8 +38,8 @@ pub(crate) struct Pane {
     /// Owned.
     pub terminal_surface: Option<Box<Surface>>,
     pub closing: Option<Close>,
-    /// The tab page made after setup its window belongs to, else 0. Its windows
-    /// share a Rex floating pane.
+    /// Its window's home tab page, if that tab page gets a tab page area of
+    /// its own (ADR 0012), else 0. Its windows share that area.
     pub tab: i64,
     /// Set for a Rex floating pane showing a group of floats, not a window.
     pub layer: Option<Layer>,

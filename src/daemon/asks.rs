@@ -206,6 +206,17 @@ impl Asks {
         asked.chain(waiting).any(is_placement)
     }
 
+    /// Whether `step` settles the placements: it ends a `place_beside` or a
+    /// `resize`, and none is left asked or waiting. Where L8's span ends
+    /// (`Point::Placed`).
+    pub(crate) fn settles_placement(&self, step: &Step) -> bool {
+        let ends_one = match step {
+            Step::Done(ask, _) | Step::FallBack(ask) => is_placement(ask),
+            Step::Warn(_) => false,
+        };
+        ends_one && !self.placing()
+    }
+
     /// The next thing the daemon has to do about an act.
     pub(crate) fn next_step(&mut self) -> Option<Step> {
         self.steps.pop_front()
@@ -238,8 +249,8 @@ pub(crate) fn close(t: TerminalId) -> Ask {
 
 #[cfg(test)]
 mod tests {
-    use super::super::provider::ProviderEvent;
     use super::super::provider::fake::FakeProvider;
+    use super::super::provider::{Direction, ProviderEvent};
     use super::*;
     use crate::attach::PaneId;
 
@@ -269,6 +280,49 @@ mod tests {
 
     fn opened(t: &str) -> Answer {
         Answer::Terminal(TerminalId::from(t))
+    }
+
+    fn resize(n: u32) -> Ask {
+        Ask::Resize {
+            terminal: TerminalId::from(format!("t{n}").as_str()),
+            origin: TerminalId::from("t0"),
+            dir: Direction::Right,
+            size: 40,
+            ratio: 0.5,
+        }
+    }
+
+    #[test]
+    fn placing_lasts_until_the_last_placement_is_answered_which_alone_settles_them() {
+        let caps = [Capability::Resize, Capability::OpenTabPage];
+        let (mut asks, mut fake, now) =
+            (Asks::default(), FakeProvider::with(&caps), Instant::now());
+        assert!(!asks.placing());
+        asks.act(Some(&mut fake), resize(1), now);
+        // waits its turn behind the first
+        asks.act(Some(&mut fake), resize(2), now);
+        assert!(asks.placing());
+
+        // a refused one is answered too, but the second is now asked
+        fake.answer(fake.last_id(), Outcome::Failed("no".into()));
+        deliver(&mut asks, &mut fake, now);
+        assert!(asks.placing());
+        let first = steps(&mut asks);
+        assert!(first.contains(&Step::FallBack(resize(1))));
+        assert!(first.iter().all(|s| !asks.settles_placement(s)));
+
+        // an open behind it doesn't count
+        asks.act(Some(&mut fake), open(3), now);
+        fake.answer(fake.asks[1].0, Outcome::Done(Answer::Nothing));
+        deliver(&mut asks, &mut fake, now);
+        assert!(!asks.placing());
+        assert_eq!(1, asks.waiting());
+        let last = steps(&mut asks);
+        assert_eq!(vec![Step::Done(resize(2), Answer::Nothing)], last);
+        assert!(asks.settles_placement(&last[0]));
+        // nor do its steps, or a warning
+        assert!(!asks.settles_placement(&Step::FallBack(open(3))));
+        assert!(!asks.settles_placement(&Step::Warn(String::new())));
     }
 
     #[test]

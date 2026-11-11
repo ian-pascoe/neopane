@@ -3286,6 +3286,48 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_tab_pages_layout_record_goes_with_it() {
+        let argv = ["nvim", "--clean", "--embed", "-n", "-p", "a", "b"];
+        let Some(mut h) = Harness::spawn(&argv, 120, 30) else {
+            return;
+        };
+        h.boot();
+        // the records windows.lua keeps of tab pages without a tab page area,
+        // found through the closures of its module
+        let count = |h: &mut Harness| {
+            h.eval_str(&format!(
+                "local function find(f, seen)\n\
+                 \x20 if seen[f] then return end\n\
+                 \x20 seen[f] = true\n\
+                 \x20 for i = 1, math.huge do\n\
+                 \x20   local n, v = debug.getupvalue(f, i)\n\
+                 \x20   if not n then return end\n\
+                 \x20   if n == 'layouts' then return v end\n\
+                 \x20   if type(v) == 'function' then\n\
+                 \x20     local got = find(v, seen)\n\
+                 \x20     if got then return got end\n\
+                 \x20   end\n\
+                 \x20 end\n\
+                 end\n\
+                 local seen, layouts = {{}}\n\
+                 for _, f in pairs(_G['{NAME}']) do\n\
+                 \x20 if type(f) == 'function' then layouts = layouts or find(f, seen) end\n\
+                 end\n\
+                 return tostring(vim.tbl_count(assert(layouts, 'no layouts')))",
+            ))
+        };
+        // both tab pages were current, so both have one
+        h.input(":tabnext<CR>");
+        h.barrier();
+        h.input(":tabnext<CR>");
+        h.barrier();
+        assert_eq!("2", count(&mut h));
+        h.input(":2tabclose<CR>");
+        h.barrier();
+        assert_eq!("1", count(&mut h));
+    }
+
+    #[test]
     fn a_tab_page_built_as_diffview_does_reports_its_layout_final_order_and_sizes() {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;

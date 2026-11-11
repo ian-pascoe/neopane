@@ -1,5 +1,6 @@
-//! The float group pane lifecycle: a float group pane, such as a Rex
-//! floating pane, for each group of floats that took focus. It matches panes
+//! The float group pane lifecycle: a float group pane, a floating terminal
+//! over its origin pane's layout area, for each group of floats that took
+//! focus. It matches panes
 //! to groups, says what to ask the pane provider for (`open_float`, with the
 //! group's cells relative to its origin pane, and `close`), and moves the
 //! floats to follow a pane the user moved: to its rect in its layout area,
@@ -185,8 +186,9 @@ pub(crate) struct GroupBounds {
 
 /// Where float group `g` is relative to pane `origin`, the one its pane
 /// opens from: on grid 1, which spans `origin`'s layout area while it's the
-/// current pane. Without the pane, its terminal or a live area, its top left
-/// is the screen's, and its size the screen's. None with no screen.
+/// current pane. Without the pane, its terminal or a live area, the origin
+/// is the screen: its top left the screen's, and its size grid 1's. None
+/// with no screen.
 pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> Option<GroupBounds> {
     let screen = grids.get(1)?;
     let (sw, sh) = (f64::from(screen.width), f64::from(screen.height));
@@ -197,8 +199,10 @@ pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> O
     let top_left = rect.map_or([0, 0], |r| {
         [(r[0] * sw).round() as i32, (r[1] * sh).round() as i32]
     });
-    let origin_size = origin
-        .and_then(|p| p.terminal_surface.as_ref())
+    // the terminal's size only with the rect it's at: cells from the
+    // screen's top left are counted in the screen
+    let origin_size = rect
+        .and(origin.and_then(|p| p.terminal_surface.as_ref()))
         .map_or([screen.width, screen.height], |s| {
             [s.view.cols, s.view.rows]
         });
