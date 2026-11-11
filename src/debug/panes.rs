@@ -10,6 +10,7 @@ use std::path::Path;
 use super::Result;
 use super::pane_host::PaneHost;
 use crate::daemon::event_loop::{Event, Loop};
+use crate::name::NAME;
 
 const TOKEN_SIGNAL: usize = 0;
 const TOKEN_SERVER: usize = 1;
@@ -31,7 +32,7 @@ fn serve(event_loop: &mut Loop, server: &UnixListener, socket_path: &Path) -> Re
     event_loop.add_read(server.as_raw_fd(), TOKEN_SERVER)?;
     let shown = socket_path.display();
     eprintln!(
-        "debug-panes: listening on {shown}. Run `neorex pane {shown}` in Rex panes. Ctrl+C quits."
+        "debug-panes: listening on {shown}. Run `{NAME} pane {shown}` in Rex panes. Ctrl+C quits."
     );
 
     let mut host = PaneHost::new(TOKEN_PANES, "debug-panes");

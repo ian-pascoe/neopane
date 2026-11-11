@@ -1,10 +1,16 @@
 -- neorex in Neovim: every window except one hidden anchor per tab page is
--- external, shown in its own Rex pane. Run once with nvim_exec_lua(chan,
--- cols, rows); returns { first window, its anchor }.
-local chan, cols, rows = ...
+-- external, shown in its own Rex pane. Run once with nvim_exec_lua(tool,
+-- tool_title, chan, cols, rows), `tool` the tool's name and `tool_title`
+-- it capitalised; returns { first window, its anchor }.
+local tool, tool_title, chan, cols, rows = ...
 local api = vim.api
 local M = {}
-_G.neorex = M
+_G[tool] = M
+
+-- tells the daemon: the note `<tool>_<method>`
+local function note(method, ...)
+  vim.rpcnotify(chan, tool .. '_' .. method, ...)
+end
 
 -- tab page -> anchor window
 local anchors = {}
@@ -25,7 +31,7 @@ local focused = {}
 local closing_ours = false
 -- the tab page closing, with every window in it
 local closing_tab
-local group = api.nvim_create_augroup('neorex', {})
+local group = api.nvim_create_augroup(tool, {})
 
 local function is_anchor(win)
   for _, a in pairs(anchors) do
@@ -115,7 +121,7 @@ local making_anchor = false
 local function anchor_buf()
   local buf = api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = 'wipe'
-  vim.b[buf].neorex_anchor = true
+  vim.b[buf][tool .. '_anchor'] = true
   return buf
 end
 
@@ -435,7 +441,7 @@ local function refresh_layout(tab)
   local key = table.concat(flat, ',')
   if t.told == key or (t.told == nil and #flat == 0) then return end
   t.told = key
-  vim.rpcnotify(chan, 'neorex_layout', tab, flat)
+  note('layout', tab, flat)
 end
 
 -- after the command that changed it, which may change it more
@@ -550,7 +556,7 @@ api.nvim_create_autocmd({ 'SafeState', 'WinResized' }, { group = group, callback
 -- keys the user typed, not ones a plugin runs with :normal or feedkeys
 vim.on_key(function(_, typed)
   if typed ~= '' then last_activity = now_ms() end
-end, api.nvim_create_namespace('neorex'))
+end, api.nvim_create_namespace(tool))
 
 --- Closes `win`, whose pane went away. Unsaved changes stay in its buffer.
 function M.close(win)
@@ -623,7 +629,7 @@ api.nvim_create_autocmd('WinNew', {
       if api.nvim_win_get_config(win).relative == '' and not anchor_of(tab) then
         floating[tab] = floating[tab] or { back = last }
         home[win] = tab
-        vim.rpcnotify(chan, 'neorex_split', win, false, false, 0, tab)
+        note('split', win, false, false, 0, tab)
         schedule_layout(tab)
       end
       return
@@ -636,7 +642,7 @@ api.nvim_create_autocmd('WinNew', {
       local view = api.nvim_win_call(from, vim.fn.winsaveview)
       vim.fn.winrestview(view)
     end
-    vim.rpcnotify(chan, 'neorex_split', win, dir == 'row', first, shown(from) and from or 0, floating[tab] and tab or 0)
+    note('split', win, dir == 'row', first, shown(from) and from or 0, floating[tab] and tab or 0)
     if floating[tab] then schedule_layout(tab) end
   end,
 })
@@ -666,7 +672,7 @@ local function evict(tab)
   local a = anchor_of(tab)
   if not a then return false end
   local buf = api.nvim_win_get_buf(a)
-  if vim.b[buf].neorex_anchor then return false end
+  if vim.b[buf][tool .. '_anchor'] then return false end
   local to = anchor_target(tab)
   if not to then return false end
   local view = api.nvim_win_call(a, vim.fn.winsaveview)
@@ -720,11 +726,11 @@ local function report()
   -- a float shows in the pane it floats over, which stays focused, unless
   -- it's in a Rex floating pane: the daemon decides
   if api.nvim_win_get_config(cur).relative ~= '' then
-    vim.rpcnotify(chan, 'neorex_float', cur)
+    note('float', cur)
     return
   end
   last = cur
-  vim.rpcnotify(chan, 'neorex_win', cur)
+  note('win', cur)
 end
 
 -- after the command that moved, so :windo and friends report once
@@ -740,7 +746,7 @@ api.nvim_create_autocmd('WinEnter', {
     -- redraw that first shows it
     local win = api.nvim_get_current_win()
     note_focus(win)
-    if api.nvim_win_get_config(win).relative ~= '' then vim.rpcnotify(chan, 'neorex_entered', win) end
+    if api.nvim_win_get_config(win).relative ~= '' then note('entered', win) end
     schedule_report()
   end,
 })
@@ -761,7 +767,7 @@ for key, synonyms in pairs(directions) do
   local function move()
     local count = vim.v.count1
     if shown(api.nvim_get_current_win()) then
-      vim.rpcnotify(chan, 'neorex_direction', key, count)
+      note('direction', key, count)
     else
       vim.cmd(count .. 'wincmd ' .. key)
     end
@@ -779,7 +785,7 @@ local function report_tabline()
   local n = (stal == 2 or (stal == 1 and #api.nvim_list_tabpages() > 1)) and 1 or 0
   if n == tabline_rows then return end
   tabline_rows = n
-  vim.rpcnotify(chan, 'neorex_tabline', n)
+  note('tabline', n)
 end
 -- whenever Neovim waits for input: plugins such as bufferline set
 -- 'showtabline' in their own autocommands, which fire no OptionSet. Not
@@ -798,7 +804,7 @@ api.nvim_create_autocmd({ 'TabNew', 'TabClosed' }, {
 -- vim.o.columns reading as it.
 local tabline_width
 -- what a `%!` 'tabline' is set to while it's fitted
-local wrapper = '%!v:lua.neorex.tabline()'
+local wrapper = '%!v:lua.' .. tool .. '.tabline()'
 -- The last 'tabline' we padded: { orig = what a user or plugin set, padded =
 -- what we set it to }, or nil. Only that exact string is ours: any other
 -- value is a new orig, so we never parse or strip a suffix.
@@ -831,7 +837,7 @@ end
 -- 0.12's draw_tabline, labelling each tab page from its own windows and
 -- laid out to the tabline width. 'tabline' reads this while a user or plugin
 -- leaves it empty, and only this exact value is ours.
-local builtin_copy = '%!v:lua.neorex.builtin_tabline()'
+local builtin_copy = '%!v:lua.' .. tool .. '.builtin_tabline()'
 
 -- `s`'s characters, each with any that combine with it
 local function chars(s)
@@ -936,7 +942,7 @@ end
 -- The copy's groups for the built-in's: a 'tabline' draws every group
 -- combined over TabLineFill, so these stand for the built-in's own, each
 -- drawn as it is (see `sync_tabline_groups`). TabLineFill needs none.
-local tabline_groups = { TabLineSel = 'NeorexTabLineSel', TabLine = 'NeorexTabLine' }
+local tabline_groups = { TabLineSel = tool_title .. 'TabLineSel', TabLine = tool_title .. 'TabLine' }
 
 -- Cells such as `lay_out_tabline` gives as a 'tabline' format string
 local function tabline_format(row)
@@ -950,7 +956,7 @@ local function tabline_format(row)
       elseif click == 'close' then
         out[#out + 1] = '%999X'
       elseif click == 'next' then
-        out[#out + 1] = '%@v:lua.neorex.tabline_click@'
+        out[#out + 1] = '%@v:lua.' .. tool .. '.tabline_click@'
       else
         out[#out + 1] = '%' .. click .. 'T'
       end
@@ -1123,7 +1129,7 @@ function M.set_tabline_width(cols)
   if cols == vim.NIL then cols = nil end
   if cols == tabline_width then return end
   tabline_width = cols
-  vim.g.neorex_tabline_width = cols
+  vim.g[tool .. '_tabline_width'] = cols
   fit_tabline()
   vim.cmd.redrawtabline()
 end
@@ -1150,7 +1156,7 @@ local function report_cmdheight()
   local n = vim.o.cmdheight
   if n == cmdheight then return end
   cmdheight = n
-  vim.rpcnotify(chan, 'neorex_cmdheight', n)
+  note('cmdheight', n)
 end
 -- whenever Neovim waits for input, since autocommands that set it fire no
 -- OptionSet, and a tab page change brings its own. Not scheduled: SafeState
@@ -1273,7 +1279,7 @@ local function close_tab(tab)
   end
   floating[tab] = nil
   -- the daemon forgets its layout, if it has one
-  if t.told and t.told ~= '' then vim.rpcnotify(chan, 'neorex_layout', tab, {}) end
+  if t.told and t.told ~= '' then note('layout', tab, {}) end
   -- back to the window it opened over
   if not (last and api.nvim_win_is_valid(last)) then last = t.back end
   if not api.nvim_tabpage_is_valid(tab) or #api.nvim_list_tabpages() == 1 then return end
@@ -1292,7 +1298,7 @@ local function reopen(win, from, enter)
   local view = api.nvim_win_call(win, vim.fn.winsaveview)
   local t = floating[from]
   if t then t.reopening = (t.reopening or 0) + 1 end
-  vim.rpcnotify(chan, 'neorex_reopen', win)
+  note('reopen', win)
   vim.schedule(function()
     -- first, so an error below can't stop its layout for good
     if t then t.reopening = t.reopening - 1 end
@@ -1308,7 +1314,7 @@ local function reopen(win, from, enter)
     for _, f in pairs(floating) do
       if f.back == win then f.back = new end
     end
-    vim.rpcnotify(chan, 'neorex_reopened', win, new)
+    note('reopened', win, new)
     -- unless the tab page closed meanwhile
     if t and floating[from] == t then
       if t.layout then swap_win(t.layout, win, new) end

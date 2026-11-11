@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 
 use super::Result;
+use crate::name::NAME;
 use crate::nvim::forwarder::Forwarder;
 use crate::nvim::msgpack::{Decoder, Token};
 use crate::nvim::nvim::{Nvim, UiOptions};
@@ -135,7 +136,7 @@ fn print_message(nvim: &mut Nvim, out: &mut Vec<u8>, msg: &rpc::Message) -> Resu
             out.extend_from_slice(b"request ");
             out.extend_from_slice(method);
             out.extend_from_slice(b" (refused)\r\n");
-            nvim.respond_error(*id, "neorex debug-events serves no requests")?;
+            nvim.respond_error(*id, &format!("{NAME} debug-events serves no requests"))?;
         }
         rpc::Message::Notification { method, params } => {
             if *method != b"redraw" {

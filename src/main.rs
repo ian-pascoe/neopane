@@ -3,30 +3,35 @@ use std::process::ExitCode;
 
 use neorex::daemon::{launch, pane_helper, serve};
 use neorex::debug;
+use neorex::name::NAME;
 
-const USAGE: &str = "\
-usage: neorex [nvim args]    open Neovim in this pane
-       neorex <command>
+fn usage() -> String {
+    format!(
+        "\
+usage: {NAME} [nvim args]    open Neovim in this pane
+       {NAME} <command>
 
 commands:
   debug-keys                 show each key, paste, focus and mouse event as you type
   debug-events [nvim args]   run Neovim and print the redraw events it sends
-  debug-tui [nvim args]      run Neovim in this terminal through neorex's renderer
+  debug-tui [nvim args]      run Neovim in this terminal through {NAME}'s renderer
   debug-panes SOCKET         stand-in daemon: drive the terminals of panes that connect
   debug-rex SOCKET           open a split in this Rex session and drive its pane; print Rex events
   pane SOCKET [ID]           hand this terminal to the daemon at SOCKET, then wait
   help                       show this help
 
-neorex runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
+{NAME} runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
 to find its pane. Only debug-rex reads them, of the debug commands.
 
-The daemon logs to `log` in its private directory, neorex-<launcher pid>.XXXXXX in
+The daemon logs to `log` in its private directory, {NAME}-<launcher pid>.XXXXXX in
 $XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
 On a clean exit (Neovim quits or crashes, the last pane closes, or a signal) the
 daemon removes the log.
 When the daemon itself fails, the log and directory stay, and if it failed to start,
-neorex prints the log's path.
-";
+{NAME} prints the log's path.
+"
+    )
+}
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -51,7 +56,7 @@ fn run() -> Result<()> {
     let rest: &[OsString] = if args.len() >= 2 { &args[2..] } else { &[] };
 
     if cmd == "help" || cmd == "-h" || cmd == "--help" {
-        eprint!("{USAGE}");
+        eprint!("{}", usage());
         return Ok(());
     }
     if cmd == "debug-keys" && rest.is_empty() {
@@ -92,7 +97,7 @@ fn run() -> Result<()> {
 
 /// Prints the usage and exits with status 2.
 fn usage_exit() -> ! {
-    eprint!("{USAGE}");
+    eprint!("{}", usage());
     std::process::exit(2);
 }
 
@@ -127,7 +132,8 @@ fn parse_u32(s: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{USAGE, parse_u32};
+    use super::{parse_u32, usage};
+    use neorex::name::NAME;
 
     #[test]
     fn help_says_where_the_log_is() {
@@ -137,9 +143,9 @@ mod tests {
             "REX_BLOCK",
             "XDG_RUNTIME_DIR",
             "TMPDIR",
-            "`log` in its private directory, neorex-<launcher pid>.XXXXXX",
+            &format!("`log` in its private directory, {NAME}-<launcher pid>.XXXXXX"),
         ] {
-            assert!(USAGE.contains(want), "{want}");
+            assert!(usage().contains(want), "{want}");
         }
     }
 

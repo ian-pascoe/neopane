@@ -257,6 +257,7 @@ pub(crate) fn parse_hello(bytes: &[u8]) -> Result<Option<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::NAME;
 
     #[test]
     fn hello_carries_the_id() {
@@ -297,7 +298,7 @@ mod tests {
     /// A hello over a real socket, with a terminal fd.
     #[test]
     fn accept_hello_takes_the_terminal_and_the_id() {
-        let path = std::env::temp_dir().join(format!("neorex-ph-{}.sock", std::process::id()));
+        let path = std::env::temp_dir().join(format!("{NAME}-ph-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let server = UnixListener::bind(&path).unwrap();
         let client = UnixStream::connect(&path).unwrap();

@@ -12,6 +12,7 @@ use super::Result;
 use super::pane_host::PaneHost;
 use super::panes as debug_panes;
 use crate::daemon::event_loop::{Event, Loop};
+use crate::name::NAME;
 use crate::rex::client::{self, Client, Message, ResponseResult};
 
 const TOKEN_SIGNAL: usize = 0;
@@ -76,7 +77,7 @@ fn serve(
 ) -> Result<()> {
     event_loop.add_read(server.as_raw_fd(), TOKEN_SERVER)?;
 
-    let mut rex = Client::connect(server_url)?;
+    let mut rex = Client::connect(server_url, NAME)?;
     event_loop.add_read(rex.fd(), TOKEN_REX)?;
     eprintln!("debug-rex: connected to {server_url}. Ctrl+C quits.");
 
@@ -144,7 +145,7 @@ fn serve(
                                         "layout".into(),
                                         json!({ "block": {
                                             "flavor": "com.superlogical.terminal.shell",
-                                            "label": "neorex",
+                                            "label": NAME,
                                             "options": {
                                                 "shell": "none",
                                                 "command": [exe, "pane", socket_path],

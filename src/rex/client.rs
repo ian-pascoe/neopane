@@ -173,12 +173,18 @@ impl Client {
         }
     }
 
-    /// Connects to `server_url` (`REX_SERVER`), then exchanges hello and welcome.
-    /// Blocks until welcomed.
-    pub(crate) fn connect(server_url: &str) -> Result<Client, ClientError> {
+    /// Connects to `server_url` (`REX_SERVER`), then exchanges hello and welcome,
+    /// as the client `client_name`. Blocks until welcomed.
+    pub(crate) fn connect(server_url: &str, client_name: &str) -> Result<Client, ClientError> {
         let mut path_buf = [0u8; 256];
         let path = socket_path(server_url, &mut path_buf)?;
         let stream = UnixStream::connect(Path::new(std::ffi::OsStr::from_bytes(path)))?;
+        Client::handshake(stream, client_name)
+    }
+
+    /// Upgrades `stream`, a new connection to Rex, then exchanges hello and
+    /// welcome as the client `client_name`. Blocks until welcomed.
+    fn handshake(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
         let mut me = Client::from_stream(stream);
         // not upgraded yet: nothing to close
         me.open = false;
@@ -212,7 +218,7 @@ impl Client {
         let hello = serde_json::to_vec(&json!({
             "type": "hello",
             "api_revision": API_REVISION,
-            "client": { "kind": "other", "name": "neorex" },
+            "client": { "kind": "other", "name": client_name },
         }))?;
         send_frame(&me.stream, &mut me.frame, Opcode::Text, &hello)?;
 
@@ -474,6 +480,7 @@ fn eql(a: Option<&str>, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::NAME;
 
     fn parse_sample(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
@@ -610,7 +617,7 @@ mod tests {
             eprintln!("skipping: REX_SERVER is not set");
             return;
         };
-        let mut c = Client::connect(&url).unwrap();
+        let mut c = Client::connect(&url, NAME).unwrap();
         assert!(c.max_message >= 65536);
 
         let id = c.request("server.version", None).unwrap();
@@ -621,13 +628,85 @@ mod tests {
         assert!(!get_str(payload, "rex_version").unwrap().is_empty());
 
         let bad = c
-            .request("neorex.no_such_method", Some(&json!({ "x": 1 })))
+            .request(&format!("{NAME}.no_such_method"), Some(&json!({ "x": 1 })))
             .unwrap();
         let ResponseResult::Err(e) = wait_for(&mut c, bad).unwrap().result else {
             panic!("expected an error");
         };
         assert_eq!("method_not_found", e.code);
         assert_eq!(404, e.status);
+    }
+
+    /// Reads one masked frame from `stream` and returns its payload.
+    fn read_client_frame(stream: &mut UnixStream) -> Vec<u8> {
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).unwrap();
+        let len = match head[1] & 0x7f {
+            126 => {
+                let mut n = [0u8; 2];
+                stream.read_exact(&mut n).unwrap();
+                u16::from_be_bytes(n) as usize
+            }
+            127 => panic!("a frame too big for a hello"),
+            n => n as usize,
+        };
+        let mut mask = [0u8; 4];
+        stream.read_exact(&mut mask).unwrap();
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).unwrap();
+        body.iter()
+            .enumerate()
+            .map(|(k, b)| b ^ mask[k % 4])
+            .collect()
+    }
+
+    // The hello names the client as the caller asked: Rex shows it.
+    #[test]
+    fn hello_names_the_client() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while web_socket::head_end(&head).is_none() {
+                theirs.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let key = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            let accept = web_socket::accept_for(key.as_bytes().try_into().unwrap());
+            let accept = std::str::from_utf8(&accept).unwrap();
+            write!(
+                theirs,
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
+                 Sec-WebSocket-Protocol: {PROTOCOL}\r\n\r\n"
+            )
+            .unwrap();
+            let hello: Value = serde_json::from_slice(&read_client_frame(&mut theirs)).unwrap();
+            let welcome = json!({
+                "type": "welcome",
+                "protocol": PROTOCOL,
+                "limits": { "max_message_bytes": 65536 },
+            })
+            .to_string();
+            // a server frame is unmasked
+            let mut frame = vec![0x81, 126];
+            frame.extend_from_slice(&(welcome.len() as u16).to_be_bytes());
+            frame.extend_from_slice(welcome.as_bytes());
+            theirs.write_all(&frame).unwrap();
+            hello
+        });
+        let c = Client::handshake(ours, "sometool").unwrap();
+        let hello = server.join().unwrap();
+        assert_eq!("hello", hello["type"]);
+        assert_eq!(
+            json!({ "kind": "other", "name": "sometool" }),
+            hello["client"]
+        );
+        assert_eq!(65536, c.max_message);
     }
 
     // The bytes a request puts on the wire.

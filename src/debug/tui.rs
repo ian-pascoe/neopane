@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 
 use super::Result;
+use crate::name::NAME;
 use crate::nvim::forwarder::Forwarder;
 use crate::nvim::nvim::{Nvim, UiOptions};
 use crate::nvim::rpc;
@@ -122,7 +123,7 @@ fn drive<S: AsRef<OsStr>>(
                     }
                     // nothing here serves requests; neovim would wait forever
                     rpc::Message::Request { id, .. } => {
-                        nvim.respond_error(id, "neorex debug-tui serves no requests")?;
+                        nvim.respond_error(id, &format!("{NAME} debug-tui serves no requests"))?;
                     }
                     rpc::Message::Response { .. } => {}
                 }

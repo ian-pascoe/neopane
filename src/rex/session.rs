@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::client::{self, Client, ClientError};
 use super::ids;
 use super::web_socket::Close;
+use crate::name::NAME;
 
 /// What a request asked for; tags match Rex's methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +221,7 @@ impl Session {
 
     /// Any Rex error closes Rex: the windows keep working without it.
     fn close_rex(&mut self, reason: &str) {
-        eprintln!("neorex daemon: Rex {reason}, treating it as closed");
+        eprintln!("{NAME} daemon: Rex {reason}, treating it as closed");
         self.conn = Conn::Closed;
     }
 
@@ -485,11 +486,11 @@ impl Session {
     fn on_closed(&mut self, c: &Close) {
         match c.code {
             Some(code) => eprintln!(
-                "neorex daemon: Rex closed {code} {}",
+                "{NAME} daemon: Rex closed {code} {}",
                 String::from_utf8_lossy(&c.reason)
             ),
             None => eprintln!(
-                "neorex daemon: Rex closed null {}",
+                "{NAME} daemon: Rex closed null {}",
                 String::from_utf8_lossy(&c.reason)
             ),
         }
@@ -732,11 +733,11 @@ fn find_focused_block(snapshot: &Value) -> Option<ids::Block> {
 pub(crate) fn log_request_error(req: Request, e: &client::Error) {
     match req {
         Request::NewSplit(pane) => eprintln!(
-            "neorex daemon: Rex new_split for pane {pane} failed: {}: {}",
+            "{NAME} daemon: Rex new_split for pane {pane} failed: {}: {}",
             e.code, e.message
         ),
         _ => eprintln!(
-            "neorex daemon: Rex {} failed: {}: {}",
+            "{NAME} daemon: Rex {} failed: {}: {}",
             req.tag_name(),
             e.code,
             e.message
@@ -746,7 +747,7 @@ pub(crate) fn log_request_error(req: Request, e: &client::Error) {
 
 /// Rex said yes, in a shape we can't read.
 fn log_unexpected_response(req: Request, what: &str) {
-    eprintln!("neorex daemon: Rex {} answer has no {what}", req.tag_name());
+    eprintln!("{NAME} daemon: Rex {} answer has no {what}", req.tag_name());
 }
 
 // These check the JSON written to Rex and the view/focus flow.
