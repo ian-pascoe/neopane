@@ -113,17 +113,13 @@ fn attach_stdin(address: &Address, how: &Attach) -> Exit {
         Ok(stream) => attach_on(stream, tty, how, Some(&mut signals)),
         Err(e) => Exit::fail(format!("can't connect to {address}: {e}")),
     };
-    let exit = match (&exit.message, how.want) {
-        (Some(m), Want::SelfAttach) if exit.status != 0 && !shell_job() => {
-            eprint!("{NAME}: {m} (press a key)");
-            wait_for_key(tty, Some(&mut signals));
-            eprintln!();
-            Exit {
-                message: None,
-                ..exit
-            }
+    let exit = match how.want {
+        Want::SelfAttach => {
+            let mut stderr = io::stderr();
+            let due = how.started + how.min_life;
+            hold_failure(exit, tty, shell_job(), due, &mut stderr, Some(&mut signals))
         }
-        _ => exit,
+        Want::Requested(_) => exit,
     };
     signals.deinit();
     exit
@@ -243,6 +239,10 @@ fn attach_with(
             return Exit::fail(message);
         }
         Answer::Signalled => {
+            // `a` and `u` may have come all the same
+            if let Some(undo) = reader.latest_undo(&mut stream) {
+                restore.undo = undo;
+            }
             drop(stream);
             restore.stopped();
             return Exit::signalled();
@@ -299,6 +299,9 @@ fn attach_with(
         {
             let fired = s.drain().unwrap_or_default();
             if stopping(fired) {
+                if let Some(undo) = reader.latest_undo(&mut stream) {
+                    restore.undo = undo;
+                }
                 drop(stream);
                 restore.stopped();
                 return Exit::signalled();
@@ -448,6 +451,61 @@ pub(crate) fn wait_for_key(tty: RawFd, mut signals: Option<&mut Signals>) {
     saved.restore();
 }
 
+/// The launcher's failure before it could attach, such as a daemon that
+/// didn't start, held as a failed self-attach is: see `hold_failure`.
+/// `started` is when the launcher started.
+pub fn launcher_failed(message: String, started: Instant) -> Exit {
+    let exit = Exit::fail(message);
+    let tty = libc::STDIN_FILENO;
+    // a key wait ended by a stopping signal still restores the terminal
+    let Ok(mut signals) = Signals::init(&STOPPING) else {
+        return exit;
+    };
+    let job = shell_job();
+    let exit = hold_failure(
+        exit,
+        tty,
+        job,
+        started + MIN_LIFE,
+        &mut io::stderr(),
+        Some(&mut signals),
+    );
+    signals.deinit();
+    exit
+}
+
+/// A failed self-attach's exit, once its line is shown: on terminal `tty`,
+/// unless a shell started it as a `job`, it writes the line to `out` with
+/// ` (press a key)` no sooner than `due`, and waits for a key, so the line
+/// stays on a terminal that closes as it exits. The exit then has no line
+/// left to print. Any other exit is left as it is.
+pub(crate) fn hold_failure(
+    exit: Exit,
+    tty: RawFd,
+    job: bool,
+    due: Instant,
+    out: &mut dyn Write,
+    signals: Option<&mut Signals>,
+) -> Exit {
+    // SAFETY: `isatty` only inspects the fd.
+    let terminal = unsafe { libc::isatty(tty) } == 1;
+    let Some(m) = exit.message.as_ref().filter(|_| exit.status != 0) else {
+        return exit;
+    };
+    if job || !terminal {
+        return exit;
+    }
+    wait_out(due);
+    let _ = write!(out, "{NAME}: {m} (press a key)");
+    let _ = out.flush();
+    wait_for_key(tty, signals);
+    let _ = writeln!(out);
+    Exit {
+        message: None,
+        ..exit
+    }
+}
+
 /// A process's group and session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ids {
@@ -592,6 +650,20 @@ impl Reader {
         }
         self.buf.extend_from_slice(&chunk[..n]);
         Ok(())
+    }
+
+    /// The latest `u` among what the daemon has sent, read without
+    /// waiting; None if it sent none.
+    fn latest_undo(&mut self, stream: &mut UnixStream) -> Option<Vec<u8>> {
+        let _ = stream.set_nonblocking(true);
+        while self.read_more(stream).is_ok() {}
+        let mut latest = None;
+        while let Ok(Some(m)) = self.decoded() {
+            if let Message::Undo(undo) = m {
+                latest = Some(undo);
+            }
+        }
+        latest
     }
 
     /// The next whole message in the buffer, if any. Unknown kinds are
@@ -1066,6 +1138,81 @@ mod tests {
         assert_eq!(b"\x18\x1b\\<undo>", &run.shown[..]);
         assert!(run.restored && run.blocking);
         assert!(run.took < Duration::from_secs(30));
+    }
+
+    /// A signal while the answer is awaited: `a` and `u` came, unread, and
+    /// the undo bytes are written all the same.
+    #[test]
+    fn a_signal_during_the_answer_wait_writes_the_undo_already_sent() {
+        let _one = crate::term::signals::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut signals = Signals::init(&STOPPING).unwrap();
+        let (master, slave) = open_pty(80, 24);
+        let before = raw::settings(slave);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        // sent before the hello, and the signal before the wait: the wait
+        // finds both, and the signal goes first
+        send(&theirs, accept());
+        send(&theirs, undo(b"<undo>"));
+        unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+        let sink = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut &theirs, &mut std::io::sink());
+        });
+        let how = Attach::new(Want::Requested(pane()), Transport::Fd);
+        let exit = attach_on(ours, slave, &how, Some(&mut signals));
+        signals.deinit();
+        sink.join().unwrap();
+        assert_eq!(Exit::signalled(), exit);
+        assert_eq!(b"\x18\x1b\\<undo>", &drain(master)[..]);
+        assert!(raw::same(&before, &raw::settings(slave)));
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+    }
+
+    #[test]
+    fn a_failure_waits_for_a_key_unless_a_shell_job_or_no_terminal() {
+        let (master, slave) = open_pty(80, 24);
+        let due = Instant::now() + Duration::from_millis(150);
+        let typist = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(1, unsafe { libc::write(master, b"x".as_ptr().cast(), 1) });
+            master
+        });
+        let mut out = Vec::new();
+        let exit = hold_failure(Exit::fail("boom"), slave, false, due, &mut out, None);
+        assert!(Instant::now() >= due + Duration::from_millis(100));
+        let master = typist.join().unwrap();
+        // shown, so not printed again
+        assert_eq!((1, None), (exit.status, exit.message));
+        let shown = format!("{NAME}: boom (press a key)\n");
+        assert_eq!(shown.as_bytes(), &out[..]);
+
+        // a shell's job: left to print its line, at once
+        let mut out = Vec::new();
+        let late = Instant::now() + Duration::from_secs(30);
+        let exit = hold_failure(Exit::fail("boom"), slave, true, late, &mut out, None);
+        assert_eq!(Exit::fail("boom"), exit);
+        assert!(out.is_empty());
+        // no terminal
+        let mut fds = [0; 2];
+        assert_eq!(0, unsafe { libc::pipe(fds.as_mut_ptr()) });
+        let exit = hold_failure(Exit::fail("boom"), fds[0], false, late, &mut out, None);
+        assert_eq!(Exit::fail("boom"), exit);
+        // a success
+        assert_eq!(
+            Exit::ok(),
+            hold_failure(Exit::ok(), slave, false, late, &mut out, None)
+        );
+        assert!(out.is_empty());
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+            libc::close(master);
+            libc::close(slave);
+        }
     }
 
     #[test]

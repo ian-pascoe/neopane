@@ -187,7 +187,7 @@ too.
 | `closed` / `stopped` / `detached` | 0 | nothing | no |
 | `quit` | a self-attach: Neovim's own status (`exit`); a requested pane: 0 | nothing | no |
 | a requested attach refused `pane-expired` or `stopping` | 0 | nothing | no |
-| any other refusal, `failed`, daemon gone, no answer in 10 s, can't connect, not a terminal | 1 | `<name>: <message>` on stderr | a self-attach only, unless a shell started it as a job (its parent in the same session, another process group); on Windows, when it is the console's only process; never when stdin isn't a terminal |
+| any other refusal, `failed`, daemon gone, no answer in 10 s, can't connect, not a terminal; the launcher's failures before it attaches, such as a daemon that didn't start | 1 | `<name>: <message>` on stderr | a self-attach only, unless a shell started it as a job (its parent in the same session, another process group); on Windows, when it is the console's only process; never when stdin isn't a terminal |
 | usage | 2 | usage | no |
 
 The helper never exits within 300 ms of starting, except by a signal.
