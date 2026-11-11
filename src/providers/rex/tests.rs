@@ -244,8 +244,149 @@ fn method_not_found_is_unsupported_and_any_other_error_fails() {
 #[test]
 fn what_rex_has_no_request_for_is_unsupported() {
     let (mut p, _theirs) = rex();
-    p.ask(AskId(9), Ask::ReportLayout);
+    p.ask(
+        AskId(9),
+        Ask::Focus {
+            terminal: TerminalId::from("block:o"),
+        },
+    );
     assert_eq!(vec![answered(9, Outcome::Unsupported)], events(&mut p));
+}
+
+fn window_id(n: u32) -> String {
+    format!("window:00000000-0000-0000-0000-{n:0>12}")
+}
+
+/// A Rex block id, as Rex's views name blocks.
+fn block_id(n: u32) -> String {
+    format!("block:00000000-0000-0000-0000-{n:0>12}")
+}
+
+/// Rex's view changes to `windows`, at revision `rev`, its view fetch
+/// being request `id`.
+fn view_changes(p: &mut RexProvider, theirs: &mut UnixStream, id: u64, rev: i64, windows: Value) {
+    let changed = json!({ "type": "event", "seq": 0, "payload": {
+        "type": "session_view_changed", "payload": { "revision": rev } } });
+    theirs
+        .write_all(&server_frame(&changed.to_string()))
+        .unwrap();
+    p.on_ready(0);
+    let view = json!({ "revision": rev, "active_window_id": window_id(2),
+        "windows": windows });
+    reply(p, theirs, id, view);
+}
+
+#[test]
+fn each_view_is_told_as_a_live_layout_and_report_layout_answers_the_last() {
+    let (mut p, mut theirs) = rex();
+    assert!(p.capabilities().has(Capability::ReportLayout));
+    assert!(p.capabilities().has(Capability::Events));
+    // no view yet: nothing to report
+    p.ask(AskId(1), Ask::ReportLayout);
+    assert_eq!(
+        vec![answered(1, Outcome::Failed("no view from Rex yet".into()))],
+        events(&mut p)
+    );
+
+    let (a, b) = (block_id(1), block_id(2));
+    let windows = json!([
+        { "window_id": window_id(1), "focused_block_id": a, "layers": [
+            { "kind": "tiled", "layout": { "block_id": a, "rect": [0, 0, 1, 1] } } ] },
+        { "window_id": window_id(2), "focused_block_id": b, "layers": [
+            { "kind": "tiled", "layout": { "block_id": b, "rect": [0, 0, 1, 1] } } ] },
+    ]);
+    view_changes(&mut p, &mut theirs, 1, 1, windows);
+    let told = events(&mut p);
+    let [ProviderEvent::Layout(l)] = &told[..] else {
+        panic!("{told:?}");
+    };
+    assert_eq!(
+        vec![window_id(1), window_id(2)],
+        l.areas.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+    );
+    // the active window's focused block
+    assert_eq!(Some(TerminalId::from(b.as_str())), l.current);
+
+    p.ask(AskId(2), Ask::ReportLayout);
+    assert_eq!(
+        vec![answered(2, Outcome::Done(Answer::Layout(l.clone())))],
+        events(&mut p)
+    );
+}
+
+fn open_float(origin: &str) -> Ask {
+    Ask::OpenFloat {
+        pane: pane(),
+        attach: attach(),
+        title: String::new(),
+        origin: TerminalId::from(origin),
+        x: 11,
+        y: 6,
+        cols: 37,
+        rows: 18,
+        origin_cols: 100,
+        origin_rows: 40,
+        area_bounds: None,
+    }
+}
+
+#[test]
+fn a_float_groups_block_is_framed_and_a_layer_opens_in_its_origins_window() {
+    let (mut p, mut theirs) = rex();
+    p.ask(AskId(1), open_float("block:a"));
+    reply(&mut p, &mut theirs, 1, json!({ "block_ids": ["block:f"] }));
+    reply(&mut p, &mut theirs, 2, json!({}));
+    events(&mut p);
+    let bounds = [0.1, 0.125, 0.4, 0.5];
+    let windows = json!([
+        { "window_id": window_id(1), "layers": [
+            { "kind": "tiled", "layout": { "block_id": "block:a", "rect": [0, 0, 1, 1] } } ] },
+        { "window_id": window_id(2), "layers": [
+            { "kind": "tiled", "layout": { "block_id": "block:b", "rect": [0, 0, 1, 1] } },
+            { "kind": "floating", "bounds": bounds, "blocks": [ { "block_id": "block:f" } ],
+              "layout": { "block_id": "block:f", "rect": [0, 0, 1, 1] } } ] },
+    ]);
+    view_changes(&mut p, &mut theirs, 3, 1, windows);
+    let told = events(&mut p);
+    let [ProviderEvent::Layout(l)] = &told[..] else {
+        panic!("{told:?}");
+    };
+    let f = &l.areas[1].terminals[1];
+    assert_eq!(
+        ("block:f", bounds, true, layout::FRAME_INSET),
+        (f.terminal.as_str(), f.rect, f.floating, f.inset)
+    );
+
+    // into the window of the origin: the first, not the active one
+    p.ask(AskId(2), open_float("block:a"));
+    p.ask(
+        AskId(3),
+        Ask::OpenTabPage {
+            pane: pane(),
+            attach: attach(),
+            title: String::new(),
+            origin: TerminalId::from("block:b"),
+            cols: 72,
+            rows: 21,
+        },
+    );
+    // an origin the last view didn't have: Rex's active window, not the last
+    p.ask(AskId(4), open_float("block:gone"));
+    let reqs = requests(p, theirs);
+    let layers: Vec<&Value> = reqs
+        .iter()
+        .filter(|(m, _)| m == "session.new_layer")
+        .map(|(_, v)| &v["window_id"])
+        .collect();
+    assert_eq!(
+        vec![
+            &Value::Null,
+            &json!(window_id(1)),
+            &json!(window_id(2)),
+            &Value::Null
+        ],
+        layers
+    );
 }
 
 /// Checks `p` told `Gone` once, and nothing after.

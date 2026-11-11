@@ -24,12 +24,12 @@ use super::event_loop::{Event, Kind, Loop};
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry, REX_DEFAULT_SIZE};
+use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd};
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, TerminalId};
-use super::rex_layout::LayoutSnapshot;
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
@@ -44,9 +44,9 @@ use crate::providers::Held;
 use crate::providers::rex::RexProvider;
 use crate::rex::session as rex_session;
 use crate::screen::float_groups;
-use crate::screen::grid::{Cell, Grid, blank_cut_wide};
+use crate::screen::grid::Cell;
 use crate::screen::grids::{Grids, WinKind};
-use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown};
+use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown, tabline_slice};
 use crate::term::input;
 use indexmap::IndexMap;
 
@@ -92,8 +92,10 @@ pub(crate) struct Daemon {
     /// Where Neovim has the windows of each tab page made after setup, as it
     /// last said, and what was done to place their panes to match.
     pub tab_layouts: IndexMap<i64, Tab>,
-    /// The Rex layout last applied to the panes.
-    pub rex_layout: Option<LayoutSnapshot>,
+    /// The live layout last applied to the panes.
+    pub live_layout: Option<LiveLayout>,
+    /// When the area timer is set to fire, if it is.
+    area_timer_due: Option<Instant>,
     /// When the escape timer is set to fire, if it is.
     escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
@@ -143,6 +145,7 @@ pub(crate) enum Token {
     EscapeTimer,
     HelloTimer,
     AskTimer,
+    AreaTimer,
 }
 
 impl Token {
@@ -159,13 +162,14 @@ impl Token {
             7 => Token::EscapeTimer,
             8 => Token::HelloTimer,
             9 => Token::AskTimer,
+            10 => Token::AreaTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::AskTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::AreaTimer as usize) < pane::TOKEN_BASE);
 
 /// The id `Pane::startup` gives the pane neorex was run in.
 const STARTUP_PANE_ID: u32 = 0;
@@ -179,7 +183,12 @@ const FOCUS_OUT_DELAY_MS: u32 = 80;
 /// a command that needs a key.
 const SWITCH_RECHECK_MS: u32 = 100;
 
-/// How long a new split waits for the app to size it before trusting its terminal's size.
+/// How long a new split waits for the app to size it before trusting its
+/// terminal's size.
+const SPLIT_SIZE_WAIT_MS: u32 = 1000;
+
+/// How long a requested pane whose terminal attached with its id waits for
+/// the live layout to report it, before it is its own layout area.
 const LAYOUT_WAIT_MS: u32 = 1000;
 
 /// A count on a directional window command repeats the move this many times
@@ -192,9 +201,6 @@ const MAX_MSG_ROWS: u32 = 1000;
 
 /// Most sizes kept for windows not yet in a pane.
 const MAX_PENDING_SIZES: usize = 16;
-
-/// Most cells of the tabline one pane draws.
-const TABLINE_MAX: usize = 256;
 
 /// Most grids kept out of the panes that aren't floating panes.
 const SKIP_MAX: usize = float_groups::MAX_GROUPS * 16;
@@ -276,7 +282,8 @@ impl Daemon {
             split_options: windows::SplitOptions::default(),
             pending_sizes: Vec::new(),
             tab_layouts: IndexMap::new(),
-            rex_layout: None,
+            live_layout: None,
+            area_timer_due: None,
             escape_timer_due: None,
             stopped: None,
             asks: Asks::default(),
@@ -301,6 +308,9 @@ impl Daemon {
         if let Some(r) = self.rex() {
             r.session.attach()?;
         }
+        // no requested pane: its own area until a live layout places it,
+        // drawn and fitted as before there was any
+        self.panes.by_id_mut(STARTUP_PANE_ID).unwrap().area = Area::Own;
         Ok(())
     }
 
@@ -358,6 +368,7 @@ impl Daemon {
             Some(Token::EscapeTimer) => self.flush_pending_escapes()?,
             Some(Token::HelloTimer) => self.time_out_hellos(Instant::now())?,
             Some(Token::AskTimer) => self.time_out_asks()?,
+            Some(Token::AreaTimer) => self.time_out_reports(Instant::now())?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -442,9 +453,16 @@ impl Daemon {
         Ok(())
     }
 
-    /// Tells Neovim the tabline width when it changed.
+    /// Tells Neovim the tabline width when it changed. While the current
+    /// pane is in no layout area, it stays.
     fn sync_tabline_width(&mut self) -> Result<()> {
-        let cols = self.geometry().tabline_width();
+        let Some(current) = self.current_pane() else {
+            return Ok(());
+        };
+        if current.area == Area::Unreported {
+            return Ok(());
+        }
+        let cols = self.geometry().tabline_width(current);
         self.nvim.tell_tabline_width(cols);
         self.nvim.client.flush()?;
         Ok(())
@@ -553,7 +571,7 @@ impl Daemon {
             .resize(u32::from(size.cols), u32::from(size.rows));
         let asked = self.size_window(id);
         let _ = self.floating().follow_layer(id);
-        if self.focused_pane_id() == Some(id) {
+        if self.current_pane_id() == Some(id) {
             self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         }
         self.nvim.client.flush()?;
@@ -711,7 +729,7 @@ impl Daemon {
         let from = self
             .panes
             .by_win(sp.from)
-            .or_else(|| self.focused_pane())
+            .or_else(|| self.current_pane())
             .filter(|p| p.layer.is_none() && p.tab == 0);
         let Some(id) = from.map(|p| p.id) else {
             return;
@@ -907,7 +925,7 @@ impl Daemon {
             }
             self.nvim.ready = true;
             // its window is in its pane now: the editor can span the Rex window
-            if let Some(f) = self.focused_pane_id() {
+            if let Some(f) = self.current_pane_id() {
                 self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
             }
             self.reconcile()?;
@@ -922,7 +940,7 @@ impl Daemon {
         if self.nvim.switch_in_flight().is_some() {
             return Ok(());
         }
-        let from_tab = self.focused_pane().map(|p| p.tab);
+        let from_tab = self.current_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.nvim.current_win = win;
         let Some(p) = self.panes.by_win_mut(win) else {
@@ -1308,7 +1326,7 @@ impl Daemon {
         {
             return Some(p);
         }
-        self.focused_pane()
+        self.current_pane()
     }
 
     // The pane provider
@@ -1346,7 +1364,7 @@ impl Daemon {
         let p = self.provider.as_ref().map(Held::seam_ref);
         let open_float = self.asks.may_ask(p, Capability::OpenFloat);
         let origin = self
-            .focused_pane()
+            .current_pane()
             .and_then(|f| f.terminal.clone())
             .or_else(|| self.any_terminal(|_| true));
         for ask in self.floating().reconcile_layers(open_float, origin) {
@@ -1371,14 +1389,14 @@ impl Daemon {
                         self.asks.answered(p.seam(), id, outcome, Instant::now());
                     }
                 }
-                ProviderEvent::Layout(snapshot) => self.on_layout(snapshot)?,
+                ProviderEvent::Layout(l) => self.on_live_layout(l)?,
                 ProviderEvent::Focused(t) => self.on_provider_focus(&t)?,
                 ProviderEvent::Closed(t) => {
                     if let Some(id) = self.panes.by_terminal(t.as_str()).map(|p| p.id) {
                         self.pane_gone(id)?;
                     }
                 }
-                ProviderEvent::Gone { reason } => self.provider_gone(&reason),
+                ProviderEvent::Gone { reason } => self.provider_gone(&reason)?,
             }
         }
         self.run_steps()?;
@@ -1386,14 +1404,17 @@ impl Daemon {
     }
 
     /// The pane provider failed as a whole: it's dropped, and every act
-    /// asked of it or waiting falls back.
-    fn provider_gone(&mut self, reason: &str) {
+    /// asked of it or waiting falls back. Its live layout goes: a pane it
+    /// hadn't reported is its own area, and the rest stay as they are.
+    fn provider_gone(&mut self, reason: &str) -> Result<()> {
         log_warn!("{NAME} daemon: dropping the pane provider: {reason}");
         if let Some(fd) = self.rex_ref().map(|r| r.session.client.fd()) {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
         self.asks.gone();
+        self.live_layout = None;
+        self.make_own(|p| p.area == Area::Unreported)
     }
 
     /// The ask timer fired: the acts whose time is up fail.
@@ -1429,6 +1450,7 @@ impl Daemon {
         while let Some(step) = self.asks.next_step() {
             match step {
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
+                Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_live_layout(l)?,
                 Step::Done(..) => {}
                 Step::FallBack(ask) => self.fall_back(ask)?,
                 Step::Warn(line) => {
@@ -1455,9 +1477,10 @@ impl Daemon {
         p.terminal = Some(t.clone());
         let handle = p.neovim_window_handle;
         // a layout that came before the terminal's id placed it already
-        if let Some(snapshot) = self.rex_layout.clone() {
-            self.on_layout(snapshot)?;
+        if let Some(l) = self.live_layout.clone() {
+            self.on_live_layout(l)?;
         }
+        self.wait_for_report(pane_id, Instant::now())?;
         match ask {
             Ask::OpenBeside { .. } => {
                 if handle == Some(self.nvim.current_win) {
@@ -1496,6 +1519,9 @@ impl Daemon {
     /// and a tab page's other windows ask for their own (#112 draws a window
     /// in its origin pane instead).
     fn fall_back(&mut self, ask: Ask) -> Result<()> {
+        if ask == Ask::ReportLayout {
+            return self.report_failed();
+        }
         let Some(attach_id) = opened_pane(&ask) else {
             return Ok(());
         };
@@ -1536,7 +1562,7 @@ impl Daemon {
         if win == self.nvim.current_win && self.nvim.current_float == 0 {
             return Ok(());
         }
-        let from_tab = self.focused_pane().map(|p| p.tab);
+        let from_tab = self.current_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.make_current(id)?;
         self.trace_tab_move(from_tab, id);
@@ -1559,52 +1585,149 @@ impl Daemon {
         from_tab.is_some_and(|from| self.panes.by_id(id).is_some_and(|p| p.tab != from))
     }
 
-    /// A newer view: where our panes sit, so the editor and floats fit. A view
-    /// that says what the last did, to panes that are as it left them, changes
-    /// nothing to size or draw.
-    fn on_layout(&mut self, snapshot: LayoutSnapshot) -> Result<()> {
-        let changed = self.apply_layout(&snapshot);
-        if !changed && self.rex_layout.as_ref() == Some(&snapshot) {
+    /// A live layout came: the panes it names join their areas (ADR 0008).
+    /// One that says what the last did, to panes that are as it left them,
+    /// changes nothing to size or draw. No terminal is moved.
+    fn on_live_layout(&mut self, l: LiveLayout) -> Result<()> {
+        let changed = self.apply_live_layout(&l);
+        if !changed && self.live_layout.as_ref() == Some(&l) {
             return Ok(());
         }
-        self.rex_layout = Some(snapshot);
-        // a pane moved to or from the top: the tabline's over it, or not
+        self.live_layout = Some(l);
+        self.arm_area_timer()?;
+        self.refit_to_areas()
+    }
+
+    /// Gives the panes `l` names their areas, and has the floats of a float
+    /// group pane the user moved follow it. A pane it doesn't name keeps its
+    /// area. Whether any pane's area changed.
+    fn apply_live_layout(&mut self, l: &LiveLayout) -> bool {
+        let mut changed = false;
+        for i in 0..self.panes.list.len() {
+            let p = &mut self.panes.list[i];
+            let Some(area) = p.terminal.as_ref().and_then(|t| l.area_of(t)) else {
+                continue;
+            };
+            p.report_due = None;
+            if p.area == area {
+                continue;
+            }
+            let (id, layer, rect) = (p.id, p.layer.is_some(), area.rect());
+            p.area = area;
+            changed = true;
+            if layer && let Some(rect) = rect {
+                self.floating().follow_moved_layer(id, rect);
+            }
+        }
+        changed
+    }
+
+    /// The panes' areas changed: windows fit their panes again, with or
+    /// without the tabline, Neovim's screen fits the current pane's area, and
+    /// everything is drawn.
+    fn refit_to_areas(&mut self) -> Result<()> {
         self.size_windows();
-        if let Some(f) = self.focused_pane_id() {
+        if let Some(f) = self.current_pane_id() {
             self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
         }
         self.nvim.client.flush()?;
         self.draw()
     }
 
-    /// Gives our panes their rects, remembers which Rex window holds them, and
-    /// has the floats of a floating pane the user moved follow it. Whether
-    /// any pane or the window differed from it.
-    fn apply_layout(&mut self, snapshot: &LayoutSnapshot) -> bool {
-        let mut changed = false;
-        for (block, rect) in &snapshot.rects {
-            if let Some(p) = self.panes.by_terminal_mut(block)
-                && p.rect != Some(*rect)
-            {
-                p.rect = Some(*rect);
-                changed = true;
+    /// Whether the pane provider can give a live layout.
+    fn reports_layouts(&self) -> bool {
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        self.asks.may_ask(p, Capability::ReportLayout)
+    }
+
+    /// Pane `id` may have just got the last of its terminal and its terminal
+    /// id: an `Unreported` one then waits a second for the live layout to
+    /// report it, and asks for a report of a pane provider that doesn't tell
+    /// them unasked. With no live layout to come, or no id to be found by,
+    /// it is its own layout area at once.
+    fn wait_for_report(&mut self, id: u32, now: Instant) -> Result<()> {
+        let reports = self.reports_layouts();
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return Ok(());
+        };
+        if p.area != Area::Unreported || p.terminal_surface.is_none() || p.report_due.is_some() {
+            return Ok(());
+        }
+        // a requested pane's id is on its way
+        if p.terminal.is_none() && p.attach_id.is_some() && reports {
+            return Ok(());
+        }
+        if !reports || p.terminal.is_none() {
+            p.area = Area::Own;
+            // before setup, setup fits everything
+            if !self.nvim.ready {
+                return Ok(());
+            }
+            return self.refit_to_areas();
+        }
+        p.report_due = Some(now + Duration::from_millis(u64::from(LAYOUT_WAIT_MS)));
+        self.arm_area_timer()?;
+        let told = self
+            .provider
+            .as_ref()
+            .is_some_and(|p| p.seam_ref().capabilities().has(Capability::Events));
+        if !told {
+            self.act(Ask::ReportLayout);
+        }
+        Ok(())
+    }
+
+    /// The area timer fired: a pane still unreported a second after its
+    /// terminal attached with its id is its own layout area.
+    fn time_out_reports(&mut self, now: Instant) -> Result<()> {
+        self.area_timer_due = None;
+        self.make_own(|p| p.area == Area::Unreported && p.report_due.is_some_and(|d| d <= now))?;
+        self.arm_area_timer()
+    }
+
+    /// Makes each pane `pick` picks its own layout area, waiting for no
+    /// report, and fits everything again if any changed.
+    fn make_own(&mut self, pick: impl Fn(&Pane) -> bool) -> Result<()> {
+        let mut any = false;
+        for p in self.panes.list.iter_mut().filter(|p| pick(p)) {
+            p.report_due = None;
+            if p.area != Area::Own {
+                p.area = Area::Own;
+                any = true;
             }
         }
-        for w in &snapshot.windows {
-            let ours = w.blocks.iter().any(|b| self.panes.by_terminal(b).is_some());
-            if ours
-                && let Some(id) = w.id
-                && let Some(r) = self.rex()
-                && r.session.window != Some(id)
-            {
-                r.session.window = Some(id);
-                changed = true;
-            }
+        if any {
+            self.refit_to_areas()?;
         }
-        for l in &snapshot.layer_bounds {
-            changed |= self.floating().follow_moved_layer(l);
+        Ok(())
+    }
+
+    /// Starts the area timer for the soonest pane's wait for its report,
+    /// unless it already runs for one that soon.
+    fn arm_area_timer(&mut self) -> Result<()> {
+        let Some(due) = self.panes.list.iter().filter_map(|p| p.report_due).min() else {
+            return Ok(());
+        };
+        if self.area_timer_due.is_some_and(|armed| armed <= due) {
+            return Ok(());
         }
-        changed
+        // round up, so the timer doesn't fire before the deadline
+        let ms = due
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1000);
+        self.area_timer_due = Some(due);
+        self.add_timer(Token::AreaTimer, u32::try_from(ms).unwrap_or(u32::MAX))
+    }
+
+    /// A `report_layout` couldn't be done. A failed one keeps the last
+    /// layout; one found unsupported makes every pane its own area.
+    fn report_failed(&mut self) -> Result<()> {
+        if self.provider.is_none() || self.reports_layouts() {
+            return Ok(());
+        }
+        self.live_layout = None;
+        self.make_own(|_| true)
     }
 
     /// The borrows of the floating panes' lifecycle (see `floating_panes`).
@@ -1623,7 +1746,7 @@ impl Daemon {
 
     /// Draws every pane that changed.
     fn draw(&mut self) -> Result<()> {
-        let focused = self.focused_pane_id();
+        let focused = self.current_pane_id();
         // floats in floating panes stay out of the others
         let mut skip: Vec<u32> = Vec::with_capacity(SKIP_MAX);
         for p in &self.panes.list {
@@ -1891,15 +2014,15 @@ impl Daemon {
     }
 
     /// The pane showing Neovim's current window; before setup, the launcher's.
-    fn focused_pane(&self) -> Option<&Pane> {
+    fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
             return self.panes.by_id(STARTUP_PANE_ID);
         }
         self.panes.by_win(self.nvim.current_win)
     }
 
-    fn focused_pane_id(&self) -> Option<u32> {
-        self.focused_pane().map(|p| p.id)
+    fn current_pane_id(&self) -> Option<u32> {
+        self.current_pane().map(|p| p.id)
     }
 
     /// What pane `id` draws of the screen's tabline: its slice of grid 1's top
@@ -2044,23 +2167,6 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> usize {
     }
 }
 
-/// Grid 1's top row from column `col`, `cols` wide. A wide character cut at
-/// either edge leaves a blank.
-fn tabline_slice(screen: &Grid, col: u32, cols: u32) -> Vec<Cell> {
-    let row = screen.row(0);
-    let from = (col as usize).min(row.len());
-    let n = (row.len() - from).min(cols as usize).min(TABLINE_MAX);
-    let mut buf = row[from..from + n].to_vec();
-    blank_cut_wide(&mut buf, row.get(from + n));
-    if n > 0 && buf[0].len == 0 {
-        buf[0] = Cell {
-            hl: buf[0].hl,
-            ..Cell::default()
-        };
-    }
-    buf
-}
-
 /// Mouse events on the floats drawn go to their grids.
 fn set_targets(f: &mut Forwarder, rects: &[Rect]) {
     let n = rects.len().min(forwarder::MAX_TARGETS);
@@ -2082,9 +2188,9 @@ mod slow_terminal_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::super::live_layout::{LayoutArea, PlacedTerminal};
     use super::super::provider::fake::FakeProvider;
     use super::super::provider::{CapabilitySet, Outcome};
-    use super::super::rex_layout;
     use super::*;
     use crate::nvim::nvim::for_test_on;
     use crate::nvim::windows::{Kind, Node};
@@ -2092,6 +2198,7 @@ mod tests {
     use crate::rex::session::tests::server_frame;
     use crate::rex::session::{Conn, Session as RexSession};
     use crate::screen::float_groups::Group;
+    use crate::screen::grid::Grid;
     use crate::screen::grids::{Float, Win};
     use serde_json::Value;
     use serde_json::json;
@@ -2755,33 +2862,69 @@ mod tests {
         }
     }
 
-    /// A daemon with a 200 x 50 screen and the tabline on, and panes to place.
+    /// A daemon with a 200 x 50 screen and the tabline on, and panes to place
+    /// in layout areas. Its pane provider tells its live layouts unasked.
     /// Only its panes and grids are set up.
     struct TablineFixture {
+        /// The other ends of the panes' terminals, so drawing into them
+        /// works. Closed first, so the daemon needn't wait for them as it ends.
+        terminals: Vec<TerminalEnd>,
         fx: Fixture,
-        /// Rex's view sets the Rex window
-        _rex_end: UnixStream,
+    }
+
+    /// A pty's master and a helper's socket, held open while a test runs.
+    struct TerminalEnd {
+        master: i32,
+        _helper: UnixStream,
+    }
+
+    impl Drop for TerminalEnd {
+        fn drop(&mut self) {
+            // SAFETY: the master is ours, and nothing else closes it.
+            unsafe { libc::close(self.master) };
+        }
     }
 
     impl TablineFixture {
         fn init() -> TablineFixture {
-            let (mut fx, _rex_end) = rex_fixture();
+            TablineFixture::on(with_provider(Some(Held::Fake(FakeProvider::telling()))))
+        }
+
+        fn on(mut fx: Fixture) -> TablineFixture {
             fx.d.tabline_rows = 1;
             fx.d.grids.grids.insert(1, Grid::default());
             fx.d.grids.get_mut(1).unwrap().resize(200, 50);
-            TablineFixture { fx, _rex_end }
+            TablineFixture {
+                fx,
+                terminals: Vec::new(),
+            }
+        }
+
+        /// A surface of `cols` x `rows` over a terminal that takes what is
+        /// drawn.
+        fn surface(&mut self, cols: u32, rows: u32) -> Box<Surface> {
+            let (master, slave) = surface::open_pty(cols as u16, rows as u16);
+            let (socket, helper) = UnixStream::pair().unwrap();
+            let mut s =
+                Surface::create(socket, slave, surface::cells(cols as u16, rows as u16)).unwrap();
+            s.terminal.writer.clear();
+            self.terminals.push(TerminalEnd {
+                master,
+                _helper: helper,
+            });
+            s
         }
 
         fn d(&mut self) -> &mut Daemon {
             &mut self.fx.d
         }
 
-        /// A window's pane, for slot `slot`, of `cols` columns, at `rect` in
-        /// the Rex window; None for one Rex hasn't placed yet. Its id.
-        fn add(&mut self, slot: u32, cols: u32, rect: Option<[f64; 4]>) -> u32 {
+        /// A window's pane, for slot `slot`, of `cols` x 20 cells, in `area`.
+        /// Its id.
+        fn add(&mut self, slot: u32, cols: u32, area: Area) -> u32 {
             let mut p = Pane::from_neovim_window(slot + 1, 1000 + i64::from(slot));
-            p.terminal_surface = Some(Surface::for_test(cols, 20));
-            p.rect = rect;
+            p.terminal_surface = Some(self.surface(cols, 20));
+            p.area = area;
             self.fx.d.panes.add(p).id
         }
 
@@ -2794,30 +2937,12 @@ mod tests {
     }
 
     #[test]
-    fn a_tabline_slice_cut_through_a_wide_char_blanks_its_left_half() {
-        let mut g = Grid::default();
-        g.resize(8, 1);
-        g.cells[3] = Cell::init("x", 0);
-        g.cells[4] = Cell::init("\u{3042}", 0);
-        g.cells[5] = Cell {
-            len: 0,
-            ..Cell::default()
-        };
-        let right = tabline_slice(&g, 0, 5);
-        assert_eq!(5, right.len());
-        assert_eq!("x".as_bytes(), right[3].str());
-        assert_eq!(" ".as_bytes(), right[4].str());
-        let whole = tabline_slice(&g, 0, 6);
-        assert_eq!("\u{3042}".as_bytes(), whole[4].str());
-    }
-
-    #[test]
     fn with_a_shell_to_the_left_the_first_neovim_pane_starts_the_tabline_and_the_next_continues_it()
     {
         let mut fx = TablineFixture::init();
         // a shell holds x = 0 to 0.4; the Neovim panes sit right of it
-        let left = fx.add(0, 60, Some([0.4, 0.0, 0.3, 1.0]));
-        let right = fx.add(1, 60, Some([0.7, 0.0, 0.3, 1.0]));
+        let left = fx.add(0, 60, live("w", [0.4, 0.0, 0.3, 1.0]));
+        let right = fx.add(1, 60, live("w", [0.7, 0.0, 0.3, 1.0]));
         assert_eq!(Some(0), fx.start(0));
         assert_eq!(Some(60), fx.start(1));
 
@@ -2870,17 +2995,36 @@ mod tests {
         assert_eq!(Some(60), fx.start(0));
     }
 
+    /// Area `id` of a live layout, at `rect` in it, tiled.
+    fn live(id: &str, rect: [f64; 4]) -> Area {
+        Area::Live {
+            id: id.into(),
+            rect,
+            floating: false,
+        }
+    }
+
+    /// Area `id` of a live layout, at `rect` in it, floating.
+    fn floating_in(id: &str, rect: [f64; 4]) -> Area {
+        Area::Live {
+            id: id.into(),
+            rect,
+            floating: true,
+        }
+    }
+
     #[test]
     fn a_pane_that_closes_moves_the_ones_to_its_right_left_and_only_top_panes_show_the_tabline() {
         let mut fx = TablineFixture::init();
-        fx.add(0, 50, Some([0.0, 0.0, 0.25, 0.5]));
-        fx.add(1, 70, Some([0.25, 0.0, 0.35, 0.5]));
-        fx.add(2, 80, Some([0.6, 0.0, 0.4, 0.5]));
-        // under them, and on another tab page: neither shows it, or takes room
-        fx.add(3, 90, Some([0.0, 0.5, 1.0, 0.5]));
+        fx.add(0, 50, live("w", [0.0, 0.0, 0.25, 0.5]));
+        fx.add(1, 70, live("w", [0.25, 0.0, 0.35, 0.5]));
+        fx.add(2, 80, live("w", [0.6, 0.0, 0.4, 0.5]));
+        // under them: it shows none, and takes no room
+        fx.add(3, 90, live("w", [0.0, 0.5, 1.0, 0.5]));
         assert_eq!(None, fx.start(3));
         assert_eq!(Some(120), fx.start(2));
-        fx.d().panes.list[1].tab = 2;
+        // floating: the same
+        fx.d().panes.list[1].area = floating_in("w", [0.25, 0.0, 0.35, 0.5]);
         assert_eq!(None, fx.start(1));
         assert_eq!(Some(50), fx.start(2));
         // the first closes, as in the middle of `draw`
@@ -2893,9 +3037,11 @@ mod tests {
 
     /// The tabline widths a daemon sent Neovim, in order; None for nil.
     fn tabline_widths_sent(fx: TablineFixture) -> Vec<Option<i64>> {
+        let TablineFixture { terminals, fx } = fx;
+        drop(terminals);
         let Fixture {
             d, mut nvim_end, ..
-        } = fx.fx;
+        } = fx;
         drop(d);
         let mut all = Vec::new();
         nvim_end.read_to_end(&mut all).unwrap();
@@ -2921,15 +3067,16 @@ mod tests {
         let mut fx = TablineFixture::init();
         fx.d().nvim.ready = true;
         // a foreign pane holds x = 0 to 0.4; two window panes sit right of it
-        fx.add(0, 60, Some([0.4, 0.0, 0.3, 1.0]));
-        fx.add(1, 60, Some([0.7, 0.0, 0.3, 1.0]));
+        fx.add(0, 60, live("w", [0.4, 0.0, 0.3, 1.0]));
+        fx.add(1, 60, live("w", [0.7, 0.0, 0.3, 1.0]));
+        fx.d().nvim.current_win = 1000;
         fx.d().sync_tabline_width().unwrap();
         // the same again: nothing
         fx.d().sync_tabline_width().unwrap();
         // the foreign pane closes: the panes take the whole width, and hide nothing
-        fx.d().panes.list[0].rect = Some([0.0, 0.0, 0.5, 1.0]);
+        fx.d().panes.list[0].area = live("w", [0.0, 0.0, 0.5, 1.0]);
         fx.d().panes.list[0].terminal_surface = Some(Surface::for_test(100, 20));
-        fx.d().panes.list[1].rect = Some([0.5, 0.0, 0.5, 1.0]);
+        fx.d().panes.list[1].area = live("w", [0.5, 0.0, 0.5, 1.0]);
         fx.d().panes.list[1].terminal_surface = Some(Surface::for_test(100, 20));
         fx.d().sync_tabline_width().unwrap();
         assert_eq!(vec![Some(120), None], tabline_widths_sent(fx));
@@ -2939,17 +3086,17 @@ mod tests {
     fn the_tabline_width_stays_while_the_tabline_is_off_and_goes_with_the_tabline_panes() {
         let mut fx = TablineFixture::init();
         fx.d().nvim.ready = true;
-        fx.add(0, 120, Some([0.4, 0.0, 0.6, 0.5]));
+        fx.add(0, 120, live("w", [0.4, 0.0, 0.6, 0.5]));
         // under it, and a floating tab page's: neither shows the tabline
-        fx.add(1, 200, Some([0.0, 0.5, 1.0, 0.5]));
-        fx.add(2, 30, Some([0.0, 0.0, 0.15, 0.5]));
-        fx.d().panes.list[2].tab = 2;
+        fx.add(1, 200, live("w", [0.0, 0.5, 1.0, 0.5]));
+        fx.add(2, 30, floating_in("w", [0.0, 0.0, 0.15, 0.5]));
+        fx.d().nvim.current_win = 1000;
         fx.d().sync_tabline_width().unwrap();
         // ready for when it's on again
         fx.d().tabline_rows = 0;
         fx.d().sync_tabline_width().unwrap();
         // a foreign pane takes the top: there are no tabline panes
-        fx.d().panes.list[0].rect = Some([0.4, 0.3, 0.6, 0.2]);
+        fx.d().panes.list[0].area = live("w", [0.4, 0.3, 0.6, 0.2]);
         fx.d().sync_tabline_width().unwrap();
         assert_eq!(vec![Some(120), None], tabline_widths_sent(fx));
     }
@@ -2958,35 +3105,318 @@ mod tests {
     fn a_layout_that_moves_a_pane_to_the_top_sends_the_tabline_width_after_its_batch() {
         let mut fx = TablineFixture::init();
         // under a foreign pane: it shows no tabline
-        let id = fx.add(0, 120, Some([0.4, 0.5, 0.6, 0.5]));
-        fx.d().panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from(block_id(1).as_str()));
+        let id = fx.add(0, 120, live("w", [0.4, 0.5, 0.6, 0.5]));
+        fx.d().panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        fx.d().nvim.current_win = 1000;
         // windows.lua isn't running yet
         fx.d().after_batch().unwrap();
         fx.d().nvim.ready = true;
         fx.d().after_batch().unwrap();
 
         // the user moves it to the top, a foreign pane left of it
-        let view = json!({ "window_id": window_id(1), "layers": [ { "kind": "tiled",
-            "bounds": [0.0, 0.0, 1.0, 1.0],
-            "layout": { "kind": "split", "children": [
-                { "block_id": block_id(9), "rect": [0.0, 0.0, 0.4, 1.0] },
-                { "block_id": block_id(1), "rect": [0.4, 0.0, 0.6, 1.0] } ] } } ] });
-        fx.d().on_layout(rex_layout::read(&[view])).unwrap();
+        let l = layout_of(&[(
+            "w",
+            &[
+                ("t9", [0.0, 0.0, 0.4, 1.0], false),
+                ("t1", [0.4, 0.0, 0.6, 1.0], false),
+            ],
+        )]);
+        fake(fx.d()).push(ProviderEvent::Layout(l));
+        fx.d().drain_provider().unwrap();
         fx.d().after_batch().unwrap();
         assert_eq!(vec![Some(120)], tabline_widths_sent(fx));
     }
 
     #[test]
-    fn a_pane_rex_hasnt_placed_yet_doesnt_take_the_top_left_unless_none_is_placed() {
+    fn a_pane_in_no_layout_area_yet_is_no_tabline_pane_and_takes_no_room() {
         let mut fx = TablineFixture::init();
-        // a new split, before the layout names its place
-        fx.add(0, 40, None);
-        // no layout yet at all: it's the window
-        assert_eq!(Some(0), fx.start(0));
-        fx.add(1, 60, Some([0.4, 0.0, 0.6, 1.0]));
+        // a new split, before the live layout names its place
+        fx.add(0, 40, Area::Unreported);
+        assert_eq!(None, fx.start(0));
+        fx.add(1, 60, live("w", [0.4, 0.0, 0.6, 1.0]));
         assert_eq!(None, fx.start(0));
         // and the placed pane starts the tabline, not after it
         assert_eq!(Some(0), fx.start(1));
+        // its window leaves no row for the tabline
+        let d = fx.d();
+        assert_eq!([40, 19], d.geometry().window_size(&d.panes.list[0]));
+    }
+
+    /// A terminal of a live layout: its id, rect, and whether it floats.
+    type Placing<'a> = (&'a str, [f64; 4], bool);
+
+    /// A live layout of `areas`: each its id, and its terminals.
+    fn layout_of(areas: &[(&str, &[Placing<'_>])]) -> LiveLayout {
+        LiveLayout {
+            areas: areas
+                .iter()
+                .map(|(id, ts)| LayoutArea {
+                    id: id.to_string(),
+                    terminals: ts
+                        .iter()
+                        .map(|&(t, rect, floating)| PlacedTerminal {
+                            terminal: TerminalId::from(t),
+                            rect,
+                            floating,
+                            inset: [0; 4],
+                        })
+                        .collect(),
+                })
+                .collect(),
+            current: None,
+        }
+    }
+
+    #[test]
+    fn a_layout_of_two_areas_makes_tabline_panes_per_area_and_the_screen_follows_the_current_pane()
+    {
+        let mut fx = TablineFixture::init();
+        fx.d().nvim.ready = true;
+        let a = fx.add(0, 100, Area::Unreported);
+        let b = fx.add(1, 100, Area::Unreported);
+        let c = fx.add(2, 60, Area::Unreported);
+        for (id, n) in [(a, 1), (b, 2), (c, 3)] {
+            set_block(fx.d(), id, n);
+        }
+        fx.d().nvim.current_win = 1000;
+        // two layout areas: a and b side by side; c over a foreign pane
+        let l = layout_of(&[
+            (
+                "w1",
+                &[
+                    (block_id(1).as_str(), [0.0, 0.0, 0.5, 1.0], false),
+                    (block_id(2).as_str(), [0.5, 0.0, 0.5, 1.0], false),
+                ],
+            ),
+            (
+                "w2",
+                &[
+                    (block_id(3).as_str(), [0.0, 0.0, 0.5, 0.5], false),
+                    (block_id(9).as_str(), [0.0, 0.5, 1.0, 0.5], false),
+                ],
+            ),
+        ]);
+        fake(fx.d()).push(ProviderEvent::Layout(l));
+        fx.d().drain_provider().unwrap();
+        fx.d().after_batch().unwrap();
+        assert_eq!(
+            live("w2", [0.0, 0.0, 0.5, 0.5]),
+            fx.d().panes.by_id(c).unwrap().area
+        );
+        // each area's tabline starts at its left
+        let starts: Vec<Option<u32>> = (0..3).map(|i| fx.start(i)).collect();
+        assert_eq!(vec![Some(0), Some(100), Some(0)], starts);
+        // the screen is a's area, in its cells; its tabline panes fill it
+        assert_eq!([200, 20], fx.d().nvim.editor_size);
+
+        // into c: its area, measured in its cells; its tabline fitted to it
+        fx.d().on_current(1002).unwrap();
+        fx.d().after_batch().unwrap();
+        assert_eq!([120, 40], fx.d().nvim.editor_size);
+        // back into b
+        fx.d().on_current(1001).unwrap();
+        fx.d().after_batch().unwrap();
+        assert_eq!([200, 20], fx.d().nvim.editor_size);
+        // no terminal was moved for it
+        assert!(fake(fx.d()).asks.is_empty());
+        assert_eq!(vec![Some(60), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn the_launch_pane_is_its_own_area_until_a_live_layout_places_it() {
+        let mut fx = TablineFixture::init();
+        let s = fx.surface(80, 24);
+        fx.d()
+            .start(Pane::startup(Some(TerminalId::from("t0")), s))
+            .unwrap();
+        // no wait for a report: a tabline pane, the screen its size
+        let d = fx.d();
+        assert_eq!(Area::Own, d.panes.list[0].area);
+        assert_eq!(None, d.panes.list[0].report_due);
+        assert_eq!(None, d.area_timer_due);
+        assert_eq!(Some([80, 24]), geometry::area_size(&d.panes.list[0]));
+        assert!(fake(d).asks.is_empty());
+        assert_eq!(Some(0), fx.start(0));
+
+        let rect = [0.0, 0.0, 0.5, 1.0];
+        fake(fx.d()).push(ProviderEvent::Layout(layout_of(&[(
+            "w",
+            &[("t0", rect, false)],
+        )])));
+        fx.d().drain_provider().unwrap();
+        let d = fx.d();
+        assert_eq!(live("w", rect), d.panes.list[0].area);
+        assert_eq!(Some([160, 24]), geometry::area_size(&d.panes.list[0]));
+    }
+
+    #[test]
+    fn each_areas_tabline_panes_slice_the_screens_tabline_from_its_start() {
+        let mut fx = TablineFixture::init();
+        {
+            let screen = fx.d().grids.get_mut(1).unwrap();
+            screen.resize(20, 10);
+            for (c, ch) in "1:one 2:two 3:three ".chars().enumerate() {
+                screen.cells[c] = Cell::init(ch.to_string(), 0);
+            }
+        }
+        let a = fx.add(0, 12, live("w1", [0.0, 0.0, 0.6, 1.0]));
+        let b = fx.add(1, 8, live("w1", [0.6, 0.0, 0.4, 1.0]));
+        let c = fx.add(2, 8, live("w2", [0.0, 0.0, 0.3, 1.0]));
+        let d = fx.add(3, 26, Area::Own);
+        let shown = |fx: &mut TablineFixture, id: u32| {
+            let t = fx.d().prepare_tabline(id);
+            let text: String = t
+                .cells
+                .unwrap()
+                .iter()
+                .map(|c| String::from_utf8_lossy(c.str()).into_owned())
+                .collect();
+            (t.col, text)
+        };
+        // the current area's, end to end: every tab, once
+        assert_eq!((0, "1:one 2:two ".to_string()), shown(&mut fx, a));
+        assert_eq!((12, "3:three ".to_string()), shown(&mut fx, b));
+        // another area's, from its start: cut at its width, or ending with
+        // the screen's row, past which the pane shows it blank
+        assert_eq!((0, "1:one 2:".to_string()), shown(&mut fx, c));
+        assert_eq!((0, "1:one 2:two 3:three ".to_string()), shown(&mut fx, d));
+    }
+
+    #[test]
+    fn the_area_timer_fires_once_the_report_wait_is_over_and_not_before() {
+        let mut fx = with_provider(Some(Held::Fake(FakeProvider::telling())));
+        let (id, pane) = requested_pane(&mut fx);
+        fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        let _attached = attach_terminal(&mut fx, pane, 70, 20);
+        let due = fx.d.panes.by_id(id).unwrap().report_due.unwrap();
+        assert_eq!(Some(due), fx.d.area_timer_due);
+        let mut events = [Event::default(); 8];
+        let fired = loop {
+            let n = fx.d.event_loop.wait(&mut events).unwrap().len();
+            if let Some(e) = events[..n]
+                .iter()
+                .find(|e| Token::of(e.token) == Some(Token::AreaTimer))
+            {
+                break *e;
+            }
+        };
+        // rounded up: never early
+        assert!(Instant::now() >= due);
+        fx.d.handle(fired).unwrap();
+        assert_eq!(Area::Own, area_of(&fx, id));
+        assert_eq!(None, fx.d.area_timer_due);
+    }
+
+    #[test]
+    fn with_no_pane_provider_each_pane_is_its_own_area_with_its_own_tabline() {
+        let mut fx = TablineFixture::on(with_provider(None));
+        let s = fx.surface(80, 24);
+        fx.d().start(Pane::startup(None, s)).unwrap();
+        fx.d().nvim.ready = true;
+        let other = fx.add(1, 60, Area::Unreported);
+        fx.d().wait_for_report(other, Instant::now()).unwrap();
+        let d = fx.d();
+        for p in &d.panes.list {
+            assert_eq!(Area::Own, p.area);
+        }
+        assert_eq!(Some([80, 24]), geometry::area_size(&d.panes.list[0]));
+        assert_eq!(Some([60, 20]), geometry::area_size(&d.panes.list[1]));
+        assert_eq!(None, d.geometry().tabline_width(&d.panes.list[0]));
+        assert_eq!(Some(0), fx.start(0));
+        assert_eq!(Some(0), fx.start(1));
+    }
+
+    /// Pane `pane`'s terminal attaches, `cols` x `rows`: the helper's end,
+    /// and what it rides on, to keep while the test runs.
+    fn attach_terminal(
+        fx: &mut Fixture,
+        pane: crate::attach::PaneId,
+        cols: u16,
+        rows: u16,
+    ) -> (UnixStream, Pty, Address) {
+        let at = Address::new(&format!("attach-{}", pane.token()));
+        let pty = Pty::new(cols, rows);
+        let helper = at.send(&hello_for(pane, cols, rows), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        (helper, pty, at)
+    }
+
+    fn area_of(fx: &Fixture, id: u32) -> Area {
+        fx.d.panes.by_id(id).unwrap().area.clone()
+    }
+
+    #[test]
+    fn an_unreported_pane_becomes_its_own_area_a_second_after_its_terminal_attached_with_its_id() {
+        let mut fx = with_provider(Some(Held::Fake(FakeProvider::telling())));
+        let (id, pane) = requested_pane(&mut fx);
+        // its open is done: it has its terminal id
+        fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        let before = Instant::now();
+        let _attached = attach_terminal(&mut fx, pane, 70, 20);
+        assert_eq!(Area::Unreported, area_of(&fx, id));
+        // it tells its layouts unasked: nothing is asked
+        assert!(fake(&mut fx.d).asks.is_empty());
+        fx.d.time_out_reports(before + Duration::from_millis(900))
+            .unwrap();
+        assert_eq!(Area::Unreported, area_of(&fx, id));
+        fx.d.time_out_reports(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(Area::Own, area_of(&fx, id));
+    }
+
+    #[test]
+    fn with_no_live_layout_to_come_an_attached_pane_is_its_own_area_at_once() {
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        let _attached = attach_terminal(&mut fx, pane, 70, 20);
+        assert_eq!(Area::Own, area_of(&fx, id));
+    }
+
+    #[test]
+    fn a_pane_provider_that_doesnt_tell_layouts_is_asked_and_only_unsupported_drops_its_layout() {
+        let mut f = FakeProvider::opening();
+        f.caps.insert(Capability::ReportLayout);
+        let mut fx = with_provider(Some(Held::Fake(f)));
+        let (id, pane) = requested_pane(&mut fx);
+        fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
+        let _attached = attach_terminal(&mut fx, pane, 70, 20);
+        assert_eq!(vec![Ask::ReportLayout], fake(&mut fx.d).asked());
+        let rect = [0.5, 0.0, 0.5, 1.0];
+        let l = layout_of(&[("w", &[("t1", rect, false)])]);
+        let f = fake(&mut fx.d);
+        f.answer(f.last_id(), Outcome::Done(Answer::Layout(l)));
+        fx.d.drain_provider().unwrap();
+        assert_eq!(live("w", rect), area_of(&fx, id));
+
+        // a report that fails keeps the last layout
+        fx.d.act(Ask::ReportLayout);
+        let f = fake(&mut fx.d);
+        f.answer(f.last_id(), Outcome::Failed("no".into()));
+        fx.d.drain_provider().unwrap();
+        assert_eq!(live("w", rect), area_of(&fx, id));
+        assert!(fx.d.live_layout.is_some());
+        // one found unsupported makes every pane its own area
+        fx.d.act(Ask::ReportLayout);
+        let f = fake(&mut fx.d);
+        f.answer(f.last_id(), Outcome::Unsupported);
+        fx.d.drain_provider().unwrap();
+        assert_eq!(Area::Own, area_of(&fx, id));
+        assert!(fx.d.live_layout.is_none());
+    }
+
+    #[test]
+    fn a_pane_provider_gone_makes_its_unreported_panes_their_own_areas_and_leaves_the_rest() {
+        let mut fx = TablineFixture::init();
+        let placed = fx.add(0, 60, live("w", [0.0, 0.0, 0.5, 1.0]));
+        let waiting = fx.add(1, 60, Area::Unreported);
+        fake(fx.d()).push(ProviderEvent::Gone {
+            reason: "hung up".into(),
+        });
+        fx.d().drain_provider().unwrap();
+        let area = |fx: &mut TablineFixture, id| fx.d().panes.by_id(id).unwrap().area.clone();
+        assert_eq!(live("w", [0.0, 0.0, 0.5, 1.0]), area(&mut fx, placed));
+        assert_eq!(Area::Own, area(&mut fx, waiting));
     }
 
     /// The JSON of each text frame in `bytes`, as a Client wrote them: masked
@@ -3307,7 +3737,7 @@ mod tests {
     #[test]
     fn the_window_leaves_cmdheight_rows_for_messages_then_the_tablines() {
         let mut fx = TablineFixture::init();
-        let id = fx.add(0, 60, None);
+        let id = fx.add(0, 60, Area::Own);
         let size = |fx: &mut TablineFixture| {
             let d = fx.d();
             d.geometry().window_size(d.panes.by_id(id).unwrap())
@@ -3345,14 +3775,10 @@ mod tests {
         d.panes.by_id(id).unwrap().layer.as_ref().unwrap().bounds
     }
 
-    /// Reads `view` as Rex's, and sends what that asked of Neovim.
-    fn read_and_flush(d: &mut Daemon, view: Value) {
-        apply_views(d, &[view]);
+    /// Applies live layout `l`, and sends what that asked of Neovim.
+    fn apply_and_flush(d: &mut Daemon, l: &LiveLayout) {
+        d.apply_live_layout(l);
         d.nvim.client.flush().unwrap();
-    }
-
-    fn apply_views(d: &mut Daemon, wins: &[Value]) -> bool {
-        d.apply_layout(&rex_layout::read(wins))
     }
 
     fn approx(a: [f64; 4], b: [f64; 4]) {
@@ -3501,84 +3927,34 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_gives_our_panes_their_rects_and_the_window_holding_them_its_id() {
+    fn a_live_layout_gives_the_panes_it_names_their_areas_and_the_rest_keep_theirs() {
         let mut fx = TablineFixture::init();
-        let a = fx.add(0, 60, None);
-        let b = fx.add(1, 60, None);
-        let other = fx.add(2, 60, None);
+        let a = fx.add(0, 60, Area::Unreported);
+        let b = fx.add(1, 60, Area::Unreported);
+        let other = fx.add(2, 60, Area::Own);
         let d = fx.d();
         set_block(d, a, 1);
         set_block(d, b, 2);
         set_block(d, other, 3);
-        let wins = vec![
-            // no panes of ours: its id isn't ours
-            json!({ "window_id": window_id(8), "layers": [ { "kind": "tiled", "layout": {
-                "kind": "leaf", "block_id": block_id(99), "rect": [0, 0, 1, 1] } } ] }),
-            json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
-                "kind": "split", "children": [
-                    { "kind": "leaf", "block_id": block_id(1), "rect": [0.0, 0.0, 0.5, 1.0] },
-                    { "kind": "split", "children": [
-                        { "kind": "leaf", "block_id": block_id(2), "rect": [0.5, 0.0, 0.5, 0.25] },
-                        // a bad rect: kept as it was
-                        { "kind": "leaf", "block_id": block_id(3), "rect": [0.5, 0.25, 0.5] },
-                    ] },
-                ] } } ] }),
-        ];
-        apply_views(d, &wins);
-        assert_eq!(Some([0.0, 0.0, 0.5, 1.0]), d.panes.by_id(a).unwrap().rect);
-        assert_eq!(Some([0.5, 0.0, 0.5, 0.25]), d.panes.by_id(b).unwrap().rect);
-        assert_eq!(None, d.panes.by_id(other).unwrap().rect);
-        assert_eq!(
-            Some(*window_id(9).as_bytes().first_chunk().unwrap()),
-            d.rex_ref().unwrap().session.window
-        );
-    }
-
-    #[test]
-    fn applying_the_same_layout_again_changes_nothing() {
-        let mut fx = TablineFixture::init();
-        let a = fx.add(0, 60, None);
-        let d = fx.d();
-        set_block(d, a, 1);
-        let view = json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
-            "block_id": block_id(1), "rect": [0.0, 0.0, 0.5, 1.0] } } ] });
-        assert!(apply_views(d, std::slice::from_ref(&view)));
-        assert!(!apply_views(d, &[view]));
-        // a pane that gets its block later still gets its rect
-        let b = d.panes.add(Pane::from_neovim_window(50, 1000)).id;
-        set_block(d, b, 2);
-        let two = json!({ "window_id": window_id(9), "layers": [ { "kind": "tiled", "layout": {
-            "block_id": block_id(2), "rect": [0.5, 0.0, 0.5, 1.0] } } ] });
-        assert!(apply_views(d, &[two]));
-        assert!(d.panes.by_id(b).unwrap().rect.is_some());
-    }
-
-    #[test]
-    fn a_window_id_of_the_wrong_length_or_without_our_panes_isnt_kept() {
-        let mut fx = TablineFixture::init();
-        let a = fx.add(0, 60, None);
-        let d = fx.d();
-        set_block(d, a, 1);
-        let layers = json!([ { "kind": "tiled", "layout": {
-            "block_id": block_id(1), "rect": [0.0, 0.0, 1.0, 1.0] } } ]);
-        apply_views(
-            d,
-            &[json!({ "window_id": "window:short", "layers": layers })],
-        );
-        assert_eq!(None, d.rex_ref().unwrap().session.window);
-        assert!(d.panes.by_id(a).unwrap().rect.is_some());
-        apply_views(d, &[json!({ "layers": layers })]);
-        assert_eq!(None, d.rex_ref().unwrap().session.window);
-        // our pane only in a floating layer: the tiled ones hold the window
-        apply_views(
-            d,
-            &[
-                json!({ "window_id": window_id(4), "layers": [ { "kind": "floating",
-            "layout": { "block_id": block_id(1), "rect": [0.1, 0.1, 0.2, 0.2] } } ] }),
-            ],
-        );
-        assert_eq!(None, d.rex_ref().unwrap().session.window);
-        assert_eq!(Some([0.1, 0.1, 0.2, 0.2]), d.panes.by_id(a).unwrap().rect);
+        let one = [0.0, 0.0, 0.5, 1.0];
+        let two = [0.5, 0.0, 0.5, 0.25];
+        let l = |b2: &str| {
+            layout_of(&[
+                ("w8", &[(block_id(99).as_str(), one, false)]),
+                ("w9", &[(block_id(1).as_str(), one, false), (b2, two, true)]),
+            ])
+        };
+        assert!(d.apply_live_layout(&l(&block_id(2))));
+        assert_eq!(live("w9", one), d.panes.by_id(a).unwrap().area);
+        assert_eq!(floating_in("w9", two), d.panes.by_id(b).unwrap().area);
+        assert_eq!(Area::Own, d.panes.by_id(other).unwrap().area);
+        // the same again: nothing changes
+        assert!(!d.apply_live_layout(&l(&block_id(2))));
+        // one that no longer names a pane leaves it where it was
+        assert!(!d.apply_live_layout(&l(&block_id(5))));
+        assert_eq!(floating_in("w9", two), d.panes.by_id(b).unwrap().area);
+        // and nothing was asked of the pane provider: no terminal moves
+        assert!(fake(d).asks.is_empty());
     }
 
     #[test]
@@ -3709,10 +4085,9 @@ mod tests {
         id
     }
 
-    fn floating_layer_view(bounds: [f64; 4]) -> Value {
-        json!({ "window_id": window_id(1), "layers": [ { "kind": "floating",
-            "bounds": bounds, "blocks": [ { "block_id": block_id(7) } ],
-            "layout": { "block_id": block_id(7), "rect": [0.0, 0.0, 1.0, 1.0] } } ] })
+    /// A live layout with the float group pane's terminal at `bounds`.
+    fn floating_layer_at(bounds: [f64; 4]) -> LiveLayout {
+        layout_of(&[("w", &[(block_id(7).as_str(), bounds, true)])])
     }
 
     /// How many times the daemon asked Neovim to place floats, as it wrote them.
@@ -3731,23 +4106,23 @@ mod tests {
         let asked = layer_bounds_of(&d, id);
 
         // Rex reports the bounds we asked for: nothing to follow
-        read_and_flush(&mut d, floating_layer_view(asked));
+        apply_and_flush(&mut d, &floating_layer_at(asked));
         // within half a cell: the same
         let near = [asked[0] + 0.002, asked[1], asked[2], asked[3]];
-        read_and_flush(&mut d, floating_layer_view(near));
+        apply_and_flush(&mut d, &floating_layer_at(near));
         assert_eq!(asked, layer_bounds_of(&d, id));
 
         // the user moves it 20 columns right: its floats follow, once
         let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
-        read_and_flush(&mut d, floating_layer_view(moved));
+        apply_and_flush(&mut d, &floating_layer_at(moved));
         assert_eq!(moved, layer_bounds_of(&d, id));
         // Neovim has put them there: the next flush's group, and Rex's view again
         d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 30]);
         d.reconcile_layers();
         let col = |d: &Daemon| d.panes.by_id(id).unwrap().layer.as_ref().unwrap().group.col;
         assert_eq!(30, col(&d));
-        read_and_flush(&mut d, floating_layer_view(moved));
-        read_and_flush(&mut d, floating_layer_view(moved));
+        apply_and_flush(&mut d, &floating_layer_at(moved));
+        apply_and_flush(&mut d, &floating_layer_at(moved));
         assert_eq!(1, d.panes.list.len());
         // and the pane provider is asked nothing of it but the pane
         assert_eq!(1, fake(&mut d).asks.len());
@@ -3763,47 +4138,33 @@ mod tests {
         // floats' size is the pane's, which is theirs already
         let asked = layer_bounds_of(&d, id);
         let wider = [asked[0], asked[1], asked[2] + 0.1, asked[3]];
-        read_and_flush(&mut d, floating_layer_view(wider));
+        apply_and_flush(&mut d, &floating_layer_at(wider));
         assert_eq!(wider, layer_bounds_of(&d, id));
         drop(d);
         assert_eq!(0, place_group_requests(nvim_end));
     }
 
     #[test]
-    fn a_floating_layer_that_isnt_one_of_ours_to_follow_changes_nothing() {
+    fn a_floating_terminal_that_isnt_a_float_group_panes_moves_no_floats() {
         let Fixture { mut d, nvim_end } = fixture();
         let id = made_picker_pane(&mut d, 60, 20);
         let asked = layer_bounds_of(&d, id);
         let moved = [asked[0] + 0.1, asked[1], asked[2], asked[3]];
-        let view = |layer: Value| json!({ "window_id": window_id(1), "layers": [layer] });
-        for layer in [
-            // no bounds
-            json!({ "kind": "floating", "blocks": [ { "block_id": block_id(7) } ] }),
-            // bounds that aren't four numbers
-            json!({ "kind": "floating", "bounds": [0.1, 0.2],
-                "blocks": [ { "block_id": block_id(7) } ] }),
-            // no blocks, or none
-            json!({ "kind": "floating", "bounds": moved }),
-            json!({ "kind": "floating", "bounds": moved, "blocks": [] }),
-            // its first isn't ours, or has no id
-            json!({ "kind": "floating", "bounds": moved,
-                "blocks": [ { "block_id": block_id(8) }, { "block_id": block_id(7) } ] }),
-            json!({ "kind": "floating", "bounds": moved, "blocks": [ {} ] }),
-        ] {
-            read_and_flush(&mut d, view(layer));
-            assert_eq!(asked, layer_bounds_of(&d, id));
-        }
+        // another terminal, unknown, floating where it would have moved to
+        apply_and_flush(
+            &mut d,
+            &layout_of(&[("w", &[(block_id(8).as_str(), moved, true)])]),
+        );
+        assert_eq!(asked, layer_bounds_of(&d, id));
 
-        // a pane of ours that has no floating pane: a window's, in a layer
+        // a window's pane of ours, floating: no float group pane
         let w = d.panes.add(Pane::from_neovim_window(50, 1000)).id;
         set_block(&mut d, w, 9);
-        let before = d.panes.by_id(w).unwrap().rect;
-        read_and_flush(
+        apply_and_flush(
             &mut d,
-            view(json!({ "kind": "floating", "bounds": moved,
-                "blocks": [ { "block_id": block_id(9) } ] })),
+            &layout_of(&[("w", &[(block_id(9).as_str(), moved, true)])]),
         );
-        assert_eq!(before, d.panes.by_id(w).unwrap().rect);
+        assert_eq!(floating_in("w", moved), d.panes.by_id(w).unwrap().area);
         assert!(d.panes.by_id(w).unwrap().layer.is_none());
         assert_eq!(asked, layer_bounds_of(&d, id));
         drop(d);
@@ -3873,7 +4234,7 @@ mod tests {
                 "layers": [ { "kind": "tiled", "layout": {
                     "block_id": block_id(5), "rect": [0.5, 0.0, 0.5, 1.0] } } ] } ] });
         rex_says(&mut fx.d, response(3, view));
-        assert_eq!(None, fx.d.panes.by_id(id).unwrap().rect);
+        assert_eq!(Area::Unreported, fx.d.panes.by_id(id).unwrap().area);
         // the disown answered: the open is done, and the pane where the view has it
         rex_says(&mut fx.d, response(2, json!({})));
         let p = fx.d.panes.by_id(id).unwrap();
@@ -3881,7 +4242,7 @@ mod tests {
             Some(block_id(5).as_str()),
             p.terminal.as_ref().map(TerminalId::as_str)
         );
-        assert_eq!(Some([0.5, 0.0, 0.5, 1.0]), p.rect);
+        assert_eq!(live(&window_id(1), [0.5, 0.0, 0.5, 1.0]), p.area);
     }
 
     #[test]

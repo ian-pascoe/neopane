@@ -110,7 +110,7 @@ pub(crate) struct Session {
 
     pub focused_block: FocusedBlock,
 
-    /// The Rex window our panes are in, as the daemon last found in a view.
+    /// The Rex window a new layer opens in, as its pane provider last chose.
     pub window: Option<[u8; 43]>,
 
     /// A focus change from the same view as a `layout` update, sent after it.
@@ -130,8 +130,12 @@ pub(crate) enum Update {
         req: Request,
         result: client::ResponseResult,
     },
-    /// A newer view's windows, to read where our panes sit.
-    Layout(Vec<Value>),
+    /// A newer view's windows, to read where our panes sit, and its active
+    /// window's focused block, unless our own focus change is still landing.
+    Layout {
+        windows: Vec<Value>,
+        current: Option<String>,
+    },
     /// The user focused this block in Rex.
     FocusMoved(String),
     /// Rex closed or failed, for the reason in `closed`: nothing more will be
@@ -631,7 +635,8 @@ impl Session {
             return None;
         }
         self.view.rev = rev;
-        let focus_update = match find_focused_block(snapshot) {
+        let focused = find_focused_block(snapshot);
+        let focus_update = match focused {
             Some(block) => self.apply_focus(block, rev),
             None => {
                 log_unexpected_response(Request::View, "focused block");
@@ -647,7 +652,15 @@ impl Session {
         if let Some(Update::FocusMoved(block)) = focus_update {
             self.queued_focus = Some(block);
         }
-        Some(Update::Layout(items.clone()))
+        // a view from before our focus change landed says the old focus
+        let landing = matches!(self.focused_block, FocusedBlock::Requesting { .. });
+        let current = focused
+            .filter(|_| !landing)
+            .map(|b| String::from_utf8_lossy(&b).into_owned());
+        Some(Update::Layout {
+            windows: items.clone(),
+            current,
+        })
     }
 
     /// Reports focus the user moved; echoes of our own change are ignored.
@@ -858,21 +871,28 @@ pub(crate) mod tests {
             })
         };
         // the first view only learns the focus
-        let Some(Update::Layout(w)) = s.apply_view(&view(1, &a)) else {
+        let Some(Update::Layout { windows, current }) = s.apply_view(&view(1, &a)) else {
             panic!("expected a layout");
         };
-        assert_eq!(1, w.len());
+        assert_eq!(1, windows.len());
+        assert_eq!(Some(String::from_utf8_lossy(&a).into_owned()), current);
         assert!(s.has_focused(Some(a)));
         // an older view is skipped
         assert_eq!(None, s.apply_view(&view(1, &b)));
         // the user moved focus: layout, then the focus
-        let Some(Update::Layout(_)) = s.apply_view(&view(2, &b)) else {
+        let Some(Update::Layout { .. }) = s.apply_view(&view(2, &b)) else {
             panic!("expected a layout");
         };
         assert_eq!(
             Some(Update::FocusMoved(String::from_utf8_lossy(&b).into_owned())),
             s.next().unwrap()
         );
+        // while our own focus change lands, a view says no current block
+        s.focus(Some(a)).unwrap();
+        let Some(Update::Layout { current, .. }) = s.apply_view(&view(3, &b)) else {
+            panic!("expected a layout");
+        };
+        assert_eq!(None, current);
     }
 
     pub(crate) fn ok(v: Value) -> client::ResponseResult {
@@ -914,7 +934,7 @@ pub(crate) mod tests {
             "windows": [{ "window_id": "window:w",
                           "focused_block_id": String::from_utf8_lossy(focused) }],
         });
-        let Some(Update::Layout(_)) = s.apply_view(&view) else {
+        let Some(Update::Layout { .. }) = s.apply_view(&view) else {
             panic!("expected a layout");
         };
         s.queued_focus.take().map(Update::FocusMoved)

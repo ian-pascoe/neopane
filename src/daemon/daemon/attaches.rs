@@ -199,7 +199,7 @@ impl Daemon {
             if v.cols != REX_DEFAULT_SIZE[0] || v.rows != REX_DEFAULT_SIZE[1] {
                 pane.awaiting_layout = false;
             } else {
-                self.add_timer(Token::LayoutTimer, LAYOUT_WAIT_MS)?;
+                self.add_timer(Token::LayoutTimer, SPLIT_SIZE_WAIT_MS)?;
             }
         }
         self.size_window(id);
@@ -209,6 +209,7 @@ impl Daemon {
         {
             l.fit = Fit::Asked(req);
         }
+        self.wait_for_report(id, Instant::now())?;
         self.nvim.client.flush()?;
         self.draw()?;
         // a size sent right after the hello

@@ -1,10 +1,12 @@
-//! Screen and pane geometry: window and pane sizes, and where the screen's
-//! tabline falls over the panes. Pure reads of the grids and panes.
+//! Screen and pane geometry: window and pane sizes, layout area sizes, and
+//! where the screen's tabline falls over the panes of each layout area. Pure
+//! reads of the grids and panes.
 //!
 //! `Geometry` holds separate borrows of the daemon's parts, since the daemon
 //! can't be borrowed whole while its Neovim session is.
 
 use super::floating_panes::LAYER_FRAME;
+use super::live_layout::Area;
 use super::pane::Pane;
 use super::panes::Panes;
 use crate::nvim::windows;
@@ -70,9 +72,10 @@ impl Geometry<'_> {
         ]
     }
 
-    /// Where pane `p`'s top left sits on grid 1: row, col.
+    /// Where pane `p`'s top left sits on grid 1, which spans its layout
+    /// area while it's current: row, col.
     pub(crate) fn pane_origin(&self, p: &Pane) -> [i32; 2] {
-        let Some(r) = p.rect else {
+        let Some(r) = p.area.rect() else {
             return [0, 0];
         };
         let Some(screen) = self.grids.get(1) else {
@@ -96,42 +99,29 @@ impl Geometry<'_> {
         ]
     }
 
-    /// The tabline's rows over pane `p`: those of a window's pane along the top
-    /// of the Rex window, which shows its share of the screen's tabline.
-    /// A pane Rex hasn't placed yet counts only while none has been: it would
-    /// otherwise take the top left from the panes already there, until the
-    /// layout arrives. Without Rex's layout at all, the one pane is the window.
+    /// The tabline's rows over pane `p`: those of a tabline pane, which
+    /// shows its share of the screen's tabline.
     pub(crate) fn tabline_rows_of(&self, p: &Pane) -> u32 {
-        if self.tabline_rows > 0 && self.is_tabline_pane(p) {
+        if self.tabline_rows > 0 && is_tabline_pane(p) {
             self.tabline_rows
         } else {
             0
         }
     }
 
-    /// Whether pane `p` is one of the tabline panes: a window pane along the
-    /// top of the Rex window, which shows the tabline when there is one.
-    fn is_tabline_pane(&self, p: &Pane) -> bool {
-        if p.layer.is_some() || p.tab != 0 {
-            return false;
-        }
-        if p.rect.is_none() && self.panes.list.iter().any(|q| q.rect.is_some()) {
-            return false;
-        }
-        self.pane_origin(p)[0] == 0
-    }
-
-    /// The tabline width, the tabline panes' columns, while it's narrower than
-    /// Neovim's screen, which shows the tabline past it nowhere. None when it
-    /// hides nothing, or there are no tabline panes. Whether the tabline is
-    /// on doesn't matter.
-    pub(crate) fn tabline_width(&self) -> Option<u32> {
-        let screen = self.grids.get(1)?.width;
+    /// The tabline width, the columns of the tabline panes of `current`'s
+    /// layout area, while it's narrower than the area, which shows the
+    /// tabline past it nowhere. None when it hides nothing, or there are no
+    /// tabline panes there. Whether the tabline is on doesn't matter.
+    pub(crate) fn tabline_width(&self, current: &Pane) -> Option<u32> {
+        let screen = area_size(current)
+            .map(|s| s[0])
+            .or_else(|| Some(self.grids.get(1)?.width))?;
         let cols: u32 = self
             .panes
             .list
             .iter()
-            .filter(|p| self.is_tabline_pane(p))
+            .filter(|p| is_tabline_pane(p) && same_area(p, current))
             .filter_map(|p| p.terminal_surface.as_ref())
             .map(|s| s.view.cols)
             .sum();
@@ -146,17 +136,17 @@ impl Geometry<'_> {
     }
 
     /// The column of the screen's tabline pane `p` starts at, if it shows any.
-    /// The panes along the top that show it lay it out left to right from
-    /// column 0, whatever else is in the Rex window, so each tab shows in
-    /// exactly one of them. Panes at the same column go in list order.
-    /// A pane closing in the middle of `draw` leaves the panes drawn before it
-    /// on their old columns for that frame; the next draw sees their start
-    /// move and `PaneView` redraws the row.
+    /// The panes along the top of a layout area that show it lay it out left
+    /// to right from column 0, whatever else is in the area, so each tab
+    /// shows in exactly one of them. Panes at the same column go in list
+    /// order. A pane closing in the middle of `draw` leaves the panes drawn
+    /// before it on their old columns for that frame; the next draw sees
+    /// their start move and `PaneView` redraws the row.
     pub(crate) fn tabline_start(&self, p: &Pane) -> Option<u32> {
         if !self.shows_tabline(p) {
             return None;
         }
-        let mine = self.pane_origin(p)[1];
+        let mine = left(p);
         let mut col: u32 = 0;
         let mut listed_before = true;
         for q in &self.panes.list {
@@ -164,14 +154,62 @@ impl Geometry<'_> {
                 listed_before = false;
                 continue;
             }
-            if !self.shows_tabline(q) {
+            if !self.shows_tabline(q) || !same_area(p, q) {
                 continue;
             }
-            let theirs = self.pane_origin(q)[1];
+            let theirs = left(q);
             if theirs < mine || (theirs == mine && listed_before) {
                 col += q.terminal_surface.as_ref().unwrap().view.cols;
             }
         }
         Some(col)
+    }
+}
+
+/// Whether pane `p` is one of the tabline panes (#92 decision 17): a window
+/// pane that is its own layout area, or along the top of a live one and not
+/// floating. Never one that's in no area yet. It doesn't depend on which
+/// pane is current, so no window gains or loses a row as focus moves.
+pub(crate) fn is_tabline_pane(p: &Pane) -> bool {
+    if p.layer.is_some() {
+        return false;
+    }
+    match &p.area {
+        Area::Own => true,
+        Area::Live { rect, floating, .. } => !floating && rect[1].abs() < TOP_EPSILON,
+        Area::Unreported => false,
+    }
+}
+
+/// How far below its area's top a rect still counts as at the top.
+const TOP_EPSILON: f64 = 1e-6;
+
+/// Whether panes `a` and `b` share a layout area.
+pub(crate) fn same_area(a: &Pane, b: &Pane) -> bool {
+    match (&a.area, &b.area) {
+        (Area::Live { id: x, .. }, Area::Live { id: y, .. }) => x == y,
+        _ => a.id == b.id,
+    }
+}
+
+/// Where pane `p`'s left edge is in its area, as a fraction.
+fn left(p: &Pane) -> f64 {
+    p.area.rect().map_or(0.0, |r| r[0])
+}
+
+/// The size of pane `p`'s layout area, in its cells: its cells over its
+/// share of the area (ADR 0008). Neovim's screen is this, for the current
+/// pane. None while it's in no area, or has no terminal.
+pub(crate) fn area_size(p: &Pane) -> Option<[u32; 2]> {
+    let s = p.terminal_surface.as_ref()?;
+    let (cols, rows) = (s.view.cols, s.view.rows);
+    match &p.area {
+        Area::Unreported => None,
+        Area::Own => Some([cols, rows]),
+        Area::Live { rect: r, .. } if r[2] <= 0.0 || r[3] <= 0.0 => Some([cols, rows]),
+        Area::Live { rect: r, .. } => Some([
+            cols.max((f64::from(cols) / r[2]).round() as u32),
+            rows.max((f64::from(rows) / r[3]).round() as u32),
+        ]),
     }
 }

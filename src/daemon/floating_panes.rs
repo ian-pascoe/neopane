@@ -13,7 +13,6 @@ use super::event_loop::Loop;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::provider::{Ask, TerminalId};
-use super::rex_layout;
 use crate::nvim::windows;
 use crate::screen::float_groups::{self, Group};
 use crate::screen::grids::{Grids, WinKind};
@@ -35,21 +34,17 @@ pub(crate) struct FloatingPanes<'a> {
 }
 
 impl FloatingPanes<'_> {
-    /// A floating layer of ours somewhere else: the user moved it, so its
-    /// floats follow.
-    pub(crate) fn follow_moved_layer(&mut self, moved: &rex_layout::LayerBounds) -> bool {
-        let Some(p) = self.panes.by_terminal(&moved.block) else {
+    /// Float group pane `id` is at `bounds` in the live layout: if that's
+    /// somewhere else, the user moved it, so its floats follow. Whether it was.
+    pub(crate) fn follow_moved_layer(&mut self, id: u32, bounds: [f64; 4]) -> bool {
+        let Some(l) = self.panes.by_id(id).and_then(|p| p.layer) else {
             return false;
         };
-        let Some(l) = p.layer else {
-            return false;
-        };
-        if same_bounds(self.grids, moved.bounds, l.bounds) {
+        if same_bounds(self.grids, bounds, l.bounds) {
             return false;
         }
-        let id = p.id;
         if let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer {
-            l.bounds = moved.bounds;
+            l.bounds = bounds;
         }
         let _ = self.follow_layer(id);
         true

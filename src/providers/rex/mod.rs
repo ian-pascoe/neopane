@@ -12,8 +12,15 @@
 //! - An error `method_not_found` is unsupported, any other fails the act. Rex
 //!   hanging up, failing, or sending what can't be read is `Gone`.
 //!
+//! - Each view is told as a `LiveLayout` (`layout.rs`), one layout area per
+//!   Rex window, and `report_layout` is answered from the last. A float
+//!   group's block is placed at its floating layer's bounds, its frame the
+//!   inset. A new layer opens in its origin's Rex window.
+//!
 //! Until #109–#111, the daemon also focuses and places blocks through
-//! `session` itself, and reads Rex's view as a `LayoutSnapshot`.
+//! `session` itself.
+
+pub(crate) mod layout;
 
 use std::collections::VecDeque;
 
@@ -21,10 +28,10 @@ use serde_json::{Value, json};
 
 use crate::daemon::floating_panes;
 use crate::daemon::geometry::{REX_DEFAULT_SIZE, TAB_LAYER_BOUNDS};
+use crate::daemon::live_layout::LiveLayout;
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
 };
-use crate::daemon::rex_layout;
 use crate::name::NAME;
 use crate::rex::client::{self, ResponseResult};
 use crate::rex::ids;
@@ -36,6 +43,9 @@ const CAPABILITIES: &[Capability] = &[
     Capability::OpenFloat,
     Capability::OpenTabPage,
     Capability::Close,
+    Capability::ReportLayout,
+    // views come unasked
+    Capability::Events,
 ];
 
 pub(crate) struct RexProvider {
@@ -43,6 +53,12 @@ pub(crate) struct RexProvider {
     pub session: Session,
     /// The blocks opened for asks, each waiting for its disown's answer.
     opened: Vec<(u64, TerminalId)>,
+    /// The `open_float` asks whose layer has no block yet.
+    float_asks: Vec<u64>,
+    /// The blocks opened for float groups, framed in the layout.
+    float_blocks: Vec<TerminalId>,
+    /// The layout of the last view.
+    layout: Option<LiveLayout>,
     events: VecDeque<ProviderEvent>,
     /// Told `Gone`: nothing more comes.
     gone: bool,
@@ -53,6 +69,9 @@ impl RexProvider {
         RexProvider {
             session,
             opened: Vec::new(),
+            float_asks: Vec::new(),
+            float_blocks: Vec::new(),
+            layout: None,
             events: VecDeque::new(),
             gone: false,
         }
@@ -84,13 +103,19 @@ impl RexProvider {
                     .new_split(tag, origin.as_str(), dir.across(), dir.before(), layout)?;
             }
             Ask::OpenTabPage {
-                attach, cols, rows, ..
+                attach,
+                origin,
+                cols,
+                rows,
+                ..
             } => {
                 let layout = json!({ "block": block(&attach, Some([cols, rows])) });
+                self.in_window_of(&origin);
                 self.session.new_layer(tag, TAB_LAYER_BOUNDS, layout)?;
             }
             Ask::OpenFloat {
                 attach,
+                origin,
                 x,
                 y,
                 cols,
@@ -106,12 +131,35 @@ impl RexProvider {
                     return Ok(true);
                 };
                 let layout = json!({ "block": block(&attach, None) });
+                self.in_window_of(&origin);
+                self.float_asks.push(tag);
                 self.session.new_layer(tag, bounds, layout)?;
             }
-            Ask::Close { terminal } => self.session.close_block(tag, terminal.as_str())?,
+            Ask::Close { terminal } => {
+                self.float_blocks.retain(|b| *b != terminal);
+                self.session.close_block(tag, terminal.as_str())?
+            }
+            Ask::ReportLayout => {
+                let outcome = match &self.layout {
+                    Some(l) => Outcome::Done(Answer::Layout(l.clone())),
+                    None => Outcome::Failed("no view from Rex yet".into()),
+                };
+                self.answer(tag, outcome);
+            }
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// New layers open in the Rex window of terminal `origin`, as the last
+    /// view had it; in Rex's active window if it didn't.
+    fn in_window_of(&mut self, origin: &TerminalId) {
+        self.session.window = self.layout.as_ref().and_then(|l| {
+            l.areas
+                .iter()
+                .find(|a| a.terminals.iter().any(|t| t.terminal == *origin))
+                .and_then(|a| a.id.as_bytes().try_into().ok())
+        });
     }
 
     fn answer(&mut self, tag: u64, outcome: Outcome) {
@@ -125,9 +173,11 @@ impl RexProvider {
     fn on_update(&mut self, u: Update) -> Result<(), client::ClientError> {
         match u {
             Update::Answered { req, result } => self.on_answer(req, result)?,
-            Update::Layout(wins) => self
-                .events
-                .push_back(ProviderEvent::Layout(rex_layout::read(&wins))),
+            Update::Layout { windows, current } => {
+                let l = layout::read(&windows, current.as_deref(), &self.float_blocks);
+                self.layout = Some(l.clone());
+                self.events.push_back(ProviderEvent::Layout(l));
+            }
             Update::FocusMoved(block) => self
                 .events
                 .push_back(ProviderEvent::Focused(TerminalId::from(block.as_str()))),
@@ -144,7 +194,12 @@ impl RexProvider {
     ) -> Result<(), client::ClientError> {
         match (req, result) {
             (Request::NewSplit(tag) | Request::NewLayer(tag), ResponseResult::Ok(ok)) => {
+                let float = self.took_float_ask(tag);
                 if let Some(block) = session::new_block_id(&ok) {
+                    // framed in views from now on, before the open is done
+                    if float {
+                        self.float_blocks.push(TerminalId::from(block));
+                    }
                     // done once Rex, not us, sizes it
                     self.session.disown(tag, block)?;
                     self.opened.push((tag, TerminalId::from(block)));
@@ -172,10 +227,21 @@ impl RexProvider {
             (
                 Request::NewSplit(tag) | Request::NewLayer(tag) | Request::CloseBlock(tag),
                 ResponseResult::Err(e),
-            ) => self.answer(tag, outcome_of_error(&e)),
+            ) => {
+                self.took_float_ask(tag);
+                self.answer(tag, outcome_of_error(&e))
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Whether ask `tag` was an `open_float` waiting for its block; it no
+    /// longer is.
+    fn took_float_ask(&mut self, tag: u64) -> bool {
+        let before = self.float_asks.len();
+        self.float_asks.retain(|&t| t != tag);
+        self.float_asks.len() != before
     }
 
     /// Rex is gone: tells it once; nothing asked will be answered.

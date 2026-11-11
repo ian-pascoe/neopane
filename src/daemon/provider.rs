@@ -7,12 +7,12 @@
 //! ready (`on_ready`). What the daemon does with acts, their queue, deadlines
 //! and fallbacks, is `asks.rs`'s.
 //!
-//! Until #109–#111 move focus, layout areas and placement onto the seam, only
-//! the opens and `close` are asked through it.
+//! Until #109 and #111 move focus and placement onto the seam, only the
+//! opens, `close` and `report_layout` are asked through it.
 
 use std::fmt;
 
-use super::rex_layout::LayoutSnapshot;
+use super::live_layout::LiveLayout;
 use crate::attach::PaneId;
 
 #[cfg(test)]
@@ -34,8 +34,8 @@ pub(crate) enum Capability {
     Focus,
     FocusDirection,
     ReportLayout,
-    /// The command runner's (#125).
-    #[allow(dead_code)]
+    /// It tells live layouts and focus unasked, as Rex's views and the
+    /// command runner's `events` (#125) do.
     Events,
 }
 
@@ -281,13 +281,11 @@ impl Ask {
 
 /// What a pane provider gives back for an ask that worked.
 #[derive(Debug, Clone, PartialEq)]
-// `Layout` answers `report_layout`, asked from #110
-#[allow(dead_code)]
 pub(crate) enum Answer {
     Nothing,
     Terminal(TerminalId),
-    /// Until #110 makes it the core's `LiveLayout`.
-    Layout(LayoutSnapshot),
+    /// `report_layout`'s.
+    Layout(LiveLayout),
 }
 
 /// How an ask ended.
@@ -309,9 +307,8 @@ pub(crate) enum ProviderEvent {
         id: AskId,
         outcome: Outcome,
     },
-    /// The terminals' places, as they changed. Until #110 makes it the
-    /// core's `LiveLayout`.
-    Layout(LayoutSnapshot),
+    /// The terminals' places, as they changed.
+    Layout(LiveLayout),
     /// The user focused this terminal.
     Focused(TerminalId),
     /// This terminal closed.

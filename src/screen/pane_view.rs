@@ -131,6 +131,27 @@ const MAX_COLS: usize = 1024;
 /// Tallest terminal a floating pane draws into.
 const MAX_ROWS: usize = 512;
 
+/// Most cells of the screen's tabline one pane draws.
+const TABLINE_MAX: usize = 256;
+
+/// What a pane shows of the screen's tabline: grid 1's top row from column
+/// `col`, `cols` wide, or less where the row ends, past which the pane shows
+/// it blank. A wide character cut at either edge leaves a blank.
+pub fn tabline_slice(screen: &Grid, col: u32, cols: u32) -> Vec<Cell> {
+    let row = screen.row(0);
+    let from = (col as usize).min(row.len());
+    let n = (row.len() - from).min(cols as usize).min(TABLINE_MAX);
+    let mut buf = row[from..from + n].to_vec();
+    blank_cut_wide(&mut buf, row.get(from + n));
+    if n > 0 && buf[0].len == 0 {
+        buf[0] = Cell {
+            hl: buf[0].hl,
+            ..Cell::default()
+        };
+    }
+    buf
+}
+
 impl PaneView {
     pub fn init(cols: u32, rows: u32) -> PaneView {
         PaneView {
@@ -1136,6 +1157,27 @@ mod tests {
     fn add_grid(gs: &mut Grids, id: u32, w: u32, h: u32) {
         gs.grids.insert(id, Grid::default());
         gs.grids.get_mut(&id).unwrap().resize(w, h);
+    }
+
+    #[test]
+    fn a_tabline_slice_cut_through_a_wide_char_blanks_its_left_half() {
+        let mut g = Grid::default();
+        g.resize(8, 1);
+        g.cells[3] = Cell::init("x", 0);
+        g.cells[4] = Cell::init("\u{3042}", 0);
+        g.cells[5] = Cell {
+            len: 0,
+            ..Cell::default()
+        };
+        let right = tabline_slice(&g, 0, 5);
+        assert_eq!(5, right.len());
+        assert_eq!("x".as_bytes(), right[3].str());
+        assert_eq!(" ".as_bytes(), right[4].str());
+        let whole = tabline_slice(&g, 0, 6);
+        assert_eq!("\u{3042}".as_bytes(), whole[4].str());
+        // past the row's end: nothing, which the pane shows blank
+        assert_eq!(2, tabline_slice(&g, 6, 5).len());
+        assert!(tabline_slice(&g, 9, 5).is_empty());
     }
 
     #[test]

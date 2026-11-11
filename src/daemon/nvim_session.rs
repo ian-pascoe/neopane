@@ -230,16 +230,19 @@ impl NvimSession {
         self.client.flush()
     }
 
-    /// The editor spans the Rex window, so editor floats such as pickers can
-    /// too. Messages show in the focused pane. Not before setup: the first
-    /// window still fills the editor, and growing it to the Rex window then
-    /// shrinking it to its pane leaves it scrolled, as a dashboard drawn for
-    /// the bigger size would be.
+    /// Sizes Neovim's screen to current pane `p`'s layout area, in `p`'s
+    /// cells (ADR 0008), so screen floats such as pickers can span it; only
+    /// when that size changes, and not while `p` is in no layout area. The
+    /// command line and messages show in `p`. Not before setup: the first
+    /// window still fills the screen, and growing the screen to the layout
+    /// area then shrinking the window to its pane leaves it scrolled, as a
+    /// dashboard drawn for the bigger size would be.
     pub(crate) fn fit_ui_to(&mut self, p: &Pane) -> io::Result<()> {
         if !self.ready {
             return Ok(());
         }
-        let Some(size) = editor_size(p) else {
+        // while it's in no layout area, the screen keeps its size
+        let Some(size) = super::geometry::area_size(p) else {
             return Ok(());
         };
         if size == self.editor_size {
@@ -258,24 +261,6 @@ impl NvimSession {
         self.tabline_width = cols;
         windows::set_tabline_width(&mut self.client, cols);
     }
-}
-
-/// The Rex window's size in cells, judged from pane `p`'s share of it;
-/// without that, the pane's own size.
-fn editor_size(p: &Pane) -> Option<[u32; 2]> {
-    let s = p.terminal_surface.as_ref()?;
-    let cols = s.view.cols;
-    let rows = s.view.rows;
-    let Some(r) = p.rect else {
-        return Some([cols, rows]);
-    };
-    if r[2] <= 0.0 || r[3] <= 0.0 {
-        return Some([cols, rows]);
-    }
-    Some([
-        cols.max((f64::from(cols) / r[2]).round() as u32),
-        rows.max((f64::from(rows) / r[3]).round() as u32),
-    ])
 }
 
 #[cfg(test)]
