@@ -58,7 +58,7 @@ impl FloatingPanes<'_> {
     }
 
     /// Matches float group panes to groups of floats: new groups get one, and
-    /// those whose group closed hang up. A float group pane's size is Rex's:
+    /// those whose group closed hang up. A float group pane's size is the pane provider's:
     /// it's never moved to follow its floats, they follow it. Float group
     /// panes are only made if the pane provider can `open_float`, from
     /// `origin`, the current pane's terminal. What to ask for, it returns.
@@ -126,7 +126,7 @@ impl FloatingPanes<'_> {
         })
     }
 
-    /// Fits a float group pane's floats to where it is and the size Rex gave it.
+    /// Fits a float group pane's floats to where it is and the size the pane provider gave it.
     /// Returns the request's id, if it sent one.
     pub(crate) fn follow_layer(&mut self, id: u32) -> Option<u32> {
         let p = self.panes.by_id(id)?;

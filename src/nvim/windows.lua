@@ -17,7 +17,7 @@ local anchors = {}
 -- the window last reported as current
 local last
 -- tab page made after setup -> { back = the window current before it }.
--- Its windows show in a Rex floating pane, and it closes with the last.
+-- Its windows show in a tab page area, and it closes with the last.
 -- The record also holds its window layout, as the daemon is told of it, and
 -- how many of its windows are being reopened (`reopening`).
 local floating = {}
@@ -282,7 +282,7 @@ end
 -- window each. The same as `Layout::MAX_NODES` in windows.rs.
 local MAX_LAYOUT_NODES = 63
 
--- A floating tab page's `layout`: nested windows { win, w, h } and rows and
+-- A tab page's `layout`: nested windows { win, w, h } and rows and
 -- columns { dir, kids, w, h }, in cells. Once a window is external it's out
 -- of winlayout(), so the layout is kept here, and told to the daemon as it
 -- changes. `told` is what it last heard, flattened.
@@ -624,7 +624,7 @@ function M.close(win)
 end
 
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
---- `col` on the screen, as their Rex floating pane was resized to. `cur` is
+--- `col` on the screen, as their float group pane was resized to. `cur` is
 --- where they are now: row, col, width, height. Returns whether it moved
 --- anything.
 function M.place_group(tops, row, col, w, h, cur)
@@ -681,7 +681,7 @@ api.nvim_create_autocmd('WinNew', {
     if not dir then
       -- the first window of a new tab page, as :tabnew, Neogit and Diffview
       -- open. External windows follow the current tab page, so it opens
-      -- over them: its windows get a Rex floating pane.
+      -- over them: its windows get a tab page area.
       local tab = api.nvim_win_get_tabpage(win)
       if api.nvim_win_get_config(win).relative == '' and not anchor_of(tab) then
         floating[tab] = floating[tab] or { back = last }
@@ -781,7 +781,7 @@ local function report()
     return
   end
   -- a float shows in the pane it floats over, which stays focused, unless
-  -- it's in a Rex floating pane: the daemon decides
+  -- it's in a float group pane: the daemon decides
   if api.nvim_win_get_config(cur).relative ~= '' then
     note('float', cur)
     return
@@ -1394,8 +1394,9 @@ api.nvim_create_autocmd('QuitPre', {
   end,
 })
 
--- A window of floating tab page `tab` closed: once none is left, close the
--- tab page too, from another one, as external windows would go with it.
+-- A window of tab page `tab`, made after setup, closed: once none is left,
+-- close the tab page too, from another one, as external windows would go
+-- with it.
 local function close_tab(tab)
   local t = floating[tab]
   -- windows being reopened in it are still to come

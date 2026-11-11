@@ -41,7 +41,7 @@ pub(crate) struct Pane {
     /// Its window's home tab page, if that tab page gets a tab page area of
     /// its own (ADR 0012), else 0. Its windows share that area.
     pub tab: i64,
-    /// Set for a Rex floating pane showing a group of floats, not a window.
+    /// Set for a float group pane, showing a group of floats, not a window.
     pub layer: Option<Layer>,
     /// Its layout area, as the live layout last said (ADR 0008).
     pub area: Area,
@@ -227,7 +227,7 @@ impl Pane {
         }
     }
 
-    /// A Rex floating pane for a group of floats.
+    /// A float group pane for a group of floats.
     pub(crate) fn from_group(id: u32, group: Group) -> Pane {
         Pane {
             layer: Some(Layer::new(group)),
