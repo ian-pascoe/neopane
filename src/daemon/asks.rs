@@ -20,6 +20,9 @@ use super::provider::{
 use crate::log::{log_info, log_warn};
 use crate::name::NAME;
 
+/// Most characters of a failure's reason a warning shows (#93 decision 20).
+const WHY_MAX: usize = 200;
+
 /// What the daemon has to do about an act.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
@@ -132,7 +135,7 @@ impl Asks {
                 self.steps.push_back(Step::FallBack(ask));
             }
             Outcome::Failed(why) => {
-                self.failed(p.name(), cap, &format!("failed: {why}"));
+                self.failed(p.name(), cap, "failed", Some(&why));
                 self.steps.push_back(Step::FallBack(ask));
             }
         }
@@ -150,7 +153,7 @@ impl Asks {
             let Sent { ask, .. } = self.sent.remove(i);
             let cap = ask.capability();
             let secs = cap.timeout_ms() / 1000;
-            self.failed(p.name(), cap, &format!("timed out after {secs} s"));
+            self.failed(p.name(), cap, &format!("timed out after {secs} s"), None);
             self.steps.push_back(Step::FallBack(ask));
         }
         self.next_layout_act(p, now);
@@ -167,11 +170,29 @@ impl Asks {
         }
     }
 
-    /// Logs a failed act; its capability's first failure warns in Neovim
-    /// too, as #93 decision 20 words it.
-    fn failed(&mut self, provider: &str, cap: Capability, what: &str) {
+    /// Logs a failed act, and `why`; its capability's first failure warns in
+    /// Neovim too, as #93 decision 20 words it, with the first line of `why`
+    /// cut to 200 characters.
+    fn failed(&mut self, provider: &str, cap: Capability, what: &str, why: Option<&str>) {
         let line = format!("{provider}: {cap} {what}");
-        log_warn!("{NAME} daemon: {line}");
+        let Some(why) = why else {
+            log_warn!("{NAME} daemon: {line}");
+            self.warn(cap, line);
+            return;
+        };
+        log_warn!("{NAME} daemon: {line}: {why}");
+        let first: String = why
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(WHY_MAX)
+            .collect();
+        self.warn(cap, format!("{line}: {first}"));
+    }
+
+    /// Warns of `line` in Neovim, if `cap` hasn't warned yet.
+    fn warn(&mut self, cap: Capability, line: String) {
         if !self.warned.has(cap) {
             self.warned.insert(cap);
             self.steps.push_back(Step::Warn(format!("{NAME}: {line}")));
@@ -279,6 +300,23 @@ mod tests {
         fake.answer(fake.last_id(), Outcome::Failed("no room".into()));
         deliver(&mut asks, &mut fake, now);
         assert_eq!(vec![Step::FallBack(open(2))], steps(&mut asks));
+    }
+
+    #[test]
+    fn a_failures_warning_shows_the_first_line_of_its_reason_cut_to_200_characters() {
+        let (mut asks, mut fake, now) = (Asks::default(), FakeProvider::opening(), Instant::now());
+        asks.act(Some(&mut fake), open(1), now);
+        let why = format!("refused: {}\nmore", "é".repeat(300));
+        fake.answer(fake.last_id(), Outcome::Failed(why));
+        deliver(&mut asks, &mut fake, now);
+        let shown = format!("refused: {}", "é".repeat(191));
+        assert_eq!(
+            vec![
+                Step::Warn(format!("{NAME}: fake: open_tab_page failed: {shown}")),
+                Step::FallBack(open(1)),
+            ],
+            steps(&mut asks)
+        );
     }
 
     #[test]
