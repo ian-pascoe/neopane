@@ -14,7 +14,7 @@ use super::live_layout::Area;
 use super::pane_layout::PaneLayout;
 use super::provider::TerminalId;
 use super::surface::Surface;
-use crate::attach::{self, End, Ending, PaneId, Transport};
+use crate::attach::{self, Ending, PaneId, Transport};
 use crate::name::NAME;
 use crate::screen::float_groups::Group;
 
@@ -260,13 +260,13 @@ impl Pane {
             Some(Close::WindowClosed | Close::RequestFailed) => Ending::Closed,
             Some(Close::Shutdown) | None => ending,
         };
-        self.end(End::ending(ending, ending_message(ending), false));
+        self.end(ending, ending_message(ending));
     }
 
-    /// Ends the pane's attach with `end`.
-    pub(crate) fn end(self, end: End) {
+    /// Ends the pane's attach as `ending`, with `message` for its helper.
+    pub(crate) fn end(self, ending: Ending, message: &str) {
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(end);
+            surface.destroy(ending, message);
         }
     }
 

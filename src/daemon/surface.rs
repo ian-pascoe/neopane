@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 
 use super::attach_conn;
 use super::backlog::Backlog;
-use crate::attach::{End, Size};
+use crate::attach::{End, Ending, Size};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -59,12 +59,13 @@ impl Surface {
         })
     }
 
-    /// Ends the attach with `end`, which says why, and closes the terminal
-    /// and the helper socket. Nothing more is written to the terminal: what
-    /// waits is dropped, and `end` says whether that cut a frame short. The
-    /// helper then undoes what the daemon wrote and restores the terminal.
-    pub(crate) fn destroy(self: Box<Surface>, mut end: End) {
-        end.cut = self.backlog.cut();
+    /// Ends the attach as `ending`, with `message` for the helper, and
+    /// closes the terminal and the helper socket. Nothing more is written to
+    /// the terminal: what waits is dropped, and the `z` says whether that cut
+    /// a frame short. The helper then undoes what the daemon wrote and
+    /// restores the terminal.
+    pub(crate) fn destroy(self: Box<Surface>, ending: Ending, message: &str) {
+        let end = End::ending(ending, message, self.backlog.cut());
         attach_conn::send_end(&self.helper_socket, end);
         // the terminal's fd and the helper socket are closed as `self` drops
     }
@@ -118,29 +119,8 @@ pub(crate) fn cells(cols: u16, rows: u16) -> Size {
     }
 }
 
-/// A pty of `cols` x `rows`: master and slave fds.
 #[cfg(test)]
-pub(crate) fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
-    let (mut master, mut slave) = (-1, -1);
-    let mut ws = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: valid out-pointers; no name or termios.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut ws,
-        )
-    };
-    assert_eq!(0, rc);
-    (master, slave)
-}
+pub(crate) use crate::term::terminal::open_pty;
 
 #[cfg(test)]
 impl Surface {
@@ -201,7 +181,7 @@ mod tests {
 
         // `create` buffered the editor modes; destroy drops them unsent
         assert!(!surface.terminal.writer.is_empty());
-        surface.destroy(End::ending(Ending::Failed, "bye", false));
+        surface.destroy(Ending::Failed, "bye");
         // SAFETY: plain fcntl and read calls on the pty's master.
         unsafe {
             let fl = libc::fcntl(master, libc::F_GETFL);
@@ -230,7 +210,7 @@ mod tests {
         // more than the pty takes: nobody reads its master
         surface.terminal.writer = vec![b'x'; 1 << 20];
         assert_eq!(Sent::Waiting, surface.send_frame().unwrap());
-        surface.destroy(End::ending(Ending::Closed, "", false));
+        surface.destroy(Ending::Closed, "");
         let said = attach_conn::read_all_frames(&helper);
         let [crate::attach::Message::End(z)] = &said[..] else {
             panic!("{said:?}")

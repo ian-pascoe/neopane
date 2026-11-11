@@ -9,7 +9,6 @@ use std::os::fd::RawFd;
 
 /// A terminal's settings and its open file's status flags, as they were
 /// before raw mode.
-#[derive(Clone, Copy)]
 pub(crate) struct Saved {
     fd: RawFd,
     termios: libc::termios,
@@ -121,7 +120,7 @@ pub(crate) fn same(a: &libc::termios, b: &libc::termios) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::surface::open_pty;
+    use crate::term::terminal::open_pty;
 
     #[test]
     fn raw_mode_keeps_typeahead_and_restore_puts_back_settings_and_flags() {

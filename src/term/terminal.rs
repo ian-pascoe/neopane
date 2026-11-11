@@ -63,6 +63,30 @@ fn write_all(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// A pty of `cols` x `rows`: master and slave fds.
+#[cfg(test)]
+pub(crate) fn open_pty(cols: u16, rows: u16) -> (RawFd, RawFd) {
+    let (mut master, mut slave) = (-1, -1);
+    let mut ws = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: valid out-pointers; no name or termios.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut ws,
+        )
+    };
+    assert_eq!(0, rc);
+    (master, slave)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,7 +94,7 @@ mod tests {
     // Runs size and flush over a pty.
     #[test]
     fn output_over_a_pty() {
-        let (master, slave) = crate::daemon::surface::open_pty(30, 7);
+        let (master, slave) = open_pty(30, 7);
         let mut t = Terminal::new(slave);
         let size = t.size().unwrap();
         assert_eq!((7, 30), (size.ws_row, size.ws_col));

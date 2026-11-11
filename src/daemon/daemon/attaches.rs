@@ -179,7 +179,7 @@ impl Daemon {
         let mut surface = Surface::create(stream, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: pane {shown}'s helper went: {e}");
-            surface.destroy(End::ending(crate::attach::Ending::Failed, "", false));
+            surface.destroy(crate::attach::Ending::Failed, "");
             return Ok(());
         }
         log::trace_at(Point::Hello, u64::from(id), at);

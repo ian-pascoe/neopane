@@ -729,7 +729,7 @@ impl Startup<'_> {
 
 /// Ends `launch`'s attach as failed with `message`, which its helper prints.
 fn fail(launch: Pane, message: &str) {
-    launch.end(End::ending(Ending::Failed, message, false));
+    launch.end(Ending::Failed, message);
 }
 
 /// How `child`, which has ended, ended. Reaps it.
