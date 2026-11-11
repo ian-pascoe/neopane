@@ -105,9 +105,9 @@ helper gives the answer 10 s.
 
 - **Accepted:** `a`, with `v`, `build`, `daemon` (its name), `log` (its log's
   path, bin) and `features` (the new messages needing an answer this daemon
-  understands, as str). Then, before setting any mode, `u` and the first
-  output in one write, and a new `u` whenever the undo bytes change. Between
-  `a` and the first output the helper draws nothing.
+  understands, as str). `a` and `u` go in one write, before the daemon sets
+  any mode, and a new `u` whenever the undo bytes change. Between `a` and the
+  first output the helper draws nothing.
 - **Refused:** `z` before any `a`, with a refusal reason and a `message` of
   one human-readable line the daemon composes.
 - **A control request:** one `r`, then the daemon closes.
@@ -133,10 +133,22 @@ closes its copy of the terminal. It sends `z` and closes:
 - `exit`: int 0–255, Neovim's exit status, only with `quit`. A self-attach
   exits with it.
 
-The helper writes the undo bytes, then restores its terminal's settings and
-file status flags. If the daemon goes without `z`, the helper writes
-`18 1B 5C` and the latest undo bytes, restores, prints a line naming the
-log, and exits 1.
+The helper writes the undo bytes, blocking in its own process, then
+restores its terminal: it drops input not yet read (`tcflush(TCIFLUSH)`),
+and puts back the settings and file status flags it saved. If the daemon
+goes without `z`, the helper writes `18 1B 5C` and the latest undo bytes,
+restores, prints a line naming the log, and exits 1. Once a helper hangs
+up, the daemon writes nothing more to its terminal.
+
+### The terminal's settings
+
+The helper owns them, under both transports; the daemon never sets them.
+Before its hello it saves the terminal's settings and fd 0's file status
+flags (`F_GETFL`), then sets raw mode (`cfmakeraw`, `tcsetattr(TCSANOW)`),
+keeping what was typed for the daemon to read. It restores both on every way
+out once its hello is sent, after its 300 ms minimum: a reply to a query the
+daemon wrote has had time to arrive by then, and is dropped with the rest of
+the input.
 
 ## Reasons
 

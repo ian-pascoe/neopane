@@ -33,7 +33,7 @@ use super::nvim_session::NvimSession;
 use super::pane::Pane;
 use super::provider::TerminalId;
 use super::surface::Surface;
-use crate::attach::{End, Purpose, Refusal};
+use crate::attach::{End, Ending, Purpose, Refusal};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
@@ -224,7 +224,7 @@ fn tell_launcher(line: &str) -> bool {
 /// The daemon ends Neovim by closing its `--embed` channel, dropping its
 /// `Nvim` before this: Neovim then exits through `preserve_exit()`, running
 /// VimLeave, keeping the swap files of changed buffers and deleting the rest.
-/// As this drops, after the terminals are restored, Neovim is waited for, and
+/// As this drops, after the panes are hung up, Neovim is waited for, and
 /// killed if it hasn't ended within `grace`: one caught in a `system()`
 /// call, such as a clipboard read from an autocommand, can hang on its way
 /// out, and would keep the daemon waiting for good. Never `:qa`, which can
@@ -604,7 +604,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     event_loop.add_read(server.as_raw_fd(), Token::HelperListener as usize)?;
     event_loop.add_read(rex.fd(), Token::Provider as usize)?;
 
-    // dropped first: terminals restored and panes hung up before anything else ends
+    // dropped first: panes hung up before anything else ends
     let mut d = Daemon::new(
         event_loop,
         NvimSession::new(nvim),
@@ -702,7 +702,10 @@ struct Startup<'a> {
 impl Drop for Startup<'_> {
     fn drop(&mut self) {
         if let Some(launch) = self.launch.take() {
-            launch.deinit_with_message(&format!("the daemon didn't start; see {}", self.log));
+            fail(
+                launch,
+                &format!("the daemon didn't start; see {}", self.log),
+            );
         }
     }
 }
@@ -715,14 +718,18 @@ impl Startup<'_> {
             .expect("the launcher's pane was released twice")
     }
 
-    /// Restores the pane and tells it why we're stopping, then returns
-    /// `failure`, which `main` prints to the log.
+    /// Tells the pane why we're stopping, then returns `failure`, which
+    /// `main` prints to the log.
     fn give_up(&mut self, failure: StartFailure) -> Box<dyn std::error::Error> {
         let message = failure_message(&failure, self.log);
-        let launch = self.release();
-        launch.deinit_with_message(&message);
+        fail(self.release(), &message);
         Box::new(failure)
     }
+}
+
+/// Ends `launch`'s attach as failed with `message`, which its helper prints.
+fn fail(launch: Pane, message: &str) {
+    launch.end(End::ending(Ending::Failed, message, false));
 }
 
 /// How `child`, which has ended, ended. Reaps it.
@@ -798,9 +805,7 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
         return Err(Error::NoPane.into());
     }
     let tty = a.tty.expect("checked").into_raw_fd();
-    // (a failing `Surface::create` closes the hello's socket and terminal
-    // itself)
-    let mut surface = Surface::create(a.stream, tty, terminal.size)?;
+    let mut surface = Surface::create(a.stream, tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     log::trace_at(Point::Hello, 0, a.at);
     log::trace(Point::Accepted, 0);
@@ -811,7 +816,7 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attach::{Ending, Message};
+    use crate::attach::Message;
     use crate::daemon::dir::Address;
     use crate::daemon::dir::testing::Scratch;
     use std::os::unix::fs::PermissionsExt;
@@ -1002,7 +1007,7 @@ mod tests {
     }
 
     /// A pseudo-terminal's output, read as it comes until it closes or 1024
-    /// bytes: restoring a terminal waits for its output to be taken.
+    /// bytes.
     fn read_screen(master: RawFd) -> Vec<u8> {
         let mut text = vec![0u8; 1024];
         let mut len = 0;
@@ -1077,14 +1082,19 @@ mod tests {
         assert!(!exists(&sock));
         assert!(!exists(&nvim_sock));
 
-        let _shown = reader.join().unwrap();
+        // nothing was drawn, so nothing was written: no mode was set, and no
+        // query asked whose reply could reach the shell (SPI-970)
+        let shown = reader.join().unwrap();
+        assert!(shown.is_empty(), "{shown:?}");
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
         let said = attach_conn::read_all_frames(&launcher.unwrap());
-        let [Message::Accept(_), Message::End(z)] = &said[..] else {
+        let [Message::Accept(_), Message::Undo(undo), Message::End(z)] = &said[..] else {
             panic!("{said:?}")
         };
+        assert_eq!(&crate::term::modes::undo(), undo);
         assert_eq!(Ending::Failed, z.as_ending());
+        assert!(!z.cut);
         (err, z.message.clone())
     }
 

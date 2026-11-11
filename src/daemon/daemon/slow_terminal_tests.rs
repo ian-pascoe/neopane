@@ -171,7 +171,7 @@ impl Rig {
         let (socket0, helper0) = UnixStream::pair().unwrap();
         let startup = Pane::startup(
             Some(TerminalId::from(TERMINAL)),
-            Surface::create(socket0, slave0, cells(200, 60)).unwrap(),
+            Surface::create(socket0, slave0, cells(200, 60)),
         );
         let pane0 = Emulator::start(master0);
         d.start(startup).unwrap();

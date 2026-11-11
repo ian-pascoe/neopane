@@ -210,12 +210,14 @@ mod tests {
         let (socket, helper) = std::os::unix::net::UnixStream::pair().unwrap();
         let (master, slave) = super::super::surface::open_pty(80, 24);
         let mut p = Pane::from_neovim_window(5, 1000);
-        p.terminal_surface =
-            Some(Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap());
+        p.terminal_surface = Some(Surface::create(
+            socket,
+            slave,
+            super::super::surface::cells(80, 24),
+        ));
         panes.add(p);
         panes.add_for_window(1001).closing = Some(Close::WindowClosed);
 
-        // with nothing to read the terminal's output, restoring it can't wait on it
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
         panes.deinit(Ending::Stopped);

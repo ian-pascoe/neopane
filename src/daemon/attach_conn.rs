@@ -12,6 +12,7 @@ use super::pane_helper;
 use crate::attach::{self, ATTACH_PROTOCOL_VERSION, Accept, End, Frame, Hello, Message, Refusal};
 use crate::attach::{PaneId, Terminal, Transport};
 use crate::log;
+use crate::term::modes;
 
 /// How long a connected peer has to send its hello.
 pub(crate) const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -209,10 +210,14 @@ pub(crate) fn accept_frame(daemon: &str, log: &str) -> Vec<u8> {
     .expect("an accept fits a frame")
 }
 
-/// Sends the `a` frame, waiting for room: the first thing on a new
-/// connection, which has room for it.
+/// Sends the `a` frame and the `u` frame with the undo bytes, in one write,
+/// waiting for room: the first thing on a new connection, which has room
+/// for it, before the daemon sets any of the terminal's modes.
 pub(crate) fn send_accept(stream: &UnixStream, daemon: &str, log: &str) -> io::Result<()> {
-    (&*stream).write_all(&accept_frame(daemon, log))
+    let mut bytes = accept_frame(daemon, log);
+    let undo = Message::Undo(modes::undo()).encode();
+    bytes.extend_from_slice(&undo.expect("the undo bytes fit a `u`"));
+    (&*stream).write_all(&bytes)
 }
 
 /// Whether a requested or self-attached terminal can be taken: under `fd`,

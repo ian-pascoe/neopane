@@ -13,7 +13,7 @@ use super::event_loop::{self, Loop};
 use super::live_layout::Area;
 use super::pane_layout::PaneLayout;
 use super::provider::TerminalId;
-use super::surface::{Restore, Surface};
+use super::surface::Surface;
 use crate::attach::{self, End, Ending, PaneId, Transport};
 use crate::name::NAME;
 use crate::screen::float_groups::Group;
@@ -97,7 +97,7 @@ impl Layer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Close {
-    /// The terminal hung up, so it isn't restored.
+    /// The terminal hung up, so its helper isn't told.
     TerminalHungUp,
     WindowClosed,
     RequestFailed,
@@ -250,32 +250,23 @@ impl Pane {
         TOKEN_BASE + 2 * self.id as usize + source_fd as usize
     }
 
-    /// Hanging up makes the helper exit, and Rex closes the pane. A pane
-    /// closing while the daemon runs is restored without waiting for its
-    /// terminal; one the daemon leaves as it ends (`closing` is `Shutdown`, or
-    /// None before the pane was set up) waits a moment for it.
-    ///
-    /// The helper is told why its attach ends: its pane closed, or, as the
-    /// daemon ends, `ending`.
+    /// Hanging up makes the helper restore its terminal and exit, and Rex
+    /// close the pane. Its helper is told why its attach ends: its pane
+    /// closed, or, as the daemon ends, `ending`. One that is gone already
+    /// is told nothing.
     pub(crate) fn deinit(self, ending: Ending) {
-        let (restore, ending) = match self.closing {
-            Some(Close::TerminalHungUp) => (Restore::No, Ending::Closed),
-            Some(Close::WindowClosed | Close::RequestFailed) => (Restore::Now, Ending::Closed),
-            Some(Close::Shutdown) | None => (Restore::Waiting, ending),
+        let ending = match self.closing {
+            Some(Close::TerminalHungUp) => return, // the fds close as `self` drops
+            Some(Close::WindowClosed | Close::RequestFailed) => Ending::Closed,
+            Some(Close::Shutdown) | None => ending,
         };
-        if let Some(surface) = self.terminal_surface {
-            surface.destroy(restore, End::ending(ending, ending_message(ending), false));
-        }
+        self.end(End::ending(ending, ending_message(ending), false));
     }
 
-    /// `deinit` as the daemon gives up: the attach fails with `message`,
-    /// which its helper prints.
-    pub(crate) fn deinit_with_message(self, message: &str) {
+    /// Ends the pane's attach with `end`.
+    pub(crate) fn end(self, end: End) {
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(
-                Restore::Waiting,
-                End::ending(Ending::Failed, message, false),
-            );
+            surface.destroy(end);
         }
     }
 
@@ -352,10 +343,11 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         let (master, slave) = open_pty(80, 24);
+        crate::term::raw::as_the_helper_does(slave);
         let (socket, mut helper) = UnixStream::pair().unwrap();
         let pane = Pane::startup(
             None,
-            Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap(),
+            Surface::create(socket, slave, super::super::surface::cells(80, 24)),
         );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();
@@ -382,7 +374,7 @@ mod tests {
         assert_eq!(pane.token(PaneFd::Terminal), got[0].token);
         assert_eq!(Kind::Read, got[0].kind);
 
-        // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
+        // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
         pane.deinit(Ending::Stopped);
     }
@@ -400,7 +392,7 @@ mod tests {
         let (socket, mut helper) = UnixStream::pair().unwrap();
         let pane = Pane::startup(
             None,
-            Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap(),
+            Surface::create(socket, slave, super::super::surface::cells(80, 24)),
         );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();
@@ -417,7 +409,7 @@ mod tests {
 
         // a pane that was never registered is fine
         pane.unregister_from(&event_loop);
-        // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
+        // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
         pane.deinit(Ending::Stopped);
     }

@@ -1,70 +1,25 @@
-//! A terminal in raw mode, with buffered output.
+//! A terminal's output, buffered. Its settings are its own process's
+//! (`super::raw`).
 
 use std::io;
 use std::os::fd::RawFd;
 
 pub(crate) struct Terminal {
-    /// Not necessarily stdin; the daemon will drive panes' terminals.
+    /// Not necessarily stdin; the daemon drives panes' terminals.
     pub fd: RawFd,
-    /// Settings before raw mode, restored on deinit.
-    original: libc::termios,
     /// Buffered output. Write a frame, then flush.
     ///
-    /// A growable `Vec`, written to the fd only by `flush` (so `init` takes no
-    /// buffer).
+    /// A growable `Vec`, written to the fd only by `flush`.
     pub writer: Vec<u8>,
 }
 
-/// Calls `f` until it isn't interrupted by a signal, as `tcgetattr` and
-/// `tcsetattr` need.
-fn retry(mut f: impl FnMut() -> libc::c_int) -> io::Result<()> {
-    loop {
-        if f() == 0 {
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
-        }
-    }
-}
-
 impl Terminal {
-    /// Switches `fd` to raw mode. Fails if it isn't a terminal.
-    pub(crate) fn init(fd: RawFd) -> io::Result<Terminal> {
-        // SAFETY: an all-zero termios is a valid out-parameter for tcgetattr.
-        let mut original: libc::termios = unsafe { std::mem::zeroed() };
-        // SAFETY: `original` is a valid termios.
-        retry(|| unsafe { libc::tcgetattr(fd, &mut original) })?;
-
-        let mut raw = original;
-        // SAFETY: `raw` is a valid termios.
-        unsafe { libc::cfmakeraw(&mut raw) };
-        // SAFETY: `raw` is a valid termios.
-        retry(|| unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) })?;
-
-        Ok(Terminal {
+    /// Output to `fd`, nothing buffered yet. Its settings are left alone.
+    pub(crate) fn new(fd: RawFd) -> Terminal {
+        Terminal {
             fd,
-            original,
             writer: Vec::new(),
-        })
-    }
-
-    /// Flushes, then restores the original settings. Errors are ignored.
-    pub(crate) fn deinit(&mut self) {
-        let _ = self.flush();
-        // SAFETY: `original` is the termios `init` read.
-        let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) });
-    }
-
-    /// Restores the original settings now, without waiting for the output
-    /// still queued to be read, as `deinit` does; input not yet read is
-    /// dropped all the same. Errors are ignored.
-    pub(crate) fn restore_now(&mut self) {
-        // SAFETY: plain calls on the terminal's fd; `original` is the termios
-        // `init` read.
-        unsafe { libc::tcflush(self.fd, libc::TCIFLUSH) };
-        let _ = retry(|| unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) });
+        }
     }
 
     /// Current size in cells.
@@ -112,29 +67,11 @@ fn write_all(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    // Runs init, size, flush and deinit over a pty.
+    // Runs size and flush over a pty.
     #[test]
-    fn raw_mode_over_a_pty() {
-        let (mut master, mut slave) = (-1, -1);
-        let mut ws = libc::winsize {
-            ws_row: 7,
-            ws_col: 30,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: valid out-pointers; no name or termios.
-        let rc = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut ws,
-            )
-        };
-        assert_eq!(0, rc);
-
-        let mut t = Terminal::init(slave).unwrap();
+    fn output_over_a_pty() {
+        let (master, slave) = crate::daemon::surface::open_pty(30, 7);
+        let mut t = Terminal::new(slave);
         let size = t.size().unwrap();
         assert_eq!((7, 30), (size.ws_row, size.ws_col));
 
@@ -146,24 +83,10 @@ mod tests {
         let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
         assert_eq!(b"hello", &buf[..n as usize]);
 
-        t.deinit();
-        // SAFETY: closing the fds `openpty` made.
+        // SAFETY: closing the fds `open_pty` made.
         unsafe {
             libc::close(master);
             libc::close(slave);
-        }
-    }
-
-    #[test]
-    fn not_a_terminal() {
-        // SAFETY: a throwaway pipe.
-        let mut fds = [0; 2];
-        assert_eq!(0, unsafe { libc::pipe(fds.as_mut_ptr()) });
-        assert!(Terminal::init(fds[0]).is_err());
-        // SAFETY: closing the pipe above.
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
         }
     }
 }

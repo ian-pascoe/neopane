@@ -18,6 +18,13 @@ pub(crate) const EDITOR_OFF: &str = concat!(
     "\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[0m\x1b[0 q\x1b[?25h\x1b[?1049l"
 );
 
+/// The bytes that undo what the daemon writes to a pane's terminal, for its
+/// helper to write as the attach ends (ADR 0013): the end of a synchronized
+/// update a frame cut short left open, then `EDITOR_OFF`.
+pub(crate) fn undo() -> Vec<u8> {
+    [b"\x1b[?2026l", EDITOR_OFF.as_bytes()].concat()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
