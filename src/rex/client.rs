@@ -179,12 +179,12 @@ impl Client {
         let mut path_buf = [0u8; 256];
         let path = socket_path(server_url, &mut path_buf)?;
         let stream = UnixStream::connect(Path::new(std::ffi::OsStr::from_bytes(path)))?;
-        Client::handshake(stream, client_name)
+        Client::upgrade_and_greet(stream, client_name)
     }
 
     /// Upgrades `stream`, a new connection to Rex, then exchanges hello and
     /// welcome as the client `client_name`. Blocks until welcomed.
-    fn handshake(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
+    fn upgrade_and_greet(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
         let mut me = Client::from_stream(stream);
         // not upgraded yet: nothing to close
         me.open = false;
@@ -699,7 +699,7 @@ mod tests {
             theirs.write_all(&frame).unwrap();
             hello
         });
-        let c = Client::handshake(ours, "sometool").unwrap();
+        let c = Client::upgrade_and_greet(ours, "sometool").unwrap();
         let hello = server.join().unwrap();
         assert_eq!("hello", hello["type"]);
         assert_eq!(

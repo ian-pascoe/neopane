@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(vec!["one \\\" two", "three", "fo\"ur", "five", ""], found);
     }
 
-    /// Every `.rs` file and every other file under `dir`.
+    /// Every file under `dir`.
     fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
