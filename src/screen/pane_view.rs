@@ -36,7 +36,46 @@ pub struct PaneView {
     /// The floats drawn last frame.
     pub(crate) drawn_floats: [Rect; MAX_FLOATS],
     pub(crate) drawn_floats_len: u8,
+    /// The windows `frame_split` drew last, and their separators.
+    pub(crate) drawn_split: Vec<Shown>,
+    pub(crate) drawn_separators: Vec<Separator>,
 }
+
+/// A window's grid shown at a rect of a pane's window area (below its
+/// tabline row), its statusline included. A grid taller than its rect shows
+/// its first rows and its last, the statusline: a window squeezed to one row
+/// shows just that.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct Shown {
+    pub grid: u32,
+    pub row: u32,
+    pub col: u32,
+    pub cols: u32,
+    pub rows: u32,
+}
+
+/// A separator column between windows side by side, in the window area.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct Separator {
+    pub row: u32,
+    pub col: u32,
+    pub rows: u32,
+}
+
+/// Several windows laid out in one pane, as Neovim lays out splits.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct Split<'a> {
+    pub wins: &'a [Shown],
+    pub separators: &'a [Separator],
+    /// What a separator is drawn with: `'fillchars'`'s `vert` in WinSeparator.
+    pub separator: Cell,
+}
+
+/// `drawn_grid` after `frame_split`, which draws no one grid.
+const SPLIT_GRID: u32 = u32::MAX;
 
 /// How a pane draws the screen's floats and messages.
 #[derive(Debug, Clone, Copy, Default)]
@@ -103,6 +142,8 @@ impl PaneView {
             drawn_cursor_mode: None,
             drawn_floats: [Rect::default(); MAX_FLOATS],
             drawn_floats_len: 0,
+            drawn_split: Vec::new(),
+            drawn_separators: Vec::new(),
         }
     }
 
@@ -338,6 +379,295 @@ impl PaneView {
         self.drawn_floats[0..rects.len()].copy_from_slice(&rects);
         self.drawn_floats_len = rects.len() as u8;
         true
+    }
+
+    /// Draws a frame if anything changed: the windows of `split` at their
+    /// rects, with the separators between and the floats over them, and, as
+    /// `frame` does, the tabline and, if focused, the screen's floats and the
+    /// messages. Rows are drawn again rather than scrolls repeated, as a
+    /// window's scroll moves only its part of a row. True if it wrote anything.
+    pub fn frame_split(
+        &mut self,
+        grids: &mut Grids,
+        split: Split<'_>,
+        opts: Opts<'_>,
+        w: &mut Vec<u8>,
+    ) -> bool {
+        let focused = opts.focused;
+        grids.style.clear_blends();
+        let wins: Vec<Shown> = split
+            .wins
+            .iter()
+            .copied()
+            .filter(|s| grids.grids.contains_key(&s.grid))
+            .collect();
+        if self.drawn_grid != SPLIT_GRID
+            || self.drawn_split != wins
+            || self.drawn_separators != split.separators
+        {
+            self.full = true;
+        }
+        let top: u32 = if opts.tabline.is_some() {
+            1.min(self.rows)
+        } else {
+            0
+        };
+        if top != self.drawn_tabline {
+            self.full = true;
+        }
+        let msg_total = if focused { grids.msg_rows() } else { 0 };
+        let msg_n = msg_total.min(self.rows);
+        let msg_id: Option<u32> = if msg_n > 0 {
+            grids.msg_grid.filter(|i| grids.grids.contains_key(i))
+        } else {
+            None
+        };
+        let msg_top = self.rows - msg_n;
+        let area_rows = msg_top.saturating_sub(top);
+
+        // the floats over each window, then the screen's, in the window area
+        let mut rects: Vec<Rect> = Vec::new();
+        for (i, s) in wins.iter().enumerate() {
+            let placed = grids.floats_over(s.grid, focused && i == 0, opts.skip);
+            for mut r in float_rects(grids, &placed) {
+                if !r.on_screen {
+                    r.row += s.row as i32;
+                    r.col += s.col as i32;
+                }
+                rects.push(r);
+            }
+        }
+        if wins.is_empty() && focused {
+            let placed = grids.floats_over(0, true, opts.skip);
+            rects = float_rects(grids, &placed);
+        }
+        if rects.len() > MAX_FLOATS {
+            rects.drain(0..rects.len() - MAX_FLOATS);
+        }
+        self.fit_screen(&mut rects, opts.origin, screen_rows(grids));
+        for r in rects.iter_mut() {
+            if r.on_screen {
+                r.row -= top as i32;
+            }
+        }
+        let floats_moved = !same_rects(&rects, self.drawn_floats());
+
+        // the window area's rows to draw
+        let mut dirty = DirtyRows::default();
+        dirty.resize(area_rows as usize, false);
+        if self.full {
+            dirty.set_all();
+        } else {
+            for s in &wins {
+                let g = grids.get(s.grid).unwrap();
+                for i in 0..s.rows {
+                    let r = s.row + i;
+                    if r >= area_rows {
+                        break;
+                    }
+                    let changed = match shown_row(g, s, i) {
+                        Some(gr) => g.scrolls_len > 0 || g.dirty.is_set(gr as usize),
+                        None => false,
+                    };
+                    if changed {
+                        dirty.set(r as usize);
+                    }
+                }
+            }
+            let mut mark = |r: &Rect, all: bool, g: &Grid| {
+                if all {
+                    let (t, b) = r.rows(area_rows);
+                    for i in t..b {
+                        dirty.set(i as usize);
+                    }
+                    return;
+                }
+                for fr in g.dirty.iter() {
+                    let tr = r.row as i64 + fr as i64;
+                    if tr >= 0 && tr < area_rows as i64 {
+                        dirty.set(tr as usize);
+                    }
+                }
+            };
+            if floats_moved {
+                let blank = Grid::default();
+                for r in self.drawn_floats() {
+                    mark(r, true, &blank);
+                }
+            }
+            for r in &rects {
+                let f = grids.get(r.grid).unwrap();
+                mark(r, floats_moved || f.scrolls_len > 0, f);
+            }
+            // rows the messages covered last frame and no longer do
+            let old_top = self.rows - self.drawn_msg.min(self.rows);
+            for r in old_top.min(msg_top)..msg_top {
+                if r >= top {
+                    dirty.set((r - top) as usize);
+                }
+            }
+        }
+        let msg_changed = match msg_id.and_then(|i| grids.get(i)) {
+            Some(m) => m.dirty.count() > 0 || msg_n != self.drawn_msg,
+            None => msg_n != self.drawn_msg,
+        };
+        let old_msg_top = self.rows - self.drawn_msg.min(self.rows);
+        let tabline_changed = top > 0
+            && (self.full
+                || opts.tabline_dirty
+                || opts.tabline_col != self.drawn_tabline_col
+                || old_msg_top.min(msg_top) < top);
+        let cur = self.split_cursor(grids, &wins, &rects, top, area_rows, msg_total, msg_n);
+        if !self.full
+            && dirty.count() == 0
+            && !msg_changed
+            && !tabline_changed
+            && self.cursor_unchanged(cur, &grids.style)
+        {
+            return false;
+        }
+
+        render::begin(w);
+        let mut current: Option<u32> = None;
+        if self.full {
+            render::set_hl(&grids.style, 0, w, &mut current);
+            w.extend_from_slice(b"\x1b[2J");
+        }
+        if tabline_changed && let Some(row) = opts.tabline {
+            let cut = &row[..row.len().min(self.cols as usize)];
+            render::draw_row(cut, &grids.style, 0, self.cols, w, &mut current);
+        }
+        {
+            let cols = self.cols.min(MAX_COLS as u32);
+            let gmap = &grids.grids;
+            let style = &mut grids.style;
+            let mut base = [Cell::default(); MAX_COLS];
+            let mut line = [Cell::default(); MAX_COLS];
+            for r in dirty.iter() {
+                let r = r as u32;
+                base[..cols as usize].fill(Cell::default());
+                for s in &wins {
+                    if r < s.row || r >= s.row + s.rows || s.col >= cols {
+                        continue;
+                    }
+                    let g = &gmap[&s.grid];
+                    let Some(gr) = shown_row(g, s, r - s.row) else {
+                        continue;
+                    };
+                    let src = g.row(gr);
+                    let n = (s.cols.min(cols - s.col) as usize).min(src.len());
+                    let to = &mut base[s.col as usize..s.col as usize + n];
+                    to.copy_from_slice(&src[..n]);
+                    blank_cut_wide(to, src.get(n));
+                }
+                for sep in split.separators {
+                    if r >= sep.row && r < sep.row + sep.rows && sep.col < cols {
+                        base[sep.col as usize] = split.separator;
+                    }
+                }
+                let shown = compose(
+                    gmap,
+                    style,
+                    &base[..cols as usize],
+                    &rects,
+                    r,
+                    cols,
+                    &mut line,
+                );
+                render::draw_row(shown, style, top + r, self.cols, w, &mut current);
+            }
+        }
+        if let Some(mid) = msg_id
+            && (self.full || msg_changed)
+        {
+            let m = &grids.grids[&mid];
+            for i in 0..msg_n {
+                let src = msg_total - msg_n + i;
+                render::draw_row(
+                    m.row(src),
+                    &grids.style,
+                    msg_top + i,
+                    self.cols,
+                    w,
+                    &mut current,
+                );
+            }
+        }
+        render::end(&grids.style, cur, w);
+        for s in &wins {
+            let g = grids.grids.get_mut(&s.grid).unwrap();
+            g.dirty.unset_all();
+            g.scrolls_len = 0;
+        }
+
+        self.full = false;
+        self.drawn_grid = SPLIT_GRID;
+        self.drawn_size = [0, 0];
+        self.drawn_msg = msg_n;
+        self.drawn_tabline = top;
+        self.drawn_tabline_col = opts.tabline_col;
+        self.drawn_cursor = cur;
+        self.drawn_cursor_mode = grids.style.cursor_mode();
+        self.drawn_floats[0..rects.len()].copy_from_slice(&rects);
+        self.drawn_floats_len = rects.len() as u8;
+        self.drawn_split = wins;
+        self.drawn_separators = split.separators.to_vec();
+        true
+    }
+
+    /// Where the cursor shows among a split's windows, floats and messages.
+    #[allow(clippy::too_many_arguments)]
+    fn split_cursor(
+        &self,
+        grids: &Grids,
+        wins: &[Shown],
+        rects: &[Rect],
+        top: u32,
+        area_rows: u32,
+        msg_total: u32,
+        msg_n: u32,
+    ) -> Option<render::Cursor> {
+        let at = |row: i64, col: i64| {
+            (row >= 0 && row < area_rows as i64 && col >= 0 && col < self.cols as i64).then(|| {
+                render::Cursor {
+                    row: top + row as u32,
+                    col: col as u32,
+                }
+            })
+        };
+        for r in rects {
+            if grids.cursor_grid == r.grid {
+                let f = grids.get(r.grid).unwrap();
+                return at(
+                    r.row as i64 + f.cursor_row as i64,
+                    r.col as i64 + f.cursor_col as i64,
+                );
+            }
+        }
+        for s in wins {
+            if grids.cursor_grid != s.grid {
+                continue;
+            }
+            let g = grids.get(s.grid).unwrap();
+            // on a row the window shows, inside its rect
+            let shown = (0..s.rows).find(|&i| shown_row(g, s, i) == Some(g.cursor_row))?;
+            if g.cursor_col >= s.cols {
+                return None;
+            }
+            return at(i64::from(s.row + shown), i64::from(s.col + g.cursor_col));
+        }
+        let m = grids.get(grids.msg_grid?)?;
+        if Some(grids.cursor_grid) != grids.msg_grid || msg_n == 0 {
+            return None;
+        }
+        let first = msg_total - msg_n;
+        if m.cursor_row < first || m.cursor_row >= msg_total || m.cursor_col >= self.cols {
+            return None;
+        }
+        Some(render::Cursor {
+            row: self.rows - msg_n + (m.cursor_row - first),
+            col: m.cursor_col,
+        })
     }
 
     /// The cursor is where, and looks as, it was drawn. A pane without one
@@ -587,6 +917,16 @@ impl PaneView {
             col: m.cursor_col,
         })
     }
+}
+
+/// The row of grid `g` that row `i` of its rect `s` shows: its first
+/// rows, and its last (the statusline) in the rect's last row when the grid
+/// is taller. None past the grid's end.
+fn shown_row(g: &Grid, s: &Shown, i: u32) -> Option<u32> {
+    if g.height > s.rows && i + 1 == s.rows {
+        return Some(g.height - 1);
+    }
+    (i < g.height).then_some(i)
 }
 
 fn screen_rows(grids: &Grids) -> u32 {
