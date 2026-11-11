@@ -36,11 +36,11 @@ Install with `just install`. On macOS, a binary overwritten in place is killed a
 
 ### Issue tracker
 
-GitHub Issues on `ian-pascoe/neorex`, through `gh`. See `docs/agents/issue-tracker.md`.
+Issues live in Linear (team SPI, project ian-pascoe/neopane); GitHub Issues on `ian-pascoe/neorex` are the public intake and sync one-way into it. Reach Linear through Executor's Linear app, falling back to the `linear` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-The five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+The five default labels, as labels of the Linear team SPI: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
