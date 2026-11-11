@@ -1201,8 +1201,16 @@ api.nvim_create_autocmd('CmdlineLeave', {
   pattern = ':',
   callback = function()
     if vim.v.event.abort then return end
-    local ok, cmd = pcall(api.nvim_parse_cmd, vim.fn.getcmdline(), {})
-    if not ok or cmd.cmd ~= 'detach' then return end
+    -- each command of a bar-chain too, as in :echo 1 | detach
+    local line = vim.fn.getcmdline()
+    local found = false
+    while line and line ~= '' and not found do
+      local ok, cmd = pcall(api.nvim_parse_cmd, line, {})
+      if not ok then return end
+      found = cmd.cmd == 'detach'
+      line = cmd.nextcmd
+    end
+    if not found then return end
     -- vim.v.event is a copy
     vim.cmd('let v:event.abort = v:true')
     vim.schedule(function()

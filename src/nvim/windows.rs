@@ -874,16 +874,25 @@ mod tests {
             return;
         };
         let refused = format!("{NAME}: :detach is refused: it would end Neovim");
-        // `:det` is `:detach` too
-        for (n, typed) in [":detach<CR>", ":det<CR>"].into_iter().enumerate() {
+        // `:det` is `:detach` too, and so is one after a bar
+        let typed = [":detach<CR>", ":det<CR>", ":echo 1 | detach<CR>"];
+        for (n, typed) in typed.into_iter().enumerate() {
             h.input(typed);
             // still attached: a line typed after it runs
             h.typed();
             // the message comes on the next turn; one at a time, it needs no
             // hit-enter
             h.sync(&format!(
-                "assert(vim.wait(2500, function() \
-                   return select(2, vim.fn.execute('messages'):gsub('{refused}', '')) == {} \
+                "local function count(s, p) \
+                   local n, at = 0, 1 \
+                   while true do \
+                     local i = s:find(p, at, true) \
+                     if not i then return n end \
+                     n, at = n + 1, i + 1 \
+                   end \
+                 end \
+                 assert(vim.wait(2500, function() \
+                   return count(vim.fn.execute('messages'), {refused:?}) == {} \
                  end), vim.fn.execute('messages'))",
                 n + 1
             ));
