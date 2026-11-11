@@ -962,19 +962,21 @@ fn which_finds_programs_on_path() {
 #[test]
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
-    let envs: [&[(&str, &str)]; 6] = [
+    // set means present, even empty, as the daemon reads its own
+    let envs: [&[(&str, &str)]; 7] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
         &[("REX_SESSION", "s")],
         &[("REX_SERVER", ""), ("REX_SESSION", "s")],
+        &[("REX_SERVER", ""), ("REX_SESSION", "")],
         &[
             ("TMUX", "/tmp/t,1,0"),
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
     ];
-    let want = [false, true, false, false, false, true];
+    let want = [false, true, false, false, true, true, true];
     for (env, want) in envs.into_iter().zip(want) {
         let mut f = Fixture::new(source);
         f.attach.env = env

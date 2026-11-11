@@ -31,11 +31,10 @@ pub fn choose(outcome: &Outcome, file: &str) -> Result<Chosen, Problems> {
 }
 
 /// The built-in default (#93 decision 27), on an environment: `"rex"` when
-/// `REX_SERVER` and `REX_SESSION` are both set and not empty, else none.
+/// `REX_SERVER` and `REX_SESSION` are both set, even if empty, else none.
 /// The daemon's own default and the config's `<name>.default` both use it.
 pub fn default_name(var: impl Fn(&str) -> Option<Vec<u8>>) -> Option<&'static str> {
-    let set = |name| var(name).is_some_and(|v| !v.is_empty());
-    (set("REX_SERVER") && set("REX_SESSION")).then_some(Builtin::Rex.name())
+    (var("REX_SERVER").is_some() && var("REX_SESSION").is_some()).then_some(Builtin::Rex.name())
 }
 
 /// The built-in default's choice for `attach`, as the daemon makes it with
