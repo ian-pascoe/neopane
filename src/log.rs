@@ -62,9 +62,102 @@ pub fn env_var() -> String {
     format!("{}_LOG", name::upper())
 }
 
-static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
+/// A log's level and its traces waiting. The daemon has one, `LOG`; the
+/// functions below use it.
+#[derive(Debug)]
+pub struct Log {
+    level: AtomicU8,
+    traces: Mutex<Traces>,
+}
 
-static TRACES: Mutex<Traces> = Mutex::new(Traces::new());
+static LOG: Log = Log::new();
+
+impl Default for Log {
+    fn default() -> Self {
+        Log::new()
+    }
+}
+
+impl Log {
+    /// At `info`, with no traces.
+    pub const fn new() -> Log {
+        Log {
+            level: AtomicU8::new(LogLevel::Info as u8),
+            traces: Mutex::new(Traces::new()),
+        }
+    }
+
+    /// Sets the level. At `debug`, makes room for the traces once, up front.
+    pub fn set_level(&self, level: LogLevel) {
+        self.level.store(level as u8, Ordering::Relaxed);
+        self.lock_traces().set_on(level >= LogLevel::Debug);
+    }
+
+    /// Whether lines at `level` are logged.
+    #[inline]
+    pub fn enabled(&self, level: LogLevel) -> bool {
+        self.level.load(Ordering::Relaxed) >= level as u8
+    }
+
+    /// Whether traces are kept: the level is `debug`.
+    #[inline]
+    pub fn tracing(&self) -> bool {
+        self.enabled(LogLevel::Debug)
+    }
+
+    /// Traces `point` for `id` now, at `debug`.
+    #[inline]
+    pub fn trace(&self, point: Point, id: u64) {
+        if self.tracing() {
+            self.trace_at(point, id, now_ns(), None);
+        }
+    }
+
+    /// Traces `point` for `id` now, timed from `from`, at `debug`.
+    #[inline]
+    pub fn trace_since(&self, point: Point, id: u64, from: Instant) {
+        if self.tracing() {
+            let now = now_ns();
+            let ago = u64::try_from(from.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.trace_at(point, id, now, Some(now.saturating_sub(ago)));
+        }
+    }
+
+    /// Traces `point` for `id` at `t`, from `from`, both `now_ns` times, if
+    /// traces are kept. A full buffer is written to stderr.
+    pub fn trace_at(&self, point: Point, id: u64, t: u64, from: Option<u64>) {
+        let mut traces = self.lock_traces();
+        traces.record(point, id, t, from);
+        if traces.is_full() {
+            let _ = traces.write_into(&mut io::stderr().lock());
+        }
+    }
+
+    /// Writes the traces waiting to `w`, in one write.
+    pub fn flush_into(&self, w: &mut impl Write) -> io::Result<()> {
+        self.lock_traces().write_into(w)
+    }
+
+    /// Writes a log line at `level` to `w`, if it's on, after the traces
+    /// waiting.
+    pub fn line_into(
+        &self,
+        w: &mut impl Write,
+        level: LogLevel,
+        args: std::fmt::Arguments<'_>,
+    ) -> io::Result<()> {
+        if !self.enabled(level) {
+            return Ok(());
+        }
+        self.flush_into(w)?;
+        writeln!(w, "{args}")
+    }
+
+    fn lock_traces(&self) -> std::sync::MutexGuard<'_, Traces> {
+        // a panic mid-trace leaves a buffer still good to use
+        self.traces.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 /// The level `<NAME>_LOG` names, and the warning for a value it isn't one.
 pub fn from_env() -> (LogLevel, Option<String>) {
@@ -82,34 +175,28 @@ pub fn init_daemon() -> LogLevel {
     level
 }
 
-/// Sets the level. At `debug`, makes room for the traces once, up front.
+/// Sets the level.
 pub fn set_level(level: LogLevel) {
-    LEVEL.store(level as u8, Ordering::Relaxed);
-    lock_traces().set_on(level >= LogLevel::Debug);
+    LOG.set_level(level);
 }
 
 /// Whether lines at `level` are logged.
 #[inline]
 pub fn enabled(level: LogLevel) -> bool {
-    LEVEL.load(Ordering::Relaxed) >= level as u8
+    LOG.enabled(level)
 }
 
 /// Whether traces are kept: the level is `debug`.
 #[inline]
 pub fn tracing() -> bool {
-    enabled(LogLevel::Debug)
+    LOG.tracing()
 }
 
 /// Writes a log line at `level`, if it's on, after the traces waiting. (See
 /// `log_warn!`, `log_info!` and `log_debug!`.)
 pub fn line(level: LogLevel, args: std::fmt::Arguments<'_>) {
-    if !enabled(level) {
-        return;
-    }
-    let mut err = io::stderr().lock();
     // a failed log write has nowhere to be told
-    let _ = lock_traces().write_into(&mut err);
-    let _ = writeln!(err, "{args}");
+    let _ = LOG.line_into(&mut io::stderr().lock(), level, args);
 }
 
 /// Logs a line at `warn`: something went wrong.
@@ -144,7 +231,7 @@ pub enum Point {
     Exec,
     /// L1: a new pane's split asked for.
     Split,
-    /// L1, L3, L6: a frame written to a pane.
+    /// L1, L3, L6: a frame written to a pane in full, its last byte gone out.
     Frame,
     /// L4: a read's keys written to Neovim as `nvim_input`, straight away.
     /// Its `from` is when the read came.
@@ -153,7 +240,7 @@ pub enum Point {
     HeldInput,
     /// L2: a focus request written to Rex.
     Focus,
-    /// L3: a pane of another tab page became the focused one.
+    /// L3: a pane of another tab page became the current pane.
     TabMove,
     /// L5: a pane's terminal was resized.
     Resize,
@@ -222,34 +309,18 @@ impl Point {
 /// Traces `point` for `id` (a pane, mostly) now, at `debug`.
 #[inline]
 pub fn trace(point: Point, id: u64) {
-    if tracing() {
-        trace_at(point, id, now_ns(), None);
-    }
+    LOG.trace(point, id);
 }
 
 /// Traces `point` for `id` now, timed from `from`, at `debug`.
 #[inline]
 pub fn trace_since(point: Point, id: u64, from: Instant) {
-    if tracing() {
-        let now = now_ns();
-        let ago = u64::try_from(from.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        trace_at(point, id, now, Some(now.saturating_sub(ago)));
-    }
-}
-
-/// Traces `point` for `id` at `t`, from `from`, both `now_ns` times, if
-/// traces are kept. A full buffer is written out.
-pub fn trace_at(point: Point, id: u64, t: u64, from: Option<u64>) {
-    let mut traces = lock_traces();
-    traces.record(point, id, t, from);
-    if traces.is_full() {
-        let _ = traces.write_into(&mut io::stderr().lock());
-    }
+    LOG.trace_since(point, id, from);
 }
 
 /// Writes out the traces waiting, as the daemon ends.
 pub fn flush_traces() {
-    let _ = lock_traces().write_into(&mut io::stderr().lock());
+    let _ = LOG.flush_into(&mut io::stderr().lock());
 }
 
 /// The monotonic clock `Instant` reads, in nanoseconds: the same in every
@@ -269,11 +340,6 @@ pub fn now_ns() -> u64 {
     (ts.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64)
-}
-
-fn lock_traces() -> std::sync::MutexGuard<'static, Traces> {
-    // a panic mid-trace leaves a buffer still good to use
-    TRACES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Room for the traces between writes: some hundreds of lines.
@@ -387,6 +453,76 @@ mod tests {
             assert_eq!(Some(p), Point::from_tag(p.tag_name()));
         }
         assert_eq!(None, Point::from_tag("nothing"));
+    }
+
+    #[test]
+    fn every_point_is_in_all() {
+        // a point added to the enum fails to compile here until it's listed
+        let index = |p: Point| match p {
+            Point::Exec => 0,
+            Point::Split => 1,
+            Point::Frame => 2,
+            Point::Input => 3,
+            Point::HeldInput => 4,
+            Point::Focus => 5,
+            Point::TabMove => 6,
+            Point::Resize => 7,
+            Point::ResizeSent => 8,
+            Point::Place => 9,
+            Point::Placed => 10,
+            Point::Accept => 11,
+            Point::Found => 12,
+            Point::Hello => 13,
+            Point::Accepted => 14,
+        };
+        for (i, p) in Point::ALL.into_iter().enumerate() {
+            assert_eq!(i, index(p), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn traces_are_kept_and_written_only_at_debug() {
+        let log = Log::new();
+        let mut out = Counted::default();
+        for level in [LogLevel::Warn, LogLevel::Info] {
+            log.set_level(level);
+            log.trace(Point::Frame, 1);
+            log.trace_since(Point::Input, 1, Instant::now());
+            log.line_into(&mut out, LogLevel::Warn, format_args!("a warning"))
+                .unwrap();
+            log.flush_into(&mut out).unwrap();
+        }
+        let text = String::from_utf8(std::mem::take(&mut out.bytes)).unwrap();
+        assert_eq!("a warning\na warning\n", text);
+        assert_eq!(0, log.lock_traces().buf.capacity());
+
+        log.set_level(LogLevel::Debug);
+        let writes = out.writes;
+        let from = Instant::now();
+        log.trace(Point::Frame, 1);
+        log.trace_since(Point::Input, 2, from);
+        // kept, not written, until the next log line
+        assert_eq!(
+            2,
+            log.lock_traces()
+                .pending()
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+        );
+        assert_eq!(writes, out.writes);
+        log.line_into(&mut out, LogLevel::Debug, format_args!("a line"))
+            .unwrap();
+        let text = String::from_utf8(out.bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(3, lines.len(), "{text}");
+        assert!(lines[0].starts_with(&format!("{NAME} trace frame 1 ")));
+        let input: Vec<&str> = lines[1].split(' ').collect();
+        assert_eq!([NAME, "trace", "input", "2"], input[..4]);
+        let (t, read): (u64, u64) = (input[4].parse().unwrap(), input[5].parse().unwrap());
+        assert!(read <= t);
+        assert_eq!("a line", lines[2]);
+        assert!(log.lock_traces().pending().is_empty());
     }
 
     /// A writer that counts the writes made to it, as syscalls would be.
