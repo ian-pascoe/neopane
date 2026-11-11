@@ -1100,6 +1100,7 @@ fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
             col: 0,
             cols: 6,
             rows: 4,
+            statusline: None,
         },
         Shown {
             grid: 3,
@@ -1107,6 +1108,7 @@ fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
             col: 7,
             cols: 5,
             rows: 4,
+            statusline: None,
         },
     ];
     let seps = [Separator {
@@ -1165,6 +1167,7 @@ fn three_windows_under_the_tabline_one_beside_two_stacked() -> Result<()> {
             col: 0,
             cols: 5,
             rows: 5,
+            statusline: None,
         },
         Shown {
             grid: 3,
@@ -1172,6 +1175,7 @@ fn three_windows_under_the_tabline_one_beside_two_stacked() -> Result<()> {
             col: 6,
             cols: 6,
             rows: 2,
+            statusline: None,
         },
         Shown {
             grid: 4,
@@ -1179,6 +1183,7 @@ fn three_windows_under_the_tabline_one_beside_two_stacked() -> Result<()> {
             col: 6,
             cols: 6,
             rows: 3,
+            statusline: None,
         },
     ];
     let seps = [Separator {
@@ -1235,6 +1240,7 @@ fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Resul
             col: 0,
             cols: 8,
             rows: 1,
+            statusline: None,
         },
         Shown {
             grid: 3,
@@ -1242,6 +1248,7 @@ fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Resul
             col: 0,
             cols: 8,
             rows: 2,
+            statusline: None,
         },
         Shown {
             grid: 4,
@@ -1249,6 +1256,7 @@ fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Resul
             col: 0,
             cols: 8,
             rows: 1,
+            statusline: None,
         },
     ];
     let mut view = PaneView::init(8, 5);
@@ -1272,4 +1280,57 @@ fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Resul
         ],
     )?;
     expect_cursor(&t, &gs.style, Some(render::Cursor { row: 1, col: 0 }))
+}
+
+#[test]
+fn with_laststatus_0_the_window_above_shows_a_blank_statusline_drawn_for_it() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // Neovim draws neither a statusline: each grid is text only
+    add_window(&mut gs, 2, 6, 2, 'a');
+    add_window(&mut gs, 3, 6, 2, 'b');
+    for id in [2, 3] {
+        gs.get_mut(id).unwrap().resize(6, 2);
+    }
+    gs.cursor_grid = 3;
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 6,
+            rows: 3,
+            statusline: Some(STL),
+        },
+        Shown {
+            grid: 3,
+            row: 3,
+            col: 0,
+            cols: 6,
+            rows: 2,
+            statusline: None,
+        },
+    ];
+    let mut view = PaneView::init(6, 6);
+    let mut t = test_terminal(6, 6)?;
+    let mut out = Vec::new();
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &[],
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("a0    ", "......"),
+            ("a1    ", "......"),
+            ("      ", "SSSSSS"),
+            ("b0    ", "......"),
+            ("b1    ", "......"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
 }

@@ -924,8 +924,9 @@ impl Daemon {
     /// in every pane laying out several windows.
     fn on_split_options(&mut self, o: windows::SplitOptions) -> Result<()> {
         let redraw = o.separator != self.split_options.separator;
+        let refit = o.statuslines != self.split_options.statuslines;
         self.split_options = o;
-        if !redraw {
+        if !redraw && !refit {
             return Ok(());
         }
         for p in self.panes.list.iter_mut() {
@@ -934,6 +935,11 @@ impl Daemon {
             {
                 s.view.full = true;
             }
+        }
+        if refit {
+            // statuslines of ours came or went: windows above others resize
+            self.size_windows();
+            self.nvim.client.flush()?;
         }
         self.draw()
     }
@@ -971,6 +977,11 @@ impl Daemon {
         let area = self.geometry().window_size(p);
         let current = p.neovim_window_handle.unwrap_or(win);
         let was = layout.lay_out(area, current).of(win);
+        // told without the statusline neorex draws it
+        let rows = match was {
+            Some(w) if rows != 0 && self.draws_statusline(&w, area) => rows + 1,
+            _ => rows,
+        };
         let p = self.panes.by_id_mut(id).unwrap();
         let layout = p.layout.as_mut().unwrap();
         if cols != 0 && was.is_none_or(|w| w.cols != cols) {
@@ -1648,10 +1659,12 @@ impl Daemon {
             let Some(grid) = self.grids.grid_of(w.win) else {
                 continue;
             };
+            // a statusline of ours takes the last row
+            let ours = u32::from(self.draws_statusline(w, area));
             let want = LastAskedWinSize {
                 grid,
                 cols: w.cols,
-                rows: w.rows,
+                rows: (w.rows - ours).max(1),
             };
             if !p.layout_asked.contains(&(w.win, want)) {
                 asks.push((w.win, want));
@@ -1676,16 +1689,29 @@ impl Daemon {
             .wins
             .iter()
             .filter_map(|w| {
+                let hl = if w.win == self.nvim.current_win {
+                    self.grids.statusline_hl
+                } else {
+                    self.grids.statusline_nc_hl
+                };
                 Some(Shown {
                     grid: self.grids.grid_of(w.win)?,
                     row: w.row,
                     col: w.col,
                     cols: w.cols,
                     rows: w.rows,
+                    statusline: self.draws_statusline(w, area).then_some(hl),
                 })
             })
             .collect();
         (wins, laid.separators)
+    }
+
+    /// Whether neorex draws window `w`, laid out in `area`, its statusline: a
+    /// window with another below it always has one, and with `'laststatus'`
+    /// 0 Neovim draws it none.
+    fn draws_statusline(&self, w: &pane_layout::Placed, area: [u32; 2]) -> bool {
+        !self.split_options.statuslines && w.row + w.rows < area[1]
     }
 
     /// `size_window` for every pane.
@@ -3350,14 +3376,16 @@ mod tests {
                     row: 0,
                     col: 0,
                     cols: 40,
-                    rows: 23
+                    rows: 23,
+                    statusline: None
                 },
                 Shown {
                     grid: 2,
                     row: 0,
                     col: 41,
                     cols: 40,
-                    rows: 23
+                    rows: 23,
+                    statusline: None
                 },
             ],
             wins
@@ -3397,6 +3425,53 @@ mod tests {
             ],
             sizes_sent(&sent.nvim_bytes)
         );
+    }
+
+    #[test]
+    fn with_rex_closed_a_pane_of_two_windows_draws_both_and_the_separator_between() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        // a terminal whose output the test reads
+        let (master, slave) = surface::open_pty(81, 24);
+        let (socket, _helper) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::create(socket, slave).unwrap());
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 81, 23);
+        note_split_from(&mut fx.d, 1001, 1000, true, true);
+        draw_external(&mut fx.d, 3, 1001, 40, 23);
+        fx.d.reconcile().unwrap();
+        for (grid, text) in [(2, "right"), (3, "left")] {
+            let g = fx.d.grids.get_mut(grid).unwrap();
+            for (i, c) in text.chars().enumerate() {
+                g.cells[i] = Cell::init(c.to_string(), 0);
+            }
+        }
+        fx.d.grids.get_mut(2).unwrap().resize(40, 23);
+
+        fx.d.draw().unwrap();
+        assert!(fx.d.panes.by_id(id).is_some());
+        // SAFETY: reads what the frame wrote from the pty's master, without
+        // waiting, then closes it.
+        let written = unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = libc::read(master, buf.as_mut_ptr().cast(), buf.len());
+                if n <= 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+            libc::close(master);
+            String::from_utf8_lossy(&all).into_owned()
+        };
+        // the left window from the first column, the right after the separator
+        assert!(written.contains("\x1b[1;1Hleft"), "{written:?}");
+        assert!(written.contains("\u{2502}right"), "{written:?}");
     }
 
     #[test]
@@ -3463,6 +3538,44 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(fx.d.pending_sizes.is_empty());
+    }
+
+    #[test]
+    fn with_laststatus_0_a_window_above_another_gets_a_statusline_drawn_for_it() {
+        let mut fx = fixture();
+        fx.d.rex.conn = Conn::Closed;
+        fx.d.nvim.ready = true;
+        fx.d.grids.statusline_hl = 7;
+        fx.d.grids.statusline_nc_hl = 8;
+        fx.d.on_note(windows::Note::Options(windows::SplitOptions {
+            statuslines: false,
+            ..windows::SplitOptions::default()
+        }))
+        .unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        // :split, the new window above and current
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        draw_external(&mut fx.d, 3, 1001, 80, 9);
+        fx.d.reconcile().unwrap();
+        let pane = fx.d.panes.by_id(id).unwrap();
+        let (wins, _) = fx.d.laid_out_view(pane);
+        // the one above: its last row a statusline of ours, in StatusLine as
+        // it's current; the one below has none, as in Neovim
+        assert_eq!(
+            vec![(3, 0, 10, Some(7)), (2, 10, 10, None)],
+            wins.iter()
+                .map(|w| (w.grid, w.row, w.rows, w.statusline))
+                .collect::<Vec<_>>()
+        );
+        let sent = sent_by(fx);
+        let sizes = sizes_sent(&sent.nvim_bytes);
+        // Neovim's window above is a row short of its place
+        assert_eq!(&[[1001, 80, 9], [1000, 80, 10]], &sizes[sizes.len() - 2..]);
     }
 
     #[test]

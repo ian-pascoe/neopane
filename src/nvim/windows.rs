@@ -143,6 +143,8 @@ pub struct SplitOptions {
     pub(crate) splitbelow: bool,
     pub(crate) splitright: bool,
     pub(crate) separator: char,
+    /// `'laststatus'` isn't 0: Neovim draws windows their statuslines.
+    pub(crate) statuslines: bool,
 }
 
 impl Default for SplitOptions {
@@ -153,6 +155,7 @@ impl Default for SplitOptions {
             splitbelow: false,
             splitright: false,
             separator: '│',
+            statuslines: true,
         }
     }
 }
@@ -427,10 +430,10 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
     }))
 }
 
-/// `[equalalways, splitbelow, splitright, vert]`: three booleans, and the one
-/// character separators are drawn with.
+/// `[equalalways, splitbelow, splitright, vert, laststatus]`: three booleans,
+/// the one character separators are drawn with, and a number.
 fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
-    if rpc::expect_array(params)? < 4 {
+    if rpc::expect_array(params)? < 5 {
         return Err(rpc::Error::BadMessage);
     }
     let equalalways = rpc::expect_bool(params)?;
@@ -441,11 +444,13 @@ fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
     let (Some(separator), None) = (chars.next(), chars.next()) else {
         return Err(rpc::Error::BadMessage);
     };
+    let laststatus = rpc::expect_int(params)?;
     Ok(Note::Options(SplitOptions {
         equalalways,
         splitbelow,
         splitright,
         separator,
+        statuslines: laststatus != 0,
     }))
 }
 
@@ -2781,13 +2786,14 @@ mod tests {
             return;
         };
         assert!(h.until(|x| last_options(x) == Some(SplitOptions::default())));
-        h.input(":set noequalalways splitbelow splitright fillchars=vert:\\|<CR>");
+        h.input(":set noequalalways splitbelow splitright fillchars=vert:\\| laststatus=0<CR>");
         assert!(h.until(|x| last_options(x)
             == Some(SplitOptions {
                 equalalways: false,
                 splitbelow: true,
                 splitright: true,
                 separator: '|',
+                statuslines: false,
             })));
     }
 
@@ -2842,6 +2848,24 @@ mod tests {
     }
 
     #[test]
+    fn a_statusline_coming_or_going_is_no_size_neovim_gave() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        for set in [":set laststatus=0<CR>", ":set laststatus=2<CR>"] {
+            h.notes.clear();
+            h.input(set);
+            h.barrier();
+            h.barrier();
+            assert!(
+                !h.notes.iter().any(|n| matches!(n, Note::Resized { .. })),
+                "{set}: {:?}",
+                h.notes
+            );
+        }
+    }
+
+    #[test]
     fn a_size_given_a_new_window_before_its_adopted_is_told_as_it_is() {
         let Some(mut h) = Harness::start() else {
             return;
@@ -2872,28 +2896,31 @@ mod tests {
     #[test]
     fn options_and_resized_notes_are_read_and_bad_ones_are_errors() {
         let mut buf = Vec::new();
-        msgpack::write_array_header(&mut buf, 4);
+        msgpack::write_array_header(&mut buf, 5);
         msgpack::write_bool(&mut buf, false);
         msgpack::write_bool(&mut buf, true);
         msgpack::write_bool(&mut buf, false);
         msgpack::write_str(&mut buf, "\u{2503}");
+        msgpack::write_int(&mut buf, 2);
         assert_eq!(
             Some(Note::Options(SplitOptions {
                 equalalways: false,
                 splitbelow: true,
                 splitright: false,
                 separator: '\u{2503}',
+                statuslines: true,
             })),
             parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf)).unwrap()
         );
         // a separator of two characters, or none
         for vert in ["ab", ""] {
             let mut buf = Vec::new();
-            msgpack::write_array_header(&mut buf, 4);
+            msgpack::write_array_header(&mut buf, 5);
             for _ in 0..3 {
                 msgpack::write_bool(&mut buf, true);
             }
             msgpack::write_str(&mut buf, vert);
+            msgpack::write_int(&mut buf, 2);
             assert_eq!(
                 Err(rpc::Error::BadMessage),
                 parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf))

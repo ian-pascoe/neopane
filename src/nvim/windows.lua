@@ -1198,17 +1198,17 @@ end
 -- fires again after every scheduled callback.
 api.nvim_create_autocmd('SafeState', { group = group, callback = report_cmdheight })
 
--- 'equalalways', 'splitbelow', 'splitright' and the separator 'fillchars'
--- draws, as last reported: a pane laying out several windows splits and closes
+-- 'equalalways', 'splitbelow', 'splitright', the separator 'fillchars' draws
+-- and 'laststatus', as last reported: a pane laying out several windows splits and closes
 -- them as these say. Looked at whenever Neovim waits for input, as for
 -- 'cmdheight'.
 local reported_options
 local function report_options()
   local vert = vim.opt_global.fillchars:get().vert or '│'
-  local now = table.concat({ tostring(vim.go.equalalways), tostring(vim.go.splitbelow), tostring(vim.go.splitright), vert }, ' ')
+  local now = table.concat({ tostring(vim.go.equalalways), tostring(vim.go.splitbelow), tostring(vim.go.splitright), vert, vim.go.laststatus }, ' ')
   if now == reported_options then return end
   reported_options = now
-  note('options', vim.go.equalalways, vim.go.splitbelow, vim.go.splitright, vert)
+  note('options', vim.go.equalalways, vim.go.splitbelow, vim.go.splitright, vert, vim.go.laststatus)
 end
 api.nvim_create_autocmd('SafeState', { group = group, callback = report_options })
 
@@ -1216,6 +1216,9 @@ api.nvim_create_autocmd('SafeState', { group = group, callback = report_options 
 -- `:vertical resize` do: a pane laying out several windows gives it that size.
 -- Each size is told once (see `reported_sizes`).
 local function report_resized()
+  -- a statusline that came or went changed the text's height, not the
+  -- window's: the refit on its way puts it back
+  if refit_pending then return end
   for win, p in pairs(panes) do
     local w, h
     if p.w and api.nvim_win_is_valid(win) and not waiting(win) and api.nvim_win_get_config(win).external then

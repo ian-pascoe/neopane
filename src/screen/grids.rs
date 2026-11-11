@@ -24,6 +24,9 @@ pub struct Grids {
     pub(crate) msg_row: u32,
     /// The highlight Neovim draws WinSeparator in, as `hl_group_set` says.
     pub separator_hl: u32,
+    /// The highlights of StatusLine and StatusLineNC, likewise.
+    pub statusline_hl: u32,
+    pub statusline_nc_hl: u32,
 }
 
 impl Default for Grids {
@@ -36,6 +39,8 @@ impl Default for Grids {
             msg_grid: None,
             msg_row: 0,
             separator_hl: 0,
+            statusline_hl: 0,
+            statusline_nc_hl: 0,
         }
     }
 }
@@ -472,10 +477,15 @@ impl Grids {
                     return Err(rpc::Error::BadMessage);
                 }
                 let name = rpc::expect_str(d)?;
-                let separator = name == b"WinSeparator";
+                let which = match name {
+                    b"WinSeparator" => Some(&mut self.separator_hl),
+                    b"StatusLine" => Some(&mut self.statusline_hl),
+                    b"StatusLineNC" => Some(&mut self.statusline_nc_hl),
+                    _ => None,
+                };
                 let hl = expect_int::<u32>(d)?;
-                if separator {
-                    self.separator_hl = hl;
+                if let Some(at) = which {
+                    *at = hl;
                 }
                 Ok(2)
             }
@@ -646,6 +656,7 @@ mod tests {
             group(w, "VertSplit", 9);
         });
         assert_eq!(7, gs.separator_hl);
+        assert_eq!(3, gs.statusline_hl);
     }
 
     #[test]
@@ -929,6 +940,8 @@ mod tests {
         assert_eq!(4, gs.get(first).unwrap().cursor_col);
         // a highlight to draw separators in
         assert_ne!(0, gs.separator_hl);
+        assert_ne!(0, gs.statusline_hl);
+        assert_ne!(0, gs.statusline_nc_hl);
 
         // a split gets another grid; the first window, made external, keeps its own
         nvim.exec_lua(

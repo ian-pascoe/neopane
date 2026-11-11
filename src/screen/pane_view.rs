@@ -53,6 +53,10 @@ pub struct Shown {
     pub col: u32,
     pub cols: u32,
     pub rows: u32,
+    /// A statusline neorex draws in the rect's last row, blank in this
+    /// highlight, for a window above another that Neovim draws none for
+    /// (`'laststatus'` 0).
+    pub statusline: Option<u32>,
 }
 
 /// A separator column between windows side by side, in the window area.
@@ -551,6 +555,13 @@ impl PaneView {
                         continue;
                     }
                     let g = &gmap[&s.grid];
+                    if let Some(hl) = s.statusline
+                        && r + 1 == s.row + s.rows
+                    {
+                        let n = s.cols.min(cols - s.col) as usize;
+                        base[s.col as usize..s.col as usize + n].fill(Cell::init(" ", hl));
+                        continue;
+                    }
                     let Some(gr) = shown_row(g, s, r - s.row) else {
                         continue;
                     };
@@ -923,6 +934,10 @@ impl PaneView {
 /// rows, and its last (the statusline) in the rect's last row when the grid
 /// is taller. None past the grid's end.
 fn shown_row(g: &Grid, s: &Shown, i: u32) -> Option<u32> {
+    if s.statusline.is_some() {
+        // the last row is ours
+        return (i + 1 < s.rows && i < g.height).then_some(i);
+    }
     if g.height > s.rows && i + 1 == s.rows {
         return Some(g.height - 1);
     }
