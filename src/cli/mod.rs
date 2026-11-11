@@ -29,11 +29,12 @@ pub enum Command {
     /// `<name>: <what> isn't built yet`.
     NotBuilt(String),
     /// `attach --address A --pane ID [--transport fd|relay]`: a requested
-    /// pane's helper, which the daemon's attach command runs.
+    /// pane's helper, which the daemon's attach command runs. Without
+    /// `--transport`, `<NAME>_TRANSPORT` chooses.
     AttachPane {
         address: OsString,
         pane: PaneId,
-        transport: Transport,
+        transport: Option<Transport>,
     },
     /// `pane`, which older daemons ran: it exits 1 with [`PANE_REPLACED`].
     Replaced,
@@ -55,6 +56,12 @@ pub enum Command {
     DebugRex(OsString),
     /// Hidden: for `docs/latency.md`.
     DebugLatency(OsString),
+    /// Hidden: `debug-relay {attach}`, the relay test tool, which attaches
+    /// a requested pane over the relay with no pty, on stdin and stdout.
+    DebugRelay {
+        address: OsString,
+        pane: PaneId,
+    },
 }
 
 /// The bare form's own options, and Neovim's arguments as typed.
@@ -154,6 +161,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         b"debug-panes" => one("debug-panes").map(Command::DebugPanes),
         b"debug-rex" => one("debug-rex").map(Command::DebugRex),
         b"debug-latency" => one("debug-latency").map(Command::DebugLatency),
+        b"debug-relay" => debug_relay(rest),
         _ => start(args),
     }
 }
@@ -285,6 +293,22 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
     Ok(Command::Start(start))
 }
 
+/// `debug-relay`'s words: a requested pane's `{attach}`, its exe first.
+fn debug_relay(words: &[OsString]) -> Result<Command, UsageError> {
+    let takes = || UsageError("debug-relay takes a requested pane's attach command".into());
+    let [_exe, attach_word, rest @ ..] = words else {
+        return Err(takes());
+    };
+    if attach_word != "attach" {
+        return Err(takes());
+    }
+    match attach(rest) {
+        Ok(Command::AttachPane { address, pane, .. }) => Ok(Command::DebugRelay { address, pane }),
+        Ok(_) => Err(takes()),
+        Err(e) => Err(e),
+    }
+}
+
 /// `daemon`'s words: `NAME [--dedup] [--detach] -- NVIM-ARGS`.
 fn daemon(words: &[OsString]) -> Result<Command, UsageError> {
     let usage = || UsageError("daemon takes NAME [--dedup] [--detach] -- NVIM-ARGS".into());
@@ -364,7 +388,7 @@ fn attach(words: &[OsString]) -> Result<Command, UsageError> {
     Ok(Command::AttachPane {
         address,
         pane,
-        transport: transport.unwrap_or(Transport::Fd),
+        transport,
     })
 }
 

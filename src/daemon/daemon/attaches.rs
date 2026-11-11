@@ -2,12 +2,12 @@
 //! without blocking the loop, answered, and the frames an attached helper
 //! sends after.
 
-use std::os::fd::{AsRawFd, IntoRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Instant;
 
 use super::*;
-use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size};
+use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size, Transport};
 use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Pending, Step};
 use crate::nvim::msgpack;
 
@@ -175,8 +175,7 @@ impl Daemon {
             return self.refuse_requested(stream, z, Some((id, pane)));
         }
         self.panes.ids.take(&pane).expect("checked");
-        let tty = tty.expect("checked").into_raw_fd();
-        let mut surface = Surface::create(stream, tty, terminal.size);
+        let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: pane {shown}'s helper went: {e}");
             surface.destroy(crate::attach::Ending::Failed, "");
@@ -264,8 +263,9 @@ impl Daemon {
         msgpack::write_map_header(w, 0);
     }
 
-    /// Pane `id`'s helper sent something: its terminal's new size, as `s`.
-    /// A helper that hung up or broke the protocol closes the pane.
+    /// Pane `id`'s helper sent something: its terminal's new size, as `s`,
+    /// or, relayed, what was typed, as `i`. A helper that hung up or broke
+    /// the protocol closes the pane.
     pub(super) fn on_helper(&mut self, id: u32) -> Result<()> {
         let mut buf = [0u8; 4096];
         let fd = self.surface_of(id).helper_fd();
@@ -293,17 +293,27 @@ impl Daemon {
         self.read_helper_frames(id)
     }
 
-    /// Acts on the whole frames pane `id`'s helper has sent: the latest size.
+    /// Acts on the whole frames pane `id`'s helper has sent, in order: what
+    /// was typed, and the latest size, which goes before anything typed
+    /// after it.
     fn read_helper_frames(&mut self, id: u32) -> Result<()> {
         let mut size: Option<Size> = None;
-        let s = self
-            .panes
-            .by_id_mut(id)
-            .and_then(|p| p.terminal_surface.as_deref_mut())
-            .expect("an attached pane has a terminal");
         loop {
+            let Some(s) = self
+                .panes
+                .by_id_mut(id)
+                .and_then(|p| p.terminal_surface.as_deref_mut())
+            else {
+                return Ok(());
+            };
             match attach_conn::next_message(&mut s.helper_in) {
                 Ok(Some(Message::Size(new))) => size = Some(new),
+                Ok(Some(Message::Input(keys))) if s.io.transport() == Transport::Relay => {
+                    if let Some(size) = size.take() {
+                        self.handle_resize(id, size)?;
+                    }
+                    self.on_keys(id, &keys)?;
+                }
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) => {

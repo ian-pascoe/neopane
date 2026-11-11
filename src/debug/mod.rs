@@ -3,6 +3,7 @@ pub mod keys;
 pub mod latency;
 pub(crate) mod pane_host;
 pub mod panes;
+pub mod relay;
 pub mod rex;
 pub mod tui;
 

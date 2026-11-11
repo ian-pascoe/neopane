@@ -145,6 +145,13 @@ Rex sets in every pane:
   warning, and `info` is used.
 - `NEOREX_TMPDIR`: where daemons keep their files, instead of `/tmp`. A
   relative path is taken from the directory `neorex` runs in.
+- `NEOREX_TRANSPORT`: how a pane's terminal reaches the daemon, for
+  diagnosis. `fd`, the default (unset or empty too): the helper hands the
+  terminal over. `relay`: the helper copies its bytes to and from the daemon
+  instead, as it must on Windows. Every helper reads it, and a daemon started
+  under `relay` asks for its panes with `--transport relay` added to their
+  command, which overrides the variable. Any other value prints `neorex:
+  ignoring NEOREX_TRANSPORT=<value> (use fd or relay)`, and `fd` is used.
 
 Each window's Rex pane runs `neorex attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,

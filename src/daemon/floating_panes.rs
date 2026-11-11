@@ -13,6 +13,7 @@ use super::event_loop::Loop;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::provider::{Ask, TerminalId};
+use crate::attach::Transport;
 use crate::nvim::windows;
 use crate::screen::float_groups::{self, Group};
 use crate::screen::grids::{Grids, WinKind};
@@ -27,6 +28,7 @@ pub(crate) struct FloatingPanes<'a> {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: &'a str,
     pub sock: &'a Address,
+    pub transport: Transport,
     pub grids: &'a Grids,
     pub panes: &'a mut Panes,
     pub event_loop: &'a Loop,
@@ -106,7 +108,7 @@ impl FloatingPanes<'_> {
         let pane = self.panes.add_for_group(g);
         pane.layer.as_mut().unwrap().bounds = bounds;
         let id = pane.attach_id.expect("a requested pane");
-        let attach = pane::attach_words(self.exe, self.sock, pane);
+        let attach = pane::attach_words(self.exe, self.sock, self.transport, pane);
         // until #111, cells on the screen, which spans the Rex window
         Some(Ask::OpenFloat {
             pane: id,

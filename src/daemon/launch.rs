@@ -94,6 +94,8 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     if std::env::var_os("REX_SERVER").is_none() || std::env::var_os("REX_SESSION").is_none() {
         return Err(Error::NotInRex.into());
     }
+    // warned of before the daemon starts, which warns in its log
+    let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
     let base = dir::base()?;
     let name = default_name(&std::env::current_dir().unwrap_or_default());
 
@@ -148,7 +150,7 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     Ok(pane_helper::run(
         &base.address(&name),
         pane_helper::Want::SelfAttach,
-        Transport::Fd,
+        transport,
     ))
 }
 

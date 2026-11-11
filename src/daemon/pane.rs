@@ -6,8 +6,6 @@
 //! a `u32` looked up in `Panes`, which a borrow of `Panes` couldn't outlive
 //! anyway.
 
-use std::os::fd::RawFd;
-
 use super::dir::Address;
 use super::event_loop::{self, Loop};
 use super::live_layout::Area;
@@ -112,6 +110,8 @@ pub(crate) const TOKEN_BASE: usize = 16;
 #[repr(u8)]
 pub(crate) enum PaneFd {
     HelperSocket = 0,
+    /// The terminal's input under `fd`, and the room its output waits for,
+    /// on the terminal or, under `relay`, the helper socket.
     Terminal = 1,
 }
 
@@ -135,13 +135,18 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
 }
 
 /// The command a requested pane's terminal runs: `{attach}`, with the pane
-/// id minted for it.
-pub(crate) fn attach_words(exe: &str, address: &Address, pane: &Pane) -> Vec<String> {
+/// id minted for it, and `--transport relay` under the relay diagnostic.
+pub(crate) fn attach_words(
+    exe: &str,
+    address: &Address,
+    transport: Transport,
+    pane: &Pane,
+) -> Vec<String> {
     let id = pane
         .attach_id
         .as_ref()
         .expect("a requested pane has a pane id");
-    attach::attach_command(exe.as_ref(), address.as_arg(), id, Transport::Fd)
+    attach::attach_command(exe.as_ref(), address.as_arg(), id, transport)
         .iter()
         .map(|w| w.to_string_lossy().into_owned())
         .collect()
@@ -274,8 +279,10 @@ impl Pane {
     pub(crate) fn register_with(&self, event_loop: &Loop) -> event_loop::Result<()> {
         let surface = self.terminal_surface.as_ref().expect("no terminal surface");
         event_loop.add_read(surface.helper_fd(), self.token(PaneFd::HelperSocket))?;
-        let terminal_fd: RawFd = surface.terminal.fd;
-        event_loop.add_read(terminal_fd, self.token(PaneFd::Terminal))
+        match surface.io.input_fd() {
+            Some(fd) => event_loop.add_read(fd, self.token(PaneFd::Terminal)),
+            None => Ok(()),
+        }
     }
 
     /// Takes the helper and terminal fds off the loop. Call it before the pane
@@ -285,7 +292,9 @@ impl Pane {
     pub(crate) fn unregister_from(&self, event_loop: &Loop) {
         if let Some(surface) = &self.terminal_surface {
             let _ = event_loop.remove(surface.helper_fd());
-            let _ = event_loop.remove(surface.terminal.fd);
+            if let Some(fd) = surface.io.input_fd() {
+                let _ = event_loop.remove(fd);
+            }
         }
     }
 }
@@ -311,6 +320,21 @@ mod tests {
 
         let without_block = Pane::startup(None, Surface::for_test(80, 24));
         assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
+    }
+
+    /// `{attach}` ends in `--transport relay` when the daemon started
+    /// under the relay diagnostic.
+    #[test]
+    fn a_requested_panes_command_carries_the_daemons_transport() {
+        let pane = Pane {
+            attach_id: PaneId::parse("4-abcdefghij"),
+            ..Pane::blank(4)
+        };
+        let address = Address::from_arg("/run/d/sock".into());
+        let words = |t| attach_words("/bin/x", &address, t, &pane).join(" ");
+        let fd = "/bin/x attach --address /run/d/sock --pane 4-abcdefghij";
+        assert_eq!(fd, words(Transport::Fd));
+        assert_eq!(format!("{fd} --transport relay"), words(Transport::Relay));
     }
 
     #[test]

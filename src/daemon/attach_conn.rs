@@ -220,14 +220,11 @@ pub(crate) fn send_accept(stream: &UnixStream, daemon: &str, log: &str) -> io::R
     (&*stream).write_all(&bytes)
 }
 
-/// Whether a requested or self-attached terminal can be taken: under `fd`,
-/// with a terminal handed over. The relay comes with #103.
+/// Whether a requested or self-attached terminal can be taken: relayed, or
+/// under `fd` with a terminal handed over.
 pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), End> {
     if t.transport == Transport::Relay {
-        return Err(End::refusal(
-            Refusal::Transport,
-            "this daemon doesn't take the relay transport yet",
-        ));
+        return Ok(());
     }
     let Some(tty) = tty else {
         return Err(End::refusal(
@@ -438,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_terminal_under_fd_is_taken() {
+    fn a_relay_or_a_terminal_under_fd_is_taken() {
         let mut t = match requested().purpose {
             Purpose::Requested { terminal, .. } => terminal,
             _ => unreachable!(),
@@ -454,9 +451,10 @@ mod tests {
         let (master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         assert!(check_terminal(&t, Some(&slave)).is_ok());
-        t.transport = Transport::Relay;
-        assert_eq!(Refusal::Transport, reason(check_terminal(&t, Some(&slave))));
         drop(master);
+        // relayed, no terminal comes
+        t.transport = Transport::Relay;
+        assert!(check_terminal(&t, None).is_ok());
     }
 
     #[test]

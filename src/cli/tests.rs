@@ -418,6 +418,30 @@ fn hidden_commands() {
     );
     assert_eq!(refused("debug-rex"), "debug-rex takes one socket");
     assert_eq!(refused("debug-latency"), "debug-latency takes one file");
+    // the relay test tool runs a requested pane's `{attach}`
+    let pane = crate::attach::PaneId::parse("2-abcdefghij").unwrap();
+    let relay = Ok(Command::DebugRelay {
+        address: "/a/sock".into(),
+        pane,
+    });
+    let attach = "/bin/x attach --address /a/sock --pane 2-abcdefghij";
+    assert_eq!(parsed(&format!("debug-relay {attach}")), relay);
+    // it relays whatever transport the words name
+    for transport in ["relay", "fd"] {
+        assert_eq!(
+            parsed(&format!("debug-relay {attach} --transport {transport}")),
+            relay
+        );
+    }
+    let takes = "debug-relay takes a requested pane's attach command";
+    for line in [
+        "debug-relay",
+        "debug-relay /bin/x",
+        "debug-relay /bin/x attach",
+    ] {
+        assert_eq!(refused(line), takes, "{line}");
+    }
+    assert_eq!(refused("debug-relay /bin/x list"), takes);
     assert_eq!(parsed("pane s 3"), Ok(Command::Replaced));
     assert_eq!(parsed("pane"), Ok(Command::Replaced));
 }
@@ -455,15 +479,15 @@ fn attach_pane_takes_an_address_and_a_pane() {
     };
     assert_eq!(
         parsed("attach --address /tmp/x/sock --pane 2-abcdefghij"),
-        want(Transport::Fd)
+        want(None)
     );
     assert_eq!(
         parsed("attach --pane=2-abcdefghij --address /tmp/x/sock --transport relay"),
-        want(Transport::Relay)
+        want(Some(Transport::Relay))
     );
     assert_eq!(
         parsed("attach --address=/tmp/x/sock --pane 2-abcdefghij --transport=fd"),
-        want(Transport::Fd)
+        want(Some(Transport::Fd))
     );
     let only = "attach --pane takes only --address A and --transport fd|relay";
     for (line, why) in [

@@ -20,4 +20,5 @@ pub(crate) mod provider;
 pub mod serve;
 pub(crate) mod surface;
 pub(crate) mod tab_placement;
+pub(crate) mod terminal_io;
 pub(crate) mod window_changes;

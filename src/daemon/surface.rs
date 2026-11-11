@@ -4,16 +4,15 @@
 //! still handed around as a `Box<Surface>` (what `create` returns and a `Pane`
 //! owns), which keeps a `Pane` small to move around in the `Panes` list.
 
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
-use super::attach_conn;
 use super::backlog::Backlog;
-use crate::attach::{End, Ending, Size};
+use super::terminal_io::{FdIo, RelayIo, TerminalIo};
+use crate::attach::{End, Ending, Size, Transport};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
-use crate::term::terminal::Terminal;
 
 /// What a frame drawn into the terminal's writer did, sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +24,15 @@ pub(crate) enum Sent {
 }
 
 pub(crate) struct Surface {
+    /// How the terminal's bytes travel. Dropped first: under `fd`, closing
+    /// the terminal before the helper socket.
+    pub io: Box<dyn TerminalIo>,
     /// Closing it makes the helper exit, and Rex close the pane.
     pub helper_socket: UnixStream,
     /// What the helper sent that isn't a whole frame yet.
     pub helper_in: Vec<u8>,
-    pub terminal: Terminal,
+    /// The frame being drawn. Write a frame, then `send_frame`.
+    pub writer: Vec<u8>,
     pub view: PaneView,
     pub forwarder: Forwarder,
     /// Output the terminal hasn't taken yet.
@@ -37,18 +40,43 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    /// Takes over `helper_socket` and the terminal `tty`, of `size` as its
-    /// hello says: the daemon never asks a terminal its size, nor sets its
-    /// settings, which are the helper's (ADR 0013).
+    /// Takes over `helper_socket` and the terminal `tty` it handed over, of
+    /// `size` as its hello says: the daemon never asks a terminal its size,
+    /// nor sets its settings, which are the helper's (ADR 0013).
     pub(crate) fn create(helper_socket: UnixStream, tty: RawFd, size: Size) -> Box<Surface> {
-        let mut terminal = Terminal::new(tty);
-        terminal
-            .writer
-            .extend_from_slice(modes::EDITOR_ON.as_bytes());
+        // SAFETY: the caller hands the fd over.
+        let tty = unsafe { OwnedFd::from_raw_fd(tty) };
+        Surface::with_io(helper_socket, Box::new(FdIo { tty }), size)
+    }
+
+    /// Takes over an accepted attach's `helper_socket` and its terminal of
+    /// `size`, as `transport` carries it: `tty`, the terminal handed over,
+    /// under `fd`, which `attach_conn::check_terminal` makes sure came.
+    pub(crate) fn for_attach(
+        helper_socket: UnixStream,
+        transport: Transport,
+        tty: Option<OwnedFd>,
+        size: Size,
+    ) -> Box<Surface> {
+        match (transport, tty) {
+            (Transport::Fd, Some(tty)) => Surface::create(helper_socket, tty.into_raw_fd(), size),
+            (Transport::Fd, None) => panic!("an fd attach without its terminal was taken"),
+            // a file sent along all the same is closed: the relay doesn't use it
+            (Transport::Relay, _) => Surface::relayed(helper_socket, size),
+        }
+    }
+
+    /// Takes over `helper_socket`, which relays a terminal of `size`.
+    pub(crate) fn relayed(helper_socket: UnixStream, size: Size) -> Box<Surface> {
+        Surface::with_io(helper_socket, Box::new(RelayIo), size)
+    }
+
+    fn with_io(helper_socket: UnixStream, io: Box<dyn TerminalIo>, size: Size) -> Box<Surface> {
         Box::new(Surface {
+            io,
             helper_socket,
             helper_in: Vec::new(),
-            terminal,
+            writer: modes::EDITOR_ON.as_bytes().to_vec(),
             view: PaneView::init(u32::from(size.cols), u32::from(size.rows)),
             forwarder: Forwarder {
                 ctrl_q_quits: false,
@@ -60,13 +88,13 @@ impl Surface {
     }
 
     /// Ends the attach as `ending`, with `message` for the helper, and
-    /// closes the terminal and the helper socket. Nothing more is written to
-    /// the terminal: what waits is dropped, and the `z` says whether that cut
-    /// a frame short. The helper then undoes what the daemon wrote and
-    /// restores the terminal.
+    /// closes the terminal and the helper socket. What waits is dropped
+    /// (see `TerminalIo::end`), and nothing more is written to the
+    /// terminal. The helper then undoes what the daemon wrote and restores
+    /// the terminal.
     pub(crate) fn destroy(self: Box<Surface>, ending: Ending, message: &str) {
-        let end = End::ending(ending, message, self.backlog.cut());
-        attach_conn::send_end(&self.helper_socket, end);
+        let end = End::ending(ending, message, false);
+        self.io.end(&self.helper_socket, &self.backlog, end);
         // the terminal's fd and the helper socket are closed as `self` drops
     }
 
@@ -76,11 +104,12 @@ impl Surface {
         window_fitting(self.view.cols, self.view.rows, msg_rows)
     }
 
-    /// Sends the frame drawn into the terminal's writer, without waiting for
-    /// the terminal to take it. An error means the terminal is gone.
+    /// Sends the frame drawn into the writer, without waiting for the
+    /// terminal to take it. An error means the terminal is gone.
     pub(crate) fn send_frame(&mut self) -> std::io::Result<Sent> {
-        self.backlog
-            .send(self.terminal.fd, &mut self.terminal.writer)?;
+        self.io.wrap(&mut self.writer);
+        let fd = self.output_fd();
+        self.backlog.send(fd, &mut self.writer)?;
         Ok(if self.backlog.is_empty() {
             Sent::All
         } else {
@@ -92,14 +121,10 @@ impl Surface {
     pub(crate) fn helper_fd(&self) -> RawFd {
         self.helper_socket.as_raw_fd()
     }
-}
 
-impl Drop for Surface {
-    /// Closes the terminal's fd, then (as the field drops) the helper socket.
-    /// The terminal's settings are the helper's to restore.
-    fn drop(&mut self) {
-        // SAFETY: the surface owns the terminal's fd.
-        unsafe { libc::close(self.terminal.fd) };
+    /// The fd output goes to, watched for room while some waits.
+    pub(crate) fn output_fd(&self) -> RawFd {
+        self.io.output_fd(self.helper_fd())
     }
 }
 
@@ -132,7 +157,7 @@ impl Surface {
         let mut surface = Surface::create(socket, slave, cells(cols as u16, rows as u16));
         // SAFETY: closing the pty's master, which nothing else holds.
         unsafe { libc::close(master) };
-        surface.terminal.writer.clear();
+        surface.writer.clear();
         surface.view = PaneView::init(cols, rows);
         surface
     }
@@ -142,6 +167,7 @@ impl Surface {
 mod tests {
     use super::*;
     use crate::attach::Ending;
+    use crate::daemon::attach_conn;
 
     #[test]
     fn the_window_is_the_pane_less_the_message_rows_and_never_empty() {
@@ -180,7 +206,7 @@ mod tests {
         ));
 
         // `create` buffered the editor modes; destroy drops them unsent
-        assert!(!surface.terminal.writer.is_empty());
+        assert!(!surface.writer.is_empty());
         surface.destroy(Ending::Failed, "bye");
         // SAFETY: plain fcntl and read calls on the pty's master.
         unsafe {
@@ -208,7 +234,7 @@ mod tests {
         let (socket, helper) = UnixStream::pair().unwrap();
         let mut surface = Surface::create(socket, slave, cells(80, 24));
         // more than the pty takes: nobody reads its master
-        surface.terminal.writer = vec![b'x'; 1 << 20];
+        surface.writer = vec![b'x'; 1 << 20];
         assert_eq!(Sent::Waiting, surface.send_frame().unwrap());
         surface.destroy(Ending::Closed, "");
         let said = attach_conn::read_all_frames(&helper);
@@ -218,5 +244,75 @@ mod tests {
         assert!(z.cut);
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
+    }
+
+    /// Every frame `helper` reads until the daemon hangs up, and the bytes
+    /// after the last whole one.
+    fn frames_and_rest(helper: &UnixStream) -> (Vec<crate::attach::Message>, Vec<u8>) {
+        use crate::attach::{Frame, Message};
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut &*helper, &mut bytes).unwrap();
+        let mut said = Vec::new();
+        let mut at = 0;
+        while let Some((f, n)) = Frame::decode(&bytes[at..]).unwrap() {
+            at += n;
+            said.extend(Message::decode(&f).unwrap());
+        }
+        (said, bytes[at..].to_vec())
+    }
+
+    // A relayed attach's end finishes the `o` in flight, so the helper
+    // reads whole frames, and says the drawn frame was cut.
+    #[test]
+    fn a_relayed_end_finishes_the_o_in_flight_then_says_why() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        // several `o` frames, more than the socket holds
+        surface.writer = vec![b'x'; 1 << 20];
+        assert_eq!(Sent::Waiting, surface.send_frame().unwrap());
+        let reader = std::thread::spawn(move || frames_and_rest(&helper));
+        let started = std::time::Instant::now();
+        surface.destroy(Ending::Closed, "bye");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let (said, rest) = reader.join().unwrap();
+        assert!(rest.is_empty(), "{} bytes of a frame", rest.len());
+        let Some((Message::End(z), outputs)) = said.split_last() else {
+            panic!("no end")
+        };
+        assert_eq!(
+            (Ending::Closed, "bye", true),
+            (z.as_ending(), z.message.as_str(), z.cut)
+        );
+        // the first `o` whole, perhaps more, never all 16
+        let n = outputs.len();
+        assert!((1..16).contains(&n), "{n} `o` frames");
+        assert!(
+            outputs
+                .iter()
+                .all(|m| matches!(m, Message::Output(o) if o.len() == 64 << 10))
+        );
+    }
+
+    // A helper that never reads holds the end up 1 s at most; then the
+    // attach ends without a `z`, which the helper takes for a crash.
+    #[test]
+    fn a_relayed_end_waits_1_s_at_most() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer = vec![b'x'; 1 << 20];
+        assert_eq!(Sent::Waiting, surface.send_frame().unwrap());
+        let started = std::time::Instant::now();
+        surface.destroy(Ending::Closed, "bye");
+        let took = started.elapsed();
+        assert!(took >= std::time::Duration::from_millis(900), "{took:?}");
+        // and not much more, if CI is loaded
+        assert!(took < std::time::Duration::from_millis(2500), "{took:?}");
+        let (said, rest) = frames_and_rest(&helper);
+        assert!(!said.iter().any(|m| matches!(m, Message::End(_))));
+        assert!(!rest.is_empty(), "the `o` in flight is cut off");
     }
 }
