@@ -14,7 +14,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
@@ -22,13 +22,14 @@ use std::process::{Child, ChildStderr, Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::attach_conn::{self, Pending, Step, euid};
 use super::daemon::{Daemon, StopReason, Token};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
 use super::pane::{self, Pane, RexBlock};
-use super::pane_helper;
 use super::surface::Surface;
-use crate::log::{self, log_info, log_warn};
+use crate::attach::{End, Purpose, Refusal};
+use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
@@ -598,9 +599,10 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         },
         None => None,
     };
+    let name = daemon_name();
     let mut startup = Startup {
         log: &log,
-        launch: Some(Pane::startup(rex_block, take_pane(&server)?)),
+        launch: Some(Pane::startup(rex_block, take_pane(&server, &name, &log)?)),
     };
 
     // Rex is connected to while Neovim starts. Declared in this order so
@@ -640,6 +642,8 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         exe,
         sock.clone(),
     );
+    d.name = name;
+    d.log = log.clone();
     d.start(startup.release())?;
 
     let stop_reason = d.run(&server)?;
@@ -729,7 +733,7 @@ struct Startup<'a> {
 impl Drop for Startup<'_> {
     fn drop(&mut self) {
         if let Some(launch) = self.launch.take() {
-            launch.deinit();
+            launch.deinit_with_message(&format!("the daemon didn't start; see {}", self.log));
         }
     }
 }
@@ -761,12 +765,16 @@ fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
     status.signal().map(|sig| NvimExit::Signal(sig as u32))
 }
 
-/// A line for the user: why the start failed, and where the log is. At most
-/// 256 bytes plus a path.
-fn failure_message(failure: &StartFailure, log: &str) -> Vec<u8> {
-    let mut bytes = format!("{NAME}: {failure}; see {log}\r\n").into_bytes();
-    bytes.truncate(256 + MAX_PATH);
-    bytes
+/// A line for the user, which the launcher prints after `<name>: `: why
+/// the start failed, and where the log is. At most 256 bytes plus a path.
+fn failure_message(failure: &StartFailure, log: &str) -> String {
+    let mut w = format!("{failure}; see {log}");
+    let mut end = w.len().min(256 + MAX_PATH);
+    while !w.is_char_boundary(end) {
+        end -= 1;
+    }
+    w.truncate(end);
+    w
 }
 
 /// The environment variable `name`, if set (and Unicode).
@@ -774,8 +782,18 @@ fn env(name: &str) -> Option<String> {
     std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
 }
 
-/// Waits up to 5 s for the launcher's helper and takes its terminal.
-fn take_pane(server: &UnixListener) -> Result<Box<Surface>> {
+/// The daemon's name: the name of the directory it was started in.
+fn daemon_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
+/// Waits up to 5 s for the launcher's helper, and takes its terminal: the
+/// one attach of its own accord this daemon takes (#105 opens it up). Its
+/// hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running yet.
+fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface>> {
     let mut fds = [libc::pollfd {
         fd: server.as_raw_fd(),
         events: libc::POLLIN,
@@ -791,15 +809,48 @@ fn take_pane(server: &UnixListener) -> Result<Box<Surface>> {
     if ready <= 0 {
         return Err(Error::NoPane.into());
     }
-    let hello = pane_helper::accept_hello(server)?;
+    let (stream, _) = server.accept()?;
+    let Some(pending) = Pending::new(stream, attach_conn::HELLO_TIMEOUT, euid())? else {
+        return Err(Error::NoPane.into());
+    };
+    let Step::Arrived(a) = pending.read_blocking() else {
+        return Err(Error::NoPane.into());
+    };
+    let hello = match a.hello {
+        Ok(h) => h,
+        Err(e) => {
+            attach_conn::refuse(a.stream, attach_conn::refusal_of(&e));
+            return Err(e.into());
+        }
+    };
+    let Purpose::SelfAttach { terminal, .. } = hello.purpose else {
+        let message = format!("the launcher's attach can't be {}", hello.purpose.name());
+        attach_conn::refuse(a.stream, End::refusal(Refusal::Hello, message));
+        return Err(Error::NoPane.into());
+    };
+    log_info!(
+        "{NAME} daemon: hello: {}",
+        attach_conn::describe("self", None, &terminal, &hello.build)
+    );
+    if let Err(z) = attach_conn::check_terminal(&terminal, a.tty.as_ref()) {
+        attach_conn::refuse(a.stream, z);
+        return Err(Error::NoPane.into());
+    }
+    let tty = a.tty.expect("checked").into_raw_fd();
     // (a failing `Surface::create` closes the hello's socket and terminal
     // itself)
-    Ok(Surface::create(hello.stream, hello.tty)?)
+    let mut surface = Surface::create(a.stream, tty, terminal.size)?;
+    attach_conn::send_accept(&surface.helper_socket, name, log)?;
+    log::trace_at(Point::Hello, 0, a.at);
+    log::trace(Point::Accepted, 0);
+    surface.helper_in = a.rest;
+    Ok(surface)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attach::{Ending, Message};
     use crate::daemon::fdpass;
     use std::os::fd::RawFd;
 
@@ -1040,8 +1091,8 @@ mod tests {
     /// listens, and hands over a pseudo-terminal's slave as its pane.
     fn fake_launcher_ready(sock: &str, slave: RawFd) -> Result<UnixStream> {
         let stream = UnixStream::connect(sock)?;
-        let mut hello = [0u8; 16];
-        fdpass::send(&stream, pane_helper::hello_bytes(&mut hello, None)?, slave)?;
+        let hello = attach_conn::self_hello(attach_conn::test_terminal(80, 24));
+        fdpass::send(&stream, &hello, slave)?;
         // the daemon has its own copy now
         // SAFETY: closing our copy of the slave.
         unsafe { libc::close(slave) };
@@ -1082,8 +1133,8 @@ mod tests {
 
     /// Runs a start in `dir` that must fail, from a launcher in a
     /// pseudo-terminal. Checks the daemon's files and directory are gone and
-    /// the launcher's helper was hung up on; returns the error and what the
-    /// pane showed.
+    /// the launcher's attach was accepted, then failed; returns the error and
+    /// the line the launcher was told, which it prints in the pane.
     fn failed_start(dir: &str, start: TestStart<'_>) -> (Box<dyn std::error::Error>, String) {
         let sock = path(dir, "sock");
         let nvim_sock = path(dir, "nvim.sock");
@@ -1124,15 +1175,15 @@ mod tests {
         assert!(!exists(&nvim_sock));
         assert!(!exists(dir));
 
-        let shown = reader.join().unwrap();
+        let _shown = reader.join().unwrap();
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
-        let launcher = launcher.unwrap();
-        let mut hangup = [0u8; 1];
-        // SAFETY: `hangup` is valid for one byte.
-        let n = unsafe { libc::read(launcher.as_raw_fd(), hangup.as_mut_ptr().cast(), 1) };
-        assert_eq!(0, n);
-        (err, String::from_utf8_lossy(&shown).into_owned())
+        let said = attach_conn::read_all_frames(&launcher.unwrap());
+        let [Message::Accept(_), Message::End(z)] = &said[..] else {
+            panic!("{said:?}")
+        };
+        assert_eq!(Ending::Failed, z.as_ending());
+        (err, z.message.clone())
     }
 
     /// Runs a start whose Neovim fails, with `nvim_command` standing in for
@@ -1656,15 +1707,14 @@ mod tests {
     }
 
     fn reason(failure: StartFailure) -> String {
-        let message = failure_message(&failure, "/tmp/x/log");
-        String::from_utf8(message).unwrap()
+        failure_message(&failure, "/tmp/x/log")
     }
 
     #[test]
     fn a_neovim_older_than_0_12_is_refused_with_its_version() {
         let failure = check_version(&api_info("0.11.2")).unwrap_err();
         assert_eq!(
-            format!("{NAME}: Neovim 0.12 or later is needed; nvim is 0.11.2; see /tmp/x/log\r\n"),
+            "Neovim 0.12 or later is needed; nvim is 0.11.2; see /tmp/x/log",
             reason(failure)
         );
         for newer in ["0.12.6", "0.13.0"] {
@@ -1705,10 +1755,7 @@ mod tests {
             ),
         ];
         for (failure, why) in cases {
-            assert_eq!(
-                format!("{NAME}: {why}; see /tmp/x/log\r\n"),
-                reason(failure)
-            );
+            assert_eq!(format!("{why}; see /tmp/x/log"), reason(failure));
         }
         // the hint alone is no reason
         assert_eq!(None, start_reason(b"More info with \"nvim -h\"\n"));

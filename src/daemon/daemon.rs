@@ -21,19 +21,20 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
+use super::attach_conn::Pending;
 use super::event_loop::{Event, Kind, Loop};
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry, REX_DEFAULT_SIZE, TAB_LAYER_BOUNDS};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, RexBlock};
-use super::pane_helper;
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::rex_layout::{self, LayoutSnapshot};
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
+use crate::attach::{Ending, Size};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::forwarder::{self, Forwarder};
@@ -47,6 +48,9 @@ use crate::screen::grids::{Grids, WinKind};
 use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown};
 use crate::term::input;
 
+mod attaches;
+use attaches::PENDING_BASE;
+
 /// The daemon is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -54,6 +58,18 @@ pub(crate) struct Daemon {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: String,
     pub sock: String,
+    /// The daemon's name and its log's path, as an accepted attach is told.
+    pub name: String,
+    pub log: String,
+    /// Connections waiting for their hello, by loop token.
+    pending: Vec<(usize, Pending)>,
+    /// The next pending connection's token, past `PENDING_BASE`: never
+    /// reused, so a stale event can't reach a newer connection.
+    next_pending: usize,
+    /// When the hello timer is set to fire, if it is.
+    hello_timer_due: Option<Instant>,
+    /// The user a connection's peer must run as: ours.
+    uid: u32,
     pub grids: Grids,
     pub panes: Panes,
     pub changes: WindowChanges,
@@ -118,6 +134,7 @@ pub(crate) enum Token {
     LayoutTimer,
     SwitchTimer,
     EscapeTimer,
+    HelloTimer,
 }
 
 impl Token {
@@ -132,13 +149,14 @@ impl Token {
             5 => Token::LayoutTimer,
             6 => Token::SwitchTimer,
             7 => Token::EscapeTimer,
+            8 => Token::HelloTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::EscapeTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::HelloTimer as usize) < pane::TOKEN_BASE);
 
 /// The id `Pane::startup` gives the pane neorex was run in.
 const STARTUP_PANE_ID: u32 = 0;
@@ -211,7 +229,13 @@ impl AimForwarder for PaneForwarders<'_> {
 impl Drop for Daemon {
     fn drop(&mut self) {
         self.panes.unregister_all(&self.event_loop);
-        self.panes.deinit();
+        let ending = match self.stopped {
+            Some(StopReason::NvimExited) => Ending::Quit,
+            Some(StopReason::Signal) => Ending::Stopped,
+            Some(StopReason::PaneGone) => Ending::Closed,
+            None => Ending::Failed,
+        };
+        self.panes.deinit(ending);
         log::flush_traces();
     }
 }
@@ -228,6 +252,12 @@ impl Daemon {
         Daemon {
             exe,
             sock,
+            name: String::new(),
+            log: String::new(),
+            pending: Vec::new(),
+            next_pending: 0,
+            hello_timer_due: None,
+            uid: super::attach_conn::euid(),
             grids: Grids::default(),
             panes: Panes::default(),
             changes: WindowChanges::default(),
@@ -302,6 +332,9 @@ impl Daemon {
 
     /// Handles one loop event.
     fn handle(&mut self, e: Event) -> Result<()> {
+        if e.token >= PENDING_BASE {
+            return self.on_pending(e.token);
+        }
         match Token::of(e.token) {
             Some(Token::Signal) => self.stop(StopReason::Signal),
             Some(Token::NvimChannel) => self.on_nvim()?,
@@ -310,6 +343,7 @@ impl Daemon {
             Some(Token::LayoutTimer) => self.layout_wait_over()?,
             Some(Token::SwitchTimer) => self.recheck_switch()?,
             Some(Token::EscapeTimer) => self.flush_pending_escapes()?,
+            Some(Token::HelloTimer) => self.time_out_hellos(Instant::now())?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -429,50 +463,6 @@ impl Daemon {
 
     // panes
 
-    /// A new helper connected: match its hello to a pane waiting for it.
-    fn accept(&mut self, server: &UnixListener) -> Result<()> {
-        let hello = pane_helper::accept_hello(server)?;
-        // its window may have closed before it connected
-        let Some(id) = hello.id.filter(|&id| self.panes.by_id(id).is_some()) else {
-            log_info!("{NAME} daemon: a helper for a pane that's gone");
-            hello.close();
-            return Ok(());
-        };
-        // a second hello for a pane keeps the terminal it has
-        if self
-            .panes
-            .by_id(id)
-            .is_some_and(|p| p.terminal_surface.is_some())
-        {
-            log_warn!("{NAME} daemon: a second helper for pane {id}; refused");
-            hello.close();
-            return Ok(());
-        }
-        // (a failing `Surface::create` closes the helper's socket and terminal
-        // itself)
-        let surface = Surface::create(hello.stream, hello.tty)?;
-        let pane = self.panes.by_id_mut(id).unwrap();
-        pane.terminal_surface = Some(surface);
-        pane.register_with(&self.event_loop)?;
-        if pane.awaiting_layout {
-            let v = &pane.terminal_surface.as_ref().unwrap().view;
-            if v.cols != REX_DEFAULT_SIZE[0] || v.rows != REX_DEFAULT_SIZE[1] {
-                pane.awaiting_layout = false;
-            } else {
-                self.add_timer(Token::LayoutTimer, LAYOUT_WAIT_MS)?;
-            }
-        }
-        self.size_window(id);
-        if self.panes.by_id(id).unwrap().layer.is_some()
-            && let Some(req) = self.floating().follow_layer(id)
-            && let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer
-        {
-            l.fit = Fit::Asked(req);
-        }
-        self.nvim.client.flush()?;
-        self.draw()
-    }
-
     /// The app never resized a new split: its terminal's size is the real one.
     fn layout_wait_over(&mut self) -> Result<()> {
         let mut any = false;
@@ -537,34 +527,15 @@ impl Daemon {
         Ok(())
     }
 
-    fn on_helper(&mut self, id: u32) -> Result<()> {
-        let mut buf = [0u8; 64];
-        let fd = self.surface_of(id).helper_fd();
-        let n = read_fd(fd, &mut buf);
-        if n == 0 {
-            return self.pane_gone(id);
-        }
-
-        for &byte in &buf[..n] {
-            match pane_helper::Message::from_byte(byte) {
-                pane_helper::Message::Resized => return self.handle_resize(id),
-                pane_helper::Message::Hello | pane_helper::Message::Other(_) => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_resize(&mut self, id: u32) -> Result<()> {
+    /// Pane `id`'s terminal is `size` now, as its helper says.
+    fn handle_resize(&mut self, id: u32, size: Size) -> Result<()> {
         log::trace(Point::Resize, u64::from(id));
-        let Ok(window_size) = self.surface_of(id).terminal.size() else {
-            return self.pane_gone(id);
-        };
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.awaiting_layout = false;
         let surface = pane.terminal_surface.as_mut().unwrap();
         surface
             .view
-            .resize(u32::from(window_size.ws_col), u32::from(window_size.ws_row));
+            .resize(u32::from(size.cols), u32::from(size.rows));
         let asked = self.size_window(id);
         let _ = self.floating().follow_layer(id);
         if self.focused_pane_id() == Some(id) {
@@ -669,15 +640,15 @@ impl Daemon {
         let pane = self.panes.add_for_window(win);
         pane.tab = sp.tab;
         let pane_id = pane.id;
+        let command = pane::attach_words(&self.exe, &self.sock, pane);
         self.changes.forget_split(win);
 
-        let id = pane_id.to_string();
         let block = json!({
             "flavor": "com.superlogical.terminal.shell",
             "label": NAME,
             "options": {
                 "shell": "none",
-                "command": [self.exe, "pane", self.sock, id],
+                "command": command,
                 "size": { "columns": size[0], "rows": size[1] },
             },
         });
@@ -2022,55 +1993,476 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_second_hello_for_a_pane_is_refused_and_the_first_terminal_stays() {
-        use crate::daemon::{fdpass, pane_helper};
-        let mut fx = fixture();
-        fx.d.panes
-            .add(Pane::startup(None, Surface::for_test(80, 24)));
-        let before =
-            fx.d.panes
-                .by_id(0)
-                .unwrap()
-                .terminal_surface
-                .as_ref()
-                .unwrap()
-                .helper_fd();
+    /// A daemon address for one test, listening.
+    struct Address {
+        path: std::path::PathBuf,
+        server: UnixListener,
+    }
 
-        let path = std::env::temp_dir().join(format!("{NAME}-dup-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let server = UnixListener::bind(&path).unwrap();
-        let client = UnixStream::connect(&path).unwrap();
-        let mut pipe: [i32; 2] = [0; 2];
-        assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
-        let mut buf = [0u8; 16];
-        fdpass::send(
-            &client,
-            pane_helper::hello_bytes(&mut buf, Some(0)).unwrap(),
-            pipe[1],
-        )
-        .unwrap();
-
-        fx.d.accept(&server).unwrap();
-
-        let after =
-            fx.d.panes
-                .by_id(0)
-                .unwrap()
-                .terminal_surface
-                .as_ref()
-                .unwrap()
-                .helper_fd();
-        assert_eq!(before, after);
-        // the refused helper was hung up on
-        let mut client = client;
-        let mut byte = [0u8; 1];
-        assert_eq!(0, client.read(&mut byte).unwrap());
-        unsafe {
-            libc::close(pipe[0]);
-            libc::close(pipe[1]);
+    impl Address {
+        fn new(tag: &str) -> Address {
+            let path =
+                std::env::temp_dir().join(format!("{NAME}-{tag}-{}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let server = UnixListener::bind(&path).unwrap();
+            Address { path, server }
         }
-        let _ = std::fs::remove_file(&path);
+
+        /// A helper's connection that sends `hello`, `tty` riding on it.
+        fn send(&self, hello: &[u8], tty: Option<i32>) -> UnixStream {
+            let client = UnixStream::connect(&self.path).unwrap();
+            match tty {
+                Some(fd) => crate::daemon::fdpass::send(&client, hello, fd).unwrap(),
+                None => (&client).write_all(hello).unwrap(),
+            }
+            client
+        }
+    }
+
+    impl Drop for Address {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// A pty of `cols` x `rows`, closed as it drops.
+    struct Pty {
+        master: i32,
+        slave: i32,
+    }
+
+    impl Pty {
+        fn new(cols: u16, rows: u16) -> Pty {
+            let (master, slave) = surface::open_pty(cols, rows);
+            Pty { master, slave }
+        }
+    }
+
+    impl Drop for Pty {
+        fn drop(&mut self) {
+            unsafe {
+                libc::close(self.master);
+                libc::close(self.slave);
+            }
+        }
+    }
+
+    /// The first frame `client` is sent, within a second.
+    fn answer(client: &UnixStream) -> crate::attach::Message {
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(m) = crate::daemon::attach_conn::next_message(&mut got).unwrap() {
+                return m;
+            }
+            let n = (&*client).read(&mut buf).unwrap();
+            assert!(n > 0, "hung up without an answer");
+            got.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    /// The refusal `client` was sent, before it was hung up on.
+    fn refusal(client: &UnixStream) -> crate::attach::End {
+        let said = crate::daemon::attach_conn::read_all_frames(client);
+        match &said[..] {
+            [crate::attach::Message::End(z)] => z.clone(),
+            _ => panic!("{said:?}"),
+        }
+    }
+
+    /// A window's pane waiting for its terminal, its window drawn at 80 x 23:
+    /// its id and pane id.
+    fn requested_pane(fx: &mut Fixture) -> (u32, crate::attach::PaneId) {
+        draw_external(&mut fx.d, 2, 1000, 80, 23);
+        let p = fx.d.panes.add_for_window(1000);
+        (p.id, p.attach_id.unwrap())
+    }
+
+    fn hello_for(pane: crate::attach::PaneId, cols: u16, rows: u16) -> Vec<u8> {
+        use crate::daemon::attach_conn::{requested_hello, test_terminal};
+        requested_hello(pane, test_terminal(cols, rows))
+    }
+
+    #[test]
+    fn a_requested_attach_is_accepted_at_its_hellos_size() {
+        let mut fx = fixture();
+        fx.d.name = "proj".into();
+        fx.d.log = "/tmp/proj/log".into();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("accept");
+        let pty = Pty::new(90, 30);
+        // the hello says 70 x 20: the daemon never asks the terminal
+        let client = at.send(&hello_for(pane, 70, 20), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+
+        let crate::attach::Message::Accept(a) = answer(&client) else {
+            panic!("not accepted")
+        };
+        assert_eq!(
+            (
+                crate::attach::ATTACH_PROTOCOL_VERSION,
+                crate::attach::build()
+            ),
+            (a.v, a.build.as_str())
+        );
+        assert_eq!(
+            ("proj", &b"/tmp/proj/log"[..]),
+            (a.daemon.as_str(), &a.log[..])
+        );
+        let p = fx.d.panes.by_id(id).unwrap();
+        let v = &p.terminal_surface.as_ref().unwrap().view;
+        assert_eq!((70, 20), (v.cols, v.rows));
+        assert_eq!(
+            (70, 19),
+            (p.last_asked_win_size.cols, p.last_asked_win_size.rows)
+        );
+        assert!(fx.d.pending.is_empty());
+    }
+
+    #[test]
+    fn an_s_frame_resizes_the_window() {
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("resize");
+        let pty = Pty::new(80, 24);
+        let mut client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+
+        let size = crate::attach::Size {
+            cols: 100,
+            rows: 40,
+            px: Some((1000, 800)),
+        };
+        client
+            .write_all(&crate::attach::Message::Size(size).encode().unwrap())
+            .unwrap();
+        fx.d.on_helper(id).unwrap();
+        let p = fx.d.panes.by_id(id).unwrap();
+        let v = &p.terminal_surface.as_ref().unwrap().view;
+        assert_eq!((100, 40), (v.cols, v.rows));
+        assert_eq!(
+            (100, 39),
+            (p.last_asked_win_size.cols, p.last_asked_win_size.rows)
+        );
+        // the pty kept its size: only the frame said
+        let ws = crate::daemon::pane_helper::size_of(pty.slave).unwrap();
+        assert_eq!((80, 24), (ws.cols, ws.rows));
+    }
+
+    #[test]
+    fn a_hello_of_another_version_is_refused_naming_both_builds_and_versions() {
+        use crate::attach::{Hello, Message, Purpose, Refusal};
+        let mut fx = fixture();
+        let (_, pane) = requested_pane(&mut fx);
+        let at = Address::new("version");
+        let mut hello = Hello::new(Purpose::Requested {
+            pane,
+            terminal: crate::daemon::attach_conn::test_terminal(80, 24),
+        });
+        hello.v = 2;
+        hello.build = format!("{NAME} 9.9.9");
+        let client = at.send(&Message::Hello(hello).encode().unwrap(), None);
+        fx.d.accept(&at.server).unwrap();
+        let z = refusal(&client);
+        assert_eq!(Some(Refusal::Version), z.as_refusal());
+        for part in [
+            format!("{NAME} 9.9.9 speaks attach protocol 2"),
+            format!("{} speaks 1", crate::attach::build()),
+        ] {
+            assert!(z.message.contains(&part), "{}", z.message);
+        }
+    }
+
+    #[test]
+    fn a_hello_that_cant_be_read_is_refused_naming_why() {
+        use crate::attach::{Frame, Refusal};
+        let mut fx = fixture();
+        let at = Address::new("hello");
+        for (kind, payload, why) in [
+            (b'h', &b"\x80"[..], "missing field v"),
+            (b's', &b"\x80"[..], "the first frame is s, not a hello"),
+        ] {
+            let mut bytes = Vec::new();
+            Frame::encode_into(kind, payload, &mut bytes).unwrap();
+            let client = at.send(&bytes, None);
+            fx.d.accept(&at.server).unwrap();
+            let z = refusal(&client);
+            assert_eq!(
+                (Some(Refusal::Hello), why),
+                (z.as_refusal(), z.message.as_str())
+            );
+        }
+        // a requested pane's hello without one of its fields
+        let mut bytes = Vec::new();
+        let mut payload = vec![0x83];
+        for (k, v) in [("v", 1u8), ("purpose", 0), ("build", 0)] {
+            crate::nvim::msgpack::write_str(&mut payload, k);
+            match k {
+                "v" => crate::nvim::msgpack::write_int(&mut payload, v),
+                "purpose" => crate::nvim::msgpack::write_str(&mut payload, "requested"),
+                _ => crate::nvim::msgpack::write_str(&mut payload, "x"),
+            }
+        }
+        Frame::encode_into(b'h', &payload, &mut bytes).unwrap();
+        let client = at.send(&bytes, None);
+        fx.d.accept(&at.server).unwrap();
+        assert_eq!("missing field pane", refusal(&client).message);
+    }
+
+    #[test]
+    fn a_relay_or_a_file_thats_no_terminal_is_refused_and_its_pane_given_up() {
+        use crate::attach::Refusal;
+        use crate::daemon::attach_conn::{requested_hello, test_terminal};
+        let at = Address::new("terminal");
+        // the relay comes with #103
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let mut t = test_terminal(80, 24);
+        t.transport = crate::attach::Transport::Relay;
+        let client = at.send(&requested_hello(pane, t), None);
+        fx.d.accept(&at.server).unwrap();
+        assert_eq!(Some(Refusal::Transport), refusal(&client).as_refusal());
+        assert_eq!(
+            Some(Close::RequestFailed),
+            fx.d.panes.by_id(id).unwrap().closing
+        );
+        // its id is no good after
+        assert_eq!(Err(Refusal::PaneExpired), fx.d.panes.ids.take(&pane));
+        // Neovim was warned
+        fx.nvim_end
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut sent = vec![0u8; 4096];
+        let n = fx.nvim_end.read(&mut sent).unwrap();
+        let sent = String::from_utf8_lossy(&sent[..n]);
+        assert!(
+            sent.contains("nvim_echo") && sent.contains("relay"),
+            "{sent:?}"
+        );
+
+        // under fd: none at all, or a pipe
+        for tty in [false, true] {
+            let mut fx = fixture();
+            let (id, pane) = requested_pane(&mut fx);
+            let mut pipe = [0; 2];
+            assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
+            let client = at.send(&hello_for(pane, 80, 24), tty.then_some(pipe[0]));
+            fx.d.accept(&at.server).unwrap();
+            assert_eq!(
+                Some(Refusal::Terminal),
+                refusal(&client).as_refusal(),
+                "{tty}"
+            );
+            assert_eq!(
+                Some(Close::RequestFailed),
+                fx.d.panes.by_id(id).unwrap().closing
+            );
+            unsafe {
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_peer_of_another_user_is_refused() {
+        let mut fx = fixture();
+        fx.d.uid += 1;
+        let at = Address::new("user");
+        let client = UnixStream::connect(&at.path).unwrap();
+        fx.d.accept(&at.server).unwrap();
+        assert_eq!(
+            Some(crate::attach::Refusal::User),
+            refusal(&client).as_refusal()
+        );
+        assert!(fx.d.pending.is_empty());
+    }
+
+    #[test]
+    fn an_id_never_minted_is_refused_as_unknown() {
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("unknown");
+        let pty = Pty::new(80, 24);
+        // another daemon's, or another token
+        let other = crate::attach::PaneId::parse(&format!("{}-zzzzzzzzzz", pane.number)).unwrap();
+        let client = at.send(&hello_for(other, 80, 24), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        assert_eq!(
+            Some(crate::attach::Refusal::PaneUnknown),
+            refusal(&client).as_refusal()
+        );
+        // the pane still waits for its own
+        let p = fx.d.panes.by_id(id).unwrap();
+        assert!(p.closing.is_none() && p.terminal_surface.is_none());
+    }
+
+    #[test]
+    fn a_pane_closed_before_its_helper_connects_is_expired_and_the_helper_exits_0_quietly() {
+        use crate::daemon::pane_helper::{self, Exit, Want};
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        // its window closed: nothing wants the pane
+        let i = fx.d.panes.index_of(id).unwrap();
+        fx.d.panes.list[i].closing = Some(Close::WindowClosed);
+        fx.d.panes.remove(i, &fx.d.event_loop);
+        let at = Address::new("expired");
+        let client = UnixStream::connect(&at.path).unwrap();
+        let helper = std::thread::spawn(move || {
+            let pty = Pty::new(80, 24);
+            pane_helper::attach_on(
+                client,
+                pty.slave,
+                Want::Requested(pane),
+                crate::attach::Transport::Fd,
+                None,
+                Duration::from_secs(5),
+            )
+        });
+        fx.d.accept(&at.server).unwrap();
+        // the hello may not be in yet
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some(&(token, _)) = fx.d.pending.first() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            fx.d.on_pending(token).unwrap();
+        }
+        assert_eq!(
+            Exit {
+                status: 0,
+                message: None
+            },
+            helper.join().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_second_hello_for_a_pane_is_refused_as_taken_and_the_first_terminal_stays() {
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("taken");
+        let first_pty = Pty::new(80, 24);
+        let first = at.send(&hello_for(pane, 80, 24), Some(first_pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        assert!(matches!(answer(&first), crate::attach::Message::Accept(_)));
+        let before = fx.d.surface_of(id).helper_fd();
+
+        let second_pty = Pty::new(80, 24);
+        let second = at.send(&hello_for(pane, 80, 24), Some(second_pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        let z = refusal(&second);
+        assert_eq!(Some(crate::attach::Refusal::PaneTaken), z.as_refusal());
+
+        assert_eq!(before, fx.d.surface_of(id).helper_fd());
+        assert!(fx.d.panes.by_id(id).unwrap().closing.is_none());
+        // the first helper is still attached
+        first.set_nonblocking(true).unwrap();
+        let mut byte = [0u8; 1];
+        assert!((&first).read(&mut byte).is_err());
+    }
+
+    #[test]
+    fn a_silent_connection_doesnt_delay_another_attach() {
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("silent");
+        let silent = UnixStream::connect(&at.path).unwrap();
+        let started = Instant::now();
+        fx.d.accept(&at.server).unwrap();
+        assert_eq!(1, fx.d.pending.len());
+
+        let pty = Pty::new(80, 24);
+        let client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+        assert!(fx.d.panes.by_id(id).unwrap().terminal_surface.is_some());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // still waiting, until its 2 s are up
+        fx.d.time_out_hellos(Instant::now()).unwrap();
+        assert_eq!(1, fx.d.pending.len());
+        fx.d.time_out_hellos(Instant::now() + Duration::from_secs(3))
+            .unwrap();
+        assert!(fx.d.pending.is_empty());
+        assert_eq!(
+            Some(crate::attach::Refusal::Hello),
+            refusal(&silent).as_refusal()
+        );
+    }
+
+    #[test]
+    fn a_hello_with_a_64_kb_environment_is_accepted() {
+        use crate::daemon::attach_conn::{requested_hello, test_terminal};
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("big-env");
+        let pty = Pty::new(80, 24);
+        let mut t = test_terminal(80, 24);
+        t.env = (0..512)
+            .map(|i| (format!("VAR_{i}").into_bytes(), vec![b'x'; 128]))
+            .collect();
+        let hello = requested_hello(pane, t);
+        assert!(hello.len() > 64 << 10);
+        // more than a socket holds: sent as the daemon reads
+        let client = UnixStream::connect(&at.path).unwrap();
+        let slave = pty.slave;
+        let sender = std::thread::spawn(move || {
+            crate::daemon::fdpass::send(&client, &hello, slave).unwrap();
+            client
+        });
+        fx.d.accept(&at.server).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some(&(token, _)) = fx.d.pending.first() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+            fx.d.on_pending(token).unwrap();
+        }
+        let client = sender.join().unwrap();
+        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+        assert!(fx.d.panes.by_id(id).unwrap().terminal_surface.is_some());
+    }
+
+    #[test]
+    fn a_later_self_attach_or_control_request_is_refused_for_now() {
+        use crate::daemon::attach_conn::{self_hello, test_terminal};
+        let mut fx = fixture();
+        let at = Address::new("self");
+        let pty = Pty::new(80, 24);
+        let client = at.send(&self_hello(test_terminal(80, 24)), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        let z = refusal(&client);
+        assert_eq!(Some(crate::attach::Refusal::Hello), z.as_refusal());
+        assert_eq!("this daemon takes no self hello yet", z.message);
+    }
+
+    /// The daemon ends each attach saying why: Neovim quit, the daemon was
+    /// stopped, or the pane closed.
+    #[test]
+    fn an_attach_ends_saying_why() {
+        use crate::attach::{Ending, Message};
+        for (stopped, want) in [
+            (StopReason::NvimExited, Ending::Quit),
+            (StopReason::Signal, Ending::Stopped),
+            (StopReason::PaneGone, Ending::Closed),
+        ] {
+            let mut fx = fixture();
+            let (_, pane) = requested_pane(&mut fx);
+            let at = Address::new("end");
+            let pty = Pty::new(80, 24);
+            let client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+            fx.d.accept(&at.server).unwrap();
+            fx.d.stop(stopped);
+            drop(fx);
+            let said = crate::daemon::attach_conn::read_all_frames(&client);
+            let [Message::Accept(_), Message::End(z)] = &said[..] else {
+                panic!("{said:?}")
+            };
+            assert_eq!(want, z.as_ending(), "{stopped:?}");
+        }
     }
 
     /// A daemon with a 200 x 50 screen and the tabline on, and panes to place.
@@ -2939,13 +3331,13 @@ mod tests {
         let new: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
         assert_eq!("session:s", new["payload"]["session_id"]);
         assert_eq!(json!([0.045, 0.06, 0.315, 0.44]), new["payload"]["bounds"]);
-        assert_eq!(
-            json!([NAME, "pane"]),
-            json!([
-                new["payload"]["layout"]["block"]["label"],
-                new["payload"]["layout"]["block"]["options"]["command"][1]
-            ])
-        );
+        // `{attach}`, with the pane id minted for it
+        let words = &new["payload"]["layout"]["block"]["options"]["command"];
+        assert_eq!(NAME, new["payload"]["layout"]["block"]["label"]);
+        assert_eq!(json!(["attach", "--address"]), json!([words[1], words[2]]));
+        assert_eq!("--pane", words[4]);
+        let pane = crate::attach::PaneId::parse(words[5].as_str().unwrap()).unwrap();
+        assert_eq!(1, pane.number);
         let close: serde_json::Value = serde_json::from_str(&frames[1]).unwrap();
         assert_eq!(
             block_id(5).replace("block:", "layer:"),
@@ -3531,7 +3923,7 @@ mod tests {
         let (master, slave) = surface::open_pty(81, 24);
         let (socket, _helper) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut p = Pane::from_neovim_window(1, 1000);
-        p.terminal_surface = Some(Surface::create(socket, slave).unwrap());
+        p.terminal_surface = Some(Surface::create(socket, slave, surface::cells(81, 24)).unwrap());
         let id = fx.d.panes.add(p).id;
         fx.d.nvim.current_win = 1000;
         draw_external(&mut fx.d, 2, 1000, 81, 23);

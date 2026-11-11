@@ -3,7 +3,9 @@
 //! and threads playing the two terminal emulators.
 
 use super::*;
-use crate::daemon::{fdpass, surface::open_pty};
+use crate::daemon::attach_conn;
+use crate::daemon::fdpass;
+use crate::daemon::surface::{cells, open_pty};
 use crate::nvim::nvim::spawn_for_test_with;
 use crate::rex::client::Client;
 use std::io::Read;
@@ -177,7 +179,10 @@ impl Rig {
         let (master0, slave0) = open_pty(200, 60);
         let (socket0, helper0) = UnixStream::pair().unwrap();
         let block = pane::rex_block(BLOCK).unwrap();
-        let startup = Pane::startup(Some(block), Surface::create(socket0, slave0).unwrap());
+        let startup = Pane::startup(
+            Some(block),
+            Surface::create(socket0, slave0, cells(200, 60)).unwrap(),
+        );
         let pane0 = Emulator::start(master0);
         d.start(startup).unwrap();
 
@@ -204,13 +209,9 @@ impl Rig {
         rig.pump(|r| r.d.panes.by_id(1).is_some());
         let (master1, slave1) = open_pty(100, 30);
         let client = UnixStream::connect(&rig.sock).unwrap();
-        let mut buf = [0u8; 16];
-        fdpass::send(
-            &client,
-            pane_helper::hello_bytes(&mut buf, Some(1)).unwrap(),
-            slave1,
-        )
-        .unwrap();
+        let id = rig.d.panes.by_id(1).unwrap().attach_id.unwrap();
+        let hello = attach_conn::requested_hello(id, attach_conn::test_terminal(100, 30));
+        fdpass::send(&client, &hello, slave1).unwrap();
         // SAFETY: the daemon has its own copy now.
         unsafe { libc::close(slave1) };
         rig.helper_ends.push(client);

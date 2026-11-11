@@ -300,6 +300,21 @@ pub fn trace_since(point: Point, id: u64, from: Instant) {
     LOG.trace_since(point, id, from);
 }
 
+/// Traces `point` for `id` at `t`, a `now_ns` time taken earlier, at
+/// `debug`.
+#[inline]
+pub fn trace_at(point: Point, id: u64, t: u64) {
+    if LOG.tracing() {
+        LOG.trace_at(point, id, t, None);
+    }
+}
+
+/// `now_ns`, at `debug`; 0 otherwise, for a trace that won't be kept.
+#[inline]
+pub fn trace_now() -> u64 {
+    if LOG.tracing() { now_ns() } else { 0 }
+}
+
 /// Writes out the traces waiting, as the daemon ends.
 pub fn flush_traces() {
     let _ = LOG.flush_into(&mut io::stderr().lock());

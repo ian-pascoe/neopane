@@ -141,6 +141,14 @@ Rex sets in every pane:
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
   warning, and `info` is used.
 
+Each window's Rex pane runs `neorex attach --address <the daemon's socket>
+--pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
+`docs/attach-protocol.md`) and waits until the daemon ends the attach; Rex then
+closes the pane. The pane id, such as `2-k3j9x2qpa8`, is good for that one
+pane's terminal only. A terminal left over from an older daemon, which ran
+`neorex pane`, exits with `neorex: pane was replaced by attach --pane (this
+came from an older daemon)`.
+
 If stdin isn't a terminal, `neorex` prints `error: NotATerminal` and exits. In
 a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
 `neorex: run it in a Rex pane`, then `error: NotInRex`, and exits. The

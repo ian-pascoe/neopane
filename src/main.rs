@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
+use neorex::attach::{PaneId, Transport};
 use neorex::daemon::{launch, pane_helper, serve};
 use neorex::debug;
 use neorex::log;
@@ -18,7 +19,6 @@ commands:
   debug-tui [nvim args]      run Neovim in this terminal through {NAME}'s renderer
   debug-panes SOCKET         stand-in daemon: drive the terminals of panes that connect
   debug-rex SOCKET           open a split in this Rex session and drive its pane; print Rex events
-  pane SOCKET [ID]           hand this terminal to the daemon at SOCKET, then wait
   help                       show this help
 
 {NAME} runs in a Rex pane: it needs REX_SERVER and REX_SESSION, and uses REX_BLOCK
@@ -42,7 +42,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Runs, and on an error prints its name on stderr and exits with status 1.
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
             ExitCode::from(1)
@@ -50,7 +50,77 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<()> {
+/// What a helper command asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Helper {
+    /// `attach --address A --pane ID [--transport fd|relay]`: a requested
+    /// pane's helper.
+    Attach {
+        address: OsString,
+        pane: PaneId,
+        transport: Transport,
+    },
+    /// `pane`, which older daemons ran: exits 1 with this line.
+    Replaced(String),
+    Usage,
+}
+
+/// The helper command `cmd` with `rest`, if it is one.
+fn helper_command(cmd: &OsStr, rest: &[OsString]) -> Option<Helper> {
+    if cmd == "pane" {
+        return Some(Helper::Replaced(format!(
+            "{NAME}: pane was replaced by attach --pane (this came from an older daemon)"
+        )));
+    }
+    if cmd != "attach" {
+        return None;
+    }
+    let (mut address, mut pane, mut transport) = (None, None, None);
+    let mut words = rest.iter();
+    while let Some(flag) = words.next() {
+        let Some(value) = words.next() else {
+            return Some(Helper::Usage);
+        };
+        let text = value.to_str();
+        let ok = match flag.to_str() {
+            Some("--address") if address.is_none() => {
+                address = Some(value.clone());
+                true
+            }
+            Some("--pane") if pane.is_none() => {
+                pane = text.and_then(PaneId::parse);
+                pane.is_some()
+            }
+            Some("--transport") if transport.is_none() => {
+                transport = text.and_then(Transport::from_name);
+                transport.is_some()
+            }
+            _ => false,
+        };
+        if !ok {
+            return Some(Helper::Usage);
+        }
+    }
+    // a self-attach, without --pane, comes with #105
+    match (address, pane) {
+        (Some(address), Some(pane)) => Some(Helper::Attach {
+            address,
+            pane,
+            transport: transport.unwrap_or(Transport::Fd),
+        }),
+        _ => Some(Helper::Usage),
+    }
+}
+
+/// Prints a helper's line, if any, and exits with its status.
+fn helper_exit(exit: pane_helper::Exit) -> ExitCode {
+    if let Some(m) = exit.message {
+        eprintln!("{NAME}: {m}");
+    }
+    ExitCode::from(exit.status)
+}
+
+fn run() -> Result<ExitCode> {
     let args: Vec<OsString> = std::env::args_os().collect();
     let cmd: &OsStr = if args.len() >= 2 {
         &args[1]
@@ -59,55 +129,63 @@ fn run() -> Result<()> {
     };
     let rest: &[OsString] = if args.len() >= 2 { &args[2..] } else { &[] };
 
+    let done = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
     if cmd == "help" || cmd == "-h" || cmd == "--help" {
         eprint!("{}", usage());
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
     if cmd == "debug-keys" && rest.is_empty() {
-        return debug::keys::run();
+        return done(debug::keys::run());
     }
     if cmd == "debug-events" {
-        return debug::events::run(rest);
+        return done(debug::events::run(rest));
     }
     if cmd == "debug-tui" {
-        return debug::tui::run(rest);
+        return done(debug::tui::run(rest));
     }
     if cmd == "debug-panes" && rest.len() == 1 {
-        return debug::panes::run(&rest[0]);
+        return done(debug::panes::run(&rest[0]));
     }
     if cmd == "debug-rex" && rest.len() == 1 {
-        return debug::rex::run(&rest[0]);
+        return done(debug::rex::run(&rest[0]));
     }
     // hidden: for docs/latency.md
     if cmd == "debug-latency" && rest.len() == 1 {
-        return debug::latency::run(&rest[0]);
+        return done(debug::latency::run(&rest[0]));
     }
-    if cmd == "pane" && rest.len() == 1 {
-        return Ok(pane_helper::run(&rest[0], None)?);
-    }
-    if cmd == "pane" && rest.len() == 2 {
-        let Some(id) = parse_u32(rest[1].as_encoded_bytes()) else {
-            usage_exit();
-        };
-        return Ok(pane_helper::run(&rest[0], Some(id))?);
+    // hidden: run by a requested pane's terminal
+    match helper_command(cmd, rest) {
+        Some(Helper::Attach {
+            address,
+            pane,
+            transport,
+        }) => {
+            let want = pane_helper::Want::Requested(pane);
+            return Ok(helper_exit(pane_helper::run(&address, want, transport)));
+        }
+        Some(Helper::Replaced(line)) => {
+            eprintln!("{line}");
+            return Ok(ExitCode::from(1));
+        }
+        Some(Helper::Usage) => usage_exit(),
+        None => {}
     }
     // started by the launcher, not by people
     if cmd == "daemon" && !rest.is_empty() {
-        return serve::run(&rest[0].to_string_lossy(), &rest[1..]);
+        return done(serve::run(&rest[0].to_string_lossy(), &rest[1..]));
     }
     for known in [
         "debug-keys",
         "debug-panes",
         "debug-rex",
         "debug-latency",
-        "pane",
         "daemon",
     ] {
         if cmd == known {
             usage_exit();
         }
     }
-    launch::run(args.get(1..).unwrap_or(&[]))
+    Ok(helper_exit(launch::run(args.get(1..).unwrap_or(&[]))?))
 }
 
 /// Prints the usage and exits with status 2.
@@ -116,39 +194,12 @@ fn usage_exit() -> ! {
     std::process::exit(2);
 }
 
-/// `s` as a decimal `u32`, read the way `parseInt` does:
-/// a leading `+` or `-` (only zero is negative and fits), and `_` between
-/// digits.
-fn parse_u32(s: &[u8]) -> Option<u32> {
-    let (negative, digits) = match s.first() {
-        Some(b'+') => (false, &s[1..]),
-        Some(b'-') => (true, &s[1..]),
-        _ => (false, s),
-    };
-    if digits.is_empty() || digits[0] == b'_' || digits[digits.len() - 1] == b'_' {
-        return None;
-    }
-    let mut n: u32 = 0;
-    for &c in digits {
-        if c == b'_' {
-            continue;
-        }
-        if !c.is_ascii_digit() {
-            return None;
-        }
-        let digit = u32::from(c - b'0');
-        if negative && digit != 0 {
-            return None;
-        }
-        n = n.checked_mul(10)?.checked_add(digit)?;
-    }
-    Some(n)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_u32, usage};
+    use super::{Helper, helper_command, usage};
+    use neorex::attach::{PaneId, Transport};
     use neorex::name::NAME;
+    use std::ffi::{OsStr, OsString};
 
     #[test]
     fn help_says_where_the_log_is() {
@@ -165,25 +216,97 @@ mod tests {
         }
     }
 
+    fn helper(words: &[&str]) -> Option<Helper> {
+        let rest: Vec<OsString> = words[1..].iter().map(OsString::from).collect();
+        helper_command(OsStr::new(words[0]), &rest)
+    }
+
     #[test]
-    fn pane_ids_parse_like_parse_int() {
-        assert_eq!(Some(10), parse_u32(b"10"));
-        assert_eq!(Some(10), parse_u32(b"+10"));
-        assert_eq!(Some(1000), parse_u32(b"1_000"));
-        assert_eq!(Some(0), parse_u32(b"-0"));
-        assert_eq!(Some(u32::MAX), parse_u32(b"4294967295"));
+    fn pane_points_at_attach() {
+        let line =
+            format!("{NAME}: pane was replaced by attach --pane (this came from an older daemon)");
+        assert_eq!(
+            Some(Helper::Replaced(line.clone())),
+            helper(&["pane", "a", "b"])
+        );
+        assert_eq!(Some(Helper::Replaced(line)), helper(&["pane"]));
+        assert!(!usage().contains("pane SOCKET"));
+    }
+
+    #[test]
+    fn attach_takes_an_address_and_a_pane() {
+        let pane = PaneId::parse("2-abcdefghij").unwrap();
+        let want = |transport| {
+            Some(Helper::Attach {
+                address: "/tmp/x/sock".into(),
+                pane,
+                transport,
+            })
+        };
+        assert_eq!(
+            want(Transport::Fd),
+            helper(&[
+                "attach",
+                "--address",
+                "/tmp/x/sock",
+                "--pane",
+                "2-abcdefghij"
+            ])
+        );
+        assert_eq!(
+            want(Transport::Relay),
+            helper(&[
+                "attach",
+                "--pane",
+                "2-abcdefghij",
+                "--address",
+                "/tmp/x/sock",
+                "--transport",
+                "relay"
+            ])
+        );
         for bad in [
-            &b""[..],
-            b"+",
-            b"-1",
-            b"_10",
-            b"10_",
-            b" 10",
-            b"10 ",
-            b"0x10",
-            b"4294967296",
+            &["attach"][..],
+            &["attach", "--address", "/a"],
+            &["attach", "--pane", "2-abcdefghij"],
+            &["attach", "--address", "/a", "--pane", "2"],
+            &[
+                "attach",
+                "--address",
+                "/a",
+                "--pane",
+                "2-abcdefghij",
+                "--pane",
+            ],
+            &[
+                "attach",
+                "--address",
+                "/a",
+                "--address",
+                "/b",
+                "--pane",
+                "2-abcdefghij",
+            ],
+            &[
+                "attach",
+                "--address",
+                "/a",
+                "--pane",
+                "2-abcdefghij",
+                "--transport",
+                "x",
+            ],
+            &[
+                "attach",
+                "--address",
+                "/a",
+                "--pane",
+                "2-abcdefghij",
+                "file",
+            ],
         ] {
-            assert_eq!(None, parse_u32(bad), "{bad:?}");
+            assert_eq!(Some(Helper::Usage), helper(bad), "{bad:?}");
         }
+        assert_eq!(None, helper(&["debug-keys"]));
     }
 }

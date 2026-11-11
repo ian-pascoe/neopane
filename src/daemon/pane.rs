@@ -11,6 +11,7 @@ use std::os::fd::RawFd;
 use super::event_loop::{self, Loop};
 use super::pane_layout::PaneLayout;
 use super::surface::{Restore, Surface};
+use crate::attach::{self, End, Ending, PaneId, Transport};
 use crate::screen::float_groups::Group;
 
 pub(crate) use crate::rex::ids::{block as rex_block, layer as rex_layer};
@@ -22,8 +23,11 @@ pub(crate) type RexBlock = crate::rex::ids::Block;
 pub(crate) type RexLayer = crate::rex::ids::Layer;
 
 pub(crate) struct Pane {
-    /// Matches a helper's hello. 0 is the startup pane.
+    /// The daemon's own number for it, for its loop tokens. 0 is the startup
+    /// pane.
     pub id: u32,
+    /// The pane id its helper's hello names, for a requested pane.
+    pub attach_id: Option<PaneId>,
     pub rex_block: Option<RexBlock>,
     /// None for a floating pane of floats, and the startup pane before setup.
     /// Of a pane showing several windows, the one last current in it.
@@ -101,7 +105,7 @@ pub(crate) enum Close {
 }
 
 /// Above Daemon's fixed tokens, so they never clash.
-pub(crate) const TOKEN_BASE: usize = 8;
+pub(crate) const TOKEN_BASE: usize = 16;
 
 /// Which of a pane's fds an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,30 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
         } else {
             PaneFd::Terminal
         },
+    }
+}
+
+/// The command a requested pane's terminal runs: `{attach}`, with the pane
+/// id minted for it.
+pub(crate) fn attach_words(exe: &str, sock: &str, pane: &Pane) -> Vec<String> {
+    let id = pane
+        .attach_id
+        .as_ref()
+        .expect("a requested pane has a pane id");
+    attach::attach_command(exe.as_ref(), sock.as_ref(), id, Transport::Fd)
+        .iter()
+        .map(|w| w.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The line an ending carries when nothing failed.
+fn ending_message(ending: Ending) -> &'static str {
+    match ending {
+        Ending::Closed => "the pane closed",
+        Ending::Quit => "Neovim quit",
+        Ending::Stopped => "the daemon was stopped",
+        Ending::Failed => "the daemon failed",
+        Ending::Detached => "detached",
     }
 }
 
@@ -157,6 +185,7 @@ impl Pane {
     fn blank(id: u32) -> Pane {
         Pane {
             id,
+            attach_id: None,
             rex_block: None,
             neovim_window_handle: None,
             layout: None,
@@ -218,22 +247,28 @@ impl Pane {
     /// closing while the daemon runs is restored without waiting for its
     /// terminal; one the daemon leaves as it ends (`closing` is `Shutdown`, or
     /// None before the pane was set up) waits a moment for it.
-    pub(crate) fn deinit(self) {
-        let restore = match self.closing {
-            Some(Close::RexPaneClosed) => Restore::No,
-            Some(Close::WindowClosed | Close::RequestFailed) => Restore::Now,
-            Some(Close::Shutdown) | None => Restore::Waiting,
+    ///
+    /// The helper is told why its attach ends: its pane closed, or, as the
+    /// daemon ends, `ending`.
+    pub(crate) fn deinit(self, ending: Ending) {
+        let (restore, ending) = match self.closing {
+            Some(Close::RexPaneClosed) => (Restore::No, Ending::Closed),
+            Some(Close::WindowClosed | Close::RequestFailed) => (Restore::Now, Ending::Closed),
+            Some(Close::Shutdown) | None => (Restore::Waiting, ending),
         };
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(restore, None);
+            surface.destroy(restore, End::ending(ending, ending_message(ending), false));
         }
     }
 
-    /// `deinit` as the daemon gives up, leaving `message` on the restored
-    /// terminal.
-    pub(crate) fn deinit_with_message(self, message: &[u8]) {
+    /// `deinit` as the daemon gives up: the attach fails with `message`,
+    /// which its helper prints.
+    pub(crate) fn deinit_with_message(self, message: &str) {
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(Restore::Waiting, Some(message));
+            surface.destroy(
+                Restore::Waiting,
+                End::ending(Ending::Failed, message, false),
+            );
         }
     }
 
@@ -332,7 +367,10 @@ mod tests {
 
         let (master, slave) = open_pty(80, 24);
         let (socket, mut helper) = UnixStream::pair().unwrap();
-        let pane = Pane::startup(None, Surface::create(socket, slave).unwrap());
+        let pane = Pane::startup(
+            None,
+            Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap(),
+        );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();
 
@@ -360,7 +398,7 @@ mod tests {
 
         // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
         unsafe { libc::close(master) };
-        pane.deinit();
+        pane.deinit(Ending::Stopped);
     }
 
     // Closing the terminal's fd doesn't end its watch on Linux, so a pane's
@@ -374,7 +412,10 @@ mod tests {
 
         let (master, slave) = open_pty(80, 24);
         let (socket, mut helper) = UnixStream::pair().unwrap();
-        let pane = Pane::startup(None, Surface::create(socket, slave).unwrap());
+        let pane = Pane::startup(
+            None,
+            Surface::create(socket, slave, super::super::surface::cells(80, 24)).unwrap(),
+        );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();
         pane.unregister_from(&event_loop);
@@ -392,6 +433,6 @@ mod tests {
         pane.unregister_from(&event_loop);
         // SAFETY: closing the pty's master, so restoring the terminal needn't wait.
         unsafe { libc::close(master) };
-        pane.deinit();
+        pane.deinit(Ending::Stopped);
     }
 }

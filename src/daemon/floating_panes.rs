@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::daemon::{Result, block_str};
 use super::event_loop::Loop;
-use super::pane::{Close, Pane};
+use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::rex_layout;
 use crate::name::NAME;
@@ -100,15 +100,14 @@ impl FloatingPanes<'_> {
         let pane = self.panes.add_for_group(g);
         pane.layer.as_mut().unwrap().bounds = bounds;
         let pane_id = pane.id;
-
-        let id = pane_id.to_string();
+        let command = pane::attach_words(self.exe, self.sock, pane);
         self.rex.new_layer(
             pane_id,
             bounds,
             json!({ "block": {
                 "flavor": "com.superlogical.terminal.shell",
                 "label": NAME,
-                "options": { "shell": "none", "command": [self.exe, "pane", self.sock, id] },
+                "options": { "shell": "none", "command": command },
             } }),
         )?;
         Ok(())
