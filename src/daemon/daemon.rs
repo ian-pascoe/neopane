@@ -34,6 +34,7 @@ use super::rex_layout::{self, LayoutSnapshot};
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
+use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::forwarder::{self, Forwarder};
 use crate::nvim::msgpack::{self, Decoder};
@@ -211,6 +212,7 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         self.panes.unregister_all(&self.event_loop);
         self.panes.deinit();
+        log::flush_traces();
     }
 }
 
@@ -279,7 +281,7 @@ impl Daemon {
                 && self.stopped.is_none()
                 && let Err(err) = self.accept(server)
             {
-                eprintln!("{NAME} daemon: a pane failed: {err}");
+                log_warn!("{NAME} daemon: a pane failed: {err}");
             }
             if self.stopped.is_none() {
                 self.after_batch()?;
@@ -432,7 +434,7 @@ impl Daemon {
         let hello = pane_helper::accept_hello(server)?;
         // its window may have closed before it connected
         let Some(id) = hello.id.filter(|&id| self.panes.by_id(id).is_some()) else {
-            eprintln!("{NAME} daemon: a helper for a pane that's gone");
+            log_info!("{NAME} daemon: a helper for a pane that's gone");
             hello.close();
             return Ok(());
         };
@@ -442,7 +444,7 @@ impl Daemon {
             .by_id(id)
             .is_some_and(|p| p.terminal_surface.is_some())
         {
-            eprintln!("{NAME} daemon: a second helper for pane {id}; refused");
+            log_warn!("{NAME} daemon: a second helper for pane {id}; refused");
             hello.close();
             return Ok(());
         }
@@ -549,6 +551,7 @@ impl Daemon {
     }
 
     fn handle_resize(&mut self, id: u32) -> Result<()> {
+        log::trace(Point::Resize, u64::from(id));
         let Ok(window_size) = self.surface_of(id).terminal.size() else {
             return self.pane_gone(id);
         };
@@ -558,12 +561,15 @@ impl Daemon {
         surface
             .view
             .resize(u32::from(window_size.ws_col), u32::from(window_size.ws_row));
-        self.size_window(id);
+        let asked = self.size_window(id);
         let _ = self.floating().follow_layer(id);
         if self.focused_pane_id() == Some(id) {
             self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         }
         self.nvim.client.flush()?;
+        if asked {
+            log::trace(Point::ResizeSent, u64::from(id));
+        }
         self.draw()
     }
 
@@ -574,6 +580,8 @@ impl Daemon {
         if n == 0 {
             return self.pane_gone(id);
         }
+        // the key's latency is timed from here
+        let at = Instant::now();
 
         let bytes = &buf[..n];
         let pane = self.panes.by_id(id).unwrap();
@@ -595,7 +603,7 @@ impl Daemon {
             panes: &mut self.panes,
             grids: &self.grids,
         };
-        self.nvim.type_into(&mut fwds, id, bytes)?;
+        self.nvim.type_into_at(&mut fwds, id, bytes, at)?;
         self.arm_escape_timer()
     }
 
@@ -686,6 +694,7 @@ impl Daemon {
                 "layout": { "block": block },
             }),
         )?;
+        log::trace(Point::Split, u64::from(pane_id));
         Ok(())
     }
 
@@ -875,7 +884,7 @@ impl Daemon {
             self.draw()?;
         }
         if let Some(e) = err {
-            eprintln!("neovim error: {}", String::from_utf8_lossy(e));
+            log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
             let size = self
                 .geometry()
@@ -907,6 +916,7 @@ impl Daemon {
         if self.nvim.switch_in_flight().is_some() {
             return Ok(());
         }
+        let from_tab = self.focused_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.nvim.current_win = win;
         let Some(p) = self.panes.by_win_mut(win) else {
@@ -918,6 +928,7 @@ impl Daemon {
             p.neovim_window_handle = Some(win);
             self.size_window(id);
         }
+        self.trace_tab_move(from_tab, id);
         let p = self.panes.by_id(id).unwrap();
         self.nvim.fit_ui_to(p)?;
         self.draw()?;
@@ -1203,6 +1214,7 @@ impl Daemon {
                 }
                 Action::Rearrange(plan) => {
                     tab.placed = Some(plan);
+                    log::trace(Point::Place, layout.tab as u64);
                     for m in plan.items() {
                         let Some(blocks) = self.blocks_of(m) else {
                             continue;
@@ -1217,6 +1229,7 @@ impl Daemon {
                 }
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
+                    log::trace(Point::Place, layout.tab as u64);
                     for m in plan.items() {
                         let Some(blocks) = self.blocks_of(m) else {
                             continue;
@@ -1411,10 +1424,20 @@ impl Daemon {
         if win == self.nvim.current_win && self.nvim.current_float == 0 {
             return Ok(());
         }
+        let from_tab = self.focused_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.make_current(id)?;
+        self.trace_tab_move(from_tab, id);
         self.nvim.client.flush()?;
         self.draw()
+    }
+
+    /// Traces focus moving to pane `id` from a pane of tab page `from_tab`, if
+    /// that's another tab page's: its panes are to be drawn.
+    fn trace_tab_move(&self, from_tab: Option<i64>, id: u32) {
+        if log::tracing() && self.panes.by_id(id).map(|p| p.tab) != from_tab {
+            log::trace(Point::TabMove, u64::from(id));
+        }
     }
 
     /// A newer view: where our panes sit, so the editor and floats fit. A view
@@ -1594,8 +1617,11 @@ impl Daemon {
             // never waits: what the terminal can't take yet waits until it has room
             match s.send_frame() {
                 Err(_) => self.pane_gone(id)?,
-                Ok(Sent::Waiting) => self.event_loop.add_write(s.terminal.fd, token)?,
-                Ok(Sent::All) => {}
+                Ok(Sent::Waiting) => {
+                    log::trace(Point::Frame, u64::from(id));
+                    self.event_loop.add_write(s.terminal.fd, token)?
+                }
+                Ok(Sent::All) => log::trace(Point::Frame, u64::from(id)),
             }
         }
         // the panes along the top drew the tabline
@@ -1622,26 +1648,27 @@ impl Daemon {
     }
 
     /// Asks Neovim for the window to fit the pane, unless it already was.
-    fn size_window(&mut self, id: u32) {
+    /// Whether it asked.
+    fn size_window(&mut self, id: u32) -> bool {
         let Some(p) = self.panes.by_id(id) else {
-            return;
+            return false;
         };
         if p.terminal_surface.is_none() || p.awaiting_layout {
-            return;
+            return false;
         }
         if p.layout.is_some() {
             return self.size_laid_out_windows(id);
         }
         let Some(win) = p.neovim_window_handle else {
-            return;
+            return false;
         };
         let Some(grid) = self.grids.grid_of(win) else {
-            return;
+            return false;
         };
         let size = self.geometry().window_size(p);
         let last = p.last_asked_win_size;
         if last.grid == grid && last.cols == size[0] && last.rows == size[1] {
-            return;
+            return false;
         }
         self.panes.by_id_mut(id).unwrap().last_asked_win_size = LastAskedWinSize {
             grid,
@@ -1649,6 +1676,7 @@ impl Daemon {
             rows: size[1],
         };
         windows::size(&mut self.nvim.client, win, size[0], size[1]);
+        true
     }
 
     /// Asks Neovim for each window of pane `id`'s layout to fit its place,
@@ -1867,7 +1895,7 @@ fn parse_note_or_log(method: &[u8], params: &mut Decoder<'_>) -> Option<windows:
     match windows::parse_note(method, params) {
         Ok(note) => note,
         Err(err) => {
-            eprintln!(
+            log_warn!(
                 "{NAME} daemon: unreadable {} note: {err}",
                 String::from_utf8_lossy(method)
             );
@@ -1881,7 +1909,7 @@ fn parse_block(block: &str) -> Option<RexBlock> {
     match pane::rex_block(block.as_bytes()) {
         Ok(b) => Some(b),
         Err(_) => {
-            eprintln!("{NAME} daemon: not a block id: {block}");
+            log_warn!("{NAME} daemon: not a block id: {block}");
             None
         }
     }

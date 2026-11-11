@@ -26,6 +26,7 @@ use super::nvim_session::NvimSession;
 use super::pane::{self, Pane, RexBlock};
 use super::pane_helper;
 use super::surface::Surface;
+use crate::log::{self, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::nvim::{self, Nvim};
 use crate::rex::client::Client;
@@ -159,6 +160,7 @@ pub fn run<S: AsRef<OsStr>>(dir: &str, nvim_args: &[S]) -> Result<()> {
     // out of the pane's session, so closing the pane doesn't signal us
     // SAFETY: setsid has no memory effects.
     unsafe { libc::setsid() };
+    log::init_daemon();
     let rex_url = env("REX_SERVER").ok_or(Error::NotInRex)?;
     let session_id = env("REX_SESSION").ok_or(Error::NotInRex)?;
     serve(dir, nvim_args, Config::new(&rex_url, &session_id))
@@ -248,7 +250,7 @@ impl Drop for NvimChild {
         if self.wait_for_exit() {
             return;
         }
-        eprintln!("{NAME} daemon: Neovim didn't exit after SIGHUP; killing it");
+        log_warn!("{NAME} daemon: Neovim didn't exit after SIGHUP; killing it");
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -292,7 +294,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         Some(b) => match pane::rex_block(b.as_bytes()) {
             Ok(block) => Some(block),
             Err(_) => {
-                eprintln!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
+                log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
                 None
             }
         },
@@ -368,15 +370,17 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     d.start(startup.release())?;
 
     let stop_reason = d.run(&server)?;
-    eprintln!("{NAME} daemon: {}", stop_reason.tag_name());
+    log_info!("{NAME} daemon: {}", stop_reason.tag_name());
     if stop_reason == StopReason::NvimExited {
         // panes first: Neovim may take a while to finish exiting
         drop(d);
         // one still running is sent SIGHUP as it drops
         child.wait_for_exit();
     }
-    // a clean end needs no log
-    let _ = fs::remove_file(&log);
+    // a clean end needs no log, unless it was asked for in full
+    if !log::tracing() {
+        let _ = fs::remove_file(&log);
+    }
     Ok(())
 }
 
