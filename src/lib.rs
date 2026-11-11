@@ -2,6 +2,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod attach;
 pub mod daemon;
 pub mod debug;
 pub mod name;
