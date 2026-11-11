@@ -207,7 +207,8 @@ impl Terminal {
 /// Why a hello was sent, with the fields that purpose carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
-    /// A terminal a pane provider opened for the daemon, with its pane id.
+    /// A requested pane's terminal: one the daemon asked the terminal
+    /// provider for, for a window or a float group, with its pane id.
     Requested { pane: PaneId, terminal: Terminal },
     /// A terminal attaching of its own accord.
     SelfAttach {
@@ -342,9 +343,7 @@ impl Hello {
         let v = f.int("v")?;
         let build = f.str("build")?;
         let purpose = f.str("purpose")?;
-        if !Purpose::NAMES.contains(&purpose.as_str()) {
-            return Err(Error::Invalid("purpose"));
-        }
+        // the version first: another version's purposes may be unknown here
         let same = v == ATTACH_PROTOCOL_VERSION;
         if !same && !Purpose::frozen(&purpose) {
             return Err(Error::Version { v, build });
@@ -374,13 +373,14 @@ impl Hello {
                 pid,
                 force: f.opt_bool("force")?.unwrap_or(false),
             },
-            _ => Purpose::Open {
+            "open" => Purpose::Open {
                 pid,
                 cwd: f.bin("cwd")?,
                 file: f.bin("file")?,
                 line: line(&f, true)?,
                 wait: f.opt_bool("wait")?.unwrap_or(false),
             },
+            _ => return Err(Error::Invalid("purpose")),
         };
         Ok(Hello { v, build, purpose })
     }
@@ -708,7 +708,9 @@ impl End {
         w.finish()
     }
 
-    /// Reads an end. The frozen fields are read whatever the version.
+    /// Reads an end. The frozen fields are read whatever the version; a bad
+    /// optional field counts as absent, so the reason and message still
+    /// reach the helper.
     fn decode(payload: &[u8]) -> Result<Self, Error> {
         let f = Fields::decode(payload)?;
         let v = f.int("v")?;
@@ -718,8 +720,12 @@ impl End {
             build: f.str("build")?,
             reason: f.str("reason")?,
             message: f.str("message")?,
-            cut: same && f.opt_bool("cut")?.unwrap_or(false),
-            exit: if same { f.opt_int_in("exit")? } else { None },
+            cut: same && f.opt_bool("cut").ok().flatten().unwrap_or(false),
+            exit: if same {
+                f.opt_int_in("exit").ok().flatten()
+            } else {
+                None
+            },
         })
     }
 }
@@ -1107,6 +1113,59 @@ mod tests {
         };
         assert_eq!((None, None), (r.status, r.waited));
         assert_eq!(("work", 77, true), (r.name.as_str(), r.pid, r.ok));
+    }
+
+    #[test]
+    fn the_version_is_matched_before_the_purpose() {
+        let hello = Message::Hello(Hello::new(Purpose::Status { pid: None }));
+        let f = edited(&hello, |p| {
+            for (k, v) in p.iter_mut() {
+                if *k == key("v") {
+                    *v = Value::Int(ATTACH_PROTOCOL_VERSION + 1);
+                } else if *k == key("purpose") {
+                    *v = Value::Str(b"later".to_vec());
+                }
+            }
+        });
+        assert_eq!(
+            Err(Error::Version {
+                v: ATTACH_PROTOCOL_VERSION + 1,
+                build: build().to_string()
+            }),
+            Message::decode_hello(&f)
+        );
+    }
+
+    #[test]
+    fn a_bad_optional_end_field_counts_as_absent() {
+        let mut quit = End::ending(Ending::Quit, "Neovim quit", true);
+        quit.exit = Some(3);
+        let m = Message::End(quit);
+        for (field, bad) in [
+            ("exit", Value::Int(256)),
+            ("exit", Value::Str(b"3".to_vec())),
+            ("cut", Value::Int(1)),
+        ] {
+            let f = edited(&m, |p| {
+                for (k, v) in p.iter_mut() {
+                    if *k == key(field) {
+                        *v = bad.clone();
+                    }
+                }
+            });
+            let Some(Message::End(z)) = Message::decode(&f).unwrap() else {
+                panic!()
+            };
+            assert_eq!(
+                ("quit", "Neovim quit"),
+                (z.reason.as_str(), z.message.as_str())
+            );
+            if field == "exit" {
+                assert_eq!((None, true), (z.exit, z.cut));
+            } else {
+                assert_eq!((Some(3), false), (z.exit, z.cut));
+            }
+        }
     }
 
     #[test]

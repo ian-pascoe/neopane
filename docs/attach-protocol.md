@@ -87,7 +87,8 @@ field. A field that's there but nil counts as missing.
 | `force` | bool, default false; `stop` only | — | — | optional | — |
 | `wait` | bool, default false: answer once `file` is done | — | — | — | optional |
 
-- `requested`: a terminal a pane provider opened for the daemon.
+- `requested`: a requested pane's terminal, one the daemon asked the
+  terminal provider for, for a window or a float group.
 - `self`: a terminal attaching of its own accord. It carries its whole
   environment, working directory, tty, pid, any provider hint and any file.
 - `status`, `stop` and `open` are control requests (below).
@@ -121,9 +122,9 @@ open (`OSC 8 ; ; ST` if it ever writes OSC 8).
 ### Ending
 
 At a normal end the daemon drops the frames it hasn't started writing.
-Under `relay` it finishes the `o` in flight, giving the socket at most 1 s,
-else it closes without `z`; under `fd` it writes nothing more and closes its
-copy of the terminal. It sends `z` and closes:
+Under `relay` it finishes the `o` in flight, giving the connection at
+most 1 s, else it closes without `z`; under `fd` it writes nothing more and
+closes its copy of the terminal. It sends `z` and closes:
 
 - `reason`: an ending reason.
 - `message`: one line.
@@ -178,7 +179,7 @@ too.
 | usage | 2 | usage | no |
 
 The helper never exits within 300 ms of starting, except by a signal.
-Stopped by SIGTERM, SIGINT or SIGQUIT, it closes the socket, writes
+Stopped by SIGTERM, SIGINT or SIGQUIT, it closes the connection, writes
 `18 1B 5C` and the undo bytes, restores, and exits 1 quietly.
 
 ## Versions and extension
@@ -204,8 +205,8 @@ newer `<name>` can always list and stop an older daemon:
 
 ## Control requests
 
-`status`, `stop` and `open` use the same socket, frames, hello and peer
-check, with no terminal and no 300 ms minimum. The daemon answers with one
+`status`, `stop` and `open` use the same daemon address, frames, hello and
+peer check, with no terminal and no 300 ms minimum. The daemon answers with one
 `r` and closes:
 
 | Field | Type | Meaning |
