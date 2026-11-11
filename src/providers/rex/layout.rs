@@ -4,14 +4,13 @@
 
 use serde_json::Value;
 
-use crate::daemon::floating_panes::LAYER_FRAME;
+use super::bounds::LAYER_FRAME;
 use crate::daemon::live_layout::{LayoutArea, LiveLayout, PlacedTerminal};
 use crate::daemon::provider::TerminalId;
 use crate::rex::client;
 
 /// The cells of a Rex floating pane's frame at each edge: left, top, right,
-/// bottom. `LAYER_FRAME`'s cells across and down, as neorex has always
-/// guessed them, the lesser half before.
+/// bottom. `LAYER_FRAME`'s cells across and down, the lesser half before.
 pub(crate) const FRAME_INSET: [u16; 4] = {
     let [across, down] = LAYER_FRAME;
     let (left, top) = (across.div_euclid(2), down.div_euclid(2));

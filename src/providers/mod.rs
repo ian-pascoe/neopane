@@ -8,9 +8,8 @@ use crate::daemon::provider::fake::FakeProvider;
 use rex::RexProvider;
 
 /// The daemon's pane provider, until #115 holds it as a
-/// `Box<dyn PaneProvider>`: Rex's, concretely, so focus and layout can still
-/// call it directly until #109–#111 move them onto the seam; in tests, also
-/// the fake.
+/// `Box<dyn PaneProvider>`: Rex's, concretely, so focus can still call it
+/// directly until #109 moves it onto the seam; in tests, also the fake.
 pub(crate) enum Held {
     Rex(Box<RexProvider>),
     #[cfg(test)]

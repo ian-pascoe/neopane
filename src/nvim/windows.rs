@@ -834,13 +834,24 @@ mod tests {
             assert!(self.until(Harness::is_current));
         }
 
-        /// `want` is what the notes since the last clear say, in order, then the barrier's.
+        /// The notes since the last clear but the layouts, which every tab
+        /// page tells as its windows change.
+        fn notes_but_layouts(&self) -> Vec<&Note> {
+            self.notes
+                .iter()
+                .filter(|n| !matches!(n, Note::Layout(_)))
+                .collect()
+        }
+
+        /// `want` is what the notes since the last clear say, but the
+        /// layouts, in order, then the barrier's.
         fn expect_notes(&self, want: &[Note]) {
-            assert_eq!(want.len() + 1, self.notes.len());
-            for (w, got) in want.iter().zip(&self.notes[0..want.len()]) {
-                assert_eq!(w, got);
+            let notes = self.notes_but_layouts();
+            assert_eq!(want.len() + 1, notes.len());
+            for (w, got) in want.iter().zip(&notes[0..want.len()]) {
+                assert_eq!(w, *got);
             }
-            assert_eq!(Note::Current(4242), self.notes[want.len()]);
+            assert_eq!(&Note::Current(4242), notes[want.len()]);
         }
 
         /// Splits the current window, which is already set up, and adopts the
@@ -993,7 +1004,7 @@ mod tests {
                 && x.kind(cur) == Some(WinKind::External)
                 && x.kind(x.want).is_none()
         }));
-        assert_eq!(Note::Reopen(first), h.notes[0]);
+        assert_eq!(&Note::Reopen(first), h.notes_but_layouts()[0]);
 
         // :q on the last window quits
         h.input(":q<CR>");
@@ -3236,6 +3247,80 @@ mod tests {
             n += 1;
         }
         assert_eq!(out.len(), n);
+    }
+
+    #[test]
+    fn a_tab_page_without_a_tab_page_area_reports_its_layout_too() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        // the daemon decides which tab pages it places: it's told of them all
+        h.notes.clear();
+        h.lua("vim.cmd('vsplit')");
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len > 0)));
+        assert!(
+            h.notes
+                .iter()
+                .all(|n| !matches!(n, Note::Split(s) if s.tab != 0))
+        );
+    }
+
+    #[test]
+    fn a_window_closing_while_another_tab_page_is_current_reports_its_own_tab_pages_layout() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        let first = h.wins[0];
+        let split = h.split_and_adopt();
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len == 3)));
+
+        // another tab page current: the first's layout is only looked at as
+        // its window closes
+        h.sync("vim.cmd('tabnew')");
+        h.notes.clear();
+        close(&mut h.nvim, split);
+        h.nvim.flush().unwrap();
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len == 1)));
+        assert_eq!(first, h.last_layout(1).unwrap().items()[0].win);
+    }
+
+    #[test]
+    fn a_closed_tab_pages_layout_record_goes_with_it() {
+        let argv = ["nvim", "--clean", "--embed", "-n", "-p", "a", "b"];
+        let Some(mut h) = Harness::spawn(&argv, 120, 30) else {
+            return;
+        };
+        h.boot();
+        // the records windows.lua keeps of tab pages without a tab page area,
+        // found through the closures of its module
+        let count = |h: &mut Harness| {
+            h.eval_str(&format!(
+                "local function find(f, seen)\n\
+                 \x20 if seen[f] then return end\n\
+                 \x20 seen[f] = true\n\
+                 \x20 for i = 1, math.huge do\n\
+                 \x20   local n, v = debug.getupvalue(f, i)\n\
+                 \x20   if not n then return end\n\
+                 \x20   if n == 'layouts' then return v end\n\
+                 \x20   if type(v) == 'function' then\n\
+                 \x20     local got = find(v, seen)\n\
+                 \x20     if got then return got end\n\
+                 \x20   end\n\
+                 \x20 end\n\
+                 end\n\
+                 local seen, layouts = {{}}\n\
+                 for _, f in pairs(_G['{NAME}']) do\n\
+                 \x20 if type(f) == 'function' then layouts = layouts or find(f, seen) end\n\
+                 end\n\
+                 return tostring(vim.tbl_count(assert(layouts, 'no layouts')))",
+            ))
+        };
+        // both tab pages were current, so both have one
+        h.sync("vim.cmd('tabnext')");
+        h.sync("vim.cmd('tabnext')");
+        assert_eq!("2", count(&mut h));
+        h.sync("vim.cmd('2tabclose')");
+        assert_eq!("1", count(&mut h));
     }
 
     #[test]

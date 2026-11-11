@@ -11,19 +11,21 @@
 
 use crate::nvim::windows::{Kind, Layout};
 
-/// Put `win`'s pane right of (below, if not `side_by_side`) `anchor`'s,
-/// leaving `anchor` the fraction `ratio` of the room they share.
+/// Put `win`'s pane right of (below, if not `side_by_side`) `beside`'s,
+/// leaving `beside` the fraction `ratio` of the room they share, and `win`
+/// `size` cells of it along the split.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct PaneMove {
     pub win: i64,
-    pub anchor: i64,
+    pub beside: i64,
     pub side_by_side: bool,
     pub ratio: f64,
+    pub size: u32,
 }
 
 impl PaneMove {
     fn same_split(&self, b: &PaneMove) -> bool {
-        self.win == b.win && self.anchor == b.anchor && self.side_by_side == b.side_by_side
+        self.win == b.win && self.beside == b.beside && self.side_by_side == b.side_by_side
     }
 }
 
@@ -137,7 +139,7 @@ impl Planner<'_> {
         }
         if n >= 2 {
             // the first kid's pane keeps its place; each later one is put beside it, last first
-            let anchor = self.first_shown(with_panes[0]).unwrap();
+            let beside = self.first_shown(with_panes[0]).unwrap();
             let mut before: u32 = room[0..n].iter().sum();
             let mut i = n;
             while i > 1 {
@@ -146,9 +148,10 @@ impl Planner<'_> {
                 before -= room[i];
                 self.result.moves[self.result.len] = PaneMove {
                     win: self.first_shown(with_panes[i]).unwrap(),
-                    anchor,
+                    beside,
                     side_by_side,
                     ratio: before as f64 / total as f64,
+                    size: room[i],
                 };
                 self.result.len += 1;
             }
@@ -334,10 +337,10 @@ mod tests {
             rex
         }
 
-        /// `session.move_block`'s split of `anchor`'s room: `win` goes after it,
-        /// `anchor` getting `ratio` of it.
-        fn insert(&mut self, win: i64, anchor: i64, side_by_side: bool, ratio: f64) {
-            let link = Rex::find_link(&mut self.root, anchor).unwrap();
+        /// `session.move_block`'s split of `beside`'s room: `win` goes after it,
+        /// `beside` getting `ratio` of it.
+        fn insert(&mut self, win: i64, beside: i64, side_by_side: bool, ratio: f64) {
+            let link = Rex::find_link(&mut self.root, beside).unwrap();
             let old = std::mem::replace(link, RexNode::Pane(0));
             *link = RexNode::Split {
                 side_by_side,
@@ -362,11 +365,11 @@ mod tests {
             }
         }
 
-        /// `session.move_block`: takes `win`'s pane out, then splits `anchor`'s.
+        /// `session.move_block`: takes `win`'s pane out, then splits `beside`'s.
         fn move_pane(&mut self, m: PaneMove) {
             // out: its parent split gives way to the other side
             assert!(Rex::take_out(&mut self.root, m.win));
-            self.insert(m.win, m.anchor, m.side_by_side, m.ratio);
+            self.insert(m.win, m.beside, m.side_by_side, m.ratio);
         }
 
         fn take_out(node: &mut RexNode, win: i64) -> bool {
@@ -484,7 +487,15 @@ mod tests {
 
         // in the order the windows were made: old, new, panel
         let mut rex = Rex::made(&[old, new, panel]);
-        for m in TabPlacement::plan(&layout, &[old, new, panel]).items() {
+        let plan = TabPlacement::plan(&layout, &[old, new, panel]);
+        // new, then old, beside the panel, each at its width
+        let moved: Vec<(i64, i64, u32)> = plan
+            .items()
+            .iter()
+            .map(|m| (m.win, m.beside, m.size))
+            .collect();
+        assert_eq!(vec![(new, panel, 39), (old, panel, 59)], moved);
+        for m in plan.items() {
             rex.move_pane(*m);
         }
 
@@ -545,7 +556,7 @@ mod tests {
         let placement = TabPlacement::plan(&layout, &[1, 3]);
         assert_eq!(1, placement.items().len());
         assert_eq!(3, placement.items()[0].win);
-        assert_eq!(1, placement.items()[0].anchor);
+        assert_eq!(1, placement.items()[0].beside);
         assert!(placement.items()[0].side_by_side);
         expect_near(0.5, placement.items()[0].ratio);
         assert_eq!(0, TabPlacement::plan(&layout, &[1]).items().len());
@@ -603,7 +614,7 @@ mod tests {
         let two = rearranged(decide(&layout, &[Skipped, Ready, Ready, Skipped], None));
         assert_eq!(1, two.items().len());
         assert_eq!(2, two.items()[0].win);
-        assert_eq!(1, two.items()[0].anchor);
+        assert_eq!(1, two.items()[0].beside);
     }
 
     #[test]

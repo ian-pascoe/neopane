@@ -185,13 +185,18 @@ impl Daemon {
         log::trace(Point::Accepted, u64::from(id));
         surface.helper_socket.set_nonblocking(true)?;
         surface.helper_in = rest;
+        // a terminal the pane provider hasn't laid out yet says this size
+        let unlaid = self
+            .provider
+            .as_ref()
+            .and_then(|p| p.seam_ref().unlaid_size());
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.terminal_surface = Some(surface);
         pane.register_with(&self.event_loop)?;
-        if pane.awaiting_layout {
+        if pane.awaiting_size {
             let v = &pane.terminal_surface.as_ref().unwrap().view;
-            if v.cols != REX_DEFAULT_SIZE[0] || v.rows != REX_DEFAULT_SIZE[1] {
-                pane.awaiting_layout = false;
+            if unlaid != Some([v.cols, v.rows]) {
+                pane.awaiting_size = false;
             } else {
                 self.add_timer(Token::LayoutTimer, SPLIT_SIZE_WAIT_MS)?;
             }

@@ -1,14 +1,17 @@
-//! Rex's pane provider, built in (#92): the opens and `close` asked through
-//! the seam, as Rex requests on today's `rex::session::Session`.
+//! Rex's pane provider, built in (#92): what's asked through the seam, as
+//! Rex requests on today's `rex::session::Session`.
 //!
 //! - `open_beside` is `session.new_split` beside the origin's block,
 //!   `open_tab_page` a `session.new_layer` at the tab page bounds, and
-//!   `open_float` one at the float group's bounds with room for Rex's frame.
+//!   `open_float` one at the float group's bounds with room for Rex's frame
+//!   (`bounds.rs`).
 //!   None sends a `focus` key, so none moves Rex's focus. Each is done once
 //!   its block is disowned, so Rex, not the daemon, sizes it.
 //! - `close` is always `block.close`: a floating layer goes with its last
 //!   block. `close_layer` only cleans up a `new_layer` answered with no block
 //!   id, which then fails.
+//! - `place_beside` is `session.move_block` and `resize`
+//!   `session.resize_pane`, given the anchor's share, `1 − ratio`.
 //! - An error `method_not_found` is unsupported, any other fails the act. Rex
 //!   hanging up, failing, or sending what can't be read is `Gone`.
 //!
@@ -17,17 +20,15 @@
 //!   group's block is placed at its floating layer's bounds, its frame the
 //!   inset. A new layer opens in its origin's Rex window.
 //!
-//! Until #109–#111, the daemon also focuses and places blocks through
-//! `session` itself.
+//! Until #109, the daemon also focuses blocks through `session` itself.
 
+pub(crate) mod bounds;
 pub(crate) mod layout;
 
 use std::collections::VecDeque;
 
 use serde_json::{Value, json};
 
-use crate::daemon::floating_panes;
-use crate::daemon::geometry::{REX_DEFAULT_SIZE, TAB_LAYER_BOUNDS};
 use crate::daemon::live_layout::LiveLayout;
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
@@ -43,13 +44,15 @@ const CAPABILITIES: &[Capability] = &[
     Capability::OpenFloat,
     Capability::OpenTabPage,
     Capability::Close,
+    Capability::PlaceBeside,
+    Capability::Resize,
     Capability::ReportLayout,
     // views come unasked
     Capability::Events,
 ];
 
 pub(crate) struct RexProvider {
-    /// The daemon still focuses and places through it directly (#109–#111).
+    /// The daemon still focuses through it directly (#109).
     pub session: Session,
     /// The blocks opened for asks, each waiting for its disown's answer.
     opened: Vec<(u64, TerminalId)>,
@@ -102,6 +105,7 @@ impl RexProvider {
                 self.session
                     .new_split(tag, origin.as_str(), dir.across(), dir.before(), layout)?;
             }
+            // `cols` x `rows` is the origin's layout area: the Rex window
             Ask::OpenTabPage {
                 attach,
                 origin,
@@ -109,9 +113,11 @@ impl RexProvider {
                 rows,
                 ..
             } => {
-                let layout = json!({ "block": block(&attach, Some([cols, rows])) });
+                let size = bounds::tab_page_size(cols, rows);
+                let layout = json!({ "block": block(&attach, Some(size)) });
                 self.in_window_of(&origin);
-                self.session.new_layer(tag, TAB_LAYER_BOUNDS, layout)?;
+                self.session
+                    .new_layer(tag, bounds::TAB_PAGE_BOUNDS, layout)?;
             }
             Ask::OpenFloat {
                 attach,
@@ -122,11 +128,15 @@ impl RexProvider {
                 rows,
                 origin_cols,
                 origin_rows,
+                area_bounds,
                 ..
             } => {
-                let Some(bounds) =
-                    floating_panes::bounds_around(x, y, cols, rows, origin_cols, origin_rows)
-                else {
+                let Some(bounds) = bounds::float_bounds(
+                    [x, y],
+                    [cols, rows],
+                    [origin_cols, origin_rows],
+                    area_bounds,
+                ) else {
                     self.answer(tag, Outcome::Failed("no room for a floating pane".into()));
                     return Ok(true);
                 };
@@ -135,6 +145,40 @@ impl RexProvider {
                 self.float_asks.push(tag);
                 self.session.new_layer(tag, bounds, layout)?;
             }
+            // `session.move_block` puts it only right of or below `{origin}`
+            Ask::PlaceBeside { dir, .. } if dir.before() => {
+                let why = "Rex places a terminal only right of or below another";
+                self.answer(tag, Outcome::Failed(why.into()));
+                return Ok(true);
+            }
+            // Rex's ratio is the anchor's share, the ask's the placed terminal's
+            Ask::PlaceBeside {
+                terminal,
+                origin,
+                dir,
+                ratio,
+                ..
+            } => self.session.move_block(
+                tag,
+                terminal.as_str(),
+                origin.as_str(),
+                dir.across(),
+                1.0 - ratio,
+            )?,
+            // `{origin}` is before the split, `{terminal}` after it
+            Ask::Resize {
+                terminal,
+                origin,
+                dir,
+                ratio,
+                ..
+            } => self.session.resize_pane(
+                tag,
+                origin.as_str(),
+                terminal.as_str(),
+                dir.across(),
+                1.0 - ratio,
+            )?,
             Ask::Close { terminal } => {
                 self.float_blocks.retain(|b| *b != terminal);
                 self.session.close_block(tag, terminal.as_str())?
@@ -221,11 +265,16 @@ impl RexProvider {
                 }
             }
             (Request::CloseLayer(tag), _) => self.answer(tag, no_block()),
-            (Request::CloseBlock(tag), ResponseResult::Ok(_)) => {
-                self.answer(tag, Outcome::Done(Answer::Nothing))
-            }
             (
-                Request::NewSplit(tag) | Request::NewLayer(tag) | Request::CloseBlock(tag),
+                Request::CloseBlock(tag) | Request::MoveBlock(tag) | Request::ResizePane(tag),
+                ResponseResult::Ok(_),
+            ) => self.answer(tag, Outcome::Done(Answer::Nothing)),
+            (
+                Request::NewSplit(tag)
+                | Request::NewLayer(tag)
+                | Request::CloseBlock(tag)
+                | Request::MoveBlock(tag)
+                | Request::ResizePane(tag),
                 ResponseResult::Err(e),
             ) => {
                 self.took_float_ask(tag);
@@ -306,7 +355,7 @@ impl PaneProvider for RexProvider {
     }
 
     fn unlaid_size(&self) -> Option<[u32; 2]> {
-        Some(REX_DEFAULT_SIZE)
+        Some(bounds::UNLAID_SIZE)
     }
 
     fn context_vars(&self) -> &[&str] {

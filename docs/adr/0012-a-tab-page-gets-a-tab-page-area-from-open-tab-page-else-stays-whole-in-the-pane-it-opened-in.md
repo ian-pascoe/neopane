@@ -68,7 +68,8 @@ their place until visited.
   has none, and wait while its first terminal is on its way. Once each has
   one, the requested panes in the area are placed as Neovim lays out the tab
   page, with `place_beside` and `resize`, and again as that changes.
-  Self-attached panes are never moved.
+  Self-attached panes are never moved, nor what another is placed beside:
+  their terminals may be anywhere.
 - A tab page that came into a pane already showing another tab page stays
   whole in it: its later windows are drawn there, never in terminals of
   their own. Every other new window gets a terminal where the pane provider
