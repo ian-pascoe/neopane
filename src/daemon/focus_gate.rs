@@ -366,7 +366,7 @@ impl FocusGate {
             if *read >= bytes.len() {
                 self.queue.remove(i);
             }
-            if fed.sent_key {
+            if fed.stopped_after_key {
                 self.went_ahead();
                 return Ok(());
             }

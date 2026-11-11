@@ -113,7 +113,8 @@ pub(crate) struct Fed {
     pub more: bool,
     /// How many bytes were read: all, unless `feed_key` stopped after a key.
     pub read: usize,
-    pub sent_key: bool,
+    /// `feed_key` stopped after a key, which it sent.
+    pub stopped_after_key: bool,
     /// Whether keys went to Neovim with `nvim_input`.
     pub sent_input: bool,
 }
@@ -294,7 +295,7 @@ impl Forwarder {
         let mut result = Fed {
             more: true,
             read: bytes.len(),
-            sent_key: false,
+            stopped_after_key: false,
             sent_input: false,
         };
         self.parser.feed(bytes);
@@ -305,7 +306,7 @@ impl Forwarder {
                         return Ok(Fed {
                             more: false,
                             read: bytes.len(),
-                            sent_key: false,
+                            stopped_after_key: false,
                             sent_input: result.sent_input,
                         });
                     }
@@ -319,7 +320,7 @@ impl Forwarder {
                         result = Fed {
                             more: true,
                             read: bytes.len() - self.parser.take_rest().len(),
-                            sent_key: true,
+                            stopped_after_key: true,
                             sent_input: result.sent_input,
                         };
                         break;
