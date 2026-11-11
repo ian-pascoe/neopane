@@ -113,6 +113,7 @@ fn commands_built_later_exit_1() {
         (&["status"], "status"),
         (&["kill", "--all"], "kill"),
         (&["provider", "check"], "provider check"),
+        (&["--name", "x", "f"], "--name"),
         (&["--detach"], "--detach"),
     ] {
         let out = run(args);
@@ -203,11 +204,25 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
     // its directory claimed and its log made, before it finds no Rex
     let out = daemon(&tmp, &["work", "--dedup", "--"]);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(text(&out.stdout), "error run it in a Rex pane\n");
     let log = std::fs::read_to_string(base.join("work/log")).unwrap();
     assert!(log.contains("run it in a Rex pane"), "{log:?}");
-    // the next claim keeps it as log.1
-    daemon(&tmp, &["work", "--"]);
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "error work didn't start: run it in a Rex pane (log: {})\n",
+            base.join("work/log").display()
+        )
+    );
+    // the next claim keeps it as log.1, and says where its own is
+    let out = daemon(&tmp, &["work", "--"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "error work didn't start: run it in a Rex pane (log: {})\n",
+            base.join("work/log").display()
+        )
+    );
     assert_eq!(
         log,
         std::fs::read_to_string(base.join("work/log.1")).unwrap()
@@ -225,5 +240,58 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
             neorex::daemon::dir::tmpdir_var()
         )
     );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+/// `daemon` with `args` and Rex's variables set, left running: it says `ok`
+/// once it listens, then waits for the launcher's pane. With the line it
+/// said.
+fn listening_daemon(tmpdir: &Path, args: &[&str]) -> (std::process::Child, String) {
+    use std::io::BufRead;
+    let mut child = Command::new(exe())
+        .arg("daemon")
+        .args(args)
+        .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
+        .env("REX_SERVER", "ws://unused")
+        .env("REX_SESSION", "unused")
+        .env_remove("REX_BLOCK")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    (child, line)
+}
+
+#[test]
+fn a_daemon_says_ok_with_its_name_and_a_live_name_gets_a_number() {
+    let tmp = scratch("ok");
+    // SAFETY: getuid can't fail.
+    let base = tmp.join(format!("{NAME}-{}", unsafe { libc::getuid() }));
+    let (mut first, said) = listening_daemon(&tmp, &["work", "--dedup", "--"]);
+    assert_eq!(said, "ok work\n");
+    let (mut second, said) = listening_daemon(&tmp, &["work", "--dedup", "--"]);
+    assert_eq!(said, "ok work-2\n");
+    for live in ["work", "work-2"] {
+        assert!(base.join(live).join("sock").exists(), "{live}");
+    }
+    // without --dedup, a live name is refused
+    let out = daemon(&tmp, &["work", "--"]);
+    assert_eq!(text(&out.stdout), "error work is already running\n");
+
+    for d in [&mut first, &mut second] {
+        d.kill().unwrap();
+        d.wait().unwrap();
+    }
+    // the name is free again: its directory is reclaimed
+    let (mut third, said) = listening_daemon(&tmp, &["work", "--dedup", "--"]);
+    assert_eq!(said, "ok work\n");
+    assert!(base.join("work/log.1").exists());
+    third.kill().unwrap();
+    third.wait().unwrap();
     std::fs::remove_dir_all(&tmp).unwrap();
 }

@@ -5,7 +5,6 @@
 //! terminal's size as it changes, until the daemon ends the attach.
 //! `docs/attach-protocol.md` is the reference.
 
-use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -13,6 +12,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use super::dir::Address;
 use super::fdpass;
 use crate::attach::{
     End, Ending, Frame, Hello, Message, PaneId, Purpose, Refusal, Size, Terminal, Transport,
@@ -57,7 +57,7 @@ impl Exit {
 
 /// Attaches stdin's terminal to the daemon at `address`, and waits until
 /// the attach ends.
-pub fn run(address: &OsStr, want: Want, transport: Transport) -> Exit {
+pub fn run(address: &Address, want: Want, transport: Transport) -> Exit {
     let tty = libc::STDIN_FILENO;
     // SAFETY: `isatty` only inspects the fd.
     if unsafe { libc::isatty(tty) } == 0 {
@@ -68,14 +68,9 @@ pub fn run(address: &OsStr, want: Want, transport: Transport) -> Exit {
         Ok(s) => s,
         Err(e) => return Exit::fail(format!("can't watch for resizes: {e}")),
     };
-    let stream = match UnixStream::connect(address) {
+    let stream = match address.connect() {
         Ok(s) => s,
-        Err(e) => {
-            return Exit::fail(format!(
-                "can't connect to {}: {e}",
-                address.to_string_lossy()
-            ));
-        }
+        Err(e) => return Exit::fail(format!("can't connect to {address}: {e}")),
     };
     let exit = attach_on(
         stream,

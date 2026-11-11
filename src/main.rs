@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use neorex::cli::{self, Command, Start, UsageError};
+use neorex::daemon::dir::Address;
 use neorex::daemon::{launch, pane_helper, serve};
 use neorex::debug;
 use neorex::name::NAME;
@@ -39,10 +40,7 @@ fn run(command: Command) -> Result<ExitCode> {
             if let Some(option) = unbuilt_option(&start) {
                 return Ok(fail(&format!("{option} isn't built yet")));
             }
-            Ok(helper_exit(launch::run(
-                start.name.as_deref(),
-                &start.nvim_args,
-            )?))
+            Ok(helper_exit(launch::run(&start.nvim_args)?))
         }
         Command::Help => Ok(print(&cli::help())),
         Command::DebugHelp => Ok(print(&cli::debug_help())),
@@ -62,6 +60,7 @@ fn run(command: Command) -> Result<ExitCode> {
             transport,
         } => {
             let want = pane_helper::Want::Requested(pane);
+            let address = Address::from_arg(address);
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
         Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
@@ -77,6 +76,7 @@ fn run(command: Command) -> Result<ExitCode> {
 /// The first of `start`'s options that does nothing yet.
 fn unbuilt_option(start: &Start) -> Option<&'static str> {
     [
+        (start.name.is_some(), "--name"),
         (start.address.is_some(), "--address"),
         (start.detach, "--detach"),
         (start.no_wait, "--no-wait"),

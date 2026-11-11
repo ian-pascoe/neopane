@@ -7,7 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
-use super::dir::{self, Address};
+use super::dir;
 use super::pane_helper;
 use crate::attach::Transport;
 use crate::log::{self, LogLevel, Point, Traces};
@@ -24,8 +24,8 @@ pub(crate) enum Error {
     /// The daemon said why it didn't start.
     Refused(String),
     /// The daemon ended without a word: the first line it wrote to stderr,
-    /// if any.
-    DaemonFailed(Option<String>),
+    /// if any, and the base directory its log would be under.
+    DaemonFailed(Option<String>, String),
 }
 
 impl std::fmt::Display for Error {
@@ -37,9 +37,9 @@ impl std::fmt::Display for Error {
             ),
             Error::NotInRex => write!(f, "run it in a Rex pane"),
             Error::Refused(why) => write!(f, "{why}"),
-            Error::DaemonFailed(Some(said)) => write!(f, "the daemon didn't start: {said}"),
-            Error::DaemonFailed(None) => {
-                write!(f, "the daemon didn't start: it exited with no message")
+            Error::DaemonFailed(said, base) => {
+                let said = said.as_deref().unwrap_or("it exited with no message");
+                write!(f, "the daemon didn't start: {said} (logs: {base})")
             }
         }
     }
@@ -72,9 +72,9 @@ fn ready(line: &str) -> Ready {
 }
 
 /// Starts a daemon and attaches this terminal to it: how the attach ended,
-/// for the exit status. The daemon is named `name` (`--name`), else after
-/// this directory, de-duplicated.
-pub fn run<S: AsRef<OsStr>>(name: Option<&OsStr>, nvim_args: &[S]) -> Result<pane_helper::Exit> {
+/// for the exit status. The daemon is named after this directory,
+/// de-duplicated.
+pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     // L6 is timed from here
     let started = log::now_ns();
     // SAFETY: isatty only inspects the fd.
@@ -86,24 +86,14 @@ pub fn run<S: AsRef<OsStr>>(name: Option<&OsStr>, nvim_args: &[S]) -> Result<pan
         return Err(Error::NotInRex.into());
     }
     let base = dir::base()?;
-    let (name, dedup) = match name {
-        Some(name) => (name.to_string_lossy().into_owned(), false),
-        None => {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let here = cwd.file_name().unwrap_or_default();
-            (dir::clean_name(here), true)
-        }
-    };
+    let name = default_name(&std::env::current_dir().unwrap_or_default());
 
     let exe = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&exe);
     // `ps` shows `<name> daemon NAME`
-    command.arg0(NAME).arg("daemon").arg(&name);
-    if dedup {
-        command.arg("--dedup");
-    }
     command
-        .arg("--")
+        .arg0(NAME)
+        .args(["daemon", &name, "--dedup", "--"])
         .args(nvim_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -129,7 +119,7 @@ pub fn run<S: AsRef<OsStr>>(name: Option<&OsStr>, nvim_args: &[S]) -> Result<pan
         }
         Ready::Nothing => {
             let said = gone(&mut daemon);
-            return Err(Error::DaemonFailed(said).into());
+            return Err(Error::DaemonFailed(said, base.to_string()).into());
         }
     };
     // (from here it writes to its log, not to this pipe)
@@ -142,15 +132,20 @@ pub fn run<S: AsRef<OsStr>>(name: Option<&OsStr>, nvim_args: &[S]) -> Result<pan
         let mut log = std::fs::OpenOptions::new()
             .append(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(dir::log_of(&base, &name))?;
+            .open(base.log(&name))?;
         traces.write_into(&mut log)?;
     }
     // the daemon outlives us; it's never waited for here
     Ok(pane_helper::run(
-        Address::of(&base, &name).as_os_str(),
+        &base.address(&name),
         pane_helper::Want::SelfAttach,
         Transport::Fd,
     ))
+}
+
+/// The name of a daemon started in `cwd`: from its last component.
+fn default_name(cwd: &std::path::Path) -> String {
+    dir::clean_name(cwd.file_name().unwrap_or_default())
 }
 
 /// Waits for a daemon that failed to start to end: the first line it wrote
@@ -170,7 +165,15 @@ fn gone(daemon: &mut Child) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ready, ready};
+    use super::{Ready, default_name, ready};
+    use std::path::Path;
+
+    #[test]
+    fn a_daemon_is_named_after_the_directory_it_started_in() {
+        assert_eq!("neox.1", default_name(Path::new("/home/me/src/neo x.1")));
+        assert_eq!("default", default_name(Path::new("/")));
+        assert_eq!("default", default_name(Path::new("/home/\u{e9}")));
+    }
 
     #[test]
     fn the_ready_line_names_the_daemon_or_says_why_not() {

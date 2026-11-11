@@ -199,7 +199,7 @@ fn our_options_are_read_from_the_front() {
     assert_eq!(start.address, Some("/tmp/s".into()));
     assert_eq!(start.nvim_args, args("f"));
     // a value may look like an option
-    assert_eq!(started("--name -x").name, Some("-x".into()));
+    assert_eq!(started("--name --detach").name, Some("--detach".into()));
     // no abbreviations
     let start = started("--provider p f");
     assert_eq!(start.provider, Some("p".into()));
@@ -216,22 +216,6 @@ fn our_options_misused_are_usage_errors() {
     assert_eq!(
         refused("--name a --address b"),
         "--name and --address both choose a daemon: give one"
-    );
-    let rule = "--name: use 1-32 letters, digits, '.', '_' or '-'";
-    let long = format!("--name {}", "a".repeat(33));
-    for bad in [
-        "--name=",
-        "--name .",
-        "--name ..",
-        "--name a/b",
-        "--name=\u{e9}",
-        &long,
-    ] {
-        assert_eq!(refused(bad), rule, "{bad}");
-    }
-    assert_eq!(
-        started(&format!("--name {}", "a".repeat(32))).nvim_args,
-        args("")
     );
 }
 
@@ -450,11 +434,11 @@ fn usage_errors_are_one_line_pointing_at_help() {
 fn neovims_arguments_need_not_be_unicode() {
     use std::os::unix::ffi::OsStringExt;
     let file = OsString::from_vec(b"caf\xe9.txt".to_vec());
-    let line = vec![OsString::from("--name=w"), file.clone()];
+    let line = vec![OsString::from("--name=\u{e9}"), file.clone()];
     let Ok(Command::Start(start)) = parse(&line) else {
         panic!()
     };
-    assert_eq!(start.name, Some("w".into()));
+    assert_eq!(start.name, Some("\u{e9}".into()));
     assert_eq!(start.reading.files, vec![file]);
 }
 

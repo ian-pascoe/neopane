@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -78,12 +78,6 @@ pub(crate) fn create_log(path: &str) -> std::io::Result<fs::File> {
         .open(path)
 }
 
-/// Makes the socket at `path` this user's alone: mode 0600. Until then, its
-/// directory, 0700, keeps others out.
-fn owner_only(path: &str) -> std::io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
 /// What `serve` runs against. `run` uses the defaults (`Config::new`); tests
 /// swap the seams.
 pub(crate) struct Config<'a> {
@@ -125,13 +119,23 @@ pub fn run<S: AsRef<OsStr>>(name: &str, dedup: bool, detach: bool, nvim_args: &[
         close_on_exec(fd);
     }
     let told = Cell::new(false);
-    let result = start(name, dedup, detach, nvim_args, &told);
+    let logging = Cell::new(None);
+    let result = start(name, dedup, detach, nvim_args, &told, &logging);
     if let Err(err) = &result
         && !told.get()
     {
-        tell_launcher(&format!("error {err}"));
+        tell_launcher(&format!("error {}", start_error(err, logging.take())));
     }
     result
+}
+
+/// What the launcher is told of `err`, which stopped the start: with the
+/// daemon's name and log, `(name, log)`, once there is a log.
+fn start_error(err: &dyn std::fmt::Display, logging: Option<(String, String)>) -> String {
+    match logging {
+        Some((name, log)) => format!("{name} didn't start: {err} (log: {log})"),
+        None => err.to_string(),
+    }
 }
 
 /// Claims the directory, makes the log our stderr, and serves.
@@ -141,6 +145,7 @@ fn start<S: AsRef<OsStr>>(
     detach: bool,
     nvim_args: &[S],
     told: &Cell<bool>,
+    logging: &Cell<Option<(String, String)>>,
 ) -> Result<()> {
     if detach {
         return Err(Error::DetachNotBuilt.into());
@@ -153,6 +158,7 @@ fn start<S: AsRef<OsStr>>(
         return Err(std::io::Error::last_os_error().into());
     }
     drop(log);
+    logging.set(Some((claimed.name().to_string(), claimed.log())));
     log::init_daemon();
     let rex_url = env("REX_SERVER").ok_or(Error::NotInRex)?;
     let session_id = env("REX_SESSION").ok_or(Error::NotInRex)?;
@@ -207,20 +213,6 @@ fn tell_launcher(line: &str) -> bool {
         }
     }
     told
-}
-
-/// Removes the socket files left over, in order, as it drops. The directory
-/// stays, with the log.
-struct RemoveFiles {
-    files: [String; 2],
-}
-
-impl Drop for RemoveFiles {
-    fn drop(&mut self) {
-        for f in &self.files {
-            let _ = fs::remove_file(f);
-        }
-    }
 }
 
 /// Neovim's process, and the thread copying its stderr into the log.
@@ -453,34 +445,27 @@ fn check_version(frame: &Frame) -> std::result::Result<(), StartFailure> {
     Ok(())
 }
 
-/// Starts Neovim for the daemon at `address`, listening at `nvim_sock`:
-/// `command`, then the daemon's arguments, then `nvim_args`, in the launch
-/// directory, its RPC on its stdin and stdout and `$<NAME>` the daemon's
-/// address. Waits up to `timeout` for it to answer `nvim_get_api_info`, and
-/// checks its version.
+/// Starts Neovim for the daemon in `dir`: `command`, then the daemon's
+/// arguments, then `nvim_args`, in the launch directory, its RPC on its stdin
+/// and stdout and `$<NAME>` the daemon's address. Waits up to `timeout` for
+/// it to answer `nvim_get_api_info`, and checks its version.
 ///
 /// Drop the `Nvim` before the `NvimChild`: closing the channel ends Neovim.
 fn start_nvim<S: AsRef<OsStr>>(
     command: &[&str],
-    nvim_sock: &str,
-    address: &OsStr,
+    dir: &Claimed,
     nvim_args: &[S],
     timeout: Duration,
 ) -> std::result::Result<(NvimChild, Nvim), StartFailure> {
     // before the user's config, so it can tell it runs under neorex
     let mut child = Command::new(command[0])
         .args(&command[1..])
-        .args([
-            "--embed",
-            "--headless",
-            "--listen",
-            nvim_sock,
-            "--cmd",
-            &format!("let g:{NAME} = 1"),
-        ])
+        .args(["--embed", "--headless", "--listen"])
+        .arg(dir.nvim_sock())
+        .args(["--cmd", &format!("let g:{NAME} = 1")])
         .args(nvim_args)
         // Neovim's alone: nothing else the daemon runs gets it
-        .env(name::upper(), address)
+        .env(name::upper(), dir.address().as_arg())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -499,7 +484,8 @@ fn start_nvim<S: AsRef<OsStr>>(
     }
     // Neovim makes its socket under its umask, which its files need. It's
     // there once Neovim answers.
-    owner_only(nvim_sock).map_err(|err| StartFailure::Nvim(format!("{nvim_sock}: {err}")))?;
+    dir.own_nvim_sock()
+        .map_err(|err| StartFailure::Nvim(format!("{}: {err}", dir.nvim_sock().display())))?;
     Ok((child, nvim))
 }
 
@@ -553,9 +539,6 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     nvim_args: &[S],
     mut config: Config<'_>,
 ) -> Result<()> {
-    let address = dir.address();
-    let sock = address.to_string();
-    let nvim_sock = dir.nvim_sock();
     let log = dir.log();
     // resolved, symlinks and all: the `nrex` link shouldn't end up in every
     // pane's command
@@ -564,15 +547,11 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         .to_string_lossy()
         .into_owned();
 
-    // open until we exit: every new pane's helper connects here. Never over a
-    // file that's there: claiming the directory cleaned it
-    let server = UnixListener::bind(address.as_os_str())?;
-    owner_only(&sock)?;
-    // the socket's file, then, last of all, after Neovim has had its chance to
-    // remove its own: a Neovim that was stuck or killed leaves it behind
-    let _files = RemoveFiles {
-        files: [nvim_sock.clone(), sock.clone()],
-    };
+    // open until we exit: every new pane's helper connects here
+    let server = dir.bind()?;
+    // the socket files, last of all, after Neovim has had its chance to
+    // remove its own
+    let _files = dir.remove_sockets_on_drop();
 
     (config.ready)()?;
 
@@ -598,13 +577,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let nvim;
     let (started, rex) = std::thread::scope(|s| {
         let rex = s.spawn(|| Client::connect(config.rex_url, NAME));
-        let started = start_nvim(
-            config.nvim_command,
-            &nvim_sock,
-            address.as_os_str(),
-            nvim_args,
-            config.nvim_timeout,
-        );
+        let started = start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout);
         let rex = rex
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
@@ -633,7 +606,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         NvimSession::new(nvim),
         RexSession::new(rex, config.session_id.to_string()),
         exe,
-        sock.clone(),
+        dir.address(),
     );
     d.name = name;
     d.log = log.clone();
@@ -832,7 +805,9 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
 mod tests {
     use super::*;
     use crate::attach::{Ending, Message};
+    use crate::daemon::dir::Address;
     use crate::daemon::dir::testing::Scratch;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
 
     /// The file `name` in the directory `dir`.
@@ -977,14 +952,14 @@ mod tests {
         assert!(UnixListener::bind(padded(MAX_PATH + 1)).is_err());
     }
 
-    fn mode(file: &str) -> u32 {
+    fn mode(file: impl AsRef<std::path::Path>) -> u32 {
         fs::symlink_metadata(file).unwrap().permissions().mode() & 0o7777
     }
 
     /// A daemon's directory, `d`, claimed in a scratch base directory.
     fn test_dir() -> (Scratch, Claimed) {
         let base = Scratch::new();
-        let claimed = dir::claim(&base.0, "d").unwrap();
+        let claimed = dir::claim(&base.base(), "d").unwrap();
         (base, claimed)
     }
 
@@ -1009,8 +984,8 @@ mod tests {
 
     /// The launcher, for a test: connects to the daemon's socket as soon as it
     /// listens, and hands over a pseudo-terminal's slave as its pane.
-    fn fake_launcher_ready(sock: &str, slave: RawFd) -> Result<UnixStream> {
-        let stream = UnixStream::connect(sock)?;
+    fn fake_launcher_ready(address: &Address, slave: RawFd) -> Result<UnixStream> {
+        let stream = address.connect()?;
         let hello = attach_conn::self_hello(attach_conn::test_terminal(80, 24));
         fdpass::send(&stream, &hello, slave)?;
         // the daemon has its own copy now
@@ -1037,7 +1012,7 @@ mod tests {
         text
     }
 
-    fn exists(file: &str) -> bool {
+    fn exists(file: impl AsRef<std::path::Path>) -> bool {
         fs::symlink_metadata(file).is_ok()
     }
 
@@ -1056,7 +1031,8 @@ mod tests {
     /// kept, and the launcher's attach was accepted, then failed; returns the
     /// error and the line the launcher was told, which it prints in the pane.
     fn failed_start(dir: &Claimed, start: TestStart<'_>) -> (Box<dyn std::error::Error>, String) {
-        let sock = dir.address().to_string();
+        let address = dir.address();
+        let sock = dir.sock_path();
         let nvim_sock = dir.nvim_sock();
 
         // the pane neorex was run in
@@ -1084,7 +1060,7 @@ mod tests {
                 nvim_timeout: start.nvim_timeout,
                 ready: Box::new(|| {
                     on_ready();
-                    launcher = Some(fake_launcher_ready(&sock, slave)?);
+                    launcher = Some(fake_launcher_ready(&address, slave)?);
                     Ok(())
                 }),
                 ..Config::new(start.rex_url, "unused")
@@ -1093,7 +1069,6 @@ mod tests {
         .unwrap_err();
         assert!(!exists(&sock));
         assert!(!exists(&nvim_sock));
-        assert!(exists(&dir.file("")));
 
         let _shown = reader.join().unwrap();
         // SAFETY: closing the pty's master.
@@ -1142,7 +1117,7 @@ mod tests {
             return;
         };
         let (_base, dir) = test_dir();
-        let sock = dir.address().to_string();
+        let sock = dir.sock_path();
         let nvim_sock = dir.nvim_sock();
 
         // Rex, for this test: once the daemon calls, which it does as Neovim
@@ -1219,7 +1194,9 @@ mod tests {
     /// A clean Neovim started as the daemon starts it, in a new daemon
     /// directory, with its swap files in `<dir>/swap` and `args` after.
     struct TestNvim {
+        /// Holds the daemon's directory, `d`, and `swap`.
         dir: String,
+        claimed: Claimed,
         nvim: Option<Nvim>,
         child: Option<NvimChild>,
     }
@@ -1233,14 +1210,8 @@ mod tests {
             let directory = format!("set directory={swap}//");
             let mut all = vec!["--cmd", &directory];
             all.extend_from_slice(args);
-            let (nvim_sock, address) = (path(&dir, "nvim.sock"), path(&dir, "sock"));
-            let started = start_nvim(
-                &["nvim", "--clean"],
-                &nvim_sock,
-                OsStr::new(&address),
-                &all,
-                NVIM_START_TIMEOUT,
-            );
+            let claimed = dir::claim(&dir::Base::at(dir.as_ref()), "d").unwrap();
+            let started = start_nvim(&["nvim", "--clean"], &claimed, &all, NVIM_START_TIMEOUT);
             match started {
                 Ok((child, mut nvim)) => {
                     // it answered nvim_get_api_info as soon as it could; this
@@ -1252,6 +1223,7 @@ mod tests {
                     crate::nvim::nvim::wait_response(&mut nvim, id);
                     Some(TestNvim {
                         dir,
+                        claimed,
                         nvim: Some(nvim),
                         child: Some(child),
                     })
@@ -1367,12 +1339,15 @@ mod tests {
     }
 
     #[test]
-    fn a_plugins_detach_ends_the_daemon_as_neovim_exiting() {
+    fn a_plugins_detach_ends_the_daemon_as_neovim_exiting_keeping_its_log() {
         if !have_nvim() {
             return;
         }
         let (_base, dir) = test_dir();
-        let sock = dir.address().to_string();
+        let address = dir.address();
+        let sock = dir.sock_path();
+        // as `run` makes it
+        fs::write(dir.log(), "logged\n").unwrap();
         let rex_dir = Scratch::new();
         let rex_sock = rex_dir.file("rex.sock");
         let rex = silent_rex(&rex_sock);
@@ -1418,7 +1393,7 @@ mod tests {
             Config {
                 nvim_command: &["nvim", "--clean"],
                 ready: Box::new(|| {
-                    launcher = Some(fake_launcher_ready(&sock, slave)?);
+                    launcher = Some(fake_launcher_ready(&address, slave)?);
                     Ok(())
                 }),
                 ..Config::new(&rex_url, "session:s")
@@ -1435,7 +1410,8 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         assert!(took < Duration::from_secs(10), "{took:?}");
         assert!(!exists(&sock), "the daemon's socket is left");
-        assert!(exists(&dir.file("")), "the daemon's directory is gone");
+        // a clean end keeps the log
+        assert_eq!("logged\n", fs::read_to_string(dir.log()).unwrap());
         assert_eq!(1, swap_files);
     }
 
@@ -1525,7 +1501,7 @@ mod tests {
             || fs::read_to_string(&out).is_ok_and(|s| s.ends_with('\n'))
         ));
         let seen = fs::read_to_string(&out).unwrap();
-        assert_eq!(path(&nvim.dir, "sock"), seen.trim_end());
+        assert_eq!(nvim.claimed.address().to_string(), seen.trim_end());
     }
 
     /// The environment variable that makes `sigkill_helper` run, naming the
@@ -1652,6 +1628,18 @@ mod tests {
                 patch: 6
             }),
             api_info_version(&api_info("0.12.6"))
+        );
+    }
+
+    #[test]
+    fn the_launcher_is_told_where_the_log_is_once_there_is_one() {
+        assert_eq!("run it in a Rex pane", start_error(&Error::NotInRex, None));
+        assert_eq!(
+            "work-2 didn't start: run it in a Rex pane (log: /tmp/x/work-2/log)",
+            start_error(
+                &Error::NotInRex,
+                Some(("work-2".into(), "/tmp/x/work-2/log".into()))
+            )
         );
     }
 

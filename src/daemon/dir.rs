@@ -9,8 +9,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 use crate::name::{self, NAME};
@@ -156,7 +157,7 @@ pub fn tmp_root(tmpdir: Option<&OsStr>) -> PathBuf {
 /// The user's base directory, `<root>/<name>-<uid>`: made if it isn't there,
 /// then refused unless it is a real directory (by `lstat`), `uid`'s, and
 /// mode 0700.
-pub fn base_dir(root: &Path, uid: u32) -> Result<PathBuf, Error> {
+pub fn base_dir(root: &Path, uid: u32) -> Result<Base, Error> {
     let path = root.join(format!("{NAME}-{uid}"));
     match fs::DirBuilder::new().mode(0o700).create(&path) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(Error::Io(path, e)),
@@ -171,31 +172,69 @@ pub fn base_dir(root: &Path, uid: u32) -> Result<PathBuf, Error> {
             mode,
         });
     }
-    Ok(path)
+    Ok(Base(path))
 }
 
 /// This user's base directory, from the environment.
-pub fn base() -> Result<PathBuf, Error> {
+pub fn base() -> Result<Base, Error> {
     let root = tmp_root(std::env::var_os(tmpdir_var()).as_deref());
     // SAFETY: getuid can't fail.
     base_dir(&root, unsafe { libc::getuid() })
 }
 
-/// Where attaches reach a daemon, passed whole outside this module.
+/// A user's base directory, which holds a directory per daemon name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Base(PathBuf);
+
+impl Base {
+    /// The address of the daemon named `name`.
+    pub fn address(&self, name: &str) -> Address {
+        Address(self.0.join(name).join(SOCK).into_os_string())
+    }
+
+    /// The log of the daemon named `name`.
+    pub fn log(&self, name: &str) -> PathBuf {
+        self.0.join(name).join(LOG)
+    }
+
+    /// The base directory at `path`, unchecked.
+    #[cfg(test)]
+    pub(crate) fn at(path: &Path) -> Base {
+        Base(path.to_path_buf())
+    }
+}
+
+impl std::fmt::Display for Base {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+/// Where attaches reach a daemon (ADR 0004). Outside this module it is
+/// passed whole, never taken apart: on Unix it is a socket's path, on
+/// Windows it would be a named pipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address(OsString);
 
 impl Address {
-    /// The address of the daemon named `name` in `base`.
-    pub fn of(base: &Path, name: &str) -> Address {
-        Address(base.join(name).join(SOCK).into_os_string())
+    /// The address given on a command line, as `--address A`.
+    pub fn from_arg(arg: OsString) -> Address {
+        Address(arg)
     }
 
-    pub fn as_os_str(&self) -> &OsStr {
+    /// The address as one word of a command line, such as the attach
+    /// command's `--address A` or `$<NAME>`: the one place it is written out.
+    pub fn as_arg(&self) -> &OsStr {
         &self.0
+    }
+
+    /// Connects to the daemon at this address.
+    pub fn connect(&self) -> io::Result<UnixStream> {
+        UnixStream::connect(&self.0)
     }
 }
 
+/// For messages: lossy where the path isn't Unicode.
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.to_string_lossy())
@@ -207,7 +246,7 @@ impl std::fmt::Display for Address {
 pub struct Claimed {
     name: String,
     dir: PathBuf,
-    base: PathBuf,
+    base: Base,
     /// The directory, open, holding the `flock`.
     lock: OwnedFd,
 }
@@ -218,22 +257,63 @@ impl Claimed {
     }
 
     pub fn address(&self) -> Address {
-        Address::of(&self.base, &self.name)
+        self.base.address(&self.name)
     }
 
-    /// Neovim's socket.
-    pub fn nvim_sock(&self) -> String {
-        self.file(NVIM_SOCK)
+    /// Where Neovim listens.
+    pub fn nvim_sock(&self) -> PathBuf {
+        self.dir.join(NVIM_SOCK)
     }
 
+    /// The log's path.
     pub fn log(&self) -> String {
-        self.file(LOG)
+        self.dir.join(LOG).to_string_lossy().into_owned()
     }
 
-    /// The file `name` in the directory.
-    pub fn file(&self, name: &str) -> String {
-        self.dir.join(name).to_string_lossy().into_owned()
+    /// The daemon's socket file, for tests that check it.
+    #[cfg(test)]
+    pub(crate) fn sock_path(&self) -> PathBuf {
+        self.dir.join(SOCK)
     }
+
+    /// Listens at the daemon's address, which only this user can connect
+    /// to. Never over a file that's there: claiming cleaned the directory.
+    pub fn bind(&self) -> io::Result<UnixListener> {
+        let sock = self.dir.join(SOCK);
+        let listener = UnixListener::bind(&sock)?;
+        owner_only(&sock)?;
+        Ok(listener)
+    }
+
+    /// Makes Neovim's socket this user's alone: Neovim makes it under its
+    /// umask, which its files need.
+    pub fn own_nvim_sock(&self) -> io::Result<()> {
+        owner_only(&self.nvim_sock())
+    }
+
+    /// Removes Neovim's socket, then the daemon's, as the value it returns
+    /// drops. The directory stays, with the log.
+    pub fn remove_sockets_on_drop(&self) -> RemoveSockets<'_> {
+        RemoveSockets(self)
+    }
+}
+
+/// Removes a daemon's socket files left over as it drops: Neovim's, then the
+/// daemon's own. A Neovim that was stuck or killed leaves its socket behind.
+pub struct RemoveSockets<'a>(&'a Claimed);
+
+impl Drop for RemoveSockets<'_> {
+    fn drop(&mut self) {
+        for sock in [NVIM_SOCK, SOCK] {
+            let _ = fs::remove_file(self.0.dir.join(sock));
+        }
+    }
+}
+
+/// Makes the socket at `path` this user's alone: mode 0600. Until then, its
+/// directory, 0700, keeps others out.
+fn owner_only(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 impl Drop for Claimed {
@@ -245,17 +325,12 @@ impl Drop for Claimed {
     }
 }
 
-/// The log of the daemon named `name` in `base`.
-pub fn log_of(base: &Path, name: &str) -> PathBuf {
-    base.join(name).join(LOG)
-}
-
 /// Claims `name` in `base`: makes or reuses its directory, locks it, checks
 /// nothing answers on its sockets, and cleans what a daemon before left
 /// there, its `log` becoming `log.1`. A directory that is locked, or whose
 /// sockets answer, is [`Error::Live`].
-pub fn claim(base: &Path, name: &str) -> Result<Claimed, Error> {
-    let dir = base.join(name);
+pub fn claim(base: &Base, name: &str) -> Result<Claimed, Error> {
+    let dir = base.0.join(name);
     let io = |e| Error::Io(dir.clone(), e);
     match fs::DirBuilder::new().mode(0o700).create(&dir) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(io(e)),
@@ -294,18 +369,18 @@ pub fn claim(base: &Path, name: &str) -> Result<Claimed, Error> {
     Ok(Claimed {
         name: name.to_string(),
         dir,
-        base: base.to_path_buf(),
+        base: base.clone(),
         lock,
     })
 }
 
 /// Claims `name` in `base`, or with `dedup` the first of `name`, `name-2`,
 /// `name-3`, … that isn't live. Each name's path length is checked first.
-pub fn claim_name(base: &Path, name: &str, dedup_it: bool) -> Result<Claimed, Error> {
+pub fn claim_name(base: &Base, name: &str, dedup_it: bool) -> Result<Claimed, Error> {
     let mut n = 1;
     loop {
         let candidate = dedup(name, n);
-        socket_path_len_check(base, &candidate)?;
+        socket_path_len_check(&base.0, &candidate)?;
         match claim(base, &candidate) {
             Err(Error::Live(_)) if dedup_it && n < 10_000 => n += 1,
             got => return got,
@@ -343,6 +418,11 @@ pub(crate) mod testing {
             let path = self.0.to_string_lossy().into_owned();
             std::mem::forget(self);
             path
+        }
+
+        /// It, as a base directory.
+        pub(crate) fn base(&self) -> super::Base {
+            super::Base::at(&self.0)
         }
 
         /// The file `name` in it.
@@ -441,13 +521,13 @@ mod tests {
     #[test]
     fn the_base_directory_is_made_private_and_refused_otherwise() {
         let root = Scratch::new();
-        let base = base_dir(&root.0, uid()).unwrap();
+        let base = base_dir(&root.0, uid()).unwrap().0;
         assert_eq!(root.0.join(format!("{NAME}-{}", uid())), base);
         let meta = fs::symlink_metadata(&base).unwrap();
         assert!(meta.is_dir());
         assert_eq!(0o700, meta.mode() & 0o7777);
         // again, as it is
-        assert_eq!(base, base_dir(&root.0, uid()).unwrap());
+        assert_eq!(base, base_dir(&root.0, uid()).unwrap().0);
 
         // open to others
         fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
@@ -483,14 +563,14 @@ mod tests {
     #[test]
     fn a_claimed_directory_is_locked_against_a_second_claimant() {
         let base = Scratch::new();
-        let first = claim(&base.0, "work").unwrap();
+        let first = claim(&base.base(), "work").unwrap();
         assert_eq!("work", first.name());
-        let err = claim(&base.0, "work").unwrap_err();
+        let err = claim(&base.base(), "work").unwrap_err();
         assert!(matches!(&err, Error::Live(n) if n == "work"), "{err}");
         assert_eq!("work is already running", err.to_string());
         drop(first);
         // its lock went with it
-        assert!(claim(&base.0, "work").is_ok());
+        assert!(claim(&base.base(), "work").is_ok());
     }
 
     #[test]
@@ -502,7 +582,7 @@ mod tests {
             let _other = UnixListener::bind(dir.join(sock)).unwrap();
             let name = dir.file_name().unwrap().to_str().unwrap();
             assert!(
-                matches!(claim(&base.0, name), Err(Error::Live(_))),
+                matches!(claim(&base.base(), name), Err(Error::Live(_))),
                 "{sock}"
             );
             // the other one's socket is left to it
@@ -522,13 +602,13 @@ mod tests {
         drop(UnixListener::bind(dir.join(SOCK)).unwrap());
         drop(UnixListener::bind(dir.join(NVIM_SOCK)).unwrap());
 
-        let claimed = claim(&base.0, "work").unwrap();
+        let claimed = claim(&base.base(), "work").unwrap();
         assert_eq!("last", fs::read_to_string(dir.join(OLD_LOG)).unwrap());
         for gone in [LOG, SOCK, NVIM_SOCK, UNSAVED] {
             assert!(fs::symlink_metadata(dir.join(gone)).is_err(), "{gone}");
         }
         assert_eq!(dir.join(LOG).to_str().unwrap(), claimed.log());
-        assert_eq!(dir.join(SOCK).as_os_str(), claimed.address().as_os_str());
+        assert_eq!(dir.join(SOCK).as_os_str(), claimed.address().as_arg());
     }
 
     #[test]
@@ -536,30 +616,43 @@ mod tests {
         let base = Scratch::new();
         let elsewhere = Scratch::new();
         std::os::unix::fs::symlink(&elsewhere.0, base.0.join("work")).unwrap();
-        assert!(matches!(claim(&base.0, "work"), Err(Error::Io(..))));
+        assert!(matches!(claim(&base.base(), "work"), Err(Error::Io(..))));
     }
 
     #[test]
     fn two_daemons_from_one_directory_are_named_x_and_x_2() {
         let base = Scratch::new();
-        let x = claim_name(&base.0, "x", true).unwrap();
-        let x2 = claim_name(&base.0, "x", true).unwrap();
+        let x = claim_name(&base.base(), "x", true).unwrap();
+        let x2 = claim_name(&base.base(), "x", true).unwrap();
         assert_eq!(("x", "x-2"), (x.name(), x2.name()));
         // without dedup, a live name is refused
         assert!(matches!(
-            claim_name(&base.0, "x", false),
+            claim_name(&base.base(), "x", false),
             Err(Error::Live(_))
         ));
         drop(x);
-        assert_eq!("x", claim_name(&base.0, "x", true).unwrap().name());
+        assert_eq!("x", claim_name(&base.base(), "x", true).unwrap().name());
     }
 
     #[test]
     fn dedup_checks_each_names_path_length() {
-        let base = PathBuf::from(format!("/tmp/{}", "b".repeat(MAX_PATH - 20)));
-        let room = MAX_PATH - base.as_os_str().len() - 1 - 10;
+        let scratch = Scratch::new();
+        // a base with room for a name of 3 bytes: `<base>/www/nvim.sock`
+        let len = scratch.0.as_os_str().len();
+        let pad = MAX_PATH - 1 - 3 - 10 - len - 1;
+        let base = Base::at(&scratch.0.join("p".repeat(pad)));
+        fs::create_dir(&base.0).unwrap();
+        let first = claim_name(&base, "www", true).unwrap();
+        // www-2 doesn't fit
+        let err = claim_name(&base, "www", true).unwrap_err();
+        assert!(
+            matches!(&err, Error::PathTooLong { name, len } if name == "www-2" && *len == MAX_PATH + 2),
+            "{err}"
+        );
+        drop(first);
         // too long from the start: nothing is made
-        let err = claim_name(&base, &"w".repeat(room + 1), true).unwrap_err();
+        let err = claim_name(&base, "wwww", true).unwrap_err();
         assert!(matches!(err, Error::PathTooLong { .. }), "{err}");
+        assert!(fs::symlink_metadata(base.0.join("wwww")).is_err());
     }
 }

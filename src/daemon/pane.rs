@@ -8,6 +8,7 @@
 
 use std::os::fd::RawFd;
 
+use super::dir::Address;
 use super::event_loop::{self, Loop};
 use super::pane_layout::PaneLayout;
 use super::surface::{Restore, Surface};
@@ -136,12 +137,12 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
 
 /// The command a requested pane's terminal runs: `{attach}`, with the pane
 /// id minted for it.
-pub(crate) fn attach_words(exe: &str, sock: &str, pane: &Pane) -> Vec<String> {
+pub(crate) fn attach_words(exe: &str, address: &Address, pane: &Pane) -> Vec<String> {
     let id = pane
         .attach_id
         .as_ref()
         .expect("a requested pane has a pane id");
-    attach::attach_command(exe.as_ref(), sock.as_ref(), id, Transport::Fd)
+    attach::attach_command(exe.as_ref(), address.as_arg(), id, Transport::Fd)
         .iter()
         .map(|w| w.to_string_lossy().into_owned())
         .collect()

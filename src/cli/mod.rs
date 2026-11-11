@@ -275,11 +275,6 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
         }
         i += 1;
     }
-    if start.name.as_deref().is_some_and(|n| !valid_name(n)) {
-        return Err(UsageError(
-            "--name: use 1-32 letters, digits, '.', '_' or '-'".to_string(),
-        ));
-    }
     if start.name.is_some() && start.address.is_some() {
         return Err(UsageError(
             "--name and --address both choose a daemon: give one".to_string(),
