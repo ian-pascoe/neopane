@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::fdpass;
 use super::pane_helper;
 use crate::attach::{self, ATTACH_PROTOCOL_VERSION, Accept, End, Frame, Hello, Message, Refusal};
-use crate::attach::{Terminal, Transport};
+use crate::attach::{PaneId, Terminal, Transport};
 use crate::log;
 
 /// How long a connected peer has to send its hello.
@@ -36,6 +36,8 @@ pub(crate) struct Arrived {
     pub(crate) stream: UnixStream,
     pub(crate) tty: Option<OwnedFd>,
     pub(crate) hello: Result<Hello, attach::Error>,
+    /// The pane a hello that can't be read names, if it can still be told.
+    pub(crate) pane: Option<PaneId>,
     /// When its last byte was read, as `log::trace_now` has it: L9 is
     /// timed from here.
     pub(crate) at: u64,
@@ -49,8 +51,9 @@ pub(crate) enum Step {
     /// Its hello isn't all here yet.
     Waiting(Pending),
     Arrived(Arrived),
-    /// It hung up, or its socket failed, before its hello.
-    Gone,
+    /// It hung up, or its socket failed, before its hello. Its socket is
+    /// still open, for the caller to stop watching before it closes.
+    Gone(UnixStream),
 }
 
 impl Pending {
@@ -85,7 +88,7 @@ impl Pending {
             let r = match fdpass::recv(&self.stream, &mut chunk) {
                 Ok(r) => r,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Step::Waiting(self),
-                Err(_) => return Step::Gone,
+                Err(_) => return Step::Gone(self.stream),
             };
             if let Some(fd) = r.fd {
                 // SAFETY: a passed fd is ours alone; a second one is closed.
@@ -93,7 +96,7 @@ impl Pending {
                 self.tty.get_or_insert(fd);
             }
             if r.len == 0 {
-                return Step::Gone;
+                return Step::Gone(self.stream);
             }
             self.buf.extend_from_slice(&chunk[..r.len]);
             match Frame::decode(&self.buf) {
@@ -101,10 +104,16 @@ impl Pending {
                 Ok(Some((frame, n))) => {
                     let at = log::trace_now();
                     let rest = self.buf.split_off(n);
+                    let hello = Message::decode_hello(&frame);
+                    let pane = match &hello {
+                        Err(_) if frame.kind == b'h' => Hello::requested_pane(&frame.payload),
+                        _ => None,
+                    };
                     return Step::Arrived(Arrived {
                         stream: self.stream,
                         tty: self.tty,
-                        hello: Message::decode_hello(&frame),
+                        hello,
+                        pane,
                         at,
                         rest,
                     });
@@ -114,6 +123,7 @@ impl Pending {
                         stream: self.stream,
                         tty: self.tty,
                         hello: Err(e),
+                        pane: None,
                         at: log::trace_now(),
                         rest: Vec::new(),
                     });
@@ -128,8 +138,8 @@ impl Pending {
         loop {
             let left = self.deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                self.time_out();
-                return Step::Gone;
+                send_end(&self.stream, no_hello());
+                return Step::Gone(self.stream);
             }
             let mut fds = [libc::pollfd {
                 fd: self.stream.as_raw_fd(),
@@ -148,12 +158,14 @@ impl Pending {
 
     /// Its deadline passed with no hello: refused, and closed.
     pub(crate) fn time_out(self) {
-        let secs = HELLO_TIMEOUT.as_secs();
-        refuse(
-            self.stream,
-            End::refusal(Refusal::Hello, format!("no hello within {secs} s")),
-        );
+        refuse(self.stream, no_hello());
     }
+}
+
+/// The refusal of a connection whose hello didn't come in time.
+fn no_hello() -> End {
+    let secs = HELLO_TIMEOUT.as_secs();
+    End::refusal(Refusal::Hello, format!("no hello within {secs} s"))
 }
 
 /// This process's effective user id: the user a daemon lets attach.
@@ -380,7 +392,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let p = Pending::new(ours, HELLO_TIMEOUT, euid()).unwrap().unwrap();
         drop(theirs);
-        assert!(matches!(p.read(), Step::Gone));
+        assert!(matches!(p.read(), Step::Gone(_)));
     }
 
     #[test]
@@ -401,7 +413,7 @@ mod tests {
         let p = Pending::new(ours, Duration::from_millis(100), euid())
             .unwrap()
             .unwrap();
-        assert!(matches!(p.read_blocking(), Step::Gone));
+        assert!(matches!(p.read_blocking(), Step::Gone(_)));
         assert!(started.elapsed() < Duration::from_secs(2));
         // it was told why
         let mut buf = Vec::new();

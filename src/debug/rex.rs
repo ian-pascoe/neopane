@@ -1,6 +1,7 @@
 //! `neorex debug-rex SOCKET`: talks to Rex directly. Attaches to this
-//! session, opens a split running `neorex pane SOCKET`, takes that pane's
-//! terminal over as debug-panes does, and prints Rex's events. Ctrl+C quits.
+//! session, opens a split running `neorex attach --address SOCKET --pane ID`
+//! with an id it minted, takes that pane's terminal over as debug-panes does,
+//! and prints Rex's events. Ctrl+C quits.
 
 use std::fs;
 use std::os::unix::io::AsRawFd;

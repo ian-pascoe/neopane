@@ -80,28 +80,54 @@ pub fn run(address: &OsStr, want: Want, transport: Transport) -> Exit {
     let exit = attach_on(
         stream,
         tty,
-        want,
-        transport,
+        &Attach::new(want, transport),
         Some(&mut signals),
-        ANSWER_TIMEOUT,
     );
     signals.deinit();
     exit
 }
 
-/// The helper's work on a connected `stream`, for terminal `tty`; `signals`
-/// reports SIGWINCH, if given. The daemon has `answer_within` to answer.
+/// How the helper attaches.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Attach {
+    pub(crate) want: Want,
+    pub(crate) transport: Transport,
+    /// How long the daemon has to answer.
+    pub(crate) answer_within: Duration,
+    /// The user the daemon must run as: ours.
+    pub(crate) uid: u32,
+}
+
+impl Attach {
+    pub(crate) fn new(want: Want, transport: Transport) -> Attach {
+        Attach {
+            want,
+            transport,
+            answer_within: ANSWER_TIMEOUT,
+            // SAFETY: `geteuid` has no preconditions.
+            uid: unsafe { libc::geteuid() },
+        }
+    }
+}
+
+/// The helper's work on a connected `stream`, for terminal `tty`, as `how`
+/// says; `signals` reports SIGWINCH, if given. The daemon is checked to run
+/// as `how.uid` before the hello.
 pub(crate) fn attach_on(
     mut stream: UnixStream,
     tty: RawFd,
-    want: Want,
-    transport: Transport,
+    how: &Attach,
     mut signals: Option<&mut Signals>,
-    answer_within: Duration,
 ) -> Exit {
-    match same_user(&stream) {
-        Ok(true) => {}
-        Ok(false) => return Exit::fail("the daemon runs as another user"),
+    let Attach {
+        want,
+        transport,
+        answer_within,
+        uid,
+    } = *how;
+    match peer_uid(&stream) {
+        Ok(peer) if check_peer(peer, uid) => {}
+        Ok(_) => return Exit::fail("the daemon runs as another user"),
         Err(e) => return Exit::fail(format!("can't check the daemon's user: {e}")),
     }
     let terminal = match terminal_of(tty, transport) {
@@ -397,13 +423,6 @@ fn check_peer(peer: u32, ours: u32) -> bool {
     peer == ours
 }
 
-/// Whether the process on the other end of `stream` runs as our user: the
-/// peer check both ends make before the hello.
-pub(crate) fn same_user(stream: &UnixStream) -> io::Result<bool> {
-    // SAFETY: `geteuid` has no preconditions.
-    Ok(check_peer(peer_uid(stream)?, unsafe { libc::geteuid() }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,7 +440,6 @@ mod tests {
     fn a_peer_is_our_user() {
         let (a, _b) = UnixStream::pair().unwrap();
         assert_eq!(unsafe { libc::geteuid() }, peer_uid(&a).unwrap());
-        assert!(same_user(&a).unwrap());
     }
 
     fn pane() -> PaneId {
@@ -453,7 +471,7 @@ mod tests {
                 }
             }
         });
-        let exit = attach_on(ours, slave, want, Transport::Fd, None, ANSWER_TIMEOUT);
+        let exit = attach_on(ours, slave, &Attach::new(want, Transport::Fd), None);
         fake.join().unwrap();
         unsafe {
             libc::close(master);
@@ -575,14 +593,11 @@ mod tests {
             let _ = std::io::copy(&mut &silent, &mut std::io::sink());
         });
         let started = Instant::now();
-        let exit = attach_on(
-            ours,
-            slave,
-            Want::Requested(pane()),
-            Transport::Fd,
-            None,
-            Duration::from_millis(200),
-        );
+        let how = Attach {
+            answer_within: Duration::from_millis(200),
+            ..Attach::new(Want::Requested(pane()), Transport::Fd)
+        };
+        let exit = attach_on(ours, slave, &how, None);
         assert!(started.elapsed() >= Duration::from_millis(200));
         assert_eq!(Exit::fail("no answer from the daemon in 0.2 s"), exit);
         reader.join().unwrap();
@@ -590,6 +605,90 @@ mod tests {
             libc::close(master);
             libc::close(slave);
         }
+    }
+
+    #[test]
+    fn a_daemon_of_another_user_is_left_before_the_hello() {
+        let (master, slave) = open_pty(80, 24);
+        let (ours, daemon_end) = UnixStream::pair().unwrap();
+        let how = Attach {
+            uid: unsafe { libc::geteuid() } + 1,
+            ..Attach::new(Want::Requested(pane()), Transport::Fd)
+        };
+        let exit = attach_on(ours, slave, &how, None);
+        assert_eq!(Exit::fail("the daemon runs as another user"), exit);
+        // nothing was sent: the hello carries the environment
+        let mut sent = Vec::new();
+        (&daemon_end).read_to_end(&mut sent).unwrap();
+        assert!(sent.is_empty(), "{sent:?}");
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+    }
+
+    /// A resize once attached: SIGWINCH, then the new size in an `s` frame.
+    #[test]
+    fn a_resize_signalled_once_attached_is_sent() {
+        let _one = crate::term::signals::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut signals = Signals::init(&[libc::SIGWINCH]).unwrap();
+        let (master, slave) = open_pty(80, 24);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut buf = vec![0u8; 1 << 20];
+            let mut got = Vec::new();
+            loop {
+                let r = fdpass::recv(&theirs, &mut buf).unwrap();
+                if let Some(fd) = r.fd {
+                    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+                got.extend_from_slice(&buf[..r.len]);
+                if let Some((_, n)) = Frame::decode(&got).unwrap() {
+                    got.drain(..n);
+                    break;
+                }
+            }
+            send(&theirs, accept());
+            // the helper waits on its socket and the signal by now
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(got.is_empty(), "sent before any resize");
+            let ws = libc::winsize {
+                ws_row: 40,
+                ws_col: 120,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            assert_eq!(0, unsafe { libc::ioctl(master, libc::TIOCSWINSZ, &ws) });
+            unsafe { libc::raise(libc::SIGWINCH) };
+            loop {
+                if let Some((f, _)) = Frame::decode(&got).unwrap() {
+                    let Some(Message::Size(s)) = Message::decode(&f).unwrap() else {
+                        panic!("{f:?}")
+                    };
+                    assert_eq!((120, 40), (s.cols, s.rows));
+                    break;
+                }
+                let r = fdpass::recv(&theirs, &mut buf).unwrap();
+                assert!(r.len > 0, "hung up");
+                got.extend_from_slice(&buf[..r.len]);
+            }
+            send(
+                &theirs,
+                Message::End(End::ending(Ending::Closed, "", false)),
+            );
+            master
+        });
+        let how = Attach::new(Want::Requested(pane()), Transport::Fd);
+        let exit = attach_on(ours, slave, &how, Some(&mut signals));
+        let master = fake.join().unwrap();
+        signals.deinit();
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        assert_eq!(Exit::ok(), exit);
     }
 
     #[test]
@@ -652,14 +751,8 @@ mod tests {
             );
             master
         });
-        let exit = attach_on(
-            ours,
-            slave,
-            Want::Requested(pane()),
-            Transport::Fd,
-            None,
-            ANSWER_TIMEOUT,
-        );
+        let how = Attach::new(Want::Requested(pane()), Transport::Fd);
+        let exit = attach_on(ours, slave, &how, None);
         let master = fake.join().unwrap();
         unsafe {
             libc::close(master);

@@ -208,13 +208,13 @@ impl Rig {
         rig.lua("vim.cmd('vsplit | enew')");
         rig.pump(|r| r.d.panes.by_id(1).is_some());
         let (master1, slave1) = open_pty(100, 30);
-        let client = UnixStream::connect(&rig.sock).unwrap();
+        let helper = UnixStream::connect(&rig.sock).unwrap();
         let id = rig.d.panes.by_id(1).unwrap().attach_id.unwrap();
         let hello = attach_conn::requested_hello(id, attach_conn::test_terminal(100, 30));
-        fdpass::send(&client, &hello, slave1).unwrap();
+        fdpass::send(&helper, &hello, slave1).unwrap();
         // SAFETY: the daemon has its own copy now.
         unsafe { libc::close(slave1) };
-        rig.helper_ends.push(client);
+        rig.helper_ends.push(helper);
         rig.panes.push(Emulator::start(master1));
         rig.d.accept(&server).unwrap();
         rig.pump(|r| !r.panes[1].seen().is_empty());

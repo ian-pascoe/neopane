@@ -154,14 +154,15 @@ impl PaneHost {
         if let Err(z) = attach_conn::check_terminal(&terminal, a.tty.as_ref()) {
             return refuse(a.stream, z);
         }
+        // before the id is taken, so it stays good for later
+        let Some(i) = self.panes.iter().position(|p| p.is_none()) else {
+            let m = format!("{} drives {MAX_PANES} panes at most", self.name);
+            return refuse(a.stream, End::refusal(Refusal::Hello, m));
+        };
         if let Err(reason) = self.ids.take(&pane) {
             let m = format!("pane {pane} can't be attached");
             return refuse(a.stream, End::refusal(reason, m));
         }
-        let Some(i) = self.panes.iter().position(|p| p.is_none()) else {
-            let m = format!("{} drives {MAX_PANES} panes at most", self.name);
-            return refuse(a.stream, End::refusal(Refusal::PaneExpired, m));
-        };
         let tty = a.tty.expect("checked").into_raw_fd();
         let term = match Terminal::init(tty) {
             Ok(term) => term,

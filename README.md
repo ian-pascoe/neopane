@@ -141,7 +141,7 @@ Rex sets in every pane:
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
   warning, and `info` is used.
 
-Each window's Rex pane runs `neorex attach --address <the daemon's socket>
+Each window's Rex pane runs `neorex attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
 `docs/attach-protocol.md`) and waits until the daemon ends the attach; Rex then
 closes the pane. The pane id, such as `2-k3j9x2qpa8`, is good for that one

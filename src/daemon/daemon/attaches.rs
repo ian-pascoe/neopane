@@ -2,12 +2,12 @@
 //! without blocking the loop, answered, and the frames an attached helper
 //! sends after.
 
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Instant;
 
 use super::*;
-use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size, Terminal};
+use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size};
 use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Pending, Step};
 use crate::nvim::msgpack;
 
@@ -39,18 +39,18 @@ impl Daemon {
             return Ok(());
         };
         let (_, pending) = self.pending.swap_remove(i);
-        let fd = pending.stream.as_raw_fd();
         match pending.read() {
             Step::Waiting(p) => {
                 self.pending.push((token, p));
                 Ok(())
             }
-            Step::Gone => {
-                self.event_loop.remove(fd)?;
+            // off the loop before its socket closes
+            Step::Gone(stream) => {
+                self.event_loop.remove(stream.as_raw_fd())?;
                 Ok(())
             }
             Step::Arrived(a) => {
-                self.event_loop.remove(fd)?;
+                self.event_loop.remove(a.stream.as_raw_fd())?;
                 self.on_hello(a)
             }
         }
@@ -92,67 +92,66 @@ impl Daemon {
 
     /// A hello arrived whole: answer it.
     fn on_hello(&mut self, a: Arrived) -> Result<()> {
+        match &a.hello {
+            Err(e) => {
+                // a requested pane's, if it can still be told, is given up
+                let z = attach_conn::refusal_of(e);
+                let failed = a.pane.and_then(|p| self.waiting_pane(&p).map(|id| (id, p)));
+                self.refuse_requested(a.stream, z, failed)
+            }
+            Ok(Hello {
+                purpose: Purpose::Requested { .. },
+                ..
+            }) => self.attach_requested(a),
+            // the launcher's comes before the loop runs (#105 opens it up)
+            Ok(h) => {
+                let z = End::refusal(
+                    Refusal::Hello,
+                    format!("this daemon takes no {} hello yet", h.purpose.name()),
+                );
+                log_warn!("{NAME} daemon: refused a hello: {}", z.message);
+                attach_conn::refuse(a.stream, z);
+                Ok(())
+            }
+        }
+    }
+
+    /// The pane still waiting for the terminal `pane` names: its id is good,
+    /// and it has none yet.
+    fn waiting_pane(&self, pane: &PaneId) -> Option<u32> {
+        self.panes.ids.check(pane).ok()?;
+        self.panes
+            .by_attach_id(pane)
+            .filter(|p| p.terminal_surface.is_none())
+            .map(|p| p.id)
+    }
+
+    /// A requested pane's terminal, `a`: matched to the pane its id was
+    /// minted for, if it is still good, and refused otherwise. The id is
+    /// checked first, so a terminal no pane waits for is only logged.
+    fn attach_requested(&mut self, a: Arrived) -> Result<()> {
         let Arrived {
             stream,
             tty,
             hello,
             at,
             rest,
+            ..
         } = a;
-        let hello = match hello {
-            Ok(h) => h,
-            Err(e) => {
-                let z = attach_conn::refusal_of(&e);
-                log_warn!("{NAME} daemon: refused a hello: {}", z.message);
-                attach_conn::refuse(stream, z);
-                return Ok(());
-            }
+        let Ok(Hello {
+            build,
+            purpose: Purpose::Requested { pane, terminal },
+            ..
+        }) = hello
+        else {
+            unreachable!("on_hello checked it's a requested pane's hello");
         };
-        let Hello { build, purpose, .. } = hello;
-        match purpose {
-            Purpose::Requested { pane, terminal } => {
-                self.attach_requested(stream, tty, pane, terminal, &build, at, rest)
-            }
-            // the launcher's comes before the loop runs (#105 opens it up)
-            other => {
-                let z = End::refusal(
-                    Refusal::Hello,
-                    format!("this daemon takes no {} hello yet", other.name()),
-                );
-                log_warn!("{NAME} daemon: refused a hello: {}", z.message);
-                attach_conn::refuse(stream, z);
-                Ok(())
-            }
-        }
-    }
-
-    /// A requested pane's terminal: matched to the pane its id was minted
-    /// for, if it is still good, and refused otherwise.
-    #[allow(clippy::too_many_arguments)]
-    fn attach_requested(
-        &mut self,
-        stream: UnixStream,
-        tty: Option<OwnedFd>,
-        pane: PaneId,
-        terminal: Terminal,
-        build: &str,
-        at: u64,
-        rest: Vec<u8>,
-    ) -> Result<()> {
         let shown = pane.to_string();
         log_info!(
             "{NAME} daemon: hello: {}",
-            attach_conn::describe("requested", Some(&shown), &terminal, build)
+            attach_conn::describe("requested", Some(&shown), &terminal, &build)
         );
-        let id = self
-            .panes
-            .by_attach_id(&pane)
-            .filter(|p| p.terminal_surface.is_none())
-            .map(|p| p.id);
-        if let Err(z) = attach_conn::check_terminal(&terminal, tty.as_ref()) {
-            return self.refuse_requested(stream, z, id.map(|id| (id, pane)));
-        }
-        if let Err(reason) = self.panes.ids.take(&pane) {
+        if let Err(reason) = self.panes.ids.check(&pane) {
             let message = match reason {
                 Refusal::PaneTaken => format!("pane {pane} already has a terminal"),
                 Refusal::PaneExpired => format!("pane {pane} is no longer wanted"),
@@ -161,10 +160,14 @@ impl Daemon {
             return self.refuse_requested(stream, End::refusal(reason, message), None);
         }
         // a pane goes with its id, so a good id has its pane
-        let Some(id) = id else {
+        let Some(id) = self.waiting_pane(&pane) else {
             let z = End::refusal(Refusal::PaneExpired, format!("pane {pane} is gone"));
             return self.refuse_requested(stream, z, None);
         };
+        if let Err(z) = attach_conn::check_terminal(&terminal, tty.as_ref()) {
+            return self.refuse_requested(stream, z, Some((id, pane)));
+        }
+        self.panes.ids.take(&pane).expect("checked");
         let tty = tty.expect("checked").into_raw_fd();
         // (a failing `Surface::create` closes the helper's socket and terminal
         // itself)

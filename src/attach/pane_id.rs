@@ -124,12 +124,18 @@ impl PaneIdRegistry {
     /// An attach takes `id`, or is refused: an id never minted (or with
     /// another token), one already taken, or one expired.
     pub fn take(&mut self, id: &PaneId) -> Result<(), Refusal> {
-        match self.ids.get_mut(&id.number) {
+        self.check(id)?;
+        if let Some((_, state)) = self.ids.get_mut(&id.number) {
+            *state = State::Taken;
+        }
+        Ok(())
+    }
+
+    /// Whether an attach could take `id` now, without taking it.
+    pub fn check(&self, id: &PaneId) -> Result<(), Refusal> {
+        match self.ids.get(&id.number) {
             Some((token, state)) if *token == id.token => match *state {
-                State::Minted => {
-                    *state = State::Taken;
-                    Ok(())
-                }
+                State::Minted => Ok(()),
                 State::Taken => Err(Refusal::PaneTaken),
                 State::Expired => Err(Refusal::PaneExpired),
             },

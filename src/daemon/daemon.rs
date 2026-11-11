@@ -2010,12 +2010,12 @@ mod tests {
 
         /// A helper's connection that sends `hello`, `tty` riding on it.
         fn send(&self, hello: &[u8], tty: Option<i32>) -> UnixStream {
-            let client = UnixStream::connect(&self.path).unwrap();
+            let helper = UnixStream::connect(&self.path).unwrap();
             match tty {
-                Some(fd) => crate::daemon::fdpass::send(&client, hello, fd).unwrap(),
-                None => (&client).write_all(hello).unwrap(),
+                Some(fd) => crate::daemon::fdpass::send(&helper, hello, fd).unwrap(),
+                None => (&helper).write_all(hello).unwrap(),
             }
-            client
+            helper
         }
     }
 
@@ -2047,9 +2047,9 @@ mod tests {
         }
     }
 
-    /// The first frame `client` is sent, within a second.
-    fn answer(client: &UnixStream) -> crate::attach::Message {
-        client
+    /// The first frame `helper` is sent, within a second.
+    fn answer(helper: &UnixStream) -> crate::attach::Message {
+        helper
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let mut got = Vec::new();
@@ -2058,19 +2058,30 @@ mod tests {
             if let Some(m) = crate::daemon::attach_conn::next_message(&mut got).unwrap() {
                 return m;
             }
-            let n = (&*client).read(&mut buf).unwrap();
+            let n = (&*helper).read(&mut buf).unwrap();
             assert!(n > 0, "hung up without an answer");
             got.extend_from_slice(&buf[..n]);
         }
     }
 
-    /// The refusal `client` was sent, before it was hung up on.
-    fn refusal(client: &UnixStream) -> crate::attach::End {
-        let said = crate::daemon::attach_conn::read_all_frames(client);
+    /// The refusal `helper` was sent, before it was hung up on.
+    fn refusal(helper: &UnixStream) -> crate::attach::End {
+        let said = crate::daemon::attach_conn::read_all_frames(helper);
         match &said[..] {
             [crate::attach::Message::End(z)] => z.clone(),
             _ => panic!("{said:?}"),
         }
+    }
+
+    /// What the daemon has sent Neovim and Neovim hasn't read, as text.
+    fn sent_to_nvim(fx: &mut Fixture) -> String {
+        fx.nvim_end.set_nonblocking(true).unwrap();
+        let mut sent = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = fx.nvim_end.read(&mut buf) {
+            sent.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&sent).into_owned()
     }
 
     /// A window's pane waiting for its terminal, its window drawn at 80 x 23:
@@ -2095,10 +2106,10 @@ mod tests {
         let at = Address::new("accept");
         let pty = Pty::new(90, 30);
         // the hello says 70 x 20: the daemon never asks the terminal
-        let client = at.send(&hello_for(pane, 70, 20), Some(pty.slave));
+        let helper = at.send(&hello_for(pane, 70, 20), Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
 
-        let crate::attach::Message::Accept(a) = answer(&client) else {
+        let crate::attach::Message::Accept(a) = answer(&helper) else {
             panic!("not accepted")
         };
         assert_eq!(
@@ -2128,16 +2139,16 @@ mod tests {
         let (id, pane) = requested_pane(&mut fx);
         let at = Address::new("resize");
         let pty = Pty::new(80, 24);
-        let mut client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+        let mut helper = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
-        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
 
         let size = crate::attach::Size {
             cols: 100,
             rows: 40,
             px: Some((1000, 800)),
         };
-        client
+        helper
             .write_all(&crate::attach::Message::Size(size).encode().unwrap())
             .unwrap();
         fx.d.on_helper(id).unwrap();
@@ -2157,7 +2168,7 @@ mod tests {
     fn a_hello_of_another_version_is_refused_naming_both_builds_and_versions() {
         use crate::attach::{Hello, Message, Purpose, Refusal};
         let mut fx = fixture();
-        let (_, pane) = requested_pane(&mut fx);
+        let (id, pane) = requested_pane(&mut fx);
         let at = Address::new("version");
         let mut hello = Hello::new(Purpose::Requested {
             pane,
@@ -2165,9 +2176,9 @@ mod tests {
         });
         hello.v = 2;
         hello.build = format!("{NAME} 9.9.9");
-        let client = at.send(&Message::Hello(hello).encode().unwrap(), None);
+        let helper = at.send(&Message::Hello(hello).encode().unwrap(), None);
         fx.d.accept(&at.server).unwrap();
-        let z = refusal(&client);
+        let z = refusal(&helper);
         assert_eq!(Some(Refusal::Version), z.as_refusal());
         for part in [
             format!("{NAME} 9.9.9 speaks attach protocol 2"),
@@ -2175,6 +2186,121 @@ mod tests {
         ] {
             assert!(z.message.contains(&part), "{}", z.message);
         }
+        // its pane, named in the hello, is given up, and Neovim warned
+        assert_eq!(
+            Some(Close::RequestFailed),
+            fx.d.panes.by_id(id).unwrap().closing
+        );
+        assert_eq!(Err(Refusal::PaneExpired), fx.d.panes.ids.check(&pane));
+        let sent = sent_to_nvim(&mut fx);
+        assert!(
+            sent.contains("nvim_echo") && sent.contains("9.9.9"),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_requested_panes_hello_lacking_a_field_gives_its_pane_up_and_warns() {
+        use crate::attach::{Frame, Refusal};
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new("lacking");
+        let mut payload = vec![0x84];
+        for (k, v) in [
+            ("v", None),
+            ("build", Some("x")),
+            ("purpose", Some("requested")),
+            ("pane", None),
+        ] {
+            crate::nvim::msgpack::write_str(&mut payload, k);
+            match (k, v) {
+                ("v", _) => crate::nvim::msgpack::write_int(&mut payload, 1),
+                (_, Some(v)) => crate::nvim::msgpack::write_str(&mut payload, v),
+                _ => crate::nvim::msgpack::write_str(&mut payload, pane.to_string()),
+            }
+        }
+        let mut bytes = Vec::new();
+        Frame::encode_into(b'h', &payload, &mut bytes).unwrap();
+        let helper = at.send(&bytes, None);
+        fx.d.accept(&at.server).unwrap();
+        let z = refusal(&helper);
+        assert_eq!(
+            (Some(Refusal::Hello), "missing field transport"),
+            (z.as_refusal(), z.message.as_str())
+        );
+        assert_eq!(
+            Some(Close::RequestFailed),
+            fx.d.panes.by_id(id).unwrap().closing
+        );
+        assert!(sent_to_nvim(&mut fx).contains("missing field transport"));
+    }
+
+    #[test]
+    fn a_hello_naming_no_pane_still_warns() {
+        use crate::attach::Frame;
+        let mut fx = fixture();
+        let (id, _) = requested_pane(&mut fx);
+        let at = Address::new("nopane");
+        let mut bytes = Vec::new();
+        Frame::encode_into(b'h', b"\x80", &mut bytes).unwrap();
+        let helper = at.send(&bytes, None);
+        fx.d.accept(&at.server).unwrap();
+        refusal(&helper);
+        assert!(sent_to_nvim(&mut fx).contains("missing field v"));
+        // no pane to give up
+        assert!(fx.d.panes.by_id(id).unwrap().closing.is_none());
+    }
+
+    #[test]
+    fn a_terminal_no_pane_waits_for_is_refused_for_its_id_first_and_only_logged() {
+        use crate::attach::{PaneId, Refusal, Transport};
+        use crate::daemon::attach_conn::{requested_hello, test_terminal};
+        let mut fx = fixture();
+        let (id, pane) = requested_pane(&mut fx);
+        let gone = fx.d.panes.add_for_window(1001).attach_id.unwrap();
+        let i =
+            fx.d.panes
+                .index_of(fx.d.panes.by_attach_id(&gone).unwrap().id)
+                .unwrap();
+        fx.d.panes.list[i].closing = Some(Close::WindowClosed);
+        fx.d.panes.remove(i, &fx.d.event_loop);
+        let unknown = PaneId::parse(&format!("{}-zzzzzzzzzz", pane.number)).unwrap();
+        let at = Address::new("idfirst");
+        for (named, want) in [
+            (unknown, Refusal::PaneUnknown),
+            (gone, Refusal::PaneExpired),
+        ] {
+            // the relay, and no terminal: wrong too, but the id is checked first
+            let mut t = test_terminal(80, 24);
+            t.transport = Transport::Relay;
+            let helper = at.send(&requested_hello(named, t), None);
+            fx.d.accept(&at.server).unwrap();
+            assert_eq!(Some(want), refusal(&helper).as_refusal());
+            let helper = at.send(&hello_for(named, 80, 24), None);
+            fx.d.accept(&at.server).unwrap();
+            assert_eq!(Some(want), refusal(&helper).as_refusal());
+        }
+        assert_eq!("", sent_to_nvim(&mut fx));
+        // the pane waiting for its own is untouched
+        assert!(fx.d.panes.by_id(id).unwrap().closing.is_none());
+        assert_eq!(Ok(()), fx.d.panes.ids.check(&pane));
+    }
+
+    #[test]
+    fn a_peer_that_hangs_up_before_its_hello_leaves_the_daemon_running() {
+        let mut fx = fixture();
+        let at = Address::new("hangup");
+        // gone before the daemon reads it
+        drop(UnixStream::connect(&at.path).unwrap());
+        fx.d.accept(&at.server).unwrap();
+        // gone while it waits
+        let helper = UnixStream::connect(&at.path).unwrap();
+        fx.d.accept(&at.server).unwrap();
+        let token = fx.d.pending[0].0;
+        drop(helper);
+        fx.d.on_pending(token).unwrap();
+        assert!(fx.d.pending.is_empty());
+        assert!(fx.d.stopped.is_none());
     }
 
     #[test]
@@ -2188,9 +2314,9 @@ mod tests {
         ] {
             let mut bytes = Vec::new();
             Frame::encode_into(kind, payload, &mut bytes).unwrap();
-            let client = at.send(&bytes, None);
+            let helper = at.send(&bytes, None);
             fx.d.accept(&at.server).unwrap();
-            let z = refusal(&client);
+            let z = refusal(&helper);
             assert_eq!(
                 (Some(Refusal::Hello), why),
                 (z.as_refusal(), z.message.as_str())
@@ -2208,9 +2334,9 @@ mod tests {
             }
         }
         Frame::encode_into(b'h', &payload, &mut bytes).unwrap();
-        let client = at.send(&bytes, None);
+        let helper = at.send(&bytes, None);
         fx.d.accept(&at.server).unwrap();
-        assert_eq!("missing field pane", refusal(&client).message);
+        assert_eq!("missing field pane", refusal(&helper).message);
     }
 
     #[test]
@@ -2223,9 +2349,9 @@ mod tests {
         let (id, pane) = requested_pane(&mut fx);
         let mut t = test_terminal(80, 24);
         t.transport = crate::attach::Transport::Relay;
-        let client = at.send(&requested_hello(pane, t), None);
+        let helper = at.send(&requested_hello(pane, t), None);
         fx.d.accept(&at.server).unwrap();
-        assert_eq!(Some(Refusal::Transport), refusal(&client).as_refusal());
+        assert_eq!(Some(Refusal::Transport), refusal(&helper).as_refusal());
         assert_eq!(
             Some(Close::RequestFailed),
             fx.d.panes.by_id(id).unwrap().closing
@@ -2250,11 +2376,11 @@ mod tests {
             let (id, pane) = requested_pane(&mut fx);
             let mut pipe = [0; 2];
             assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
-            let client = at.send(&hello_for(pane, 80, 24), tty.then_some(pipe[0]));
+            let helper = at.send(&hello_for(pane, 80, 24), tty.then_some(pipe[0]));
             fx.d.accept(&at.server).unwrap();
             assert_eq!(
                 Some(Refusal::Terminal),
-                refusal(&client).as_refusal(),
+                refusal(&helper).as_refusal(),
                 "{tty}"
             );
             assert_eq!(
@@ -2273,11 +2399,11 @@ mod tests {
         let mut fx = fixture();
         fx.d.uid += 1;
         let at = Address::new("user");
-        let client = UnixStream::connect(&at.path).unwrap();
+        let helper = UnixStream::connect(&at.path).unwrap();
         fx.d.accept(&at.server).unwrap();
         assert_eq!(
             Some(crate::attach::Refusal::User),
-            refusal(&client).as_refusal()
+            refusal(&helper).as_refusal()
         );
         assert!(fx.d.pending.is_empty());
     }
@@ -2290,11 +2416,11 @@ mod tests {
         let pty = Pty::new(80, 24);
         // another daemon's, or another token
         let other = crate::attach::PaneId::parse(&format!("{}-zzzzzzzzzz", pane.number)).unwrap();
-        let client = at.send(&hello_for(other, 80, 24), Some(pty.slave));
+        let helper = at.send(&hello_for(other, 80, 24), Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
         assert_eq!(
             Some(crate::attach::Refusal::PaneUnknown),
-            refusal(&client).as_refusal()
+            refusal(&helper).as_refusal()
         );
         // the pane still waits for its own
         let p = fx.d.panes.by_id(id).unwrap();
@@ -2311,17 +2437,11 @@ mod tests {
         fx.d.panes.list[i].closing = Some(Close::WindowClosed);
         fx.d.panes.remove(i, &fx.d.event_loop);
         let at = Address::new("expired");
-        let client = UnixStream::connect(&at.path).unwrap();
+        let helper_end = UnixStream::connect(&at.path).unwrap();
         let helper = std::thread::spawn(move || {
             let pty = Pty::new(80, 24);
-            pane_helper::attach_on(
-                client,
-                pty.slave,
-                Want::Requested(pane),
-                crate::attach::Transport::Fd,
-                None,
-                Duration::from_secs(5),
-            )
+            let how = pane_helper::Attach::new(Want::Requested(pane), crate::attach::Transport::Fd);
+            pane_helper::attach_on(helper_end, pty.slave, &how, None)
         });
         fx.d.accept(&at.server).unwrap();
         // the hello may not be in yet
@@ -2376,9 +2496,9 @@ mod tests {
         assert_eq!(1, fx.d.pending.len());
 
         let pty = Pty::new(80, 24);
-        let client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+        let helper = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
-        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         assert!(fx.d.panes.by_id(id).unwrap().terminal_surface.is_some());
         assert!(started.elapsed() < Duration::from_secs(1));
 
@@ -2408,11 +2528,11 @@ mod tests {
         let hello = requested_hello(pane, t);
         assert!(hello.len() > 64 << 10);
         // more than a socket holds: sent as the daemon reads
-        let client = UnixStream::connect(&at.path).unwrap();
+        let helper = UnixStream::connect(&at.path).unwrap();
         let slave = pty.slave;
         let sender = std::thread::spawn(move || {
-            crate::daemon::fdpass::send(&client, &hello, slave).unwrap();
-            client
+            crate::daemon::fdpass::send(&helper, &hello, slave).unwrap();
+            helper
         });
         fx.d.accept(&at.server).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2421,8 +2541,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
             fx.d.on_pending(token).unwrap();
         }
-        let client = sender.join().unwrap();
-        assert!(matches!(answer(&client), crate::attach::Message::Accept(_)));
+        let helper = sender.join().unwrap();
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         assert!(fx.d.panes.by_id(id).unwrap().terminal_surface.is_some());
     }
 
@@ -2432,9 +2552,9 @@ mod tests {
         let mut fx = fixture();
         let at = Address::new("self");
         let pty = Pty::new(80, 24);
-        let client = at.send(&self_hello(test_terminal(80, 24)), Some(pty.slave));
+        let helper = at.send(&self_hello(test_terminal(80, 24)), Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
-        let z = refusal(&client);
+        let z = refusal(&helper);
         assert_eq!(Some(crate::attach::Refusal::Hello), z.as_refusal());
         assert_eq!("this daemon takes no self hello yet", z.message);
     }
@@ -2453,11 +2573,11 @@ mod tests {
             let (_, pane) = requested_pane(&mut fx);
             let at = Address::new("end");
             let pty = Pty::new(80, 24);
-            let client = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+            let helper = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
             fx.d.accept(&at.server).unwrap();
             fx.d.stop(stopped);
             drop(fx);
-            let said = crate::daemon::attach_conn::read_all_frames(&client);
+            let said = crate::daemon::attach_conn::read_all_frames(&helper);
             let [Message::Accept(_), Message::End(z)] = &said[..] else {
                 panic!("{said:?}")
             };

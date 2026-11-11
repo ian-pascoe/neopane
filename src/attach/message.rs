@@ -386,6 +386,19 @@ impl Hello {
     }
 }
 
+impl Hello {
+    /// The pane a hello that can't be read names, if it reads as a
+    /// requested pane's: so the daemon can give up that pane, whatever else
+    /// is wrong with the hello.
+    pub fn requested_pane(payload: &[u8]) -> Option<PaneId> {
+        let f = Fields::decode(payload).ok()?;
+        if f.str("purpose").ok()? != "requested" {
+            return None;
+        }
+        PaneId::parse(&f.str("pane").ok()?)
+    }
+}
+
 /// `line`: from 1, and only with a file.
 fn line(f: &Fields, has_file: bool) -> Result<Option<u32>, Error> {
     match f.opt_int_in::<u32>("line")? {
@@ -866,6 +879,20 @@ mod tests {
         let (f, n) = Frame::decode(&m.encode().unwrap()).unwrap().unwrap();
         assert_eq!(n, m.encode().unwrap().len());
         f
+    }
+
+    #[test]
+    fn a_requested_panes_id_is_read_from_a_hello_that_cant_be() {
+        let id = PaneId::parse("4-abcdefghij").unwrap();
+        let mut w = MapWriter::default();
+        w.int("v", 99)
+            .str("purpose", "requested")
+            .str("pane", "4-abcdefghij");
+        assert_eq!(Some(id), Hello::requested_pane(&w.finish()));
+        let mut w = MapWriter::default();
+        w.str("purpose", "self").str("pane", "4-abcdefghij");
+        assert_eq!(None, Hello::requested_pane(&w.finish()));
+        assert_eq!(None, Hello::requested_pane(b"\xc1"));
     }
 
     #[test]
