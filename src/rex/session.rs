@@ -1,5 +1,5 @@
-//! Our side of the Rex session: requests in flight, the session view,
-//! and which block Rex has focused.
+//! Our side of the Rex session: requests in flight, the session view, and
+//! the revision our last focus change landed at.
 
 use serde_json::{Value, json};
 
@@ -17,8 +17,8 @@ pub(crate) enum Request {
     Attach,
     NewSplit(u64),
     NewLayer(u64),
-    FocusBlock,
-    FocusDirection,
+    FocusBlock(u64),
+    FocusDirection(u64),
     View,
     DisownBlock(u64),
     CloseBlock(u64),
@@ -34,8 +34,8 @@ impl Request {
             Request::Attach => "attach",
             Request::NewSplit(_) => "new_split",
             Request::NewLayer(_) => "new_layer",
-            Request::FocusBlock => "focus_block",
-            Request::FocusDirection => "focus_direction",
+            Request::FocusBlock(_) => "focus_block",
+            Request::FocusDirection(_) => "focus_direction",
             Request::View => "view",
             Request::DisownBlock(_) => "disown_block",
             Request::CloseBlock(_) => "close_block",
@@ -84,18 +84,6 @@ impl Default for View {
     }
 }
 
-/// The block Rex has focused, and our change to it still landing.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum FocusedBlock {
-    Unknown,
-    Settled(ids::Block),
-    Requesting {
-        block: ids::Block,
-        in_flight: u32,
-        applied_rev: i64,
-    },
-}
-
 pub(crate) struct Session {
     /// (Owned: the daemon reaches it as `session.client`, e.g. for
     /// `client.fd()`.)
@@ -108,7 +96,9 @@ pub(crate) struct Session {
 
     pub view: View,
 
-    pub focused_block: FocusedBlock,
+    /// The revision our last focus change landed at: a view older than it
+    /// says the focus from before.
+    pub applied_rev: i64,
 
     /// The Rex window a new layer opens in, as its pane provider last chose.
     pub window: Option<[u8; 43]>,
@@ -132,11 +122,13 @@ pub(crate) enum Update {
     },
     /// A newer view's windows, to read where our panes sit, and its active
     /// window's focused block, unless our own focus change is still landing.
+    /// `FocusMoved` follows it.
     Layout {
         windows: Vec<Value>,
         current: Option<String>,
     },
-    /// The user focused this block in Rex.
+    /// A newer view's focused block, unless our own focus change is still
+    /// landing: maybe the user's move, maybe what was focused already.
     FocusMoved(String),
     /// Rex closed or failed, for the reason in `closed`: nothing more will be
     /// answered.
@@ -161,11 +153,6 @@ impl Direction {
             Direction::Down => "down",
         }
     }
-}
-
-/// A block id as the JSON string Rex knows it by.
-fn block_json(block: &ids::Block) -> Value {
-    Value::String(String::from_utf8_lossy(block).into_owned())
 }
 
 /// `v` as JSON: a whole number without a fraction (`1`, not `1.0`), so Rex
@@ -194,7 +181,7 @@ impl Session {
             pending_requests: Vec::new(),
             conn: Conn::Attaching,
             view: View::default(),
-            focused_block: FocusedBlock::Unknown,
+            applied_rev: 0,
             window: None,
             queued_focus: None,
             closed: None,
@@ -261,52 +248,23 @@ impl Session {
         Ok(None)
     }
 
-    /// Asks Rex to focus `maybe_block`, unless it already has or will.
-    pub(crate) fn focus(&mut self, maybe_block: Option<ids::Block>) -> Result<(), ClientError> {
-        if self.conn == Conn::Closed {
-            return Ok(());
-        }
-        let Some(block) = maybe_block else {
-            return Ok(());
-        };
-        if self.has_focused(Some(block)) {
-            return Ok(());
-        }
+    /// Asks Rex to focus `block`, switching to its Rex window and tab.
+    pub(crate) fn focus_block(&mut self, tag: u64, block: &str) -> Result<(), ClientError> {
         self.request(
-            Request::FocusBlock,
+            Request::FocusBlock(tag),
             "session.focus_block",
-            json!({
-                "session_id": self.session_id,
-                "block_id": block_json(&block),
-            }),
+            json!({ "session_id": self.session_id, "block_id": block }),
         )?;
         log::trace(Point::Focus, 0);
-        match &mut self.focused_block {
-            FocusedBlock::Requesting {
-                block: pending_block,
-                in_flight,
-                ..
-            } => {
-                *pending_block = block;
-                *in_flight += 1;
-            }
-            other => {
-                *other = FocusedBlock::Requesting {
-                    block,
-                    in_flight: 1,
-                    applied_rev: 0,
-                }
-            }
-        }
         Ok(())
     }
 
     /// Asks Rex to focus the nearest block `dir` of the focused one. At an edge
     /// nothing moves. The new focus comes back in the view, as the user's does.
-    pub(crate) fn focus_direction(&mut self, dir: Direction) -> Result<(), ClientError> {
+    pub(crate) fn focus_direction(&mut self, tag: u64, dir: Direction) -> Result<(), ClientError> {
         // no wrap: Rex wraps by default on some versions, and an edge must stay put
         self.request(
-            Request::FocusDirection,
+            Request::FocusDirection(tag),
             "session.focus_direction",
             json!({
                 "session_id": self.session_id,
@@ -316,17 +274,6 @@ impl Session {
         )?;
         log::trace(Point::Focus, 0);
         Ok(())
-    }
-
-    /// Rex has focused `maybe_block`, or will once our request lands.
-    pub(crate) fn has_focused(&self, maybe_block: Option<ids::Block>) -> bool {
-        let Some(focused_block) = self.current_focus() else {
-            return false;
-        };
-        let Some(block) = maybe_block else {
-            return false;
-        };
-        ids::same_block(focused_block, block)
     }
 
     /// Asks for a split beside `anchor`, holding `layout`: to its left or
@@ -489,22 +436,28 @@ impl Session {
             log_request_error(req, e);
         }
         match req {
+            Request::FocusBlock(_) => {
+                self.on_focus_block_result(&res.result)?;
+                return Ok(Some(Update::Answered {
+                    req,
+                    result: res.result,
+                }));
+            }
             Request::NewSplit(_)
             | Request::NewLayer(_)
             | Request::DisownBlock(_)
             | Request::CloseBlock(_)
             | Request::CloseLayer(_)
             | Request::MoveBlock(_)
-            | Request::ResizePane(_) => {
+            | Request::ResizePane(_)
+            | Request::FocusDirection(_) => {
                 return Ok(Some(Update::Answered {
                     req,
                     result: res.result,
                 }));
             }
             Request::View => return self.on_view_result(&res.result),
-            Request::FocusBlock => self.on_focus_block_result(&res.result)?,
             Request::Attach => self.on_attach_result(&res.result)?,
-            Request::FocusDirection => {}
         }
         Ok(None)
     }
@@ -551,35 +504,37 @@ impl Session {
         Ok(())
     }
 
-    /// Records the revision our focus change landed at.
+    /// Records the revision our focus change landed at. One refused, with no
+    /// other on its way, fetches the view: where focus really is.
     fn on_focus_block_result(
         &mut self,
         result: &client::ResponseResult,
     ) -> Result<(), ClientError> {
-        let FocusedBlock::Requesting {
-            in_flight,
-            applied_rev,
-            ..
-        } = &mut self.focused_block
-        else {
-            return Ok(());
-        };
-        *in_flight -= 1;
         match result {
             client::ResponseResult::Ok(val) => {
                 let rev = client::get_int(val, "revision").unwrap_or(0);
-                if rev > *applied_rev {
-                    *applied_rev = rev;
-                }
+                self.applied_rev = self.applied_rev.max(rev);
             }
-            // refused => need to ask for view
             client::ResponseResult::Err(_) => {
-                if *in_flight == 0 {
+                if !self.focusing() {
                     self.fetch_view()?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether a focus change of ours is unanswered.
+    fn focusing(&self) -> bool {
+        self.pending_requests
+            .iter()
+            .any(|p| matches!(p.req, Request::FocusBlock(_)))
+    }
+
+    /// Whether a view at `rev` may say the focus from before our own change:
+    /// it is unanswered, or landed after `rev`.
+    fn landing(&self, rev: i64) -> bool {
+        self.focusing() || rev < self.applied_rev
     }
 
     /// Applies the view, then fetches again if it was already out of date.
@@ -629,8 +584,12 @@ impl Session {
         }
         self.view.rev = rev;
         let focused = find_focused_block(snapshot);
+        let landing = self.landing(rev);
         let focus_update = match focused {
-            Some(block) => self.apply_focus(block, rev),
+            Some(block) if !landing => Some(Update::FocusMoved(
+                String::from_utf8_lossy(&block).into_owned(),
+            )),
+            Some(_) => None,
             None => {
                 log_unexpected_response(Request::View, "focused block");
                 None
@@ -646,7 +605,6 @@ impl Session {
             self.queued_focus = Some(block);
         }
         // a view from before our focus change landed says the old focus
-        let landing = matches!(self.focused_block, FocusedBlock::Requesting { .. });
         let current = focused
             .filter(|_| !landing)
             .map(|b| String::from_utf8_lossy(&b).into_owned());
@@ -654,50 +612,6 @@ impl Session {
             windows: items.clone(),
             current,
         })
-    }
-
-    /// Reports focus the user moved; echoes of our own change are ignored.
-    fn apply_focus(&mut self, block: ids::Block, rev: i64) -> Option<Update> {
-        match self.focused_block {
-            FocusedBlock::Requesting {
-                block: pending_block,
-                in_flight,
-                applied_rev,
-            } => {
-                if in_flight > 0 || rev < applied_rev {
-                    return None;
-                }
-                if pending_block == block {
-                    self.focused_block = FocusedBlock::Settled(block);
-                    return None;
-                }
-            }
-            FocusedBlock::Settled(last_focused_block) => {
-                if last_focused_block == block {
-                    return None;
-                }
-            }
-            FocusedBlock::Unknown => {}
-        }
-
-        let report = !matches!(self.focused_block, FocusedBlock::Unknown);
-        self.focused_block = FocusedBlock::Settled(block);
-        if report {
-            Some(Update::FocusMoved(
-                String::from_utf8_lossy(&block).into_owned(),
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// The block Rex has focused, as we last saw or asked.
-    fn current_focus(&self) -> Option<ids::Block> {
-        match self.focused_block {
-            FocusedBlock::Unknown => None,
-            FocusedBlock::Settled(last_focused) => Some(last_focused),
-            FocusedBlock::Requesting { block, .. } => Some(block),
-        }
     }
 }
 
@@ -806,7 +720,7 @@ pub(crate) mod tests {
     fn requests_as_json() {
         let (mut s, theirs) = session();
         s.attach().unwrap();
-        s.focus_direction(Direction::Left).unwrap();
+        s.focus_direction(0, Direction::Left).unwrap();
         s.move_block(0, "block:a", "block:b", true, 0.5).unwrap();
         s.resize_pane(0, "block:a", "block:b", false, 1.0).unwrap();
         s.disown(0, "block:a").unwrap();
@@ -816,9 +730,7 @@ pub(crate) mod tests {
         window[..7].copy_from_slice(b"window:");
         s.window = Some(window);
         s.new_layer(4, [0.0, 0.0, 1.0, 1.0], json!(null)).unwrap();
-        s.focus(Some(block('a'))).unwrap();
-        // already asked for
-        s.focus(Some(block('a'))).unwrap();
+        s.focus_block(5, "block:a").unwrap();
         assert_eq!(8, s.pending_requests.len());
         drop(s);
         let wire = sent(theirs);
@@ -848,6 +760,10 @@ pub(crate) mod tests {
             payload(5)
         );
         assert!(payload(6).contains(r#""window_id":"window:"#));
+        assert_eq!(
+            r#"{"session_id":"session:s","block_id":"block:a"}"#,
+            payload(7)
+        );
         assert_eq!(8, wire.len());
     }
 
@@ -863,13 +779,16 @@ pub(crate) mod tests {
                               "focused_block_id": String::from_utf8_lossy(focused) }],
             })
         };
-        // the first view only learns the focus
+        // each newer view tells its layout, then its focus
         let Some(Update::Layout { windows, current }) = s.apply_view(&view(1, &a)) else {
             panic!("expected a layout");
         };
         assert_eq!(1, windows.len());
         assert_eq!(Some(String::from_utf8_lossy(&a).into_owned()), current);
-        assert!(s.has_focused(Some(a)));
+        assert_eq!(
+            Some(Update::FocusMoved(String::from_utf8_lossy(&a).into_owned())),
+            s.next().unwrap()
+        );
         // an older view is skipped
         assert_eq!(None, s.apply_view(&view(1, &b)));
         // the user moved focus: layout, then the focus
@@ -881,7 +800,7 @@ pub(crate) mod tests {
             s.next().unwrap()
         );
         // while our own focus change lands, a view says no current block
-        s.focus(Some(a)).unwrap();
+        s.focus_block(1, &String::from_utf8_lossy(&a)).unwrap();
         let Some(Update::Layout { current, .. }) = s.apply_view(&view(3, &b)) else {
             panic!("expected a layout");
         };
@@ -918,21 +837,6 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// Applies a view at `rev` focused on `focused`, and returns the focus
-    /// change it reports, if any (the layout is dropped).
-    fn view_focus(s: &mut Session, rev: i64, focused: &ids::Block) -> Option<Update> {
-        let view = json!({
-            "revision": rev,
-            "active_window_id": "window:w",
-            "windows": [{ "window_id": "window:w",
-                          "focused_block_id": String::from_utf8_lossy(focused) }],
-        });
-        let Some(Update::Layout { .. }) = s.apply_view(&view) else {
-            panic!("expected a layout");
-        };
-        s.queued_focus.take().map(Update::FocusMoved)
-    }
-
     fn view_changed(rev: i64) -> client::Event {
         client::Event {
             seq: 0,
@@ -943,62 +847,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_the_last_of_two_focus_requests_settles() {
-        let (mut s, _theirs) = session();
-        let (a, b) = (block('a'), block('b'));
-        s.focus(Some(a)).unwrap();
-        s.focus(Some(b)).unwrap();
-        let ids = pending(&s, Request::FocusBlock);
-        assert_eq!(2, ids.len());
-
-        // the first echo lands while the second is still out
-        answer(&mut s, ids[0], ok(json!({ "revision": 5 })));
-        assert_eq!(None, view_focus(&mut s, 6, &a));
-        assert!(matches!(
-            s.focused_block,
-            FocusedBlock::Requesting { in_flight: 1, .. }
-        ));
-        assert!(s.has_focused(Some(b)));
-
-        // the second answers: its echo settles, and reports nothing
-        answer(&mut s, ids[1], ok(json!({ "revision": 7 })));
-        assert_eq!(None, view_focus(&mut s, 8, &b));
-        assert!(matches!(s.focused_block, FocusedBlock::Settled(x) if x == b));
-    }
-
-    #[test]
-    fn view_older_than_applied_revision_is_ignored() {
-        let (mut s, _theirs) = session();
-        let (a, b) = (block('a'), block('b'));
-        s.focus(Some(a)).unwrap();
-        let id = pending(&s, Request::FocusBlock)[0];
-        answer(&mut s, id, ok(json!({ "revision": 10 })));
-
-        // from before our change landed: not the user's move
-        assert_eq!(None, view_focus(&mut s, 9, &b));
-        assert!(matches!(
-            s.focused_block,
-            FocusedBlock::Requesting {
-                applied_rev: 10,
-                ..
-            }
-        ));
-        assert!(s.has_focused(Some(a)));
-
-        // at the applied revision, a different block is the user's move
-        assert_eq!(
-            Some(Update::FocusMoved(String::from_utf8_lossy(&b).into_owned())),
-            view_focus(&mut s, 10, &b)
-        );
-        assert!(matches!(s.focused_block, FocusedBlock::Settled(x) if x == b));
-    }
-
-    #[test]
     fn refused_focus_fetches_view_only_when_nothing_is_in_flight() {
         let (mut s, _theirs) = session();
-        s.focus(Some(block('a'))).unwrap();
-        s.focus(Some(block('b'))).unwrap();
-        let ids = pending(&s, Request::FocusBlock);
+        s.focus_block(1, "block:a").unwrap();
+        s.focus_block(2, "block:b").unwrap();
+        let ids = [
+            pending(&s, Request::FocusBlock(1))[0],
+            pending(&s, Request::FocusBlock(2))[0],
+        ];
 
         answer(&mut s, ids[0], refused());
         assert!(pending(&s, Request::View).is_empty());
@@ -1037,36 +893,6 @@ pub(crate) mod tests {
         // an event no newer than the view read does not fetch
         s.on_event(view_changed(3)).unwrap();
         assert_eq!(Fetch::Idle, s.view.fetch);
-    }
-
-    #[test]
-    fn repeated_focus_requests_to_one_block_are_sent_once() {
-        let (mut s, _theirs) = session();
-        let (a, b) = (block('a'), block('b'));
-        s.focus(Some(a)).unwrap();
-        s.focus(Some(a)).unwrap();
-        assert_eq!(1, pending(&s, Request::FocusBlock).len());
-        assert!(matches!(
-            s.focused_block,
-            FocusedBlock::Requesting { in_flight: 1, .. }
-        ));
-
-        // a different block is a new request; asking again for it is not
-        s.focus(Some(b)).unwrap();
-        s.focus(Some(b)).unwrap();
-        assert_eq!(2, pending(&s, Request::FocusBlock).len());
-        assert!(matches!(
-            s.focused_block,
-            FocusedBlock::Requesting { in_flight: 2, .. }
-        ));
-
-        // once settled, asking for the focused block sends nothing
-        for id in pending(&s, Request::FocusBlock) {
-            answer(&mut s, id, ok(json!({ "revision": 1 })));
-        }
-        view_focus(&mut s, 2, &b);
-        s.focus(Some(b)).unwrap();
-        assert!(pending(&s, Request::FocusBlock).is_empty());
     }
 
     #[test]

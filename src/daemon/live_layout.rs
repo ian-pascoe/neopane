@@ -8,7 +8,8 @@ use super::provider::TerminalId;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct LiveLayout {
     pub areas: Vec<LayoutArea>,
-    /// The terminal that has focus, if the pane provider knows. Read from #109.
+    /// The terminal that has focus, if the pane provider knows. Unread: focus
+    /// moves come as `ProviderEvent::Focused`.
     #[allow(dead_code)]
     pub current: Option<TerminalId>,
 }

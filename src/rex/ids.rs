@@ -23,10 +23,6 @@ pub(crate) fn block(id: &[u8]) -> Result<Block, Error> {
     id.try_into().map_err(|_| Error::BadRexBlock)
 }
 
-pub(crate) fn same_block(a: Block, b: Block) -> bool {
-    a == b
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

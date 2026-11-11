@@ -360,11 +360,137 @@ fn what_rex_has_no_request_for_is_unsupported() {
     let (mut p, _theirs) = rex();
     p.ask(
         AskId(9),
-        Ask::Focus {
-            terminal: TerminalId::from("block:o"),
+        Ask::Open {
+            pane: pane(),
+            attach: attach(),
+            title: String::new(),
+            cols: 80,
+            rows: 24,
         },
     );
     assert_eq!(vec![answered(9, Outcome::Unsupported)], events(&mut p));
+}
+
+fn focus(t: &str) -> Ask {
+    Ask::Focus {
+        terminal: TerminalId::from(t),
+    }
+}
+
+#[test]
+fn focus_is_focus_block_done_once_rex_answers() {
+    let (mut p, mut theirs) = rex();
+    assert!(p.capabilities().has(Capability::Focus));
+    p.ask(AskId(1), focus(&block_id(1)));
+    p.ask(AskId(2), focus(&block_id(2)));
+    p.ask(AskId(3), focus("pane:3"));
+    reply(&mut p, &mut theirs, 1, json!({ "revision": 4 }));
+    refuse(&mut p, &mut theirs, 2, "not_found");
+    assert_eq!(
+        vec![
+            answered(3, Outcome::Failed("pane:3 is no Rex block".into())),
+            answered(1, Outcome::Done(Answer::Nothing)),
+            answered(2, Outcome::Failed("not_found: no".into())),
+        ],
+        events(&mut p)
+    );
+    let reqs = requests(p, theirs);
+    assert_eq!(
+        (
+            "session.focus_block".to_string(),
+            json!({ "session_id": "session:s", "block_id": block_id(1) })
+        ),
+        reqs[0]
+    );
+    // refused, with none other on its way: where focus really is
+    assert_eq!("session.view", reqs[2].0);
+}
+
+#[test]
+fn focus_direction_is_count_requests_without_wrapping_done_once_the_last_is_answered() {
+    let (mut p, mut theirs) = rex();
+    assert!(p.capabilities().has(Capability::FocusDirection));
+    let down = |count| Ask::FocusDirection {
+        dir: Direction::Down,
+        count,
+    };
+    p.ask(AskId(1), down(2));
+    reply(&mut p, &mut theirs, 1, json!({}));
+    assert_eq!(Vec::<ProviderEvent>::new(), events(&mut p));
+    reply(&mut p, &mut theirs, 2, json!({}));
+    assert_eq!(
+        vec![answered(1, Outcome::Done(Answer::Nothing))],
+        events(&mut p)
+    );
+    p.ask(AskId(2), down(1));
+    refuse(&mut p, &mut theirs, 3, "method_not_found");
+    assert_eq!(vec![answered(2, Outcome::Unsupported)], events(&mut p));
+    let want = (
+        "session.focus_direction".to_string(),
+        json!({ "session_id": "session:s", "direction": "down", "wrap": false }),
+    );
+    assert_eq!(vec![want.clone(), want.clone(), want], requests(p, theirs));
+}
+
+/// Rex's view changes, at `rev`, to its active window focused on `block`.
+/// What `p` tells of it.
+fn view_focused(
+    p: &mut RexProvider,
+    theirs: &mut UnixStream,
+    id: u64,
+    rev: i64,
+    block: &str,
+) -> Vec<ProviderEvent> {
+    let windows = json!([{ "window_id": window_id(2), "focused_block_id": block, "layers": [
+        { "kind": "tiled", "layout": { "block_id": block, "rect": [0, 0, 1, 1] } } ] }]);
+    view_changes(p, theirs, id, rev, windows);
+    events(p)
+}
+
+/// The focus `told` tells: the live layout's `current`, and `Focused`.
+fn focus_told(told: &[ProviderEvent]) -> (Option<&str>, Option<&str>) {
+    let current = told.iter().find_map(|e| match e {
+        ProviderEvent::Layout(l) => Some(l.current.as_ref().map(TerminalId::as_str)),
+        _ => None,
+    });
+    let focused = told.iter().find_map(|e| match e {
+        ProviderEvent::Focused(t) => Some(t.as_str()),
+        _ => None,
+    });
+    (current.expect("a layout"), focused)
+}
+
+#[test]
+fn only_the_last_of_two_focus_requests_settles() {
+    let (mut p, mut theirs) = rex();
+    let (a, b) = (block_id(1), block_id(2));
+    p.ask(AskId(1), focus(&a));
+    p.ask(AskId(2), focus(&b));
+    reply(&mut p, &mut theirs, 1, json!({ "revision": 5 }));
+    events(&mut p);
+    // the first one's echo, while the second is still out: no focus told
+    let told = view_focused(&mut p, &mut theirs, 3, 6, &a);
+    assert_eq!((None, None), focus_told(&told));
+    // the second answers: the view after it tells its block
+    reply(&mut p, &mut theirs, 2, json!({ "revision": 7 }));
+    events(&mut p);
+    let told = view_focused(&mut p, &mut theirs, 4, 8, &b);
+    assert_eq!((Some(b.as_str()), Some(b.as_str())), focus_told(&told));
+}
+
+#[test]
+fn a_view_older_than_the_revision_our_focus_landed_at_tells_no_focus() {
+    let (mut p, mut theirs) = rex();
+    let (a, b) = (block_id(1), block_id(2));
+    p.ask(AskId(1), focus(&a));
+    reply(&mut p, &mut theirs, 1, json!({ "revision": 10 }));
+    events(&mut p);
+    // from before our change landed
+    let told = view_focused(&mut p, &mut theirs, 2, 9, &b);
+    assert_eq!((None, None), focus_told(&told));
+    // at the revision it landed at, a different block is told: maybe the user's
+    let told = view_focused(&mut p, &mut theirs, 3, 10, &b);
+    assert_eq!((Some(b.as_str()), Some(b.as_str())), focus_told(&told));
 }
 
 fn window_id(n: u32) -> String {
@@ -411,9 +537,11 @@ fn each_view_is_told_as_a_live_layout_and_report_layout_answers_the_last() {
     ]);
     view_changes(&mut p, &mut theirs, 1, 1, windows);
     let told = events(&mut p);
-    let [ProviderEvent::Layout(l)] = &told[..] else {
+    // then its focus
+    let [ProviderEvent::Layout(l), ProviderEvent::Focused(f)] = &told[..] else {
         panic!("{told:?}");
     };
+    assert_eq!(b, f.as_str());
     assert_eq!(
         vec![window_id(1), window_id(2)],
         l.areas.iter().map(|a| a.id.clone()).collect::<Vec<_>>()

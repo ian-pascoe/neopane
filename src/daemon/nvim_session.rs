@@ -8,7 +8,7 @@ use std::io;
 
 use super::focus_gate::{AimForwarder, FocusGate};
 use super::pane::Pane;
-use crate::nvim::forwarder;
+use crate::nvim::forwarder::{self, Taking};
 use crate::nvim::msgpack::Decoder;
 use crate::nvim::nvim::{Nvim, UiOptions};
 use crate::nvim::windows;
@@ -95,31 +95,32 @@ impl NvimSession {
         self.gate.switch_to(&mut self.client, win, pane)
     }
 
-    /// Whether `bytes`, read from pane `pane`, whose window is `win`, make it
-    /// current, and Rex should focus it: the pane has no focus (`rex_focused`
-    /// says Rex has given it) and what was typed or clicked into it takes
-    /// focus. Scrolling it, or moving the pointer over it, doesn't: those reach
-    /// its window through `type_into` all the same, by its grid, without a
-    /// switch. `panes` is as for `type_into`. (`&mut`: aiming a forwarder
-    /// sets its grid.)
+    /// What in `bytes`, read from pane `pane`, whose window is `win`, would
+    /// make it current, and have the pane provider focus it: nothing if it
+    /// already is, or the pane provider has focused it there
+    /// (`focused_there`), else what was typed or clicked into it. Scrolling
+    /// it, or moving the pointer over it, doesn't: those reach its window
+    /// through `type_into` all the same, by its grid, without a switch.
+    /// `panes` is as for `type_into`. (`&mut`: aiming a forwarder sets its
+    /// grid.)
     pub(crate) fn takes_focus(
         &self,
         panes: &mut impl AimForwarder,
         pane: u32,
         win: Option<i64>,
-        rex_focused: bool,
+        focused_there: bool,
         bytes: &[u8],
-    ) -> bool {
+    ) -> Taking {
         let Some(w) = win else {
-            return false;
+            return Taking::Nothing;
         };
-        if w == self.current_win || rex_focused {
-            return false;
+        if w == self.current_win || focused_there {
+            return Taking::Nothing;
         }
         let Some(fwd) = panes.aim_forwarder(pane) else {
-            return false;
+            return Taking::Nothing;
         };
-        fwd.takes_focus(bytes)
+        fwd.taking(bytes)
     }
 
     /// As `type_into_at`, for a read that came now.
@@ -539,7 +540,8 @@ mod tests {
             let win = self.wins[pane as usize];
             let focus = self
                 .session
-                .takes_focus(&mut self.fwds, pane, Some(win), false, bytes);
+                .takes_focus(&mut self.fwds, pane, Some(win), false, bytes)
+                != Taking::Nothing;
             if focus {
                 self.session.make_current(pane, win).unwrap();
             }
@@ -574,11 +576,12 @@ mod tests {
             &mut self,
             pane: u32,
             win: Option<i64>,
-            rex_focused: bool,
+            focused_there: bool,
             bytes: &[u8],
         ) -> bool {
             self.session
-                .takes_focus(&mut self.fwds, pane, win, rex_focused, bytes)
+                .takes_focus(&mut self.fwds, pane, win, focused_there, bytes)
+                != Taking::Nothing
         }
     }
 
@@ -1038,7 +1041,7 @@ mod tests {
         assert!(!r.takes_focus(0, Some(w0), false, b"\x1b[<35;31;2M"));
         assert!(!r.takes_focus(0, Some(w0), false, b"\x1b[<0;31;2m"));
         assert!(!r.takes_focus(0, Some(w0), false, b"\x1b[O"));
-        // Rex has the pane focused, or Neovim's current window is its window, or it has none
+        // the pane provider has the pane focused, or Neovim's current window is its window, or it has none
         assert!(!r.takes_focus(0, Some(w0), true, b"x"));
         assert!(!r.takes_focus(1, Some(w1), false, b"x"));
         assert!(!r.takes_focus(0, None, false, b"x"));
