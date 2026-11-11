@@ -1,5 +1,6 @@
 pub mod events;
 pub mod keys;
+pub mod latency;
 pub(crate) mod pane_host;
 pub mod panes;
 pub mod rex;

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::client::{self, Client, ClientError};
 use super::ids;
 use super::web_socket::Close;
+use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 
 /// What a request asked for; tags match Rex's methods.
@@ -221,7 +222,7 @@ impl Session {
 
     /// Any Rex error closes Rex: the windows keep working without it.
     fn close_rex(&mut self, reason: &str) {
-        eprintln!("{NAME} daemon: Rex {reason}, treating it as closed");
+        log_warn!("{NAME} daemon: Rex {reason}, treating it as closed");
         self.conn = Conn::Closed;
     }
 
@@ -275,6 +276,7 @@ impl Session {
                 "block_id": block_json(&block),
             }),
         )?;
+        log::trace(Point::Focus, 0);
         match &mut self.focused_block {
             FocusedBlock::Requesting {
                 block: pending_block,
@@ -307,7 +309,9 @@ impl Session {
                 "direction": dir.tag_name(),
                 "wrap": false,
             }),
-        )
+        )?;
+        log::trace(Point::Focus, 0);
+        Ok(())
     }
 
     /// Rex has focused `maybe_block`, or will once our request lands.
@@ -459,14 +463,24 @@ impl Session {
             Request::View => return self.on_view_result(&res.result),
             Request::FocusBlock => self.on_focus_block_result(&res.result)?,
             Request::Attach => self.on_attach_result(&res.result)?,
+            Request::MoveBlock | Request::ResizePane => {
+                if !self.placing() {
+                    log::trace(Point::Placed, 0);
+                }
+            }
             Request::FocusDirection
             | Request::DisownBlock
             | Request::CloseBlock
-            | Request::CloseLayer
-            | Request::MoveBlock
-            | Request::ResizePane => {}
+            | Request::CloseLayer => {}
         }
         Ok(None)
+    }
+
+    /// Whether a pane's move or resize is still unanswered.
+    fn placing(&self) -> bool {
+        self.pending_requests
+            .iter()
+            .any(|p| matches!(p.req, Request::MoveBlock | Request::ResizePane))
     }
 
     /// Only a newer session view matters.
@@ -485,11 +499,11 @@ impl Session {
 
     fn on_closed(&mut self, c: &Close) {
         match c.code {
-            Some(code) => eprintln!(
+            Some(code) => log_info!(
                 "{NAME} daemon: Rex closed {code} {}",
                 String::from_utf8_lossy(&c.reason)
             ),
-            None => eprintln!(
+            None => log_info!(
                 "{NAME} daemon: Rex closed null {}",
                 String::from_utf8_lossy(&c.reason)
             ),
@@ -732,11 +746,12 @@ fn find_focused_block(snapshot: &Value) -> Option<ids::Block> {
 /// Rex refused a request.
 pub(crate) fn log_request_error(req: Request, e: &client::Error) {
     match req {
-        Request::NewSplit(pane) => eprintln!(
+        Request::NewSplit(pane) => log_warn!(
             "{NAME} daemon: Rex new_split for pane {pane} failed: {}: {}",
-            e.code, e.message
+            e.code,
+            e.message
         ),
-        _ => eprintln!(
+        _ => log_warn!(
             "{NAME} daemon: Rex {} failed: {}: {}",
             req.tag_name(),
             e.code,
@@ -747,7 +762,7 @@ pub(crate) fn log_request_error(req: Request, e: &client::Error) {
 
 /// Rex said yes, in a shape we can't read.
 fn log_unexpected_response(req: Request, what: &str) {
-    eprintln!("{NAME} daemon: Rex {} answer has no {what}", req.tag_name());
+    log_warn!("{NAME} daemon: Rex {} answer has no {what}", req.tag_name());
 }
 
 // These check the JSON written to Rex and the view/focus flow.
@@ -933,6 +948,24 @@ mod tests {
             name: "session_view_changed".into(),
             payload: json!({ "revision": rev }),
         }
+    }
+
+    #[test]
+    fn placing_lasts_until_the_last_move_or_resize_is_answered() {
+        let (mut s, _theirs) = session();
+        assert!(!s.placing());
+        s.move_block("block:a", "block:b", true, 0.5).unwrap();
+        s.resize_pane("block:b", "block:c", false, 0.25).unwrap();
+        s.focus(Some(block('a'))).unwrap();
+        let moved = pending(&s, Request::MoveBlock)[0];
+        let resized = pending(&s, Request::ResizePane)[0];
+        answer(&mut s, moved, refused());
+        // a refused one is answered too
+        assert!(s.placing());
+        answer(&mut s, resized, client::ResponseResult::Ok(json!({})));
+        // the focus request still waits, but no placement does
+        assert!(!s.placing());
+        assert_eq!(1, pending(&s, Request::FocusBlock).len());
     }
 
     #[test]

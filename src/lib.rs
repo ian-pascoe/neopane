@@ -5,6 +5,7 @@
 pub mod attach;
 pub mod daemon;
 pub mod debug;
+pub mod log;
 pub mod name;
 pub mod nvim;
 pub(crate) mod rex;

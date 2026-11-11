@@ -136,6 +136,10 @@ Rex sets in every pane:
 - `REX_SESSION`: the Rex session to open panes in. Required.
 - `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
   uses it as the first window's pane, and logs a note if it isn't a block id.
+- `NEOREX_LOG`: how much the daemon logs, read as it starts. `warn`: what
+  went wrong; `info`, the default: that, and what happened; `debug`: that,
+  and the trace timestamps `docs/latency.md` reads. Any other value logs a
+  warning, and `info` is used.
 
 If stdin isn't a terminal, `neorex` prints `error: NotATerminal` and exits. In
 a terminal but without `REX_SERVER` or `REX_SESSION`, it prints
@@ -146,7 +150,8 @@ The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
 private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
 `$TMPDIR`, else `/tmp`; each is used only when it is an absolute path. It logs
 to the file `log` there. On a clean exit (Neovim quits or crashes, the last
-pane closes, or a signal) the daemon removes the log and the directory. When
+pane closes, or a signal) the daemon removes the log and the directory, unless
+`NEOREX_LOG` is `debug`. When
 the daemon itself fails, they stay, and if it failed to start, neorex prints
 the log's path. `neorex help` says the same.
 

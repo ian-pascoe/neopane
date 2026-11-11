@@ -113,7 +113,10 @@ pub(crate) struct Fed {
     pub more: bool,
     /// How many bytes were read: all, unless `feed_key` stopped after a key.
     pub read: usize,
-    pub sent_key: bool,
+    /// `feed_key` stopped after a key, which it sent.
+    pub stopped_after_key: bool,
+    /// Whether keys went to Neovim with `nvim_input`.
+    pub sent_input: bool,
 }
 
 impl Forwarder {
@@ -174,10 +177,10 @@ impl Forwarder {
         }
     }
 
-    /// Sends the input in `bytes` to Neovim and flushes. False if the user
-    /// pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
-    pub(crate) fn feed(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<bool> {
-        Ok(self.read(nvim, bytes, false)?.more)
+    /// Sends the input in `bytes` to Neovim and flushes. `more` is false if
+    /// the user pressed Ctrl+Q to quit and `ctrl_q_quits` is set.
+    pub(crate) fn feed(&mut self, nvim: &mut Nvim, bytes: &[u8]) -> Result<Fed> {
+        self.read(nvim, bytes, false)
     }
 
     /// Begins a paste: the next chunk starts it.
@@ -292,7 +295,8 @@ impl Forwarder {
         let mut result = Fed {
             more: true,
             read: bytes.len(),
-            sent_key: false,
+            stopped_after_key: false,
+            sent_input: false,
         };
         self.parser.feed(bytes);
         while let Some(event) = self.parser.next() {
@@ -302,20 +306,22 @@ impl Forwarder {
                         return Ok(Fed {
                             more: false,
                             read: bytes.len(),
-                            sent_key: false,
+                            stopped_after_key: false,
+                            sent_input: result.sent_input,
                         });
                     }
                     // room for the longest key name: flush before the buffer
                     // can't hold it
                     if KEYS_CAPACITY - keys.len() < 32 {
-                        send_keys(nvim, &mut keys)?;
+                        result.sent_input |= send_keys(nvim, &mut keys)?;
                     }
                     input::write_nvim(k, &mut keys);
                     if one_key {
                         result = Fed {
                             more: true,
                             read: bytes.len() - self.parser.take_rest().len(),
-                            sent_key: true,
+                            stopped_after_key: true,
+                            sent_input: result.sent_input,
                         };
                         break;
                     }
@@ -334,7 +340,7 @@ impl Forwarder {
                         self.paste_ended_in_cr = last == b'\r';
                     }
                     if !text.is_empty() {
-                        send_keys(nvim, &mut keys)?;
+                        result.sent_input |= send_keys(nvim, &mut keys)?;
                         paste(nvim, text, self.paste_phase)?;
                         self.paste_phase = 2;
                     }
@@ -351,7 +357,7 @@ impl Forwarder {
                 Event::Mouse(m) => {
                     if let Some(mut args) = MouseArgs::from(m) {
                         // keys typed before the click go first
-                        send_keys(nvim, &mut keys)?;
+                        result.sent_input |= send_keys(nvim, &mut keys)?;
                         let to = self.route(m);
                         args.row = to.row;
                         args.col = to.col;
@@ -362,21 +368,21 @@ impl Forwarder {
             }
         }
         self.note_escape();
-        send_keys(nvim, &mut keys)?;
+        result.sent_input |= send_keys(nvim, &mut keys)?;
         nvim.flush()?;
         Ok(result)
     }
 }
 
 /// Sends buffered keys with `nvim_input`, then empties the buffer.
-fn send_keys(nvim: &mut Nvim, keys: &mut Vec<u8>) -> Result<()> {
+fn send_keys(nvim: &mut Nvim, keys: &mut Vec<u8>) -> Result<bool> {
     if keys.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     nvim.request("nvim_input", 1);
     msgpack::write_str(nvim.writer(), &keys[..]);
     keys.clear();
-    Ok(())
+    Ok(true)
 }
 
 /// One piece of a streamed `nvim_paste`. Terminals send newlines as CR, and
@@ -737,7 +743,8 @@ mod tests {
         // an embedded Neovim starts up once a UI attaches
         nvim.ui_attach(80, 24, Default::default()).unwrap();
         let mut f = Forwarder::default();
-        assert!(f.feed(&mut nvim, b"ihi").unwrap());
+        let fed = f.feed(&mut nvim, b"ihi").unwrap();
+        assert!(fed.more && fed.sent_input);
         // nvim_input is queued; wait for Neovim to type it
         let mut got = buffer_lines(&mut nvim);
         for _ in 0..200 {
@@ -748,13 +755,13 @@ mod tests {
             got = buffer_lines(&mut nvim);
         }
         assert_eq!(vec![b"hi".to_vec()], got);
-        assert!(f.feed(&mut nvim, b"\x1b[200~a\rb\x1b[201~").unwrap());
+        assert!(f.feed(&mut nvim, b"\x1b[200~a\rb\x1b[201~").unwrap().more);
         assert_eq!(
             vec![b"hia".to_vec(), b"b".to_vec()],
             buffer_lines(&mut nvim)
         );
         // Ctrl+Q quits
-        assert!(!f.feed(&mut nvim, b"\x11").unwrap());
+        assert!(!f.feed(&mut nvim, b"\x11").unwrap().more);
     }
 
     #[test]
@@ -765,7 +772,8 @@ mod tests {
         let mut a = Forwarder::default();
         let mut b = Forwarder::default();
         assert_eq!(None, a.escape_deadline());
-        a.feed(&mut nvim, b"\x1b").unwrap();
+        // no key yet: the ESC waits
+        assert!(!a.feed(&mut nvim, b"\x1b").unwrap().sent_input);
         let due = a.escape_deadline().expect("A's ESC waits");
         let timeout = Duration::from_millis(u64::from(input::ESCAPE_TIMEOUT_MS));
         assert!(due <= Instant::now() + timeout);
@@ -773,7 +781,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         for _ in 0..3 {
             b.feed(&mut nvim, b"\x1b[<35;3;3M").unwrap();
-            b.feed(&mut nvim, b"\x1b[I").unwrap();
+            assert!(!b.feed(&mut nvim, b"\x1b[I").unwrap().sent_input);
         }
         assert_eq!(Some(due), a.escape_deadline());
         assert_eq!(None, b.escape_deadline());

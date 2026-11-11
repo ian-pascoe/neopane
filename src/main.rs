@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use neorex::daemon::{launch, pane_helper, serve};
 use neorex::debug;
+use neorex::log;
 use neorex::name::NAME;
 
 fn usage() -> String {
@@ -26,10 +27,13 @@ to find its pane. Only debug-rex reads them, of the debug commands.
 The daemon logs to `log` in its private directory, {NAME}-<launcher pid>.XXXXXX in
 $XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
 On a clean exit (Neovim quits or crashes, the last pane closes, or a signal) the
-daemon removes the log.
+daemon removes the log, unless {log} is debug.
+{log} sets what the daemon logs: warn, info (the default), or debug, which adds
+trace timestamps.
 When the daemon itself fails, the log and directory stay, and if it failed to start,
 {NAME} prints the log's path.
-"
+",
+        log = log::env_var()
     )
 }
 
@@ -74,6 +78,10 @@ fn run() -> Result<()> {
     if cmd == "debug-rex" && rest.len() == 1 {
         return debug::rex::run(&rest[0]);
     }
+    // hidden: for docs/latency.md
+    if cmd == "debug-latency" && rest.len() == 1 {
+        return debug::latency::run(&rest[0]);
+    }
     if cmd == "pane" && rest.len() == 1 {
         return Ok(pane_helper::run(&rest[0], None)?);
     }
@@ -87,7 +95,14 @@ fn run() -> Result<()> {
     if cmd == "daemon" && !rest.is_empty() {
         return serve::run(&rest[0].to_string_lossy(), &rest[1..]);
     }
-    for known in ["debug-keys", "debug-panes", "debug-rex", "pane", "daemon"] {
+    for known in [
+        "debug-keys",
+        "debug-panes",
+        "debug-rex",
+        "debug-latency",
+        "pane",
+        "daemon",
+    ] {
         if cmd == known {
             usage_exit();
         }
@@ -144,6 +159,7 @@ mod tests {
             "XDG_RUNTIME_DIR",
             "TMPDIR",
             &format!("`log` in its private directory, {NAME}-<launcher pid>.XXXXXX"),
+            &format!("{}_LOG", neorex::name::upper()),
         ] {
             assert!(usage().contains(want), "{want}");
         }

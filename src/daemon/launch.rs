@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use super::pane_helper;
 use super::serve;
+use crate::log::{self, LogLevel, Point, Traces};
 use crate::name::NAME;
 
 /// The launcher is a top layer: any error will do.
@@ -29,6 +30,8 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
+    // L6 is timed from here
+    let started = log::now_ns();
     // SAFETY: isatty only inspects the fd.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 0 {
         return Err(Error::NotATerminal.into());
@@ -43,7 +46,14 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
     let dir = serve::private_dir()?;
     let sock = serve::path(&dir, "sock");
     let log_path = serve::path(&dir, "log");
-    let log = serve::create_log(&log_path)?;
+    let mut log = serve::create_log(&log_path)?;
+    // the daemon warns of a level it doesn't know
+    if log::from_env().0 == LogLevel::Debug {
+        let mut traces = Traces::new();
+        traces.set_on(true);
+        traces.record(Point::Exec, u64::from(std::process::id()), started, None);
+        traces.write_into(&mut log)?;
+    }
     // (the log is closed here once the command, which holds it, is dropped)
     let mut daemon = Command::new(&exe)
         .arg("daemon")
