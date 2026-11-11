@@ -8,6 +8,7 @@
 - `src/config/` runs the user's `init.lua` in a config child, the hidden `config-child` command, and checks what its `provider` returned with the daemon's own rules (ADR 0007). The child sends a plain tree back in a frozen encoding (`tree.rs`, `wire.rs`): a daemon reads answers from a newer binary after an upgrade in place.
 - `src/attach/` defines the attach protocol: its frames, hello, pane ids and attach command (`docs/attach-protocol.md`).
 - With Rex closed, a new window is drawn in its origin pane, laid out as Neovim lays out splits: `src/daemon/pane_layout.rs` keeps each pane's layout, and `PaneView::frame_laid_out` draws it (ADR 0009).
+- `src/daemon/provider.rs` is the pane provider seam: the daemon asks a capability (`Ask`) and reads answers and events (`ProviderEvent`); `src/daemon/asks.rs` queues the asks, times them out and falls back. `src/providers/` holds the pane providers: Rex's, built in (`providers/rex/`). Focus, live layout and tab page placement still call Rex directly, until they move onto the seam.
 - `src/screen/` draws grids into panes. `src/rex/` is the Rex WebSocket client. `src/term/` handles key input and the terminal.
 
 A new note is a change on both sides: `note` in `windows.lua`, and the parser in `windows.rs`.
