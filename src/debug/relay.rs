@@ -209,6 +209,13 @@ impl RelayPane {
     }
 }
 
+/// The socket, for a test to wait on without holding the pane.
+impl AsRawFd for RelayPane {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.stream.as_raw_fd()
+    }
+}
+
 /// Makes `stream`'s send and receive buffers `bytes` long: for a test's
 /// daemon end of a relayed pane, beside [`RelayPane::shrink`].
 pub fn shrink(stream: &UnixStream, bytes: i32) -> io::Result<()> {

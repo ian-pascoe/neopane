@@ -11,6 +11,7 @@ use crate::daemon::provider::fake::FakeProvider;
 use crate::daemon::surface::{cells, open_pty};
 use crate::debug::relay::{self, RelayPane};
 use crate::nvim::nvim::spawn_for_test_with;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,8 +31,10 @@ const STALL_LIMIT: Duration = Duration::from_secs(3);
 enum Screen {
     /// A pty's master, the pty handed over.
     Pty(RawFd),
-    /// The relay test tool, with no pty: shared with the thread reading it.
-    Relayed(Arc<Mutex<RelayPane>>),
+    /// The relay test tool, with no pty, and its socket: shared with the
+    /// thread reading it, which waits on the socket without holding it, so
+    /// typing isn't kept waiting.
+    Relayed(Arc<Mutex<RelayPane>>, RawFd),
 }
 
 /// A terminal emulator for one pane: reads what it is sent into `seen`,
@@ -52,7 +55,8 @@ impl Emulator {
     /// An emulator playing a relayed pane's terminal with the relay test
     /// tool.
     fn relayed(pane: RelayPane) -> Emulator {
-        Emulator::start(Screen::Relayed(Arc::new(Mutex::new(pane))))
+        let socket = pane.as_raw_fd();
+        Emulator::start(Screen::Relayed(Arc::new(Mutex::new(pane)), socket))
     }
 
     fn start(screen: Screen) -> Emulator {
@@ -80,10 +84,11 @@ impl Emulator {
                     held_since = None;
                     let more = match &*screen {
                         Screen::Pty(master) => read_pty(*master),
-                        Screen::Relayed(pane) => {
+                        Screen::Relayed(pane, socket) => {
+                            // the hello may still be going out: read sends it
+                            readable_within_20_ms(*socket);
                             let mut pane = pane.lock().unwrap();
-                            let some = |p: &RelayPane| !p.output().is_empty();
-                            pane.read_until(Duration::from_millis(20), some).unwrap();
+                            pane.read().unwrap();
                             let out = pane.take_output();
                             (!pane.gone() || !out.is_empty()).then_some(out)
                         }
@@ -127,21 +132,26 @@ impl Emulator {
                 let n = unsafe { libc::write(*master, text.as_ptr().cast(), text.len()) };
                 assert_eq!(text.len() as isize, n);
             }
-            Screen::Relayed(pane) => pane.lock().unwrap().type_bytes(text.as_bytes()).unwrap(),
+            Screen::Relayed(pane, _) => pane.lock().unwrap().type_bytes(text.as_bytes()).unwrap(),
         }
     }
+}
+
+/// Whether `fd` has something to read within 20 ms.
+fn readable_within_20_ms(fd: RawFd) -> bool {
+    let mut fds = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    // SAFETY: one valid pollfd.
+    unsafe { libc::poll(fds.as_mut_ptr(), 1, 20) > 0 }
 }
 
 /// What a pty's `master` has to read within 20 ms; None once its slave
 /// closed.
 fn read_pty(master: RawFd) -> Option<Vec<u8>> {
-    let mut fds = [libc::pollfd {
-        fd: master,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: one valid pollfd.
-    if unsafe { libc::poll(fds.as_mut_ptr(), 1, 20) } <= 0 {
+    if !readable_within_20_ms(master) {
         return Some(Vec::new());
     }
     let mut buf = [0u8; 4096];
@@ -366,6 +376,8 @@ fn a_pane_nobody_reads_doesnt_stop_another_pane_or_its_input(transport: Transpor
     };
     rig.panes[0].held.store(true, Ordering::SeqCst);
     rig.churn(0, 10);
+    // its output backed up: a daemon that waited for it would stall
+    assert!(!rig.surface(0).backlog.is_empty(), "nothing backed up");
     rig.panes[1].type_text("ihello");
     rig.pump(|r| r.panes[1].seen().contains("hello"));
     // (had it stalled, its emulator would have let it go on, to end the test)
@@ -448,6 +460,7 @@ fn a_pane_nobody_reads_closes_without_stopping_the_others(transport: Transport) 
     };
     rig.panes[1].held.store(true, Ordering::SeqCst);
     rig.churn(1, 20);
+    assert!(!rig.surface(1).backlog.is_empty(), "nothing backed up");
     let win = rig.win(1);
     rig.lua(&format!("vim.api.nvim_win_close({win}, true)"));
     rig.pump(|r| r.d.panes.by_id(1).is_none());
