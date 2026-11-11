@@ -1,13 +1,16 @@
 //! A pane whose terminal nobody reads, as Rex may leave a hidden or throttled
 //! one, beside a pane that is read: a real Neovim, a daemon on this thread,
-//! and threads playing the two terminal emulators.
+//! and threads playing the two terminal emulators. Each test runs under
+//! both transports: over a pty handed over, and relayed with no pty.
 
 use super::*;
+use crate::attach::{Frame, Message, Transport};
 use crate::daemon::attach_conn;
 use crate::daemon::fdpass;
 use crate::daemon::provider::fake::FakeProvider;
 use crate::daemon::surface::{cells, open_pty};
 use crate::nvim::nvim::spawn_for_test_with;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,10 +25,28 @@ const PUMP_TIMER_TOKEN: usize = usize::MAX;
 /// How long the unread pane is held before the daemon counts as stalled.
 const STALL_LIMIT: Duration = Duration::from_secs(3);
 
-/// A terminal emulator for one pane: reads its pty's master into `seen`,
+/// What an emulator reads a pane's output from, and types into.
+enum End {
+    /// A pty's master.
+    Pty(RawFd),
+    /// The helper's end of a relayed pane's socket: `o` frames out, `i`
+    /// frames in.
+    Relay(UnixStream),
+}
+
+impl End {
+    fn fd(&self) -> RawFd {
+        match self {
+            End::Pty(master) => *master,
+            End::Relay(s) => s.as_raw_fd(),
+        }
+    }
+}
+
+/// A terminal emulator for one pane: reads what it is sent into `seen`,
 /// except while `held`.
 struct Emulator {
-    master: RawFd,
+    end: Arc<End>,
     seen: Arc<Mutex<Vec<u8>>>,
     held: Arc<AtomicBool>,
     /// Set once the daemon was blocked past `STALL_LIMIT` by this terminal
@@ -37,7 +58,8 @@ struct Emulator {
 }
 
 impl Emulator {
-    fn start(master: RawFd) -> Emulator {
+    fn start(end: End) -> Emulator {
+        let end = Arc::new(end);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let held = Arc::new(AtomicBool::new(false));
         let stalled = Arc::new(AtomicBool::new(false));
@@ -45,9 +67,13 @@ impl Emulator {
         let thread = {
             let (seen, held, stalled, done) =
                 (seen.clone(), held.clone(), stalled.clone(), done.clone());
+            let end = end.clone();
             std::thread::spawn(move || {
+                let master = end.fd();
                 let mut held_since: Option<Instant> = None;
                 let mut buf = [0u8; 4096];
+                // relayed bytes not yet a whole frame
+                let mut framed = Vec::new();
                 while !done.load(Ordering::SeqCst) {
                     if held.load(Ordering::SeqCst) {
                         let since = *held_since.get_or_insert_with(Instant::now);
@@ -75,12 +101,24 @@ impl Emulator {
                         std::thread::sleep(Duration::from_millis(10));
                         continue;
                     }
-                    seen.lock().unwrap().extend_from_slice(&buf[..n as usize]);
+                    let got = &buf[..n as usize];
+                    match *end {
+                        End::Pty(_) => seen.lock().unwrap().extend_from_slice(got),
+                        End::Relay(_) => {
+                            framed.extend_from_slice(got);
+                            while let Some((f, n)) = Frame::decode(&framed).unwrap() {
+                                framed.drain(..n);
+                                if let Some(Message::Output(o)) = Message::decode(&f).unwrap() {
+                                    seen.lock().unwrap().extend_from_slice(&o);
+                                }
+                            }
+                        }
+                    }
                 }
             })
         };
         Emulator {
-            master,
+            end,
             seen,
             held,
             stalled,
@@ -104,9 +142,17 @@ impl Emulator {
 
     /// Types `text` into the pane.
     fn type_text(&self, text: &str) {
-        // SAFETY: `text` is valid for its length.
-        let n = unsafe { libc::write(self.master, text.as_ptr().cast(), text.len()) };
-        assert_eq!(text.len() as isize, n);
+        match &*self.end {
+            End::Pty(master) => {
+                // SAFETY: `text` is valid for its length.
+                let n = unsafe { libc::write(*master, text.as_ptr().cast(), text.len()) };
+                assert_eq!(text.len() as isize, n);
+            }
+            End::Relay(s) => {
+                let frame = Message::Input(text.as_bytes().to_vec()).encode().unwrap();
+                std::io::Write::write_all(&mut &*s, &frame).unwrap();
+            }
+        }
     }
 }
 
@@ -116,8 +162,10 @@ impl Drop for Emulator {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        // SAFETY: the emulator owns the master.
-        unsafe { libc::close(self.master) };
+        if let End::Pty(master) = *self.end {
+            // SAFETY: the emulator owns the master.
+            unsafe { libc::close(master) };
+        }
     }
 }
 
@@ -142,9 +190,28 @@ impl Drop for Rig {
     }
 }
 
+/// Makes a relayed pane's socket buffer `opt` small, as a pty's is, so a
+/// frame of the startup pane is more than it holds: the sender's counts on
+/// Linux, the receiver's on macOS.
+fn small_buffer(s: &UnixStream, opt: libc::c_int) {
+    let size: libc::c_int = 4096;
+    // SAFETY: a valid int option of the size given.
+    let r = unsafe {
+        libc::setsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            opt,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(0, r);
+}
+
 impl Rig {
-    /// None when Neovim isn't installed.
-    fn start() -> Option<Rig> {
+    /// Its panes' terminals attached over `transport`. None when Neovim
+    /// isn't installed.
+    fn start(transport: Transport) -> Option<Rig> {
         let nvim = spawn_for_test_with(&[
             "nvim",
             "--clean",
@@ -165,14 +232,27 @@ impl Rig {
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
 
-        // the startup pane: big, so a frame of it is bigger than a pty holds
-        let (master0, slave0) = open_pty(200, 60);
+        // the startup pane: big, so a frame of it is bigger than a pty, or
+        // a socket made small, holds
         let (socket0, helper0) = UnixStream::pair().unwrap();
-        let startup = Pane::startup(
-            Some(TerminalId::from(TERMINAL)),
-            Surface::create(socket0, slave0, cells(200, 60)),
-        );
-        let pane0 = Emulator::start(master0);
+        let (surface0, pane0) = match transport {
+            Transport::Fd => {
+                let (master0, slave0) = open_pty(200, 60);
+                let surface = Surface::create(socket0, slave0, cells(200, 60));
+                (surface, Emulator::start(End::Pty(master0)))
+            }
+            Transport::Relay => {
+                socket0.set_nonblocking(true).unwrap();
+                small_buffer(&socket0, libc::SO_SNDBUF);
+                small_buffer(&helper0, libc::SO_RCVBUF);
+                let surface = Surface::relayed(socket0, cells(200, 60));
+                (
+                    surface,
+                    Emulator::start(End::Relay(helper0.try_clone().unwrap())),
+                )
+            }
+        };
+        let startup = Pane::startup(Some(TerminalId::from(TERMINAL)), surface0);
         d.start(startup).unwrap();
 
         // one per rig: the tests run side by side
@@ -196,16 +276,31 @@ impl Rig {
         // as its terminal would run it
         rig.lua("vim.cmd('vsplit | enew')");
         rig.pump(|r| r.d.panes.by_id(1).is_some());
-        let (master1, slave1) = open_pty(100, 30);
         let helper = UnixStream::connect(&rig.sock).unwrap();
         let id = rig.d.panes.by_id(1).unwrap().attach_id.unwrap();
-        let hello = attach_conn::requested_hello(id, attach_conn::test_terminal(100, 30));
-        fdpass::send(&helper, &hello, slave1).unwrap();
-        // SAFETY: the daemon has its own copy now.
-        unsafe { libc::close(slave1) };
+        let mut terminal = attach_conn::test_terminal(100, 30);
+        terminal.transport = transport;
+        let hello = attach_conn::requested_hello(id, terminal);
+        let emulator = match transport {
+            Transport::Fd => {
+                let (master1, slave1) = open_pty(100, 30);
+                fdpass::send(&helper, &hello, slave1).unwrap();
+                // SAFETY: the daemon has its own copy now.
+                unsafe { libc::close(slave1) };
+                Emulator::start(End::Pty(master1))
+            }
+            Transport::Relay => {
+                small_buffer(&helper, libc::SO_RCVBUF);
+                std::io::Write::write_all(&mut &helper, &hello).unwrap();
+                Emulator::start(End::Relay(helper.try_clone().unwrap()))
+            }
+        };
         rig.helper_ends.push(helper);
-        rig.panes.push(Emulator::start(master1));
+        rig.panes.push(emulator);
         rig.d.accept(&server).unwrap();
+        if transport == Transport::Relay {
+            small_buffer(&rig.surface(1).helper_socket, libc::SO_SNDBUF);
+        }
         rig.pump(|r| !r.panes[1].seen().is_empty());
         Some(rig)
     }
@@ -285,9 +380,8 @@ impl Rig {
 // The reproduction for #39. Pane 0's terminal isn't read while Neovim
 // redraws it many times over; typing into pane 1 must still reach Neovim, and
 // its echo pane 1, within `STALL_LIMIT`.
-#[test]
-fn a_pane_nobody_reads_doesnt_stop_another_pane_or_its_input() {
-    let Some(mut rig) = Rig::start() else {
+fn a_pane_nobody_reads_doesnt_stop_another_pane_or_its_input(transport: Transport) {
+    let Some(mut rig) = Rig::start(transport) else {
         return;
     };
     rig.panes[0].held.store(true, Ordering::SeqCst);
@@ -332,9 +426,8 @@ fn row_at(frame: &str, r: u32) -> Option<&str> {
 
 // An unread pane's waiting output is capped: the frames past it are dropped,
 // and once the terminal reads again the pane is drawn whole, in one frame.
-#[test]
-fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again() {
-    let Some(mut rig) = Rig::start() else {
+fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again(transport: Transport) {
+    let Some(mut rig) = Rig::start(transport) else {
         return;
     };
     rig.surface(0).backlog.cap = 16 * 1024;
@@ -369,9 +462,8 @@ fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again() {
 
 // Closing a pane writes nothing more to its terminal (its helper restores
 // it), so one nobody reads mustn't hold the daemon up.
-#[test]
-fn a_pane_nobody_reads_closes_without_stopping_the_others() {
-    let Some(mut rig) = Rig::start() else {
+fn a_pane_nobody_reads_closes_without_stopping_the_others(transport: Transport) {
+    let Some(mut rig) = Rig::start(transport) else {
         return;
     };
     rig.panes[1].held.store(true, Ordering::SeqCst);
@@ -387,3 +479,29 @@ fn a_pane_nobody_reads_closes_without_stopping_the_others() {
         "the daemon waited for the closing pane"
     );
 }
+
+/// Runs each test under both transports, as `<test>::fd` and
+/// `<test>::relay`.
+macro_rules! over_both_transports {
+    ($($test:ident),*) => {$(
+        mod $test {
+            use super::*;
+
+            #[test]
+            fn fd() {
+                super::$test(Transport::Fd);
+            }
+
+            #[test]
+            fn relay() {
+                super::$test(Transport::Relay);
+            }
+        }
+    )*};
+}
+
+over_both_transports!(
+    a_pane_nobody_reads_doesnt_stop_another_pane_or_its_input,
+    a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again,
+    a_pane_nobody_reads_closes_without_stopping_the_others
+);
