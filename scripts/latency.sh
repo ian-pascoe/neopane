@@ -7,7 +7,9 @@
 # SCENARIO is one of:
 #   keys    L4: N keys typed in insert mode
 #   split   L1: N `:vsplit`s, each closed again
-#   focus   L2: N `<C-w>w`s between two windows, each followed by a key
+#   focus   L2: N `<C-w>w`s between two windows, each with a key in one send
+#   switch  L2: N keys typed into the other of two windows' panes, each held
+#           behind the window switch it makes
 #   tabs    L3: N `gt`s between two tab pages of two windows each
 #   resize  L5: 2N resizes of a split's terminal, smaller and back
 #   exec    L6: N launches of `<name> -O a b`, each quit again
@@ -16,7 +18,7 @@
 # N defaults to 50. BIN is the binary to time, target/release/<name> by
 # default: build it first. Its name, the file name of BIN, gives the log
 # variable, <NAME>_LOG. The logs go to OUT, /tmp/<name>-latency by default:
-# OUT/SCENARIO.log is the one read. The session is killed at the end.
+# OUT/SCENARIO.log is the one read. The Rex session is killed at the end.
 set -euo pipefail
 
 scenario=${1:?usage: scripts/latency.sh SCENARIO [N]}
@@ -47,7 +49,7 @@ session=$(printf '%s' "$created" | jq -er '.session_id')
 shell=$(printf '%s' "$created" | jq -er '.initial_windows[0].block_ids[0]')
 trap 'rex session kill "$session" >/dev/null 2>&1 || true' EXIT
 
-# text to the focused pane, keys to it, a command line run in it. Tried again
+# text to the pane Rex has focused, keys to it, a command line run in it. Tried again
 # once: the pane Rex had focused may have just closed.
 send() { rex send -s "$session" "$1" || { sleep 0.3 && rex send -s "$session" "$1"; }; }
 key() { rex send-key -s "$session" "$@" || { sleep 0.3 && rex send-key -s "$session" "$@"; }; }
@@ -86,12 +88,20 @@ split)
   done
   ;;
 focus)
-  launch
-  cmd vsplit
-  sleep 1
+  # two windows from the start: no key before the loop asks for focus
+  launch -O a b
   for _ in $(seq "$n"); do
-    send $'\x17w'
-    send l
+    send $'\x17wl'
+    sleep 0.3
+  done
+  ;;
+switch)
+  launch -O a b
+  # the launcher's pane shows a, current; the split's shows b
+  panes=("$(rex block ls -s "$session" --json |
+    jq -er --arg name "$name" '[.blocks[] | select(.label == $name)][0].block_id')" "$shell")
+  for i in $(seq "$n"); do
+    rex send -s "$session" -b "${panes[i % 2 == 1 ? 0 : 1]}" l
     sleep 0.3
   done
   ;;

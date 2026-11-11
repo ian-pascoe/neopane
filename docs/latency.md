@@ -22,11 +22,11 @@ otherwise.
 |---|---|
 | `exec` | The launcher started (its id is its pid). Written by the launcher. |
 | `split` | A new pane's split asked of Rex. |
-| `frame` | A frame written to a pane's terminal. |
+| `frame` | A frame written to a pane's terminal in full: once its last byte went out. |
 | `input` | A read's keys written to Neovim with `nvim_input`; `from` is when the read came. |
 | `held_input` | As `input`, for a read held behind a window switch. |
 | `focus` | A focus request (`focus_block`, `focus_direction`) written to Rex (id 0). |
-| `tab_move` | A pane of another tab page became the focused one. |
+| `tab_move` | A pane of another tab page became the current pane. |
 | `resize` | A pane's terminal was resized. |
 | `resize_sent` | Its window asked to resize to fit, if its size changed. |
 | `place` | A tab page's panes asked to be placed (moved or resized; id: the tab page). |
@@ -46,8 +46,8 @@ milliseconds, for each criterion found in the log. It pairs the points so:
 | Criterion | From | To |
 |---|---|---|
 | L1 | `split` | the first `frame` of that pane |
-| L2 focus | the read of the last key written before a `focus` (within 1 s) | the `focus` |
-| L2 next | the read of the first key after a `focus` | its `input` |
+| L2 focus | the read of the last key read before a `focus` (within 1 s): one Neovim switched windows for, such as `<C-w>w`'s, or one typed into another pane | the `focus` |
+| L2 next | the read of a key held behind a window switch | its `held_input` |
 | L3 | a `tab_move`, or the read of the key that made it (within 100 ms before) | the last `frame` before the next key or move (within 1 s) |
 | L4 | the read of a key | its `input` (held keys are L2's) |
 | L5 | `resize` | the pane's next `resize_sent`, unless another `resize` comes first |
@@ -56,6 +56,11 @@ milliseconds, for each criterion found in the log. It pairs the points so:
 | L7 | `accept` | the `found` with its id |
 | L8 | `place` | the next `placed`, unless another `place` comes first |
 | L9 | `hello` | the `accepted` with its id |
+
+Neovim makes `<C-w>w`'s switch itself, and a key typed after it goes
+straight to Neovim, timed by L4. Keys wait only behind a switch the daemon
+asks for, as when a key is typed into a pane that isn't the current pane:
+L2 next times those.
 
 Run each scenario on a log of its own: the pairing assumes nothing else
 happens in between, which a scripted scenario makes so.
@@ -66,7 +71,7 @@ happens in between, which a scripted scenario makes so.
 own, made with `rex new` and killed at the end, then prints the table above
 for it. It needs `rex` and `jq`, and times `target/release/neorex` (build it
 first; `BIN` names another). It runs Neovim with `--clean`, and types through
-`rex send` into the focused pane, as Rex would from the keyboard. It keeps
+`rex send` into the pane Rex has focused, as Rex would from the keyboard. It keeps
 each daemon's files under `/tmp/neorex-latency/SCENARIO/`, and the log it
 read as `/tmp/neorex-latency/SCENARIO.log`. Run it with N ≥ 50 (it defaults
 to 50), and nothing else busy on the machine.
@@ -75,7 +80,8 @@ to 50), and nothing else busy on the machine.
 |---|---|---|
 | `keys` | L4 | Types N keys in insert mode, 50 ms apart. |
 | `split` | L1 | N times: `:vsplit`, then `:close`. |
-| `focus` | L2 | Two windows; N times: `<C-w>w`, then `l` at once. |
+| `focus` | L2 focus | Two windows; N times: `<C-w>w` and `l` in one send. |
+| `switch` | L2 next | Two windows; N times: `l` typed into the pane that isn't the current pane, which makes its window current and is held behind that switch. |
 | `tabs` | L3 | Two tab pages of two windows each; N `gt`s, 400 ms apart. |
 | `resize` | L5 | A split's terminal resized smaller and back, N times each, through Rex's `terminal.resize`. |
 | `exec` | L6 | N launches of `neorex --clean -O a b`, each quit with `:qa!`. |
@@ -112,18 +118,23 @@ with `scripts/latency.sh SCENARIO 55`. Times in milliseconds.
 
 | Criterion | Scenario | N | Median | p95 |
 |---|---|---|---|---|
-| L1 | `split` | 55 | 50.002 | 89.901 |
-| L2 focus | `focus` | 56 | 0.809 | 1.390 |
-| L2 next | `focus` | 56 | 0.008 | 0.019 |
-| L3 | `tabs` | 54 | 4.616 | 26.792 |
+| L1 | `split` | 55 | 50.028 | 66.273 |
+| L2 focus | `focus` | 55 | 1.050 | 1.407 |
+| L2 focus, typed into another pane | `switch` | 55 | 0.024 | 0.043 |
+| L2 next | `switch` | 55 | 0.384 | 0.607 |
+| L3 | `tabs` | 54 | 2.373 | 3.652 |
 | L4 | `keys` | 59 | 0.008 | 0.021 |
 | L5 | `resize` | 110 | 0.015 | 0.038 |
-| L6 first | `exec` | 55 | 17.197 | 36.255 |
-| L6 second | `exec` | 55 | 71.982 | 140.018 |
+| L6 first | `exec` | 55 | 17.647 | 41.050 |
+| L6 second | `exec` | 55 | 73.580 | 153.137 |
 | L8 | `place` | 55 | 1.239 | 2.597 |
 
-L1 and L6 include Rex starting each new pane's helper process; L3, that
-none of the session's panes is 200×50 (see above).
+L1 and L6 include Rex starting each new pane's helper process. L3 is timed
+on the headless session's 80×24 panes: its baseline serves the regression
+rule only, and its absolute limit, p95 ≤ 16 ms with 4 panes of 200×50, is
+checked in a session an app shows at that size, which no headless baseline
+stands in for. (`tabs` makes one fewer sample than N: its first `gt` leaves a
+window whose pane isn't made yet, which isn't counted as a move.)
 
 L4 with tracing off has no numbers of its own, since the timestamps are
 the traces. Off, the key path is as before but for one atomic load at each

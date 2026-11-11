@@ -77,7 +77,7 @@ pub(crate) fn measure(traces: &[Trace]) -> Vec<Criterion> {
         c(
             "L1",
             "split asked -> first frame in the new pane",
-            first_with_same_id(traces, Point::Split, Point::Frame),
+            pair(traces, Point::Split, Point::Frame, By::Id),
         ),
         c(
             "L2 focus",
@@ -86,27 +86,23 @@ pub(crate) fn measure(traces: &[Trace]) -> Vec<Criterion> {
         ),
         c(
             "L2 next",
-            "next key read -> its nvim_input written",
-            next_key_after_focus(traces),
+            "key held behind a window switch read -> its nvim_input written",
+            latencies(traces, Point::HeldInput),
         ),
         c(
             "L3",
-            "pane of another tab page focused -> last pane's frame written",
+            "another tab page's pane made current -> last pane's frame written",
             tab_move_to_last_frame(traces),
         ),
         c(
             "L4",
             "key read -> nvim_input written",
-            traces
-                .iter()
-                .filter(|t| t.point == Point::Input)
-                .filter_map(input_latency)
-                .collect(),
+            latencies(traces, Point::Input),
         ),
         c(
             "L5",
             "terminal resize received -> window resize sent",
-            first_with_same_id(traces, Point::Resize, Point::ResizeSent),
+            pair(traces, Point::Resize, Point::ResizeSent, By::Id),
         ),
         c("L6 first", "exec -> first frame", exec_to_frames(traces, 1)),
         c(
@@ -117,17 +113,17 @@ pub(crate) fn measure(traces: &[Trace]) -> Vec<Criterion> {
         c(
             "L7",
             "accept -> find confirmed",
-            first_with_same_id(traces, Point::Accept, Point::Found),
+            pair(traces, Point::Accept, Point::Found, By::Id),
         ),
         c(
             "L8",
             "placement asked -> last placement answered",
-            next_after(traces, Point::Place, Point::Placed),
+            pair(traces, Point::Place, Point::Placed, By::Order),
         ),
         c(
             "L9",
             "hello received -> accepted",
-            first_with_same_id(traces, Point::Hello, Point::Accepted),
+            pair(traces, Point::Hello, Point::Accepted, By::Id),
         ),
     ]
 }
@@ -141,16 +137,25 @@ fn is_input(t: &Trace) -> bool {
     t.point == Point::Input || t.point == Point::HeldInput
 }
 
-/// From each `start` to the first `end` with its id, unless another `start`
-/// with that id comes first.
-fn first_with_same_id(traces: &[Trace], start: Point, end: Point) -> Vec<u64> {
+/// Which `end` a `start` pairs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum By {
+    /// The first with its id.
+    Id,
+    /// The first.
+    Order,
+}
+
+/// From each `start` to the first `end` after it, of its id if `by` says,
+/// unless another such `start` comes first.
+fn pair(traces: &[Trace], start: Point, end: Point, by: By) -> Vec<u64> {
     let mut out = Vec::new();
     for (i, s) in traces.iter().enumerate() {
         if s.point != start {
             continue;
         }
         for e in &traces[i + 1..] {
-            if e.id != s.id {
+            if by == By::Id && e.id != s.id {
                 continue;
             }
             if e.point == end {
@@ -165,69 +170,36 @@ fn first_with_same_id(traces: &[Trace], start: Point, end: Point) -> Vec<u64> {
     out
 }
 
-/// From each `start` to the first `end` after it, unless another `start`
-/// comes first.
-fn next_after(traces: &[Trace], start: Point, end: Point) -> Vec<u64> {
-    let mut out = Vec::new();
-    for (i, s) in traces.iter().enumerate() {
-        if s.point != start {
-            continue;
-        }
-        for e in &traces[i + 1..] {
-            if e.point == end {
-                out.push(e.t - s.t);
-                break;
-            }
-            if e.point == start {
-                break;
-            }
-        }
-    }
-    out
+/// The latencies of the keys traced at `point`: each read to its `nvim_input`.
+fn latencies(traces: &[Trace], point: Point) -> Vec<u64> {
+    traces
+        .iter()
+        .filter(|t| t.point == point)
+        .filter_map(input_latency)
+        .collect()
 }
 
-/// From the read of the last key written before each focus request, within
-/// the window, to the request. Each key counts once.
+/// From the read of the last key read before each focus request, within
+/// the window, to the request: a key Neovim switched windows for, such as
+/// `<C-w>w`'s, written before it, or one typed into another pane, held
+/// behind the switch it made and written after it. Each key counts once.
 fn key_to_focus(traces: &[Trace]) -> Vec<u64> {
     let mut used = vec![false; traces.len()];
     let mut out = Vec::new();
-    for (i, f) in traces.iter().enumerate() {
-        if f.point != Point::Focus {
-            continue;
-        }
-        let Some(k) = (0..i).rev().find(|&k| is_input(&traces[k])) else {
+    for f in traces.iter().filter(|f| f.point == Point::Focus) {
+        let key = (0..traces.len())
+            .filter(|&k| is_input(&traces[k]))
+            .filter_map(|k| Some((k, traces[k].from?)))
+            .filter(|&(_, read)| read <= f.t)
+            .max_by_key(|&(_, read)| read);
+        let Some((k, read)) = key else {
             continue;
         };
-        let Some(read) = traces[k].from else {
-            continue;
-        };
-        if used[k] || f.t.saturating_sub(read) > WINDOW_NS {
+        if used[k] || f.t - read > WINDOW_NS {
             continue;
         }
         used[k] = true;
-        out.push(f.t.saturating_sub(read));
-    }
-    out
-}
-
-/// The latency of the first key read after each focus request.
-fn next_key_after_focus(traces: &[Trace]) -> Vec<u64> {
-    let mut used = vec![false; traces.len()];
-    let mut out = Vec::new();
-    for (i, f) in traces.iter().enumerate() {
-        if f.point != Point::Focus {
-            continue;
-        }
-        let next = (i + 1..traces.len())
-            .find(|&k| is_input(&traces[k]) && traces[k].from.is_some_and(|r| r > f.t));
-        let Some(k) = next else {
-            continue;
-        };
-        if used[k] {
-            continue;
-        }
-        used[k] = true;
-        out.extend(input_latency(&traces[k]));
+        out.push(f.t - read);
     }
     out
 }
@@ -416,13 +388,27 @@ n trace input 0 100 40
 n trace input 0 300 250
 n trace focus 0 500
 n trace input 1 800 700
-n trace held_input 1 990 900
 n trace focus 0 5000000000
 ";
         assert_eq!(vec![60, 50, 100], samples(log, "L4"));
         // the last focus has no key within a second
         assert_eq!(vec![250], samples(log, "L2 focus"));
-        assert_eq!(vec![100], samples(log, "L2 next"));
+        assert!(samples(log, "L2 next").is_empty());
+    }
+
+    #[test]
+    fn a_key_typed_into_another_pane_is_timed_to_its_focus_and_held_input() {
+        // the key makes the switch, and is held behind it
+        let log = "\
+n trace input 0 100 40
+n trace focus 0 1030
+n trace held_input 1 1900 1000
+n trace focus 0 3010
+n trace held_input 0 3400 3000
+";
+        assert_eq!(vec![30, 10], samples(log, "L2 focus"));
+        assert_eq!(vec![900, 400], samples(log, "L2 next"));
+        assert_eq!(vec![60], samples(log, "L4"));
     }
 
     #[test]
@@ -487,19 +473,19 @@ n trace placed 0 400
         assert_eq!(vec![150], samples(log, "L8"));
     }
 
-    /// A log of `scripts/latency.sh focus 55`, from the baseline's build.
+    /// A log of `scripts/latency.sh switch 55`, from the baseline's build.
     #[test]
     fn a_captured_log_reads_as_its_table() {
-        let log = include_str!("../../tests/fixtures/latency-focus.log");
+        let log = include_str!("../../tests/fixtures/latency-switch.log");
         let table = report(&measure(&parse(log)));
         let row = |name: &str| -> Vec<String> {
             let line = table.lines().find(|l| l.starts_with(name)).unwrap();
             let cols = line[name.len()..].split_whitespace().take(3);
             cols.map(str::to_string).collect()
         };
-        assert_eq!(["56", "0.809", "1.390"], row("L2 focus")[..], "{table}");
-        assert_eq!(["56", "0.008", "0.019"], row("L2 next")[..], "{table}");
-        assert_eq!(["114", "0.009", "0.018"], row("L4")[..], "{table}");
+        assert_eq!(["55", "0.024", "0.043"], row("L2 focus")[..], "{table}");
+        assert_eq!(["55", "0.384", "0.607"], row("L2 next")[..], "{table}");
+        assert_eq!(["2", "0.010", "0.011"], row("L4")[..], "{table}");
         assert_eq!(["0", "-", "-"], row("L3")[..], "{table}");
     }
 
