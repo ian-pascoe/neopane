@@ -651,22 +651,22 @@ impl Daemon {
                 None => return Ok(()), // no anchor yet: next flush
             }
         };
-        // a tab page's floating pane opens from the pane its window came from
-        let origin = match &anchor {
-            Some(a) => a.clone(),
-            None => match self
-                .split_from(sp)
+        // a window opens beside its anchor; a tab page's floating pane opens
+        // from the pane its window came from, else any with a terminal
+        let origin = anchor.clone().or_else(|| {
+            self.split_from(sp)
                 .and_then(|f| f.terminal.clone())
                 .or_else(|| self.panes.list.iter().find_map(|q| q.terminal.clone()))
-            {
-                Some(o) => o,
-                None => return Ok(()), // no origin yet: next flush
-            },
+        });
+        let Some(origin) = origin else {
+            return Ok(()); // no origin yet: next flush
         };
         // starts at the guess, not Rex's default
         let size = self.new_pane_size(win);
+        let [cols, rows] = size;
         let origin_size = self
-            .split_from(sp)
+            .panes
+            .by_terminal(origin.as_str())
             .and_then(|f| f.terminal_surface.as_ref())
             .map(|s| [s.view.cols, s.view.rows]);
         let pane = self.panes.add_for_window(win);
@@ -676,8 +676,7 @@ impl Daemon {
         let title = pane::title(&id);
         self.changes.forget_split(win);
 
-        let [cols, rows] = size;
-        let Some(origin_beside) = anchor else {
+        if anchor.is_none() {
             self.act(Ask::OpenTabPage {
                 pane: id,
                 attach,
@@ -687,7 +686,7 @@ impl Daemon {
                 rows,
             });
             return Ok(());
-        };
+        }
         self.panes.by_id_mut(pane_id).unwrap().awaiting_layout = true;
         let dir = Direction::of_split(sp.side_by_side, sp.before);
         let axis = usize::from(!dir.across());
@@ -701,7 +700,7 @@ impl Daemon {
             pane: id,
             attach,
             title,
-            origin: origin_beside,
+            origin,
             dir,
             size: along,
             ratio,
