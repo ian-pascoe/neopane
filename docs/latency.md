@@ -57,10 +57,10 @@ milliseconds, for each criterion found in the log. It pairs the points so:
 | L8 | `place` | the next `placed`, unless another `place` comes first |
 | L9 | `hello` | the `accepted` with its id |
 
-Neovim makes `<C-w>w`'s switch itself, and a key typed after it goes
-straight to Neovim, timed by L4. Keys wait only behind a switch the daemon
-asks for, as when a key is typed into a pane that isn't the current pane:
-L2 next times those.
+L2 next is a key held behind a window switch the daemon asks for, as when a
+key is typed into a pane that isn't the current pane. The key after
+`<C-w>w` is not L2 next but L4: Neovim makes that switch itself, and the
+key goes straight to it.
 
 Run each scenario on a log of its own: the pairing assumes nothing else
 happens in between, which a scripted scenario makes so.
@@ -87,14 +87,17 @@ to 50), and nothing else busy on the machine.
 | `exec` | L6 | N launches of `neorex --clean -O a b`, each quit with `:qa!`. |
 | `place` | L8 | N times: `:tabnew \| vsplit \| vsplit \| vsplit`, then `:tabclose`. |
 
-A `rex new` session no app shows is 80×24, so its panes are smaller than L3's
-4 panes of 200×50: L3 is timed on what the session gives, the same for the
-baseline and every later check.
+A Rex session made with `rex new` that no Rex app window shows is 80×24, so
+its panes are smaller than L3's 4 panes of 200×50: L3 is timed on what that
+Rex session gives, the same for the baseline and every later check.
 
 ## The regression rule
 
-On macOS and on Linux, in a `rex new` session, time the baseline's build and
-the new build on the same machine, N ≥ 50 each. A criterion regresses when its
+On macOS and on Linux, in a Rex session made with `rex new`, time the
+baseline's build and the new build on the same machine, N ≥ 50 each. Runs of
+the same build differ by more than some tolerances (see the baseline's
+spread below), so run each scenario 3 times, one at a time, and compare the
+median of the 3 runs' medians, and of their p95s, with the baseline's. A criterion regresses when its
 median is worse than the baseline's by more than the larger of 10% and its
 limit, or its p95 is worse by more than the larger of 20% and twice its limit.
 
@@ -116,25 +119,43 @@ Taken with this change's build (#97), the release profile, on a MacBook Pro
 (M1, 8 cores, 16 GB), macOS 27.0.1, Neovim 0.12.6, Rex 0.1.0-preview.14,
 with `scripts/latency.sh SCENARIO 55`. Times in milliseconds.
 
+`split`, `tabs` and `exec` were run 3 times, at d5b75e7 and twice at
+80210b3, which changes only when a frame that waited for its terminal is
+traced, and none waited at 80×24. Their baseline is the median of the 3
+runs' medians, and of their p95s:
+
+| Criterion | Scenario | N per run | Medians | p95s | Baseline median | Baseline p95 |
+|---|---|---|---|---|---|---|
+| L1 | `split` | 55 | 50.028, 49.971, 48.526 | 66.273, 74.679, 54.423 | 49.971 | 66.273 |
+| L3 | `tabs` | 54 | 2.373, 2.404, 2.615 | 3.652, 3.311, 3.838 | 2.404 | 3.652 |
+| L6 first | `exec` | 55 | 17.647, 17.308, 17.213 | 41.050, 20.155, 19.839 | 17.308 | 20.155 |
+| L6 second | `exec` | 55 | 73.580, 70.822, 69.244 | 153.137, 104.629, 95.476 | 70.822 | 104.629 |
+
+The rest were run once: `focus` and `switch` at d5b75e7, and `keys`,
+`resize` and `place` at a01adb1, this change before it was rebased over
+#137 and #107 (316904f is that rebase). Their code paths are unchanged
+since: nothing after touches a key's way from its read to its
+`nvim_input` (`on_input`, the focus gate, the forwarder) beyond the trace
+points, nor `handle_resize` or `place_tabs` and the answers to its moves;
+#107's branch of `size_window`, for windows laid out in one pane, isn't
+taken with Rex's panes.
+
 | Criterion | Scenario | N | Median | p95 |
 |---|---|---|---|---|
-| L1 | `split` | 55 | 50.028 | 66.273 |
 | L2 focus | `focus` | 55 | 1.050 | 1.407 |
 | L2 focus, typed into another pane | `switch` | 55 | 0.024 | 0.043 |
 | L2 next | `switch` | 55 | 0.384 | 0.607 |
-| L3 | `tabs` | 54 | 2.373 | 3.652 |
 | L4 | `keys` | 59 | 0.008 | 0.021 |
 | L5 | `resize` | 110 | 0.015 | 0.038 |
-| L6 first | `exec` | 55 | 17.647 | 41.050 |
-| L6 second | `exec` | 55 | 73.580 | 153.137 |
 | L8 | `place` | 55 | 1.239 | 2.597 |
 
 L1 and L6 include Rex starting each new pane's helper process. L3 is timed
-on the headless session's 80×24 panes: its baseline serves the regression
-rule only, and its absolute limit, p95 ≤ 16 ms with 4 panes of 200×50, is
-checked in a session an app shows at that size, which no headless baseline
-stands in for. (`tabs` makes one fewer sample than N: its first `gt` leaves a
-window whose pane isn't made yet, which isn't counted as a move.)
+on the 80×24 panes of a Rex session no Rex app window shows: its baseline
+serves the regression rule only. Its absolute limit, p95 ≤ 16 ms with 4
+panes of 200×50, is checked with the Rex session shown in a Rex app window
+of that size, which no such baseline stands in for. (`tabs` makes one fewer
+sample than N: its first `gt` leaves a window whose pane isn't made yet,
+which isn't counted as a move.)
 
 L4 with tracing off has no numbers of its own, since the timestamps are
 the traces. Off, the key path is as before but for one atomic load at each
