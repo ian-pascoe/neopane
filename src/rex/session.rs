@@ -23,8 +23,8 @@ pub(crate) enum Request {
     DisownBlock(u64),
     CloseBlock(u64),
     CloseLayer(u64),
-    MoveBlock,
-    ResizePane,
+    MoveBlock(u64),
+    ResizePane(u64),
 }
 
 impl Request {
@@ -40,8 +40,8 @@ impl Request {
             Request::DisownBlock(_) => "disown_block",
             Request::CloseBlock(_) => "close_block",
             Request::CloseLayer(_) => "close_layer",
-            Request::MoveBlock => "move_block",
-            Request::ResizePane => "resize_pane",
+            Request::MoveBlock(_) => "move_block",
+            Request::ResizePane(_) => "resize_pane",
         }
     }
 }
@@ -371,24 +371,27 @@ impl Session {
         )
     }
 
-    /// Moves `block` beside `anchor`, after it (right of it, or below if not `side_by_side`),
-    /// leaving `anchor` the fraction `ratio` of the room they share.
+    /// Moves `block` beside `anchor`: right of it, or below if not
+    /// `side_by_side`; left of it or above if `before`. `anchor` is left the
+    /// fraction `ratio` of the room they share.
     pub(crate) fn move_block(
         &mut self,
+        tag: u64,
         block: &str,
         anchor: &str,
         side_by_side: bool,
+        before: bool,
         ratio: f64,
     ) -> Result<(), ClientError> {
         self.request(
-            Request::MoveBlock,
+            Request::MoveBlock(tag),
             "session.move_block",
             json!({
                 "session_id": self.session_id,
                 "block_id": block,
                 "anchor_block_id": anchor,
                 "direction": if side_by_side { "horizontal" } else { "vertical" },
-                "side": "after",
+                "side": if before { "before" } else { "after" },
                 "ratio": json_f64(ratio),
             }),
         )
@@ -398,13 +401,14 @@ impl Session {
     /// (above and below, if not `side_by_side`), so `before` gets the fraction `ratio` of the room.
     pub(crate) fn resize_pane(
         &mut self,
+        tag: u64,
         before: &str,
         after: &str,
         side_by_side: bool,
         ratio: f64,
     ) -> Result<(), ClientError> {
         self.request(
-            Request::ResizePane,
+            Request::ResizePane(tag),
             "session.resize_pane",
             json!({
                 "session_id": self.session_id,
@@ -490,7 +494,9 @@ impl Session {
             | Request::NewLayer(_)
             | Request::DisownBlock(_)
             | Request::CloseBlock(_)
-            | Request::CloseLayer(_) => {
+            | Request::CloseLayer(_)
+            | Request::MoveBlock(_)
+            | Request::ResizePane(_) => {
                 return Ok(Some(Update::Answered {
                     req,
                     result: res.result,
@@ -499,21 +505,9 @@ impl Session {
             Request::View => return self.on_view_result(&res.result),
             Request::FocusBlock => self.on_focus_block_result(&res.result)?,
             Request::Attach => self.on_attach_result(&res.result)?,
-            Request::MoveBlock | Request::ResizePane => {
-                if !self.placing() {
-                    log::trace(Point::Placed, 0);
-                }
-            }
             Request::FocusDirection => {}
         }
         Ok(None)
-    }
-
-    /// Whether a pane's move or resize is still unanswered.
-    fn placing(&self) -> bool {
-        self.pending_requests
-            .iter()
-            .any(|p| matches!(p.req, Request::MoveBlock | Request::ResizePane))
     }
 
     /// Only a newer session view matters.
@@ -814,8 +808,9 @@ pub(crate) mod tests {
         let (mut s, theirs) = session();
         s.attach().unwrap();
         s.focus_direction(Direction::Left).unwrap();
-        s.move_block("block:a", "block:b", true, 0.5).unwrap();
-        s.resize_pane("block:a", "block:b", false, 1.0).unwrap();
+        s.move_block(0, "block:a", "block:b", true, false, 0.5)
+            .unwrap();
+        s.resize_pane(0, "block:a", "block:b", false, 1.0).unwrap();
         s.disown(0, "block:a").unwrap();
         s.new_layer(3, [1.0, 2.5, 80.0, 24.0], json!({ "kind": "leaf" }))
             .unwrap();
@@ -947,24 +942,6 @@ pub(crate) mod tests {
             name: "session_view_changed".into(),
             payload: json!({ "revision": rev }),
         }
-    }
-
-    #[test]
-    fn placing_lasts_until_the_last_move_or_resize_is_answered() {
-        let (mut s, _theirs) = session();
-        assert!(!s.placing());
-        s.move_block("block:a", "block:b", true, 0.5).unwrap();
-        s.resize_pane("block:b", "block:c", false, 0.25).unwrap();
-        s.focus(Some(block('a'))).unwrap();
-        let moved = pending(&s, Request::MoveBlock)[0];
-        let resized = pending(&s, Request::ResizePane)[0];
-        answer(&mut s, moved, refused());
-        // a refused one is answered too
-        assert!(s.placing());
-        answer(&mut s, resized, client::ResponseResult::Ok(json!({})));
-        // the focus request still waits, but no placement does
-        assert!(!s.placing());
-        assert_eq!(1, pending(&s, Request::FocusBlock).len());
     }
 
     #[test]

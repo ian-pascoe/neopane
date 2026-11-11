@@ -242,6 +242,70 @@ fn method_not_found_is_unsupported_and_any_other_error_fails() {
 }
 
 #[test]
+fn place_beside_and_resize_are_move_block_after_and_resize_pane_with_the_anchors_share() {
+    let (mut p, mut theirs) = rex();
+    assert!(p.capabilities().has(Capability::PlaceBeside));
+    assert!(p.capabilities().has(Capability::Resize));
+    // the placed terminal's share is 0.25: the anchor's, which Rex takes, is 0.75
+    p.ask(
+        AskId(1),
+        Ask::PlaceBeside {
+            terminal: TerminalId::from("block:p"),
+            origin: TerminalId::from("block:a"),
+            dir: Direction::Right,
+            size: 20,
+            ratio: 0.25,
+        },
+    );
+    p.ask(
+        AskId(2),
+        Ask::Resize {
+            terminal: TerminalId::from("block:p"),
+            origin: TerminalId::from("block:a"),
+            dir: Direction::Down,
+            size: 10,
+            ratio: 0.5,
+        },
+    );
+    reply(&mut p, &mut theirs, 1, json!({}));
+    refuse(&mut p, &mut theirs, 2, "invalid_anchor");
+    assert_eq!(
+        vec![
+            answered(1, Outcome::Done(Answer::Nothing)),
+            answered(2, Outcome::Failed("invalid_anchor: no".into())),
+        ],
+        events(&mut p)
+    );
+    assert_eq!(
+        vec![
+            (
+                "session.move_block".to_string(),
+                json!({
+                    "session_id": "session:s",
+                    "block_id": "block:p",
+                    "anchor_block_id": "block:a",
+                    "direction": "horizontal",
+                    "side": "after",
+                    "ratio": 0.75,
+                })
+            ),
+            (
+                // `{origin}` before the split, `{terminal}` after it
+                "session.resize_pane".to_string(),
+                json!({
+                    "session_id": "session:s",
+                    "before_block_id": "block:a",
+                    "after_block_id": "block:p",
+                    "direction": "vertical",
+                    "ratio": 0.5,
+                })
+            ),
+        ],
+        requests(p, theirs)
+    );
+}
+
+#[test]
 fn what_rex_has_no_request_for_is_unsupported() {
     let (mut p, _theirs) = rex();
     p.ask(

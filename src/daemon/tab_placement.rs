@@ -12,13 +12,15 @@
 use crate::nvim::windows::{Kind, Layout};
 
 /// Put `win`'s pane right of (below, if not `side_by_side`) `anchor`'s,
-/// leaving `anchor` the fraction `ratio` of the room they share.
+/// leaving `anchor` the fraction `ratio` of the room they share, and `win`
+/// `size` cells of it along the split.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct PaneMove {
     pub win: i64,
     pub anchor: i64,
     pub side_by_side: bool,
     pub ratio: f64,
+    pub size: u32,
 }
 
 impl PaneMove {
@@ -149,6 +151,7 @@ impl Planner<'_> {
                     anchor,
                     side_by_side,
                     ratio: before as f64 / total as f64,
+                    size: room[i],
                 };
                 self.result.len += 1;
             }
@@ -484,7 +487,15 @@ mod tests {
 
         // in the order the windows were made: old, new, panel
         let mut rex = Rex::made(&[old, new, panel]);
-        for m in TabPlacement::plan(&layout, &[old, new, panel]).items() {
+        let plan = TabPlacement::plan(&layout, &[old, new, panel]);
+        // new, then old, beside the panel, each at its width
+        let moved: Vec<(i64, i64, u32)> = plan
+            .items()
+            .iter()
+            .map(|m| (m.win, m.anchor, m.size))
+            .collect();
+        assert_eq!(vec![(new, panel, 39), (old, panel, 59)], moved);
+        for m in plan.items() {
             rex.move_pane(*m);
         }
 

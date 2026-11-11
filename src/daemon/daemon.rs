@@ -1163,7 +1163,7 @@ impl Daemon {
         }
         self.size_windows();
         self.reconcile_layers();
-        self.place_tabs()?;
+        self.place_tab_pages()?;
         self.nvim.client.flush()?;
         Ok(())
     }
@@ -1217,17 +1217,23 @@ impl Daemon {
                 self.tab_layouts.insert(layout.tab, Tab::new(layout));
             }
         }
-        self.place_tabs()
+        self.place_tab_pages()
     }
 
     /// Puts the panes of each tab page's windows where its layout has them,
-    /// once they all have a Rex block, and again when the windows, their order
-    /// or their sizes change. Rex has them in the order their windows were made,
-    /// which isn't where Neovim ends up putting them.
-    fn place_tabs(&mut self) -> Result<()> {
-        if self.rex().is_none() {
+    /// once they all have a terminal, and again when the windows, their order
+    /// or their sizes change: the pane provider has them in the order their
+    /// windows were made, which isn't where Neovim ends up putting them. Each
+    /// move is a `place_beside` and each new size a `resize`, through the
+    /// layout queue. Without `place_beside` nothing is placed; without
+    /// `resize`, a change of sizes alone is left.
+    fn place_tab_pages(&mut self) -> Result<()> {
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        if !self.asks.may_ask(p, Capability::PlaceBeside) {
             return Ok(());
         }
+        let resizes = self.asks.may_ask(p, Capability::Resize);
+        let mut plans = Vec::new();
         let mut i = self.tab_layouts.len();
         while i > 0 {
             i -= 1;
@@ -1243,9 +1249,6 @@ impl Daemon {
             }
             let action =
                 tab_placement::decide(&tab.layout, &states[..tab.layout.len], tab.placed.as_ref());
-            if matches!(action, Action::Rearrange(_) | Action::Resize(_)) {
-                log::trace(Point::Place, layout.tab as u64);
-            }
             match action {
                 Action::Wait | Action::Nothing => {}
                 Action::Forget => {
@@ -1253,41 +1256,52 @@ impl Daemon {
                 }
                 Action::Rearrange(plan) => {
                     tab.placed = Some(plan);
-                    for m in plan.items() {
-                        let Some(terminals) = self.terminals_of(m) else {
-                            continue;
-                        };
-                        let Some(r) = self.provider.as_mut().and_then(Held::rex) else {
-                            continue;
-                        };
-                        r.session.move_block(
-                            terminals.moved.as_str(),
-                            terminals.origin.as_str(),
-                            m.side_by_side,
-                            m.ratio,
-                        )?;
-                    }
+                    log::trace(Point::Place, layout.tab as u64);
+                    plans.push((plan, false));
                 }
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
-                    for m in plan.items() {
-                        let Some(terminals) = self.terminals_of(m) else {
-                            continue;
-                        };
-                        let Some(r) = self.provider.as_mut().and_then(Held::rex) else {
-                            continue;
-                        };
-                        r.session.resize_pane(
-                            terminals.origin.as_str(),
-                            terminals.moved.as_str(),
-                            m.side_by_side,
-                            m.ratio,
-                        )?;
+                    if resizes {
+                        log::trace(Point::Place, layout.tab as u64);
+                        plans.push((plan, true));
                     }
                 }
             }
         }
+        for (plan, resize) in plans {
+            for m in plan.items() {
+                if let Some(ask) = self.placement_ask(m, resize) {
+                    self.act(ask);
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// The `place_beside` that makes move `m`, or with `resize` the `resize`
+    /// that sizes its split, if both its panes have a terminal. The ask's
+    /// ratio is the moved terminal's share, `m`'s the anchor's.
+    fn placement_ask(&self, m: &PaneMove, resize: bool) -> Option<Ask> {
+        let Terminals { moved, origin } = self.terminals_of(m)?;
+        let dir = Direction::of_split(m.side_by_side, false);
+        let (size, ratio) = (m.size, 1.0 - m.ratio);
+        Some(if resize {
+            Ask::Resize {
+                terminal: moved,
+                origin,
+                dir,
+                size,
+                ratio,
+            }
+        } else {
+            Ask::PlaceBeside {
+                terminal: moved,
+                origin,
+                dir,
+                size,
+                ratio,
+            }
+        })
     }
 
     /// The terminals of the panes a move is between, if both have one.
@@ -1458,6 +1472,12 @@ impl Daemon {
     /// Does what became of the acts.
     fn run_steps(&mut self) -> Result<()> {
         while let Some(step) = self.asks.next_step() {
+            if let Step::Done(ask, _) | Step::FallBack(ask) = &step
+                && asks::is_placement(ask)
+                && !self.asks.placing()
+            {
+                log::trace(Point::Placed, 0);
+            }
             match step {
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
                 Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_live_layout(l)?,
@@ -1496,7 +1516,7 @@ impl Daemon {
                 if handle == Some(self.nvim.current_win) {
                     self.focus_in_rex(Some(&t))?;
                 }
-                self.place_tabs()
+                self.place_tab_pages()
             }
             Ask::OpenTabPage { .. } => {
                 if handle == Some(self.nvim.current_win) {
@@ -3570,17 +3590,6 @@ mod tests {
         layout
     }
 
-    fn methods_of(frames: &[String]) -> Vec<&str> {
-        let key = "\"method\":\"";
-        frames
-            .iter()
-            .map(|f| {
-                let at = f.find(key).unwrap() + key.len();
-                &f[at..at + f[at..].find('"').unwrap()]
-            })
-            .collect()
-    }
-
     fn block_id(n: u32) -> String {
         let id = format!("block:00000000-0000-0000-0000-{n:0>12}");
         assert_eq!(42, id.len());
@@ -3637,58 +3646,176 @@ mod tests {
         assert!(d.panes.by_id(id).is_none());
     }
 
-    #[test]
-    fn a_tab_pages_panes_are_moved_once_they_all_have_blocks_and_only_resized_when_its_sizes_change()
-     {
-        let frames = fake_rex_requests(|d| {
-            // windows 1, 2 and 3 are drawn; the layout puts 3, made last, first
-            for n in [1u32, 2, 3] {
-                d.grids.wins.insert(
-                    n + 10,
-                    Win {
-                        win: i64::from(n),
-                        kind: WinKind::External,
-                        float: Float::default(),
-                    },
-                );
-                let p = d.panes.add(Pane::from_neovim_window(n, i64::from(n)));
-                p.tab = 2;
-                // the layout comes before the last block does
-                if n < 3 {
-                    p.terminal = Some(TerminalId::from(block_id(n).as_str()));
-                }
+    /// A daemon whose fake pane provider can open, close and `caps`, with
+    /// windows 1, 2 and 3 drawn in tab page 2, each in a requested pane of
+    /// its own, all but window 3's with the terminal `block_id(n)`.
+    fn tab_page_of_three(caps: &[Capability]) -> Fixture {
+        let mut f = FakeProvider::opening();
+        for &c in caps {
+            f.caps.insert(c);
+        }
+        let mut fx = with_provider(Some(Held::Fake(f)));
+        for n in [1u32, 2, 3] {
+            fx.d.grids.wins.insert(
+                n + 10,
+                Win {
+                    win: i64::from(n),
+                    kind: WinKind::External,
+                    float: Float::default(),
+                },
+            );
+            let p = fx.d.panes.add_for_window(i64::from(n));
+            p.tab = 2;
+            if n < 3 {
+                p.terminal = Some(TerminalId::from(block_id(n).as_str()));
             }
-            let mut layout = window_row(&[20, 40, 40]);
-            layout.nodes[1].win = 3;
-            layout.nodes[3].win = 1;
-            d.on_tab_layout(layout).unwrap();
-            // 1 request would be a subset placed, to be moved again
-            d.place_tabs().unwrap();
-            d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
-            d.place_tabs().unwrap();
-            // nothing changed: nothing sent
-            d.place_tabs().unwrap();
-            // sizes only
-            layout.nodes[1].w = 30;
-            d.on_tab_layout(layout).unwrap();
-        });
-        let methods = methods_of(&frames);
-        assert_eq!(4, methods.len());
-        assert_eq!("session.move_block", methods[0]);
-        assert_eq!("session.move_block", methods[1]);
-        assert_eq!("session.resize_pane", methods[2]);
-        assert_eq!("session.resize_pane", methods[3]);
-        // the last pane of the layout goes after the first one's, then the middle one
-        assert!(frames[0].contains(&format!(
-            "\"block_id\":\"{}\",\"anchor_block_id\":\"{}\"",
-            block_id(1),
-            block_id(3)
-        )));
-        assert!(frames[1].contains(&format!(
-            "\"block_id\":\"{}\",\"anchor_block_id\":\"{}\"",
-            block_id(2),
-            block_id(3)
-        )));
+        }
+        fx
+    }
+
+    /// Windows 3, 2 and 1 in a row, `widths` wide: 3, made last, first.
+    fn three_reversed(widths: &[u32]) -> Layout {
+        let mut layout = window_row(widths);
+        layout.nodes[1].win = 3;
+        layout.nodes[3].win = 1;
+        layout
+    }
+
+    fn place(terminal: u32, origin: u32, size: u32, ratio: f64) -> Ask {
+        Ask::PlaceBeside {
+            terminal: TerminalId::from(block_id(terminal).as_str()),
+            origin: TerminalId::from(block_id(origin).as_str()),
+            dir: Direction::Right,
+            size,
+            ratio,
+        }
+    }
+
+    fn resize(terminal: u32, origin: u32, size: u32, ratio: f64) -> Ask {
+        Ask::Resize {
+            terminal: TerminalId::from(block_id(terminal).as_str()),
+            origin: TerminalId::from(block_id(origin).as_str()),
+            dir: Direction::Right,
+            size,
+            ratio,
+        }
+    }
+
+    /// `asks` with their ratios to nine places, to compare.
+    fn r9(asks: &[Ask]) -> Vec<Ask> {
+        let round = |r: f64| (r * 1e9).round() / 1e9;
+        asks.iter()
+            .cloned()
+            .map(|mut a| {
+                if let Ask::PlaceBeside { ratio, .. } | Ask::Resize { ratio, .. } = &mut a {
+                    *ratio = round(*ratio);
+                }
+                a
+            })
+            .collect()
+    }
+
+    /// Answers the fake's last ask as done, and drains it.
+    fn done(d: &mut Daemon) {
+        let f = fake(d);
+        f.answer(f.last_id(), Outcome::Done(Answer::Nothing));
+        d.drain_provider().unwrap();
+    }
+
+    #[test]
+    fn a_tab_pages_panes_are_placed_one_at_a_time_once_all_have_terminals_and_resized_when_sizes_change()
+     {
+        let mut fx = tab_page_of_three(&[Capability::PlaceBeside, Capability::Resize]);
+        let d = &mut fx.d;
+        let layout = three_reversed(&[20, 40, 40]);
+        d.on_tab_layout(layout).unwrap();
+        // a subset placed would only be moved again
+        assert!(fake(d).asks.is_empty());
+        d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
+        d.place_tab_pages().unwrap();
+        // the last of the layout goes beside the first, at its share: the
+        // second waits for the first's answer
+        assert_eq!(r9(&[place(1, 3, 40, 0.4)]), r9(&fake(d).asked()));
+        done(d);
+        assert_eq!(
+            r9(&[place(1, 3, 40, 0.4), place(2, 3, 40, 40.0 / 60.0)]),
+            r9(&fake(d).asked())
+        );
+        done(d);
+        // nothing changed: nothing asked
+        d.place_tab_pages().unwrap();
+        assert_eq!(2, fake(d).asks.len());
+        // sizes only: the same splits, resized, one at a time
+        d.on_tab_layout(three_reversed(&[30, 40, 40])).unwrap();
+        assert_eq!(
+            r9(&[resize(1, 3, 40, 40.0 / 110.0)]),
+            r9(&fake(d).asked()[2..])
+        );
+        done(d);
+        assert_eq!(
+            r9(&[resize(2, 3, 40, 40.0 / 70.0)]),
+            r9(&fake(d).asked()[3..])
+        );
+    }
+
+    #[test]
+    fn with_place_beside_alone_a_tab_page_is_arranged_and_its_sizes_left() {
+        let mut fx = tab_page_of_three(&[Capability::PlaceBeside]);
+        let d = &mut fx.d;
+        d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
+        d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
+        done(d);
+        done(d);
+        assert_eq!(vec!["place_beside"; 2], asked_capabilities(d));
+        d.on_tab_layout(three_reversed(&[30, 40, 40])).unwrap();
+        assert_eq!(2, fake(d).asks.len());
+        // windows in another order are arranged again
+        d.on_tab_layout(window_row(&[20, 40, 40])).unwrap();
+        assert_eq!(vec!["place_beside"; 3], asked_capabilities(d));
+    }
+
+    #[test]
+    fn with_resize_alone_a_tab_page_is_not_placed() {
+        let mut fx = tab_page_of_three(&[Capability::Resize]);
+        let d = &mut fx.d;
+        d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
+        d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
+        d.on_tab_layout(three_reversed(&[30, 40, 40])).unwrap();
+        assert!(fake(d).asks.is_empty());
+    }
+
+    #[test]
+    fn twenty_quick_resizes_leave_the_final_ratios() {
+        let mut fx = tab_page_of_three(&[Capability::PlaceBeside, Capability::Resize]);
+        let d = &mut fx.d;
+        d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
+        d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
+        done(d);
+        done(d);
+        // the first window a cell wider each time, faster than answers come
+        for n in 1..=20 {
+            d.on_tab_layout(three_reversed(&[20 + n, 40, 40])).unwrap();
+            if n % 3 == 0 {
+                done(d);
+            }
+        }
+        // asked one at a time, in order, until none is left
+        loop {
+            let before = fake(d).asks.len();
+            done(d);
+            if d.asks.waiting() == 0 {
+                break;
+            }
+            assert_eq!(before + 1, fake(d).asks.len());
+        }
+        let asked = fake(d).asked();
+        assert_eq!(
+            r9(&[
+                resize(1, 3, 40, 40.0 / 120.0),
+                resize(2, 3, 40, 40.0 / 80.0)
+            ]),
+            r9(&asked[asked.len() - 2..])
+        );
     }
 
     #[test]

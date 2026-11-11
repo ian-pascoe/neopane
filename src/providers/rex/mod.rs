@@ -43,6 +43,8 @@ const CAPABILITIES: &[Capability] = &[
     Capability::OpenFloat,
     Capability::OpenTabPage,
     Capability::Close,
+    Capability::PlaceBeside,
+    Capability::Resize,
     Capability::ReportLayout,
     // views come unasked
     Capability::Events,
@@ -135,6 +137,35 @@ impl RexProvider {
                 self.float_asks.push(tag);
                 self.session.new_layer(tag, bounds, layout)?;
             }
+            // Rex's ratio is the anchor's share, the ask's the placed terminal's
+            Ask::PlaceBeside {
+                terminal,
+                origin,
+                dir,
+                ratio,
+                ..
+            } => self.session.move_block(
+                tag,
+                terminal.as_str(),
+                origin.as_str(),
+                dir.across(),
+                dir.before(),
+                1.0 - ratio,
+            )?,
+            // `{origin}` is before the split, `{terminal}` after it
+            Ask::Resize {
+                terminal,
+                origin,
+                dir,
+                ratio,
+                ..
+            } => self.session.resize_pane(
+                tag,
+                origin.as_str(),
+                terminal.as_str(),
+                dir.across(),
+                1.0 - ratio,
+            )?,
             Ask::Close { terminal } => {
                 self.float_blocks.retain(|b| *b != terminal);
                 self.session.close_block(tag, terminal.as_str())?
@@ -221,11 +252,16 @@ impl RexProvider {
                 }
             }
             (Request::CloseLayer(tag), _) => self.answer(tag, no_block()),
-            (Request::CloseBlock(tag), ResponseResult::Ok(_)) => {
-                self.answer(tag, Outcome::Done(Answer::Nothing))
-            }
             (
-                Request::NewSplit(tag) | Request::NewLayer(tag) | Request::CloseBlock(tag),
+                Request::CloseBlock(tag) | Request::MoveBlock(tag) | Request::ResizePane(tag),
+                ResponseResult::Ok(_),
+            ) => self.answer(tag, Outcome::Done(Answer::Nothing)),
+            (
+                Request::NewSplit(tag)
+                | Request::NewLayer(tag)
+                | Request::CloseBlock(tag)
+                | Request::MoveBlock(tag)
+                | Request::ResizePane(tag),
                 ResponseResult::Err(e),
             ) => {
                 self.took_float_ask(tag);

@@ -199,6 +199,13 @@ impl Asks {
         }
     }
 
+    /// Whether a `place_beside` or `resize` is asked or waiting.
+    pub(crate) fn placing(&self) -> bool {
+        let asked = self.sent.iter().map(|s| &s.ask);
+        let waiting = self.queue.iter().map(|(_, a)| a);
+        asked.chain(waiting).any(is_placement)
+    }
+
     /// The next thing the daemon has to do about an act.
     pub(crate) fn next_step(&mut self) -> Option<Step> {
         self.steps.pop_front()
@@ -214,6 +221,14 @@ impl Asks {
     pub(crate) fn waiting(&self) -> usize {
         self.sent.len() + self.queue.len()
     }
+}
+
+/// Whether `ask` places a terminal: a `place_beside` or a `resize`.
+pub(crate) fn is_placement(ask: &Ask) -> bool {
+    matches!(
+        ask.capability(),
+        Capability::PlaceBeside | Capability::Resize
+    )
 }
 
 /// The ask that closes terminal `t`.
