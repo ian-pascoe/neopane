@@ -39,14 +39,22 @@ fn run(command: Command) -> Result<ExitCode> {
             if let Some(option) = unbuilt_option(&start) {
                 return Ok(fail(&format!("{option} isn't built yet")));
             }
-            Ok(helper_exit(launch::run(&start.nvim_args)?))
+            Ok(helper_exit(launch::run(
+                start.name.as_deref(),
+                &start.nvim_args,
+            )?))
         }
         Command::Help => Ok(print(&cli::help())),
         Command::DebugHelp => Ok(print(&cli::debug_help())),
         Command::Version => Ok(print(&cli::version())),
         Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
         // started by the launcher, not by people
-        Command::Daemon { dir, nvim_args } => done(serve::run(&dir.to_string_lossy(), &nvim_args)),
+        Command::Daemon {
+            name,
+            dedup,
+            detach,
+            nvim_args,
+        } => done(serve::run(&name, dedup, detach, &nvim_args)),
         Command::ConfigChild => Ok(fail("config-child isn't built yet")),
         Command::AttachPane {
             address,
@@ -69,7 +77,6 @@ fn run(command: Command) -> Result<ExitCode> {
 /// The first of `start`'s options that does nothing yet.
 fn unbuilt_option(start: &Start) -> Option<&'static str> {
     [
-        (start.name.is_some(), "--name"),
         (start.address.is_some(), "--address"),
         (start.detach, "--detach"),
         (start.no_wait, "--no-wait"),

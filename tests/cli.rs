@@ -113,7 +113,6 @@ fn commands_built_later_exit_1() {
         (&["status"], "status"),
         (&["kill", "--all"], "kill"),
         (&["provider", "check"], "provider check"),
-        (&["--name", "x", "f"], "--name"),
         (&["--detach"], "--detach"),
     ] {
         let out = run(args);
@@ -165,4 +164,66 @@ fn starting_without_a_terminal_says_how() {
             "{args:?}"
         );
     }
+}
+
+/// `daemon` with `args`, as the launcher starts it: its stdout a pipe, and
+/// its files under `tmpdir`.
+fn daemon(tmpdir: &Path, args: &[&str]) -> Output {
+    Command::new(exe())
+        .arg("daemon")
+        .args(args)
+        .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// A new directory for one test, emptied of what an earlier run left.
+fn scratch(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{NAME}-cli-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = scratch("ready");
+    // SAFETY: getuid can't fail.
+    let uid = unsafe { libc::getuid() };
+    let base = tmp.join(format!("{NAME}-{uid}"));
+
+    let out = daemon(&tmp, &["work", "--detach", "--"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "error --detach isn't built yet\n");
+
+    // its directory claimed and its log made, before it finds no Rex
+    let out = daemon(&tmp, &["work", "--dedup", "--"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "error run it in a Rex pane\n");
+    let log = std::fs::read_to_string(base.join("work/log")).unwrap();
+    assert!(log.contains("run it in a Rex pane"), "{log:?}");
+    // the next claim keeps it as log.1
+    daemon(&tmp, &["work", "--"]);
+    assert_eq!(
+        log,
+        std::fs::read_to_string(base.join("work/log.1")).unwrap()
+    );
+
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = daemon(&tmp, &["work", "--"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "error {} isn't a private directory (owner {uid}, mode 0755); set {} to another \
+             place\n",
+            base.display(),
+            neorex::daemon::dir::tmpdir_var()
+        )
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
 }

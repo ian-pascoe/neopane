@@ -199,7 +199,7 @@ fn our_options_are_read_from_the_front() {
     assert_eq!(start.address, Some("/tmp/s".into()));
     assert_eq!(start.nvim_args, args("f"));
     // a value may look like an option
-    assert_eq!(started("--name --detach").name, Some("--detach".into()));
+    assert_eq!(started("--name -x").name, Some("-x".into()));
     // no abbreviations
     let start = started("--provider p f");
     assert_eq!(start.provider, Some("p".into()));
@@ -216,6 +216,22 @@ fn our_options_misused_are_usage_errors() {
     assert_eq!(
         refused("--name a --address b"),
         "--name and --address both choose a daemon: give one"
+    );
+    let rule = "--name: use 1-32 letters, digits, '.', '_' or '-'";
+    let long = format!("--name {}", "a".repeat(33));
+    for bad in [
+        "--name=",
+        "--name .",
+        "--name ..",
+        "--name a/b",
+        "--name=\u{e9}",
+        &long,
+    ] {
+        assert_eq!(refused(bad), rule, "{bad}");
+    }
+    assert_eq!(
+        started(&format!("--name {}", "a".repeat(32))).nvim_args,
+        args("")
     );
 }
 
@@ -368,14 +384,40 @@ fn help_after_dashdash_is_a_file() {
 
 #[test]
 fn hidden_commands() {
-    assert_eq!(
-        parsed("daemon /tmp/d -O a"),
+    let daemon = |name: &str, dedup, detach, nvim_args: &str| {
         Ok(Command::Daemon {
-            dir: "/tmp/d".into(),
-            nvim_args: args("-O a"),
+            name: name.into(),
+            dedup,
+            detach,
+            nvim_args: args(nvim_args),
         })
+    };
+    assert_eq!(
+        parsed("daemon work -- -O a"),
+        daemon("work", false, false, "-O a")
     );
-    assert_eq!(refused("daemon"), "daemon takes a directory");
+    assert_eq!(
+        parsed("daemon work --dedup -- -- f"),
+        daemon("work", true, false, "-- f")
+    );
+    assert_eq!(
+        parsed("daemon w-2 --detach --dedup --"),
+        daemon("w-2", true, true, "")
+    );
+    let usage = "daemon takes NAME [--dedup] [--detach] -- NVIM-ARGS";
+    for bad in [
+        "daemon",
+        "daemon work",
+        "daemon work -O a",
+        "daemon work --dedup --dedup --",
+        "daemon work --x --",
+    ] {
+        assert_eq!(refused(bad), usage, "{bad}");
+    }
+    assert_eq!(
+        refused("daemon /tmp/d --"),
+        "daemon: /tmp/d isn't a daemon name"
+    );
     assert_eq!(parsed("config-child"), Ok(Command::ConfigChild));
     assert_eq!(parsed("debug-keys"), Ok(Command::DebugKeys));
     assert_eq!(refused("debug-keys x"), "debug-keys takes no arguments");
@@ -408,11 +450,11 @@ fn usage_errors_are_one_line_pointing_at_help() {
 fn neovims_arguments_need_not_be_unicode() {
     use std::os::unix::ffi::OsStringExt;
     let file = OsString::from_vec(b"caf\xe9.txt".to_vec());
-    let line = vec![OsString::from("--name=\u{e9}"), file.clone()];
+    let line = vec![OsString::from("--name=w"), file.clone()];
     let Ok(Command::Start(start)) = parse(&line) else {
         panic!()
     };
-    assert_eq!(start.name, Some("\u{e9}".into()));
+    assert_eq!(start.name, Some("w".into()));
     assert_eq!(start.reading.files, vec![file]);
 }
 

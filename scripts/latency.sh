@@ -60,7 +60,7 @@ cmd() {
 
 sleep 1
 rex send -s "$session" -b "$shell" \
-  "export TMPDIR=$work/tmp ${upper}_LOG=debug; unset XDG_RUNTIME_DIR"
+  "export ${upper}_TMPDIR=$work/tmp ${upper}_LOG=debug"
 rex send-key -s "$session" -b "$shell" enter
 launch() {
   rex send -s "$session" -b "$shell" "$bin --clean $*"
@@ -156,5 +156,5 @@ esac
 
 [[ $scenario == exec ]] || cmd 'qa!'
 sleep 2
-cat "$work"/tmp/"$name"-*/log >"$out/$scenario.log"
+cat "$work"/tmp/"$name"-*/*/log >"$out/$scenario.log"
 "$bin" debug-latency "$out/$scenario.log"

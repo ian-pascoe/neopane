@@ -2,6 +2,7 @@
 //! from the name constant.
 
 use crate::attach::{ATTACH_PROTOCOL_VERSION, build};
+use crate::daemon::dir::tmpdir_var;
 use crate::log;
 use crate::name::NAME;
 
@@ -33,6 +34,10 @@ pub fn help() -> String {
             "how much daemons log: warn, info (default), debug",
         ),
         (
+            tmpdir_var(),
+            "where daemons keep their files, instead of /tmp",
+        ),
+        (
             "REX_SERVER, REX_SESSION".to_string(),
             "the Rex session to open panes in (needed for now)",
         ),
@@ -46,7 +51,6 @@ pub fn help() -> String {
         .iter()
         .map(|(name, what)| format!("  {name:width$}{what}\n"))
         .collect();
-    let log = log::env_var();
     let url = repo_url();
     format!(
         "\
@@ -90,13 +94,13 @@ command, write ./list. To edit with it, set EDITOR={n}.
 
 Environment:
 {env}
-A daemon logs to `log` in its private directory, {n}-<launcher pid>.XXXXXX in
-$XDG_RUNTIME_DIR, else $TMPDIR, else /tmp (each only when it is an absolute path).
-On a clean exit the daemon removes it, unless {log} is debug; when the daemon
-fails, it stays, and {n} prints its path.
+Each daemon keeps its files in {tmpdir}, else /tmp, under
+/{n}-<uid>/<daemon name>/, and logs to `log` there. The log stays after
+the daemon ends; the next daemon of that name keeps it as log.1.
 More: {url}   Developer tools: {n} help debug
 ",
         pad = " ".repeat(n.len()),
+        tmpdir = format_args!("${}", tmpdir_var()),
     )
 }
 
@@ -133,9 +137,12 @@ mod tests {
             "REX_SERVER",
             "REX_SESSION",
             "REX_BLOCK",
-            "XDG_RUNTIME_DIR",
-            "TMPDIR",
-            &format!("`log` in its private directory, {NAME}-<launcher pid>.XXXXXX"),
+            &format!(
+                "${}_TMPDIR, else /tmp, under\n/{NAME}-<uid>/<daemon name>/",
+                upper()
+            ),
+            "logs to `log` there",
+            "log.1",
             &format!("{}_LOG", upper()),
         ] {
             assert!(help().contains(want), "{want}");

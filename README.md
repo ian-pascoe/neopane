@@ -140,6 +140,8 @@ Rex sets in every pane:
   went wrong; `info`, the default: that, and what happened; `debug`: that,
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
   warning, and `info` is used.
+- `NEOREX_TMPDIR`: where daemons keep their files, instead of `/tmp`. A
+  relative path is taken from the directory `neorex` runs in.
 
 Each window's Rex pane runs `neorex attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
@@ -154,14 +156,18 @@ to start a daemon without one, use --detach` and exits 1. In a terminal but
 without `REX_SERVER` or `REX_SESSION`, it prints `neorex: run it in a Rex
 pane` and exits 1. The `debug-rex` command reads the same three variables.
 
-The daemon keeps its files (Neovim's socket, its own socket, and the log) in a
-private directory, `neorex-<launcher pid>.XXXXXX`, in `$XDG_RUNTIME_DIR`, else
-`$TMPDIR`, else `/tmp`; each is used only when it is an absolute path. It logs
-to the file `log` there. On a clean exit (Neovim quits or crashes, the last
-pane closes, or a signal) the daemon removes the log and the directory, unless
-`NEOREX_LOG` is `debug`. When
-the daemon itself fails, they stay, and if it failed to start, neorex prints
-the log's path. `neorex --help` says the same.
+Each daemon has a name: the name of the directory `neorex` was started in,
+cut to its letters, digits, `.`, `_` and `-`, and to 32 characters (`default`
+if nothing is left), with `-2`, `-3`, … added while a daemon of that name
+runs. `--name N` names it exactly N instead. A daemon keeps its files (its own
+socket `sock`, Neovim's `nvim.sock`, and its `log`) in
+`$NEOREX_TMPDIR/neorex-<uid>/<daemon name>/`, `/tmp` standing in for an unset
+`NEOREX_TMPDIR` (ADR 0004). The directory `neorex-<uid>` must be yours, a real
+directory, and mode 0700, or `neorex` refuses to start and names
+`NEOREX_TMPDIR`. The daemon holds a lock on its own directory while it runs,
+which is how it's known to be running. Its log stays after it ends, however it
+ends; the next daemon of that name keeps it as `log.1`, replacing an older
+one. `neorex --help` says the same.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
@@ -192,9 +198,10 @@ Usage:
 ```
 
 Not built yet: `attach` (but for the hidden `attach --pane` of a Rex pane),
-`list`, `status`, `kill`, `provider`, and the `--name`, `--address`,
-`--detach` and `--no-wait` options exit 1 with `neorex: list isn't built
-yet`. `--provider` is accepted and does nothing.
+`list`, `status`, `kill`, `provider`, and the `--address`, `--detach` and
+`--no-wait` options exit 1 with `neorex: list isn't built yet`. `--provider`
+is accepted and does nothing. `--name N` starts a daemon named N, but while N
+runs it exits 1 with `neorex: N is already running` instead of attaching.
 
 ### Own options first, then Neovim's
 
@@ -258,8 +265,8 @@ quietly.
   `neorex` from a Rex pane, or set both (see above) to a session you made.
 - "the daemon didn't start; see <path>", or a failure line in the pane: read
   the log at that path.
-- To find a log left by a daemon failure, look in the directories named
-  `neorex-*` in `$XDG_RUNTIME_DIR`, `$TMPDIR` or `/tmp`.
+- A daemon's log is `/tmp/neorex-<uid>/<daemon name>/log` (under
+  `$NEOREX_TMPDIR` if set), and the one before it `log.1`.
 - While it runs, Neovim's own messages go to the same log, since the
   daemon's stderr is Neovim's.
 
