@@ -10,6 +10,7 @@ use super::Result;
 use crate::daemon::event_loop::Loop;
 use crate::daemon::fdpass;
 use crate::daemon::pane_helper::{self, Message};
+use crate::name::NAME;
 use crate::term::input::{self, Event, Key};
 use crate::term::terminal::Terminal;
 
@@ -188,7 +189,7 @@ impl PaneHost {
         eprintln!("pane {}: attached", p.id);
         write!(
             p.term.writer,
-            "\x1b[H\x1b[2Jneorex pane {}, driven by {}.\r\n",
+            "\x1b[H\x1b[2J{NAME} pane {}, driven by {}.\r\n",
             p.id, self.name
         )?;
         print_size(p)?;

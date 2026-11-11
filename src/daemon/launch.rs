@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use super::pane_helper;
 use super::serve;
+use crate::name::NAME;
 
 /// The launcher is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -34,7 +35,7 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
     }
     // each window becomes a Rex pane
     if std::env::var_os("REX_SERVER").is_none() || std::env::var_os("REX_SESSION").is_none() {
-        eprintln!("neorex: run it in a Rex pane");
+        eprintln!("{NAME}: run it in a Rex pane");
         return Err(Error::NotInRex.into());
     }
 
@@ -65,7 +66,7 @@ pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<()> {
     };
     drop(stdout);
     if n != 1 {
-        eprintln!("neorex: the daemon didn't start; see {log_path}");
+        eprintln!("{NAME}: the daemon didn't start; see {log_path}");
         return Err(Error::DaemonFailed.into());
     }
     // the daemon outlives us; it's never waited for here

@@ -26,6 +26,7 @@ use super::nvim_session::NvimSession;
 use super::pane::{self, Pane, RexBlock};
 use super::pane_helper;
 use super::surface::Surface;
+use crate::name::NAME;
 use crate::nvim::nvim::{self, Nvim};
 use crate::rex::client::Client;
 use crate::rex::session::Session as RexSession;
@@ -88,7 +89,7 @@ fn parent_dir<'a>(xdg_runtime_dir: Option<&'a str>, tmpdir: Option<&'a str>) -> 
 fn private_dir_in(parent: &str) -> Result<String> {
     let parent = parent.trim_end_matches('/');
     // SAFETY: getpid can't fail.
-    let template = format!("{parent}/neorex-{}.XXXXXX", unsafe { libc::getpid() });
+    let template = format!("{parent}/{NAME}-{}.XXXXXX", unsafe { libc::getpid() });
     if path(&template, LONGEST_NAME).len() > MAX_PATH {
         return Err(Error::NameTooLong.into());
     }
@@ -247,7 +248,7 @@ impl Drop for NvimChild {
         if self.wait_for_exit() {
             return;
         }
-        eprintln!("neorex daemon: Neovim didn't exit after SIGHUP; killing it");
+        eprintln!("{NAME} daemon: Neovim didn't exit after SIGHUP; killing it");
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -291,7 +292,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         Some(b) => match pane::rex_block(b.as_bytes()) {
             Ok(block) => Some(block),
             Err(_) => {
-                eprintln!("neorex daemon: REX_BLOCK isn't a block id: {b}");
+                eprintln!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
                 None
             }
         },
@@ -310,7 +311,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
             "--listen",
             &nvim_sock,
             "--cmd",
-            "let g:neorex = 1",
+            &format!("let g:{NAME} = 1"),
         ])
         .args(nvim_args)
         .stdin(Stdio::null())
@@ -337,7 +338,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
             ));
         }
     };
-    let rex = match Client::connect(config.rex_url) {
+    let rex = match Client::connect(config.rex_url, NAME) {
         Ok(rex) => rex,
         Err(err) => {
             return Err(startup.give_up(
@@ -367,7 +368,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     d.start(startup.release())?;
 
     let stop_reason = d.run(&server)?;
-    eprintln!("neorex daemon: {}", stop_reason.tag_name());
+    eprintln!("{NAME} daemon: {}", stop_reason.tag_name());
     if stop_reason == StopReason::NvimExited {
         // panes first: Neovim may take a while to finish exiting
         drop(d);
@@ -451,7 +452,7 @@ fn failure_message(
     nvim_exit: Option<NvimExit>,
     log: &str,
 ) -> Vec<u8> {
-    let mut w = String::from("neorex: ");
+    let mut w = format!("{NAME}: ");
     match step {
         StartStep::StartNvim => {
             if err
@@ -550,7 +551,7 @@ mod tests {
     fn a_neovim_exiting_by_itself_is_waited_for_not_sent_sighup() {
         // Neovim closes its socket before it deletes its swap files: a SIGHUP
         // in between keeps them. This one notes a SIGHUP, then ends itself.
-        let marker = std::env::temp_dir().join(format!("neorex-hup-{}", std::process::id()));
+        let marker = std::env::temp_dir().join(format!("{NAME}-hup-{}", std::process::id()));
         let _ = fs::remove_file(&marker);
         let script = format!(
             "trap 'echo hup > {}; exit 1' HUP; echo ready; sleep 0.3",
@@ -599,7 +600,7 @@ mod tests {
         assert_eq!(expected, MAX_PATH);
 
         let padded = |len: usize| {
-            let stem = format!("/tmp/neorex-maxpath-{}-", std::process::id());
+            let stem = format!("/tmp/{NAME}-maxpath-{}-", std::process::id());
             format!("{stem}{}", "x".repeat(len - stem.len()))
         };
         let longest = padded(MAX_PATH);

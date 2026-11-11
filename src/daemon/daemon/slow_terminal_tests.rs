@@ -185,7 +185,7 @@ impl Rig {
         static RIGS: AtomicU32 = AtomicU32::new(0);
         let n = RIGS.fetch_add(1, Ordering::SeqCst);
         let sock = std::env::temp_dir()
-            .join(format!("neorex-slow-{}-{n}.sock", std::process::id()))
+            .join(format!("{NAME}-slow-{}-{n}.sock", std::process::id()))
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&sock);

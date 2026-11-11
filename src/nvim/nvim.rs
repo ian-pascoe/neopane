@@ -335,6 +335,7 @@ pub(crate) fn wait_response(nvim: &mut Nvim, id: u32) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::NAME;
     use std::process::Child;
 
     /// The error and result of the response in `frame`.
@@ -429,7 +430,7 @@ mod tests {
 
     #[test]
     fn connect_to_a_listening_neovim() {
-        let path = format!("/tmp/neorex-test-connect-{}.sock", std::process::id());
+        let path = format!("/tmp/{NAME}-test-connect-{}.sock", std::process::id());
         let Some(_server) = Server::start(&path, &[]) else {
             return;
         };
@@ -440,7 +441,7 @@ mod tests {
     #[test]
     fn a_config_slower_than_connect_retrys_wait_still_starts() {
         // Neovim listens before it runs the config, so the connect doesn't wait for it
-        let path = format!("/tmp/neorex-test-slow-{}.sock", std::process::id());
+        let path = format!("/tmp/{NAME}-test-slow-{}.sock", std::process::id());
         let Some(_server) = Server::start(&path, &["--cmd", "lua vim.uv.sleep(2500)"]) else {
             return;
         };

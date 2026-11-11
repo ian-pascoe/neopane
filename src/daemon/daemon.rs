@@ -33,6 +33,7 @@ use super::rex_layout::{self, LayoutSnapshot};
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
 use super::window_changes::WindowChanges;
+use crate::name::NAME;
 use crate::nvim::forwarder::{self, Forwarder};
 use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
@@ -267,7 +268,7 @@ impl Daemon {
                 && self.stopped.is_none()
                 && let Err(err) = self.accept(server)
             {
-                eprintln!("neorex daemon: a pane failed: {err}");
+                eprintln!("{NAME} daemon: a pane failed: {err}");
             }
             if self.stopped.is_none() {
                 self.after_batch()?;
@@ -420,7 +421,7 @@ impl Daemon {
         let hello = pane_helper::accept_hello(server)?;
         // its window may have closed before it connected
         let Some(id) = hello.id.filter(|&id| self.panes.by_id(id).is_some()) else {
-            eprintln!("neorex daemon: a helper for a pane that's gone");
+            eprintln!("{NAME} daemon: a helper for a pane that's gone");
             hello.close();
             return Ok(());
         };
@@ -430,7 +431,7 @@ impl Daemon {
             .by_id(id)
             .is_some_and(|p| p.terminal_surface.is_some())
         {
-            eprintln!("neorex daemon: a second helper for pane {id}; refused");
+            eprintln!("{NAME} daemon: a second helper for pane {id}; refused");
             hello.close();
             return Ok(());
         }
@@ -641,7 +642,7 @@ impl Daemon {
         let id = pane_id.to_string();
         let block = json!({
             "flavor": "com.superlogical.terminal.shell",
-            "label": "neorex",
+            "label": NAME,
             "options": {
                 "shell": "none",
                 "command": [self.exe, "pane", self.sock, id],
@@ -753,7 +754,7 @@ impl Daemon {
                 rpc::Message::Request { id, .. } => {
                     self.nvim
                         .client
-                        .respond_error(id, "neorex serves no requests")?;
+                        .respond_error(id, &format!("{NAME} serves no requests"))?;
                 }
                 rpc::Message::Response { id, err, result } => {
                     self.on_response(id, err, result)?;
@@ -1586,7 +1587,7 @@ fn parse_note_or_log(method: &[u8], params: &mut Decoder<'_>) -> Option<windows:
         Ok(note) => note,
         Err(err) => {
             eprintln!(
-                "neorex daemon: unreadable {} note: {err}",
+                "{NAME} daemon: unreadable {} note: {err}",
                 String::from_utf8_lossy(method)
             );
             None
@@ -1599,7 +1600,7 @@ fn parse_block(block: &str) -> Option<RexBlock> {
     match pane::rex_block(block.as_bytes()) {
         Ok(b) => Some(b),
         Err(_) => {
-            eprintln!("neorex daemon: not a block id: {block}");
+            eprintln!("{NAME} daemon: not a block id: {block}");
             None
         }
     }
@@ -1714,7 +1715,7 @@ mod tests {
                 .unwrap()
                 .helper_fd();
 
-        let path = std::env::temp_dir().join(format!("neorex-dup-{}.sock", std::process::id()));
+        let path = std::env::temp_dir().join(format!("{NAME}-dup-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let server = UnixListener::bind(&path).unwrap();
         let client = UnixStream::connect(&path).unwrap();
@@ -1892,7 +1893,8 @@ mod tests {
         drop(d);
         let mut all = Vec::new();
         nvim_end.read_to_end(&mut all).unwrap();
-        let call = b"neorex.set_tabline_width(...)";
+        let call = format!("{NAME}.set_tabline_width(...)");
+        let call = call.as_bytes();
         let mut sent = Vec::new();
         let mut at = 0;
         while let Some(i) = all[at..].windows(call.len()).position(|w| w == call) {
@@ -2602,7 +2604,7 @@ mod tests {
         assert_eq!("session:s", new["payload"]["session_id"]);
         assert_eq!(json!([0.045, 0.06, 0.315, 0.44]), new["payload"]["bounds"]);
         assert_eq!(
-            json!(["neorex", "pane"]),
+            json!([NAME, "pane"]),
             json!([
                 new["payload"]["layout"]["block"]["label"],
                 new["payload"]["layout"]["block"]["options"]["command"][1]
@@ -2665,7 +2667,7 @@ mod tests {
         let mut all = Vec::new();
         nvim_end.read_to_end(&mut all).unwrap();
         String::from_utf8_lossy(&all)
-            .matches("neorex.place_group")
+            .matches(&format!("{NAME}.place_group"))
             .count()
     }
 
@@ -2894,7 +2896,7 @@ mod tests {
 
         /// How many windows it asked Neovim to close.
         fn neorex_closes(&self) -> usize {
-            self.nvim.matches("neorex.close").count()
+            self.nvim.matches(&format!("{NAME}.close")).count()
         }
 
         /// The payload of the `n`th request to Rex.
@@ -2993,7 +2995,7 @@ mod tests {
         assert_eq!(vec!["session.new_layer"], sent.rex_methods());
         let req = sent.payload(0);
         assert_eq!(json!(TAB_LAYER_BOUNDS), req["bounds"]);
-        assert_eq!("neorex", req["layout"]["block"]["label"]);
+        assert_eq!(NAME, req["layout"]["block"]["label"]);
     }
 
     #[test]

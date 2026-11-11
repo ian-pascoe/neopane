@@ -5,6 +5,7 @@
 use super::msgpack::{self, Decoder};
 use super::nvim::Nvim;
 use super::rpc;
+use crate::name::{self, NAME};
 
 const LUA: &str = include_str!("windows.lua");
 
@@ -12,7 +13,9 @@ const LUA: &str = include_str!("windows.lua");
 /// external at `cols` x `rows`. Its response is `[first window, anchor]`.
 #[doc(hidden)]
 pub fn setup(nvim: &mut Nvim, chan: i64, cols: u32, rows: u32) -> u32 {
-    let id = nvim.exec_lua(LUA, 3);
+    let id = nvim.exec_lua(LUA, 5);
+    msgpack::write_str(nvim.writer(), NAME);
+    msgpack::write_str(nvim.writer(), name::title());
     msgpack::write_int(nvim.writer(), chan);
     msgpack::write_int(nvim.writer(), cols);
     msgpack::write_int(nvim.writer(), rows);
@@ -22,7 +25,7 @@ pub fn setup(nvim: &mut Nvim, chan: i64, cols: u32, rows: u32) -> u32 {
 /// Makes ordinary window `win` external at `cols` x `rows`; anchors stay.
 #[doc(hidden)]
 pub fn adopt(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
-    nvim.exec_lua("neorex.adopt(...)", 3);
+    nvim.exec_lua(&format!("{NAME}.adopt(...)"), 3);
     msgpack::write_int(nvim.writer(), win);
     msgpack::write_int(nvim.writer(), cols.max(1));
     msgpack::write_int(nvim.writer(), rows.max(1));
@@ -31,7 +34,7 @@ pub fn adopt(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
 /// Sizes external window `win` to fill `cols` x `rows`, its statusline included.
 #[doc(hidden)]
 pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
-    nvim.exec_lua("neorex.size(...)", 3);
+    nvim.exec_lua(&format!("{NAME}.size(...)"), 3);
     msgpack::write_int(nvim.writer(), win);
     msgpack::write_int(nvim.writer(), cols.max(1));
     msgpack::write_int(nvim.writer(), rows.max(1));
@@ -41,7 +44,7 @@ pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
 /// columns, while that's narrower than Neovim's screen; None while it isn't.
 /// An empty one is neorex's copy of the built-in tabline, laid out to it.
 pub(crate) fn set_tabline_width(nvim: &mut Nvim, cols: Option<u32>) {
-    nvim.exec_lua("neorex.set_tabline_width(...)", 1);
+    nvim.exec_lua(&format!("{NAME}.set_tabline_width(...)"), 1);
     match cols {
         Some(c) => msgpack::write_int(nvim.writer(), c),
         None => msgpack::write_nil(nvim.writer()),
@@ -60,7 +63,7 @@ pub(crate) fn place_group(
     h: u32,
     cur: [i64; 4],
 ) -> u32 {
-    let id = nvim.exec_lua("neorex.place_group(...)", 6);
+    let id = nvim.exec_lua(&format!("{NAME}.place_group(...)"), 6);
     let wr = nvim.writer();
     msgpack::write_array_header(wr, tops.len() as u32);
     for &t in tops {
@@ -79,7 +82,7 @@ pub(crate) fn place_group(
 
 /// Closes `win`, keeping unsaved changes in its buffer.
 pub(crate) fn close(nvim: &mut Nvim, win: i64) {
-    nvim.exec_lua("neorex.close(...)", 1);
+    nvim.exec_lua(&format!("{NAME}.close(...)"), 1);
     msgpack::write_int(nvim.writer(), win);
 }
 
@@ -311,19 +314,26 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         Cmdheight,
         Layout,
     }
-    if method == b"neorex_direction" {
+    // `<name>_<method>`
+    let Some(method) = method
+        .strip_prefix(NAME.as_bytes())
+        .and_then(|m| m.strip_prefix(b"_"))
+    else {
+        return Ok(None);
+    };
+    if method == b"direction" {
         return parse_direction(params).map(Some);
     }
     let tag = match method {
-        b"neorex_win" => Tag::Current,
-        b"neorex_reopen" => Tag::Reopen,
-        b"neorex_reopened" => Tag::Reopened,
-        b"neorex_split" => Tag::Split,
-        b"neorex_float" => Tag::Float,
-        b"neorex_entered" => Tag::Entered,
-        b"neorex_tabline" => Tag::Tabline,
-        b"neorex_cmdheight" => Tag::Cmdheight,
-        b"neorex_layout" => Tag::Layout,
+        b"win" => Tag::Current,
+        b"reopen" => Tag::Reopen,
+        b"reopened" => Tag::Reopened,
+        b"split" => Tag::Split,
+        b"float" => Tag::Float,
+        b"entered" => Tag::Entered,
+        b"tabline" => Tag::Tabline,
+        b"cmdheight" => Tag::Cmdheight,
+        b"layout" => Tag::Layout,
         _ => return Ok(None),
     };
     let want: u32 = match tag {
@@ -614,7 +624,7 @@ mod tests {
         /// run. An error in it fails the test.
         fn sync(&mut self, code: &str) {
             let ping = self.next_ping();
-            self.lua(&format!("{code}\nvim.rpcnotify(0, 'neorex_win', {ping})"));
+            self.lua(&format!("{code}\nvim.rpcnotify(0, '{NAME}_win', {ping})"));
             self.until_ping(ping);
         }
 
@@ -643,7 +653,7 @@ mod tests {
         fn typed(&mut self) {
             self.pings += 1;
             self.input(&format!(
-                ":lua vim.rpcnotify(0, 'neorex_win', {})<CR>",
+                ":lua vim.rpcnotify(0, '{NAME}_win', {})<CR>",
                 PING_BASE + self.pings
             ));
             self.want = PING_BASE + self.pings;
@@ -748,7 +758,7 @@ mod tests {
         /// Waits until Neovim runs a command that says `neorex_win` 4242, after
         /// everything typed before it.
         fn barrier(&mut self) {
-            self.input(":call rpcnotify(0, 'neorex_win', 4242)<CR>");
+            self.input(&format!(":call rpcnotify(0, '{NAME}_win', 4242)<CR>"));
             self.want = 4242;
             assert!(self.until(Harness::is_current));
         }
@@ -913,7 +923,7 @@ mod tests {
             h.eval_str(&format!(
                 "local a = vim.api.nvim_win_get_buf({anchor})\n\
                  return string.format('%s %d %s', vim.api.nvim_win_get_buf({pane}) == picked, \
-                 vim.api.nvim_win_get_cursor({pane})[1], vim.b[a].neorex_anchor)"
+                 vim.api.nvim_win_get_cursor({pane})[1], vim.b[a].{NAME}_anchor)"
             ))
         };
         h.notes.clear();
@@ -1042,14 +1052,14 @@ mod tests {
              \x20 end\n\
              end))\n\
              daemon:start(50, 50, vim.schedule_wrap(function()\n\
-             \x20 neorex.adopt(win, 17, 9)\n\
-             \x20 neorex.size(win, 17, 9)\n\
+             \x20 {NAME}.adopt(win, 17, 9)\n\
+             \x20 {NAME}.size(win, 17, 9)\n\
              end))\n\
-             vim.defer_fn(function() vim.rpcnotify(0, 'neorex_win', {FIGHT_AT_1S} + pulls) end, 1000)\n\
+             vim.defer_fn(function() vim.rpcnotify(0, '{NAME}_win', {FIGHT_AT_1S} + pulls) end, 1000)\n\
              vim.defer_fn(function()\n\
              \x20 timer:stop()\n\
              \x20 daemon:stop()\n\
-             \x20 vim.rpcnotify(0, 'neorex_win', {FIGHT_AT_END} + pulls)\n\
+             \x20 vim.rpcnotify(0, '{NAME}_win', {FIGHT_AT_END} + pulls)\n\
              end, 1500)"
         ));
         assert!(h.until(|x| x.last_current() >= FIGHT_AT_END));
@@ -1122,11 +1132,11 @@ mod tests {
              \x20 vim.api.nvim_win_set_config(win, {{ split = 'left', win = anchor }})\n\
              end))\n\
              beat:start(500, 500, vim.schedule_wrap(function()\n\
-             \x20 vim.rpcnotify(0, 'neorex_tabline', 0)\n\
+             \x20 vim.rpcnotify(0, '{NAME}_tabline', 0)\n\
              \x20 if (#bursts >= 3 and now() - bursts[3] > 1000) or now() - began > 40000 then\n\
              \x20   timer:stop()\n\
              \x20   beat:stop()\n\
-             \x20   vim.rpcnotify(0, 'neorex_win', {FIGHT_AT_END})\n\
+             \x20   vim.rpcnotify(0, '{NAME}_win', {FIGHT_AT_END})\n\
              \x20 end\n\
              end))"
         ));
@@ -1234,7 +1244,7 @@ mod tests {
         h.gone = tab;
         assert!(h.until(|x| x.kind(x.gone).is_none()));
         h.command(&format!(
-            "if tabpagenr('$') != 2 || !nvim_win_is_valid({split}) | throw 'tab page closed' | endif | call rpcnotify(0, 'neorex_win', 4242)"
+            "if tabpagenr('$') != 2 || !nvim_win_is_valid({split}) | throw 'tab page closed' | endif | call rpcnotify(0, '{NAME}_win', 4242)"
         ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
@@ -1248,7 +1258,7 @@ mod tests {
         assert!(h.until(|x| x.is_current() && x.kind(x.gone).is_none()));
         // an error fails the wait; else a made-up report ends it
         h.command(&format!(
-            "if tabpagenr('$') != 1 || win_getid() != {first} | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4242)"
+            "if tabpagenr('$') != 1 || win_getid() != {first} | throw 'tab page left' | endif | call rpcnotify(0, '{NAME}_win', 4242)"
         ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
@@ -1393,7 +1403,7 @@ mod tests {
         // tab page 2 stays, with its window in its layout again. Checked
         // after what's scheduled, as closing a tab page is.
         h.lua(&format!(
-            "vim.schedule(function() if vim.fn.tabpagenr('$') == 2 and vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, 'neorex_win', 4242) end end)"
+            "vim.schedule(function() if vim.fn.tabpagenr('$') == 2 and vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, '{NAME}_win', 4242) end end)"
         ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
@@ -1409,7 +1419,7 @@ mod tests {
         h.gone = new;
         assert!(h.until(|x| x.kind(x.gone).is_none()));
         h.lua(&format!(
-            "vim.schedule(function() if vim.fn.tabpagenr('$') == 1 and not vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, 'neorex_win', 4343) end end)"
+            "vim.schedule(function() if vim.fn.tabpagenr('$') == 1 and not vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, '{NAME}_win', 4343) end end)"
         ));
         h.want = 4343;
         assert!(h.until(Harness::is_current));
@@ -1542,7 +1552,7 @@ mod tests {
 
         h.set_tabline_width(Some(30));
         h.until_laid_out_to(30, 'L', 'R');
-        h.sync("assert(vim.g.neorex_tabline_width == 30)");
+        h.sync(&format!("assert(vim.g.{NAME}_tabline_width == 30)"));
         // the screen is as wide as before
         h.sync("assert(vim.o.columns == 60)");
     }
@@ -1559,7 +1569,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.sync("assert(vim.g.neorex_tabline_width == 30)");
+        h.sync(&format!("assert(vim.g.{NAME}_tabline_width == 30)"));
         // the first 30 columns, as they'd be without padding
         h.until_tabline_starts_with(&format!("A{}", "x".repeat(29)));
     }
@@ -1576,7 +1586,7 @@ mod tests {
              vim.o.showtabline = 2",
         );
         h.set_tabline_width(Some(30));
-        h.sync("assert(vim.g.neorex_tabline_width == 30)");
+        h.sync(&format!("assert(vim.g.{NAME}_tabline_width == 30)"));
         h.until_tabline_starts_with(&format!("A{}Z", "x".repeat(40)));
     }
 
@@ -1591,10 +1601,10 @@ mod tests {
 
         h.set_tabline_width(None);
         h.until_laid_out_to(60, 'L', 'R');
-        h.sync(
-            "assert(vim.g.neorex_tabline_width == nil)\n\
+        h.sync(&format!(
+            "assert(vim.g.{NAME}_tabline_width == nil)\n\
              assert(vim.o.tabline == '%!v:lua.tl()', vim.o.tabline)",
-        );
+        ));
     }
 
     #[test]
@@ -1724,11 +1734,11 @@ mod tests {
             return;
         };
         // reads g:neorex_tabline_width, never vim.o.columns
-        h.sync(
-            "_G.tl = function() return 'L%=R' .. (vim.g.neorex_tabline_width or 60) end\n\
+        h.sync(&format!(
+            "_G.tl = function() return 'L%=R' .. (vim.g.{NAME}_tabline_width or 60) end\n\
              vim.o.tabline = '%!v:lua.tl()'\n\
              vim.o.showtabline = 2",
-        );
+        ));
         h.set_tabline_width(Some(30));
         h.until_laid_out_to(30, 'L', 'R');
     }
@@ -1738,14 +1748,14 @@ mod tests {
         let Some(mut h) = Harness::start_sized(60, 10) else {
             return;
         };
-        h.sync(
+        h.sync(&format!(
             "vim.cmd([[\n\
              function! Tl()\n\
-             \x20 return 'L%=R' . get(g:, 'neorex_tabline_width', 60)\n\
+             \x20 return 'L%=R' . get(g:, '{NAME}_tabline_width', 60)\n\
              endfunction]])\n\
              vim.o.tabline = '%!Tl()'\n\
              vim.o.showtabline = 2",
-        );
+        ));
         h.set_tabline_width(Some(30));
         h.until_laid_out_to(30, 'L', 'R');
     }
@@ -1898,7 +1908,7 @@ mod tests {
              \x20 n = n + 1\n\
              \x20 if n == 50 then\n\
              \x20   timer:stop()\n\
-             \x20   vim.rpcnotify(0, 'neorex_win', {TIMER_DONE})\n\
+             \x20   vim.rpcnotify(0, '{NAME}_win', {TIMER_DONE})\n\
              \x20 end\n\
              end))"
         ));
@@ -1984,8 +1994,9 @@ mod tests {
 
     /// Adopts every window that isn't external yet, as the daemon gives each
     /// new window a pane.
-    const ADOPT_ALL: &str =
-        "for _, w in ipairs(vim.api.nvim_list_wins()) do neorex.adopt(w, 20, 5) end";
+    fn adopt_all() -> String {
+        format!("for _, w in ipairs(vim.api.nvim_list_wins()) do {NAME}.adopt(w, 20, 5) end")
+    }
 
     impl Harness {
         /// Grid 1's first `n` cells of the top row: text and highlight, with
@@ -2014,7 +2025,7 @@ mod tests {
             if self.bare {
                 self.sync(step);
             } else {
-                self.sync(&format!("{step}\n{ADOPT_ALL}"));
+                self.sync(&format!("{step}\n{}", adopt_all()));
             }
         }
     }
@@ -2085,7 +2096,7 @@ mod tests {
                 |cells: &[(String, Attr)]| cells.iter().map(|c| c.0.as_str()).collect::<String>();
             // both drawn, to the tabline width at least
             assert_eq!(self.w, want.len(), "reference: {:?}", text(&want));
-            assert_eq!(self.w, got.len(), "neorex: {:?}", text(&got));
+            assert_eq!(self.w, got.len(), "{NAME}: {:?}", text(&got));
             assert_eq!(text(&want), text(&got));
             for (i, (w, g)) in want.iter().zip(&got).enumerate() {
                 assert_eq!(w, g, "cell {i} of {:?}", text(&want));
@@ -2097,7 +2108,7 @@ mod tests {
     /// path; the second current.
     const TWO_TABS: &[&str] = &[
         "vim.o.showtabline = 2\nvim.cmd('file one.lua')",
-        "vim.cmd('vsplit ~/src/neorex/two.txt')\n\
+        "vim.cmd('vsplit ~/src/proj/two.txt')\n\
          vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'x' })",
         "vim.cmd('tabnew three')",
     ];
@@ -2116,7 +2127,7 @@ mod tests {
         TWO_TABS[0],
         TWO_TABS[1],
         TWO_TABS[2],
-        "vim.cmd('tabnew ~/src/neorex/docs/research/builtin-tabline.md')",
+        "vim.cmd('tabnew ~/src/proj/docs/research/builtin-tabline.md')",
     ];
 
     /// `THREE_TABS`, then a fourth.
@@ -2231,7 +2242,7 @@ mod tests {
         };
         p.steps(TWO_TABS);
         p.expect_same();
-        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/n/two.txt  three "));
+        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/p/two.txt  three "));
     }
 
     #[test]
@@ -2310,7 +2321,7 @@ mod tests {
         // closes the windows that followed into it too, which neorex reopens
         p.steps(&["vim.cmd.tabclose()"]);
         p.expect_same();
-        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/n/two.txt "));
+        assert!(p.h.tabline_text().starts_with(" 2+ ~/s/p/two.txt "));
 
         // and the one focused last still names it
         let Some(mut p) = Pair::new(60, None) else {
@@ -2328,8 +2339,11 @@ mod tests {
     }
 
     /// Adopts the current tab page's windows that aren't external yet.
-    const ADOPT_CURRENT: &str =
-        "for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do neorex.adopt(w, 20, 5) end";
+    fn adopt_current() -> String {
+        format!(
+            "for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do {NAME}.adopt(w, 20, 5) end"
+        )
+    }
 
     #[test]
     fn windows_reopened_without_focus_keep_naming_and_counting_for_their_tab_page() {
@@ -2347,14 +2361,14 @@ mod tests {
             // followed into the third would close the second with it
             p.steps_adopting(&[
                 ("vim.cmd('tabnew three')", ""),
-                ("vim.cmd('tabnew four')", ADOPT_CURRENT),
+                ("vim.cmd('tabnew four')", &adopt_current()),
                 // closes the first tab page's windows, which followed into it;
                 // neorex reopens them, while focus goes to the second's
-                ("vim.cmd.tabclose()", ADOPT_CURRENT),
+                ("vim.cmd.tabclose()", &adopt_current()),
             ]);
             p.expect_same();
             let name = if focus == "two.txt" {
-                "~/s/n/two.txt"
+                "~/s/p/two.txt"
             } else {
                 focus
             };
@@ -2378,9 +2392,9 @@ mod tests {
             ("vim.cmd('tabnew three')", ""),
             ("vim.cmd('vsplit six')", ""),
             ("vim.api.nvim_set_current_win(vim.fn.bufwinid('three'))", ""),
-            ("vim.cmd('tabnew four')", ADOPT_CURRENT),
+            ("vim.cmd('tabnew four')", &adopt_current()),
             // back in the second, then to its window focused before
-            ("vim.cmd('tabclose | wincmd p')", ADOPT_CURRENT),
+            ("vim.cmd('tabclose | wincmd p')", &adopt_current()),
         ]);
         p.expect_same();
         assert!(
@@ -2423,7 +2437,7 @@ mod tests {
         p.expect_same();
         assert!(
             p.h.tabline_text()
-                .starts_with(" 3+ ~/s/n/two.txt  2 three ")
+                .starts_with(" 3+ ~/s/p/two.txt  2 three ")
         );
     }
 
@@ -2455,7 +2469,7 @@ mod tests {
         /// Waits until Neovim has taken the input sent so far.
         fn input_taken(&mut self) {
             let ping = self.next_ping();
-            self.input(&format!(":lua vim.rpcnotify(0, 'neorex_win', {ping})<CR>"));
+            self.input(&format!(":lua vim.rpcnotify(0, '{NAME}_win', {ping})<CR>"));
             self.until_ping(ping);
         }
     }
@@ -2773,9 +2787,9 @@ mod tests {
         h.input(":close<CR>:setlocal statusline=AFTER<CR>");
         h.both_show(first, split, "AFTER");
 
-        h.command(
-            "if get(g:, 'blanked') | throw 'a pane lost its statusline' | endif | call rpcnotify(0, 'neorex_win', 4242)",
-        );
+        h.command(&format!(
+            "if get(g:, 'blanked') | throw 'a pane lost its statusline' | endif | call rpcnotify(0, '{NAME}_win', 4242)",
+        ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
     }
@@ -2904,7 +2918,7 @@ mod tests {
         // closed, then a narrow file panel left of all: made in the order
         // old, new, panel, shown as panel, old, new
         h.notes.clear();
-        h.lua(
+        h.lua(&format!(
             "local api = vim.api\n\
              vim.cmd('tabnew')\n\
              local pivot = api.nvim_get_current_win()\n\
@@ -2914,8 +2928,8 @@ mod tests {
              api.nvim_win_close(pivot, true)\n\
              vim.cmd('topleft vsplit')\n\
              vim.cmd('vertical resize 20')\n\
-             vim.rpcnotify(0, 'neorex_win', 4242)",
-        );
+             vim.rpcnotify(0, '{NAME}_win', 4242)",
+        ));
         // the layout comes once the command is done
         assert!(h.until(|x| x.notes.iter().any(|n| matches!(n, Note::Layout(_)))));
         let mut made: Vec<i64> = Vec::new();
@@ -3017,9 +3031,9 @@ mod tests {
                 assert_eq!(first, *old);
             }
         }
-        h.command(
-            "if tabpagenr('$') != 1 | throw 'tab page left' | endif | call rpcnotify(0, 'neorex_win', 4242)",
-        );
+        h.command(&format!(
+            "if tabpagenr('$') != 1 | throw 'tab page left' | endif | call rpcnotify(0, '{NAME}_win', 4242)",
+        ));
         h.want = 4242;
         assert!(h.until(Harness::is_current));
     }
@@ -3031,7 +3045,10 @@ mod tests {
             msgpack::write_array_header(&mut buf, 1);
             msgpack::write_int(&mut buf, rows);
             let mut d = Decoder::of(&buf);
-            match parse_note(b"neorex_cmdheight", &mut d).unwrap().unwrap() {
+            match parse_note(format!("{NAME}_cmdheight").as_bytes(), &mut d)
+                .unwrap()
+                .unwrap()
+            {
                 Note::Cmdheight(got) => assert_eq!(rows, got),
                 other => panic!("not a cmdheight note: {other:?}"),
             }
@@ -3040,7 +3057,7 @@ mod tests {
         let mut none = Decoder::of(b"\x90");
         assert_eq!(
             Err(rpc::Error::BadMessage),
-            parse_note(b"neorex_cmdheight", &mut none)
+            parse_note(format!("{NAME}_cmdheight").as_bytes(), &mut none)
         );
         let mut buf = Vec::new();
         msgpack::write_array_header(&mut buf, 1);
@@ -3048,7 +3065,7 @@ mod tests {
         let mut negative = Decoder::of(&buf);
         assert_eq!(
             Err(rpc::Error::BadMessage),
-            parse_note(b"neorex_cmdheight", &mut negative)
+            parse_note(format!("{NAME}_cmdheight").as_bytes(), &mut negative)
         );
     }
 
@@ -3062,7 +3079,7 @@ mod tests {
             msgpack::write_int(&mut buf, n);
         }
         let mut d = Decoder::of(&buf);
-        parse_note(b"neorex_layout", &mut d)
+        parse_note(format!("{NAME}_layout").as_bytes(), &mut d)
     }
 
     fn layout_of(note: Option<Note>) -> Layout {
@@ -3166,11 +3183,11 @@ mod tests {
 
         // SafeState fires again after every scheduled callback, so one that
         // schedules work keeps Neovim looping, while a floating tab page is current
-        h.lua(
+        h.lua(&format!(
             "_G.safe_states = 0\n\
-             vim.api.nvim_create_autocmd('SafeState', { callback = function() _G.safe_states = _G.safe_states + 1 end })\n\
-             vim.defer_fn(function() vim.rpcnotify(0, 'neorex_tabline', 1000 + _G.safe_states) end, 300)",
-        );
+             vim.api.nvim_create_autocmd('SafeState', {{ callback = function() _G.safe_states = _G.safe_states + 1 end }})\n\
+             vim.defer_fn(function() vim.rpcnotify(0, '{NAME}_tabline', 1000 + _G.safe_states) end, 300)",
+        ));
         assert!(h.until(|x| x.last_tabline() >= 1000));
         assert!(h.last_tabline() - 1000 < 20);
     }

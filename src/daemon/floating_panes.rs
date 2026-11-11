@@ -12,6 +12,7 @@ use super::event_loop::Loop;
 use super::pane::{Close, Pane};
 use super::panes::Panes;
 use super::rex_layout;
+use crate::name::NAME;
 use crate::nvim::windows;
 use crate::rex::session::{Conn, Session as RexSession};
 use crate::screen::float_groups::{self, Group};
@@ -106,7 +107,7 @@ impl FloatingPanes<'_> {
             bounds,
             json!({ "block": {
                 "flavor": "com.superlogical.terminal.shell",
-                "label": "neorex",
+                "label": NAME,
                 "options": { "shell": "none", "command": [self.exe, "pane", self.sock, id] },
             } }),
         )?;

@@ -2,11 +2,13 @@
 
 `neorex` in a Rex pane starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows and shows each window in its own Rex pane. The layers:
 
-- `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `neorex_*` notes. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
-- `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows, in its Rex floating pane, as the `neorex_layout` notes say (`TabPlacement`).
+- `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `<name>_*` notes, `<name>` being `NAME` in `src/name.rs`. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
+- `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows, in its Rex floating pane, as the `<name>_layout` notes say (`TabPlacement`).
 - `src/screen/` draws grids into panes. `src/rex/` is the Rex WebSocket client. `src/term/` handles key input and the terminal.
 
-A new note is a change on both sides: `vim.rpcnotify` in `windows.lua`, and the parser in `windows.rs`.
+A new note is a change on both sides: `note` in `windows.lua`, and the parser in `windows.rs`.
+
+Every user-visible name comes from `NAME` in `src/name.rs` (ADR 0005): Neovim variables, highlight groups, notes, Rex labels, log prefixes, file names. `windows.lua` gets it as an argument of its chunk. A test in `src/name.rs` fails on any string literal in `src/`, or line of code in `windows.lua`, that spells the name out.
 
 ## Verify
 
