@@ -22,6 +22,8 @@ pub struct Grids {
     /// The message grid, drawn over grid 1 from `msg_row` down.
     pub msg_grid: Option<u32>,
     pub(crate) msg_row: u32,
+    /// The highlight Neovim draws WinSeparator in, as `hl_group_set` says.
+    pub separator_hl: u32,
 }
 
 impl Default for Grids {
@@ -33,6 +35,7 @@ impl Default for Grids {
             cursor_grid: 1,
             msg_grid: None,
             msg_row: 0,
+            separator_hl: 0,
         }
     }
 }
@@ -464,6 +467,18 @@ impl Grids {
                 Ok(2)
             }
             Event::HlAttrDefine => self.style.apply(style::Event::HlAttrDefine, d, len),
+            Event::HlGroupSet => {
+                if len < 2 {
+                    return Err(rpc::Error::BadMessage);
+                }
+                let name = rpc::expect_str(d)?;
+                let separator = name == b"WinSeparator";
+                let hl = expect_int::<u32>(d)?;
+                if separator {
+                    self.separator_hl = hl;
+                }
+                Ok(2)
+            }
             Event::DefaultColorsSet => self.style.apply(style::Event::DefaultColorsSet, d, len),
             Event::ModeInfoSet => self.style.apply(style::Event::ModeInfoSet, d, len),
             Event::ModeChange => self.style.apply(style::Event::ModeChange, d, len),
@@ -497,6 +512,7 @@ enum Event {
     WinClose,
     MsgSetPos,
     HlAttrDefine,
+    HlGroupSet,
     DefaultColorsSet,
     ModeInfoSet,
     ModeChange,
@@ -522,6 +538,7 @@ impl Event {
             b"win_close" => Event::WinClose,
             b"msg_set_pos" => Event::MsgSetPos,
             b"hl_attr_define" => Event::HlAttrDefine,
+            b"hl_group_set" => Event::HlGroupSet,
             b"default_colors_set" => Event::DefaultColorsSet,
             b"mode_info_set" => Event::ModeInfoSet,
             b"mode_change" => Event::ModeChange,
@@ -610,6 +627,25 @@ mod tests {
         write_str(w, text);
         write_int(w, 0);
         write_bool(w, false);
+    }
+
+    #[test]
+    fn the_highlight_set_for_win_separator_is_kept_and_other_groups_ignored() {
+        let mut gs = Grids::default();
+        let group = |w: &mut Vec<u8>, name: &str, hl: i64| {
+            write_array_header(w, 2);
+            write_str(w, "hl_group_set");
+            write_array_header(w, 2);
+            write_str(w, name);
+            write_int(w, hl);
+        };
+        apply_test(&mut gs, |w| {
+            write_array_header(w, 3);
+            group(w, "StatusLine", 3);
+            group(w, "WinSeparator", 7);
+            group(w, "VertSplit", 9);
+        });
+        assert_eq!(7, gs.separator_hl);
     }
 
     #[test]
