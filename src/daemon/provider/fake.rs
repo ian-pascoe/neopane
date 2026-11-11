@@ -14,6 +14,8 @@ pub(crate) struct FakeProvider {
     pub asks: Vec<(AskId, Ask)>,
     /// The size its terminals start at before they're laid out, if any.
     pub unlaid: Option<[u32; 2]>,
+    /// Its timeout for every capability, if not the default.
+    pub time: Option<std::time::Duration>,
     events: VecDeque<ProviderEvent>,
 }
 
@@ -78,6 +80,11 @@ impl PaneProvider for FakeProvider {
 
     fn capabilities(&self) -> CapabilitySet {
         self.caps
+    }
+
+    fn timeout(&self, cap: Capability) -> std::time::Duration {
+        self.time
+            .unwrap_or(std::time::Duration::from_millis(u64::from(cap.timeout_ms())))
     }
 
     fn ask(&mut self, id: AskId, ask: Ask) {

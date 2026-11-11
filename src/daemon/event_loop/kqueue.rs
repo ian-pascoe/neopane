@@ -1,5 +1,5 @@
-//! The kqueue backend, for macOS and FreeBSD. Uses four filters: fd
-//! readable, fd writable, signals and timers.
+//! The kqueue backend, for macOS and FreeBSD. Uses five filters: fd
+//! readable, fd writable, signals, timers and process exits.
 
 use std::os::unix::io::RawFd;
 
@@ -64,21 +64,34 @@ impl Backend {
         )
     }
 
-    pub(super) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+    pub(super) fn add_exit(&self, pid: libc::pid_t, token: usize) -> Result<()> {
+        // SAFETY: an all-zero kevent is a valid value.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = pid as usize;
+        change.filter = libc::EVFILT_PROC;
+        change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        change.fflags = libc::NOTE_EXIT;
+        change.udata = token as *mut libc::c_void;
+        self.apply(&change)
+    }
+
+    pub(super) fn fd(&self) -> RawFd {
+        self.kq
+    }
+
+    pub(super) fn wait<'a>(&self, buf: &'a mut [Event], block: bool) -> Result<&'a [Event]> {
         // SAFETY: an all-zero kevent is a valid value.
         let mut raw: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
         let max = buf.len().min(raw.len()) as libc::c_int;
+        let now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let timeout: *const libc::timespec = if block { std::ptr::null() } else { &now };
         let n: usize = loop {
             // SAFETY: no changes in, and `raw` has room for `max` events out.
             let rc = unsafe {
-                libc::kevent(
-                    self.kq,
-                    std::ptr::null(),
-                    0,
-                    raw.as_mut_ptr(),
-                    max,
-                    std::ptr::null(),
-                )
+                libc::kevent(self.kq, std::ptr::null(), 0, raw.as_mut_ptr(), max, timeout)
             };
             if rc >= 0 {
                 break rc as usize;
@@ -99,9 +112,11 @@ impl Backend {
                     libc::EVFILT_WRITE => Kind::Write,
                     libc::EVFILT_SIGNAL => Kind::Signal,
                     libc::EVFILT_TIMER => Kind::Timer,
+                    libc::EVFILT_PROC => Kind::Exit,
                     _ => unreachable!(), // only these are registered
                 },
-                eof: e.flags & libc::EV_EOF != 0,
+                // a process's exit says EV_EOF too
+                eof: e.filter != libc::EVFILT_PROC && e.flags & libc::EV_EOF != 0,
             };
         }
         Ok(&buf[..n])
@@ -128,11 +143,15 @@ impl Backend {
         change.fflags = 0;
         change.data = data as _; // isize on macOS, i64 on FreeBSD
         change.udata = token as *mut libc::c_void;
+        self.apply(&change)
+    }
+
+    fn apply(&self, change: &libc::kevent) -> Result<()> {
         // SAFETY: one change in, no events out.
         let rc = unsafe {
             libc::kevent(
                 self.kq,
-                &change,
+                change,
                 1,
                 std::ptr::null_mut(),
                 0,

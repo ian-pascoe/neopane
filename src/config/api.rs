@@ -282,7 +282,7 @@ fn shown(v: &Value) -> String {
 }
 
 /// Seconds as Lua would show them, to two places at most: `1`, `0.75`.
-pub(super) fn seconds(d: Duration) -> String {
+pub(crate) fn seconds(d: Duration) -> String {
     let s = format!("{:.2}", d.as_secs_f64());
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }

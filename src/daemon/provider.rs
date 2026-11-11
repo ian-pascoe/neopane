@@ -11,6 +11,7 @@
 //! and `focus_direction` are asked through it.
 
 use std::fmt;
+use std::time::Duration;
 
 use super::live_layout::LiveLayout;
 use crate::attach::PaneId;
@@ -328,6 +329,11 @@ pub(crate) trait PaneProvider {
 
     /// What it can be asked.
     fn capabilities(&self) -> CapabilitySet;
+
+    /// How long an ask of `cap` may take before it counts as failed.
+    fn timeout(&self, cap: Capability) -> Duration {
+        Duration::from_millis(u64::from(cap.timeout_ms()))
+    }
 
     /// Starts `ask`, whose answer comes from `next` as
     /// `ProviderEvent::Answered` with `id`. Never blocks, never answers inline.

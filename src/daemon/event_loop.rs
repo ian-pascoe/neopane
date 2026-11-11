@@ -76,6 +76,8 @@ pub(crate) enum Kind {
     Write,
     Signal,
     Timer,
+    /// A child process watched with `add_exit` ended.
+    Exit,
 }
 
 impl Default for Event {
@@ -150,9 +152,30 @@ impl Loop {
         self.backend.add_timer(id, ms, token)
     }
 
+    /// Watches child `pid` for its end, once, reported as `Kind::Exit`.
+    /// It isn't reaped: the caller waits for it. Fails if it has been
+    /// reaped already.
+    ///
+    /// Not SIGCHLD: `add_signal` ignores the signal it watches, and an
+    /// ignored SIGCHLD reaps children by itself, losing their exit statuses.
+    pub(crate) fn add_exit(&self, pid: libc::pid_t, token: usize) -> Result<()> {
+        self.backend.add_exit(pid, token)
+    }
+
+    /// The loop's own fd: readable while something is ready, so this loop
+    /// can be watched from another.
+    pub(crate) fn fd(&self) -> RawFd {
+        self.backend.fd()
+    }
+
     /// Blocks until something is ready, then fills the start of `buf`.
     pub(crate) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
-        self.backend.wait(buf)
+        self.backend.wait(buf, true)
+    }
+
+    /// Fills the start of `buf` with what is ready now, without blocking.
+    pub(crate) fn poll<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+        self.backend.wait(buf, false)
     }
 }
 
@@ -423,6 +446,68 @@ mod tests {
             loop_.wait(&mut buf).unwrap()
         );
         assert!(restarted.elapsed() >= std::time::Duration::from_millis(280));
+    }
+
+    #[test]
+    fn a_childs_exit_arrives_once_and_leaves_it_to_be_reaped() {
+        let loop_ = Loop::init().unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.1; exit 3"])
+            .spawn()
+            .unwrap();
+        loop_.add_exit(child.id() as libc::pid_t, 5).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert_eq!(
+            &[Event {
+                token: 5,
+                kind: Kind::Exit,
+                eof: false
+            }][..],
+            loop_.wait(&mut buf).unwrap()
+        );
+        assert_eq!(Some(3), child.wait().unwrap().code());
+        assert!(loop_.poll(&mut buf).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_child_that_ended_before_it_was_watched_is_reported_too() {
+        let loop_ = Loop::init().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // a zombie: ended, not reaped
+        if loop_.add_exit(child.id() as libc::pid_t, 5).is_ok() {
+            let mut buf = [Event::default(); 4];
+            assert_eq!(Kind::Exit, loop_.wait(&mut buf).unwrap()[0].kind);
+        }
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn poll_returns_at_once_with_what_is_ready() {
+        let loop_ = Loop::init().unwrap();
+        let p = pipe().unwrap();
+        loop_.add_read(p[0], 1).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert!(loop_.poll(&mut buf).unwrap().is_empty());
+        write_x(p[1]);
+        assert_eq!(1, loop_.poll(&mut buf).unwrap()[0].token);
+        for fd in p {
+            close(fd);
+        }
+    }
+
+    #[test]
+    fn a_loop_is_readable_on_another_while_it_has_something_ready() {
+        let outer = Loop::init().unwrap();
+        let inner = Loop::init().unwrap();
+        outer.add_read(inner.fd(), 1).unwrap();
+        inner.add_timer(1, 20, 2).unwrap();
+        let mut buf = [Event::default(); 4];
+        assert_eq!(1, outer.wait(&mut buf).unwrap()[0].token);
+        assert_eq!(2, inner.poll(&mut buf).unwrap()[0].token);
+        // spent: the outer loop has nothing more
+        outer.add_timer(1, 50, 3).unwrap();
+        assert_eq!(3, outer.wait(&mut buf).unwrap()[0].token);
     }
 
     #[test]

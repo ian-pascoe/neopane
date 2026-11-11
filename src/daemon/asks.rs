@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use super::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, TerminalId,
 };
+use crate::config::seconds;
 use crate::log::{log_info, log_warn};
 use crate::name::NAME;
 
@@ -44,6 +45,8 @@ struct Sent {
     id: AskId,
     ask: Ask,
     due: Instant,
+    /// The time it had.
+    time: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -132,10 +135,14 @@ impl Asks {
     }
 
     fn send(&mut self, p: &mut dyn PaneProvider, id: AskId, ask: Ask, now: Instant) {
-        let ms = ask.capability().timeout_ms();
-        let due = now + Duration::from_millis(u64::from(ms));
+        let time = p.timeout(ask.capability());
         p.ask(id, ask.clone());
-        self.sent.push(Sent { id, ask, due });
+        self.sent.push(Sent {
+            id,
+            ask,
+            due: now + time,
+            time,
+        });
     }
 
     /// `p` answered ask `id`.
@@ -180,9 +187,9 @@ impl Asks {
                 i += 1;
                 continue;
             }
-            let Sent { ask, .. } = self.sent.remove(i);
+            let Sent { ask, time, .. } = self.sent.remove(i);
             let cap = ask.capability();
-            let secs = cap.timeout_ms() / 1000;
+            let secs = seconds(time);
             self.failed(p.name(), cap, &format!("timed out after {secs} s"), None);
             self.steps.push_back(Step::FallBack(ask));
         }
@@ -417,6 +424,19 @@ mod tests {
                 Step::FallBack(open(1)),
             ],
             steps(&mut asks)
+        );
+    }
+
+    #[test]
+    fn an_act_has_the_time_its_pane_provider_gives_it() {
+        let (mut asks, mut fake, now) = (Asks::default(), FakeProvider::opening(), Instant::now());
+        fake.time = Some(Duration::from_millis(1500));
+        asks.act(Some(&mut fake), open(1), now);
+        assert_eq!(Some(now + Duration::from_millis(1500)), asks.deadline());
+        asks.time_out(&mut fake, now + Duration::from_millis(1500));
+        assert_eq!(
+            Step::Warn(format!("{NAME}: fake: open_tab_page timed out after 1.5 s")),
+            steps(&mut asks)[0]
         );
     }
 

@@ -6,6 +6,7 @@
 //! side is [`child::main`], behind the hidden `config-child` command.
 
 mod api;
+pub(crate) use api::seconds;
 pub mod check;
 pub mod child;
 mod runner;
