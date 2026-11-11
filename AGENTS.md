@@ -23,7 +23,7 @@ Every user-visible name comes from `NAME` in `src/name.rs` (ADR 0005): Neovim va
 
 The daemon focuses Rex blocks and switches tabs, so a test instance in the user's own Rex session steals their focus. Test live in a session of your own (`rex new`), or in a PTY with `REX_SESSION` pointing at it.
 
-Each daemon keeps its files in a private directory, `neorex-<launcher pid>.XXXXXX` in `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`. It logs to `log` there.
+Each daemon keeps its files in `$NEOREX_TMPDIR` (else `/tmp`) `/neorex-<uid>/<daemon name>/` (ADR 0004, `src/daemon/dir.rs`), locked with `flock` while it runs. It logs to `log` there, kept after it ends; the next daemon of that name renames it `log.1`.
 
 Install with `just install`. On macOS, a binary overwritten in place is killed at launch because the kernel keeps the old file's code signature. A running daemon keeps the binary it started with, so restart neorex to pick up a new build.
 

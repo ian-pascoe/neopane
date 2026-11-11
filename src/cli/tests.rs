@@ -368,14 +368,40 @@ fn help_after_dashdash_is_a_file() {
 
 #[test]
 fn hidden_commands() {
-    assert_eq!(
-        parsed("daemon /tmp/d -O a"),
+    let daemon = |name: &str, dedup, detach, nvim_args: &str| {
         Ok(Command::Daemon {
-            dir: "/tmp/d".into(),
-            nvim_args: args("-O a"),
+            name: name.into(),
+            dedup,
+            detach,
+            nvim_args: args(nvim_args),
         })
+    };
+    assert_eq!(
+        parsed("daemon work -- -O a"),
+        daemon("work", false, false, "-O a")
     );
-    assert_eq!(refused("daemon"), "daemon takes a directory");
+    assert_eq!(
+        parsed("daemon work --dedup -- -- f"),
+        daemon("work", true, false, "-- f")
+    );
+    assert_eq!(
+        parsed("daemon w-2 --detach --dedup --"),
+        daemon("w-2", true, true, "")
+    );
+    let usage = "daemon takes NAME [--dedup] [--detach] -- NVIM-ARGS";
+    for bad in [
+        "daemon",
+        "daemon work",
+        "daemon work -O a",
+        "daemon work --dedup --dedup --",
+        "daemon work --x --",
+    ] {
+        assert_eq!(refused(bad), usage, "{bad}");
+    }
+    assert_eq!(
+        refused("daemon /tmp/d --"),
+        "daemon: /tmp/d isn't a daemon name"
+    );
     assert_eq!(parsed("config-child"), Ok(Command::ConfigChild));
     assert_eq!(parsed("debug-keys"), Ok(Command::DebugKeys));
     assert_eq!(refused("debug-keys x"), "debug-keys takes no arguments");

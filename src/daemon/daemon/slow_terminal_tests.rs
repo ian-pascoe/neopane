@@ -172,7 +172,7 @@ impl Rig {
             NvimSession::new(nvim),
             rex,
             String::new(),
-            String::new(),
+            crate::daemon::dir::Address::from_arg(Default::default()),
         );
 
         // the startup pane: big, so a frame of it is bigger than a pty holds

@@ -2,6 +2,7 @@ pub(crate) mod attach_conn;
 pub(crate) mod backlog;
 #[allow(clippy::module_inception)]
 pub(crate) mod daemon;
+pub mod dir;
 pub(crate) mod event_loop;
 pub(crate) mod fdpass;
 pub(crate) mod floating_panes;

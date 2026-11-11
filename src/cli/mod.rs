@@ -8,6 +8,7 @@ mod nvim_args;
 use std::ffi::{OsStr, OsString};
 
 use crate::attach::{PaneId, Transport};
+use crate::daemon::dir::valid_name;
 use crate::name::NAME;
 
 pub use help::{PANE_PROVIDER_PROTOCOLS, debug_help, help, repo_url, version};
@@ -36,9 +37,13 @@ pub enum Command {
     },
     /// `pane`, which older daemons ran: it exits 1 with [`PANE_REPLACED`].
     Replaced,
-    /// `daemon DIR NVIM-ARGS…`, which the launcher starts.
+    /// `daemon NAME [--dedup] [--detach] -- NVIM-ARGS…`, which the launcher
+    /// starts.
     Daemon {
-        dir: OsString,
+        name: String,
+        /// Take `NAME-2`, `NAME-3`, … if NAME is live.
+        dedup: bool,
+        detach: bool,
         nvim_args: Vec<OsString>,
     },
     /// `config-child`, which the daemon starts.
@@ -135,13 +140,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
             "detach isn't available yet; to open a file named detach, run {NAME} ./detach"
         ))),
         b"pane" => Ok(Command::Replaced),
-        b"daemon" => match rest {
-            [dir, nvim_args @ ..] => Ok(Command::Daemon {
-                dir: dir.clone(),
-                nvim_args: nvim_args.to_vec(),
-            }),
-            [] => Err(UsageError("daemon takes a directory".to_string())),
-        },
+        b"daemon" => daemon(rest),
         b"config-child" => Ok(Command::ConfigChild),
         b"debug-keys" | b"debug-events" | b"debug-tui" | b"debug-panes" | b"debug-rex"
             if debug_asks_help =>
@@ -284,6 +283,40 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
     start.nvim_args = args[i..].to_vec();
     start.reading = nvim_args::read(&start.nvim_args).map_err(UsageError)?;
     Ok(Command::Start(start))
+}
+
+/// `daemon`'s words: `NAME [--dedup] [--detach] -- NVIM-ARGS`.
+fn daemon(words: &[OsString]) -> Result<Command, UsageError> {
+    let usage = || UsageError("daemon takes NAME [--dedup] [--detach] -- NVIM-ARGS".into());
+    let [name, rest @ ..] = words else {
+        return Err(usage());
+    };
+    let name = name
+        .to_str()
+        .filter(|n| valid_name(OsStr::new(n)))
+        .ok_or_else(|| {
+            UsageError(format!(
+                "daemon: {} isn't a daemon name",
+                name.to_string_lossy()
+            ))
+        })?;
+    let (mut dedup, mut detach) = (false, false);
+    let Some(end) = rest.iter().position(|w| w == "--") else {
+        return Err(usage());
+    };
+    for word in &rest[..end] {
+        match word.as_encoded_bytes() {
+            b"--dedup" if !dedup => dedup = true,
+            b"--detach" if !detach => detach = true,
+            _ => return Err(usage()),
+        }
+    }
+    Ok(Command::Daemon {
+        name: name.to_string(),
+        dedup,
+        detach,
+        nvim_args: rest[end + 1..].to_vec(),
+    })
 }
 
 /// `attach`'s words. Only the hidden `--pane` form is built yet.

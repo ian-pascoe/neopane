@@ -57,7 +57,7 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(crate) struct Daemon {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: String,
-    pub sock: String,
+    pub sock: super::dir::Address,
     /// The daemon's name and its log's path, as an accepted attach is told.
     pub name: String,
     pub log: String,
@@ -247,7 +247,7 @@ impl Daemon {
         nvim: NvimSession,
         rex: RexSession,
         exe: String,
-        sock: String,
+        sock: super::dir::Address,
     ) -> Daemon {
         Daemon {
             exe,
@@ -1984,7 +1984,7 @@ mod tests {
             NvimSession::new(for_test_on(nvim_ours)),
             rex,
             String::new(),
-            String::new(),
+            crate::daemon::dir::Address::from_arg(Default::default()),
         );
         Fixture {
             d,

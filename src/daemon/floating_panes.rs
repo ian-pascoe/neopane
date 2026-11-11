@@ -8,6 +8,7 @@
 use serde_json::json;
 
 use super::daemon::{Result, block_str};
+use super::dir::Address;
 use super::event_loop::Loop;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
@@ -27,7 +28,7 @@ pub(crate) const LAYER_FRAME: [i32; 2] = [3, 2];
 pub(crate) struct FloatingPanes<'a> {
     /// Our executable and the helpers' socket, for new panes' command.
     pub exe: &'a str,
-    pub sock: &'a str,
+    pub sock: &'a Address,
     pub grids: &'a Grids,
     pub panes: &'a mut Panes,
     pub event_loop: &'a Loop,

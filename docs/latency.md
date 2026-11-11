@@ -10,7 +10,7 @@ build that added the traces (#97), not a moving `main` (#95, decision 2).
 
 At `NEOREX_LOG=debug` the daemon keeps a trace line for each point below, in
 a buffer it writes to the log with the next log line, when the buffer fills,
-and as it ends. A clean end keeps the log at `debug`. At `info` and `warn` a
+and as it ends. Every log is kept. At `info` and `warn` a
 trace point is one atomic load: no syscall and no allocation.
 
 A trace line is `neorex trace <point> <id> <t> [<from>]`. `t` is the
