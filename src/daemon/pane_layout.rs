@@ -18,6 +18,8 @@
 //! current window. Past that, the windows farthest from the current one are
 //! cut, until they become current.
 
+use crate::screen::pane_view::Separator;
+
 /// Which way a row or column runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dir {
@@ -87,14 +89,6 @@ pub(crate) struct Placed {
     pub row: u32,
     pub col: u32,
     pub cols: u32,
-    pub rows: u32,
-}
-
-/// A separator column between windows side by side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Separator {
-    pub row: u32,
-    pub col: u32,
     pub rows: u32,
 }
 

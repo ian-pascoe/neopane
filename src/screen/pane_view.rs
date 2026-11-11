@@ -36,8 +36,8 @@ pub struct PaneView {
     /// The floats drawn last frame.
     pub(crate) drawn_floats: [Rect; MAX_FLOATS],
     pub(crate) drawn_floats_len: u8,
-    /// The windows `frame_split` drew last, and their separators.
-    pub(crate) drawn_split: Vec<Shown>,
+    /// The windows `frame_laid_out` drew last, and their separators.
+    pub(crate) drawn_wins: Vec<Shown>,
     pub(crate) drawn_separators: Vec<Separator>,
 }
 
@@ -64,18 +64,18 @@ pub struct Separator {
     pub rows: u32,
 }
 
-/// Several windows laid out in one pane, as Neovim lays out splits.
+/// A pane layout's windows, laid out in one pane as Neovim lays out splits.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
-pub struct Split<'a> {
+pub struct LaidOut<'a> {
     pub wins: &'a [Shown],
     pub separators: &'a [Separator],
     /// What a separator is drawn with: `'fillchars'`'s `vert` in WinSeparator.
     pub separator: Cell,
 }
 
-/// `drawn_grid` after `frame_split`, which draws no one grid.
-const SPLIT_GRID: u32 = u32::MAX;
+/// `drawn_grid` after `frame_laid_out`, which draws no one grid.
+const LAID_OUT_GRID: u32 = u32::MAX;
 
 /// How a pane draws the screen's floats and messages.
 #[derive(Debug, Clone, Copy, Default)]
@@ -142,7 +142,7 @@ impl PaneView {
             drawn_cursor_mode: None,
             drawn_floats: [Rect::default(); MAX_FLOATS],
             drawn_floats_len: 0,
-            drawn_split: Vec::new(),
+            drawn_wins: Vec::new(),
             drawn_separators: Vec::new(),
         }
     }
@@ -381,29 +381,29 @@ impl PaneView {
         true
     }
 
-    /// Draws a frame if anything changed: the windows of `split` at their
+    /// Draws a frame if anything changed: the windows of `laid` at their
     /// rects, with the separators between and the floats over them, and, as
     /// `frame` does, the tabline and, if focused, the screen's floats and the
     /// messages. Rows are drawn again rather than scrolls repeated, as a
     /// window's scroll moves only its part of a row. True if it wrote anything.
-    pub fn frame_split(
+    pub fn frame_laid_out(
         &mut self,
         grids: &mut Grids,
-        split: Split<'_>,
+        laid: LaidOut<'_>,
         opts: Opts<'_>,
         w: &mut Vec<u8>,
     ) -> bool {
         let focused = opts.focused;
         grids.style.clear_blends();
-        let wins: Vec<Shown> = split
+        let wins: Vec<Shown> = laid
             .wins
             .iter()
             .copied()
             .filter(|s| grids.grids.contains_key(&s.grid))
             .collect();
-        if self.drawn_grid != SPLIT_GRID
-            || self.drawn_split != wins
-            || self.drawn_separators != split.separators
+        if self.drawn_grid != LAID_OUT_GRID
+            || self.drawn_wins != wins
+            || self.drawn_separators != laid.separators
         {
             self.full = true;
         }
@@ -517,7 +517,7 @@ impl PaneView {
                 || opts.tabline_dirty
                 || opts.tabline_col != self.drawn_tabline_col
                 || old_msg_top.min(msg_top) < top);
-        let cur = self.split_cursor(grids, &wins, &rects, top, area_rows, msg_total, msg_n);
+        let cur = self.laid_out_cursor(grids, &wins, &rects, top, area_rows, msg_total, msg_n);
         if !self.full
             && dirty.count() == 0
             && !msg_changed
@@ -560,9 +560,9 @@ impl PaneView {
                     to.copy_from_slice(&src[..n]);
                     blank_cut_wide(to, src.get(n));
                 }
-                for sep in split.separators {
+                for sep in laid.separators {
                     if r >= sep.row && r < sep.row + sep.rows && sep.col < cols {
-                        base[sep.col as usize] = split.separator;
+                        base[sep.col as usize] = laid.separator;
                     }
                 }
                 let shown = compose(
@@ -601,7 +601,7 @@ impl PaneView {
         }
 
         self.full = false;
-        self.drawn_grid = SPLIT_GRID;
+        self.drawn_grid = LAID_OUT_GRID;
         self.drawn_size = [0, 0];
         self.drawn_msg = msg_n;
         self.drawn_tabline = top;
@@ -610,14 +610,14 @@ impl PaneView {
         self.drawn_cursor_mode = grids.style.cursor_mode();
         self.drawn_floats[0..rects.len()].copy_from_slice(&rects);
         self.drawn_floats_len = rects.len() as u8;
-        self.drawn_split = wins;
-        self.drawn_separators = split.separators.to_vec();
+        self.drawn_wins = wins;
+        self.drawn_separators = laid.separators.to_vec();
         true
     }
 
-    /// Where the cursor shows among a split's windows, floats and messages.
+    /// Where the cursor shows among a pane layout's windows, floats and messages.
     #[allow(clippy::too_many_arguments)]
-    fn split_cursor(
+    fn laid_out_cursor(
         &self,
         grids: &Grids,
         wins: &[Shown],

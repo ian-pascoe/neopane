@@ -12,7 +12,7 @@ use neorex::nvim::rpc;
 use neorex::nvim::windows::{self, Note};
 use neorex::screen::grid::{Cell, Grid};
 use neorex::screen::grids::{Grids, Placed, WinKind};
-use neorex::screen::pane_view::{Opts, PaneView, Separator, Shown, Split};
+use neorex::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown};
 use neorex::screen::render;
 use neorex::screen::style::{Attr, Shape, Style, Underline};
 
@@ -1117,12 +1117,12 @@ fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
     let mut view = PaneView::init(12, 5);
     let mut t = test_terminal(12, 5)?;
     let mut out = Vec::new();
-    let split = Split {
+    let laid = LaidOut {
         wins: &wins,
         separators: &seps,
         separator: separator(),
     };
-    assert!(view.frame_split(&mut gs, split, Opts::default(), &mut out));
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
     t.feed(&out);
     expect_written(
         &t,
@@ -1140,12 +1140,12 @@ fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
     gs.get_mut(2).unwrap().cells[0] = Cell::init("z", TEXT);
     gs.get_mut(2).unwrap().dirty.set(0);
     out.clear();
-    assert!(view.frame_split(&mut gs, split, Opts::default(), &mut out));
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
     t.feed(&out);
     expect_written(&t, &gs.style, &[("z0    │b0   ", "......|.....")])?;
     // nothing changed: nothing drawn
     out.clear();
-    assert!(!view.frame_split(&mut gs, split, Opts::default(), &mut out));
+    assert!(!view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
     Ok(())
 }
 
@@ -1197,12 +1197,12 @@ fn three_windows_under_the_tabline_one_beside_two_stacked() -> Result<()> {
         tabline: Some(&tabline),
         ..Opts::default()
     };
-    let split = Split {
+    let laid = LaidOut {
         wins: &wins,
         separators: &seps,
         separator: separator(),
     };
-    assert!(view.frame_split(&mut gs, split, opts, &mut out));
+    assert!(view.frame_laid_out(&mut gs, laid, opts, &mut out));
     t.feed(&out);
     expect_written(
         &t,
@@ -1254,12 +1254,12 @@ fn a_squeezed_window_shows_its_statusline_and_the_current_keeps_a_row() -> Resul
     let mut view = PaneView::init(8, 5);
     let mut t = test_terminal(8, 5)?;
     let mut out = Vec::new();
-    let split = Split {
+    let laid = LaidOut {
         wins: &wins,
         separators: &[],
         separator: separator(),
     };
-    assert!(view.frame_split(&mut gs, split, Opts::default(), &mut out));
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
     t.feed(&out);
     expect_written(
         &t,

@@ -43,7 +43,7 @@ use crate::rex::session::{self as rex_session, Conn, Request, Session as RexSess
 use crate::screen::float_groups;
 use crate::screen::grid::{Cell, Grid, blank_cut_wide};
 use crate::screen::grids::{Grids, WinKind};
-use crate::screen::pane_view::{Opts, Rect, Separator, Shown, Split};
+use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown};
 use crate::term::input;
 
 /// The daemon is a top layer: any error will do.
@@ -1490,7 +1490,7 @@ impl Daemon {
                         &mut s.terminal.writer,
                     )
             } else if caught_up && p.layout.is_some() {
-                let (wins, separators) = self.split_view(p);
+                let (wins, separators) = self.laid_out_view(p);
                 let origin = self.geometry().pane_origin(p);
                 let mut buf = [0u8; 4];
                 let separator = Cell::init(
@@ -1498,9 +1498,9 @@ impl Daemon {
                     self.grids.separator_hl,
                 );
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
-                s.view.frame_split(
+                s.view.frame_laid_out(
                     &mut self.grids,
-                    Split {
+                    LaidOut {
                         wins: &wins,
                         separators: &separators,
                         separator,
@@ -1637,7 +1637,7 @@ impl Daemon {
     }
 
     /// The windows of pane `p`'s layout as drawn, and the separators between.
-    fn split_view(&self, p: &Pane) -> (Vec<Shown>, Vec<Separator>) {
+    fn laid_out_view(&self, p: &Pane) -> (Vec<Shown>, Vec<Separator>) {
         let Some(layout) = &p.layout else {
             return (Vec::new(), Vec::new());
         };
@@ -1656,16 +1656,7 @@ impl Daemon {
                 })
             })
             .collect();
-        let separators = laid
-            .separators
-            .iter()
-            .map(|s| Separator {
-                row: s.row,
-                col: s.col,
-                rows: s.rows,
-            })
-            .collect();
-        (wins, separators)
+        (wins, laid.separators)
     }
 
     /// `size_window` for every pane.
@@ -3322,7 +3313,7 @@ mod tests {
         // keys typed in the pane go to it, not back to the window it came from
         assert_eq!(Some(1001), pane.neovim_window_handle);
         // 40 columns each, the separator between
-        let (wins, separators) = fx.d.split_view(pane);
+        let (wins, separators) = fx.d.laid_out_view(pane);
         assert_eq!(
             vec![
                 Shown {
@@ -3402,7 +3393,7 @@ mod tests {
         })
         .unwrap();
         let pane = fx.d.panes.by_id(id).unwrap();
-        let (wins, _) = fx.d.split_view(pane);
+        let (wins, _) = fx.d.laid_out_view(pane);
         assert_eq!(
             vec![(3, 0, 5), (2, 5, 15)],
             wins.iter()
