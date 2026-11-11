@@ -13,5 +13,3 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
 The wayfinder labels are SPI's too: `wayfinder:map` `42d85e9b-40b2-40bf-9c45-e98799d23930`, `wayfinder:research` `e03d2ce5-67b9-4c99-923f-deaade4195be`, `wayfinder:prototype` `21dda5a9-ab19-4b9b-b429-df49aa2bb39e`, `wayfinder:grilling` `642c5812-78ae-4e1d-b15e-0c130b0ca861`, `wayfinder:task` `ebe3749e-2cee-4b3d-b0a4-9c514bd8a60c`.
-
-Edit the "Label in our tracker" column to match whatever vocabulary you actually use.

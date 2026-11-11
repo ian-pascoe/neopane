@@ -1,8 +1,8 @@
 # Issue tracker: Linear
 
-Issues and specs for this repo live in **Linear**: workspace `spiritledsoftware`, team **SPI** (Spirit-Led Software), project **ian-pascoe/neopane** (neorex's future name, #134). The team also holds other repos' projects (commissary, cloudpid, lspctl, …), so create every issue for this repo in project `ian-pascoe/neopane`, and scope every read to it.
+Issues and specs for this repo live in **Linear**: workspace `spiritledsoftware`, team **SPI** (Spirit-Led Software), project **ian-pascoe/neopane** (neorex's future name, SPI-672). The team also holds other repos' projects (Commissary, cloudpid, lspctl, …), so create every issue for this repo in project `ian-pascoe/neopane`, and scope every read to it.
 
-**GitHub Issues are the public intake.** Outside users open issues on `ian-pascoe/neorex` (not the original `alexrlocke/neorex`, a separate project). A one-way sync (GitHub → Linear) copies each new one into team SPI, carrying its GitHub URL as an attachment. Comments in its synced thread sync both ways (**Comment on an issue**), and closing it in Linear closes it on GitHub. The sync puts the copy in no project; the workflow `linear project` (`.github/workflows/linear-project.yml`, `scripts/linear-project.sh`) moves it into ian-pascoe/neopane once it appears. Dispatch that workflow with an issue number to retry one whose run failed (`gh workflow run linear-project.yml -f issue=<n>`). Work every issue in Linear and refer to it by its Linear identifier (`SPI-123`). Never create issues with `gh issue create`. A GitHub number (`#95`) resolves to the Linear issue that carries its URL (**Read an issue** below).
+**GitHub Issues are the public intake.** Outside users open issues on `ian-pascoe/neorex` (not the original `alexrlocke/neorex`, a separate project). A one-way sync (GitHub → Linear) copies each new one into team SPI, carrying its GitHub URL as an attachment. Comments in its synced thread sync both ways (**Comment on an issue**), and closing it in Linear closes it on GitHub. The sync puts the copy in no project; the workflow `linear project` (`.github/workflows/linear-project.yml`, `scripts/linear-project.sh`) moves it into ian-pascoe/neopane once it appears. Dispatch that workflow with an issue number to retry one whose run failed (`gh workflow run linear-project.yml -f issue=<n>`). It reads the repository secret `LINEAR_API_KEY`, a Linear API key that may edit SPI's issues (1Password `op://Agents/Linear GitHub/credential`; set it with `gh secret set LINEAR_API_KEY`). Work every issue in Linear and refer to it by its Linear identifier (`SPI-123`). A GitHub number (`#95`) resolves to the Linear issue that carries its URL (**Read an issue** below).
 
 ## How to reach Linear
 
@@ -64,7 +64,7 @@ Label ids are in `docs/agents/triage-labels.md`. For any other label: `tools.lin
 
 ## Pull requests
 
-Code and PRs stay on GitHub (`gh`, the `code-host` skill). To close an issue from a PR, put `Fixes SPI-123` in the PR body (Linear's magic words). Linear's GitHub integration links the PR and moves the issue to Done when it merges. Use the Linear identifier for synced GitHub issues too: closing in Linear closes the GitHub copy.
+Code and PRs stay on GitHub (`gh`, the `code-host` skill). This clone's `gh` default repo is `ian-pascoe/neorex`; before the session's first `gh` write, confirm `gh repo set-default --view` prints it. To close an issue from a PR, put `Fixes SPI-123` in the PR body (Linear's magic words). Linear's GitHub integration links the PR and moves the issue to Done when it merges. Use the Linear identifier for synced GitHub issues too: closing in Linear closes the GitHub copy.
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_ When `yes`, read and act on external PRs with `gh` (`gh pr view <n>`, then `gh pr view <n> --comments`, which off a TTY prints only the comments; `gh pr diff <n>`, `gh pr comment`, `gh pr edit --add-label`, `gh pr close`), and list them with `gh api --paginate 'repos/{owner}/{repo}/pulls?state=open' --jq '.[] | select(.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not) | {number, title, author: .user.login, labels: [.labels[].name]}'`.
 
@@ -80,7 +80,7 @@ Read it as in **Read an issue** above; a GitHub number resolves through its URL.
 
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: an issue labelled `wayfinder:map` in project ian-pascoe/neopane, holding the Notes / Decisions-so-far / Fog body. The attach core and rename's is `SPI-633` (GitHub #95).
+- **Map**: an issue labelled `wayfinder:map` in project ian-pascoe/neopane, holding the Notes / Decisions-so-far / Fog body. The current map, "Build the attach core, pane providers and CLI, then rename to neopane", is `SPI-633` (GitHub #95).
 - **Child ticket**: a sub-issue of the map (**Make an issue a sub-issue of a parent**), labelled `wayfinder:<type>` (`research` / `prototype` / `grilling` / `task`). Once claimed, it is assigned to the driving dev.
 - **Blocking**: see **Blocking** under Conventions.
 - **Frontier query**: one query lists every child with its state, labels, assignee and blockers.
