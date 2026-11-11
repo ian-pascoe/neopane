@@ -49,19 +49,26 @@ impl RelayPane {
             pane,
             terminal: terminal(size),
         }));
+        let mut p = RelayPane::attached(stream)?;
+        p.out = hello.encode().map_err(io::Error::other)?;
+        p.flush()?;
+        Ok(p)
+    }
+
+    /// The helper's end of `stream`, whose attach the daemon took already,
+    /// as a test that builds the daemon's pane itself has it.
+    pub fn attached(stream: UnixStream) -> io::Result<RelayPane> {
         stream.set_nonblocking(true)?;
-        let mut p = RelayPane {
+        Ok(RelayPane {
             stream,
-            out: hello.encode().map_err(io::Error::other)?,
+            out: Vec::new(),
             buf: Vec::new(),
             output: Vec::new(),
             accepted: None,
             undo: Vec::new(),
             end: None,
             gone: false,
-        };
-        p.flush()?;
-        Ok(p)
+        })
     }
 
     /// Writes what waits to be sent, as far as the socket takes it now:
@@ -195,15 +202,33 @@ impl RelayPane {
         self.gone
     }
 
-    /// Bytes read after the last whole frame: a frame the daemon cut off.
-    pub fn partial(&self) -> &[u8] {
-        &self.buf
+    /// Makes the socket's buffers `bytes` long, as small as a pty's, so
+    /// little of what the daemon sends waits in them.
+    pub fn shrink(&self, bytes: i32) -> io::Result<()> {
+        shrink(&self.stream, bytes)
     }
+}
 
-    /// The socket, for a test that sets its options.
-    pub fn stream(&self) -> &UnixStream {
-        &self.stream
+/// Makes `stream`'s send and receive buffers `bytes` long: for a test's
+/// daemon end of a relayed pane, beside [`RelayPane::shrink`].
+pub fn shrink(stream: &UnixStream, bytes: i32) -> io::Result<()> {
+    for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        let size: libc::c_int = bytes;
+        // SAFETY: a valid int option of the size given.
+        let r = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                opt,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
+    Ok(())
 }
 
 /// What the hello says of a terminal of `size` with no pty: this process's
