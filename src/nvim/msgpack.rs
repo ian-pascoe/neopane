@@ -91,6 +91,20 @@ pub(crate) fn write_str_header(w: &mut Vec<u8>, len: u32) {
     write_tagged(w, 0xdb, &len.to_be_bytes())
 }
 
+/// Panics if `b` is longer than u32 can say, which nothing here sends.
+pub(crate) fn write_bin(w: &mut Vec<u8>, b: impl AsRef<[u8]>) {
+    let b = b.as_ref();
+    let len = u32::try_from(b.len()).expect("bin too long for msgpack");
+    if len <= u8::MAX as u32 {
+        write_tagged(w, 0xc4, &(len as u8).to_be_bytes());
+    } else if len <= u16::MAX as u32 {
+        write_tagged(w, 0xc5, &(len as u16).to_be_bytes());
+    } else {
+        write_tagged(w, 0xc6, &len.to_be_bytes());
+    }
+    w.extend_from_slice(b);
+}
+
 /// Follow with `len` values.
 pub(crate) fn write_array_header(w: &mut Vec<u8>, len: u32) {
     if len <= 15 {
