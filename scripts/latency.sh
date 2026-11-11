@@ -39,7 +39,7 @@ out=${OUT:-/tmp/$name-latency}
 
 # a copy: a binary rebuilt in place under a running one is killed on macOS
 work=$out/$scenario
-rm -rf "$work"
+rm -rf "$work" "$out/$scenario.log.all"
 mkdir -p "$work/tmp" "$work/bin"
 cp "$bin" "$work/bin/$name"
 bin=$work/bin/$name
@@ -137,6 +137,9 @@ exec)
     launch -O a b
     cmd 'qa!'
     sleep 1
+    # every launch's daemon has the same name, and the next renames its log
+    # log.1, then drops that: keep each one's log as it ends
+    cat "$work"/tmp/"$name"-*/*/log >>"$out/exec.log.all"
   done
   ;;
 place)
@@ -156,5 +159,9 @@ esac
 
 [[ $scenario == exec ]] || cmd 'qa!'
 sleep 2
-cat "$work"/tmp/"$name"-*/*/log >"$out/$scenario.log"
+if [[ $scenario == exec ]]; then
+  mv "$out/exec.log.all" "$out/$scenario.log"
+else
+  cat "$work"/tmp/"$name"-*/*/log >"$out/$scenario.log"
+fi
 "$bin" debug-latency "$out/$scenario.log"
