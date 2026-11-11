@@ -1193,6 +1193,24 @@ api.nvim_create_autocmd('VimLeavePre', {
   end,
 })
 
+-- A typed :detach is refused: it would close the daemon's channel, and the
+-- daemon would end Neovim. A plugin's vim.cmd('detach') still gets through,
+-- and the daemon takes it as Neovim exiting.
+api.nvim_create_autocmd('CmdlineLeave', {
+  group = group,
+  pattern = ':',
+  callback = function()
+    if vim.v.event.abort then return end
+    local ok, cmd = pcall(api.nvim_parse_cmd, vim.fn.getcmdline(), {})
+    if not ok or cmd.cmd ~= 'detach' then return end
+    -- vim.v.event is a copy
+    vim.cmd('let v:event.abort = v:true')
+    vim.schedule(function()
+      api.nvim_echo({ { tool .. ': :detach is refused: it would end Neovim' } }, true, { err = true })
+    end)
+  end,
+})
+
 -- 'cmdheight' as last reported: the rows at the bottom of the screen the
 -- daemon keeps clear of every pane's window, for messages and the command
 -- line. Each tab page has its own.

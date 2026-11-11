@@ -869,6 +869,28 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_detach_is_refused_with_a_message() {
+        let Some(mut h) = Harness::start_sized(80, 10) else {
+            return;
+        };
+        let refused = format!("{NAME}: :detach is refused: it would end Neovim");
+        // `:det` is `:detach` too
+        for (n, typed) in [":detach<CR>", ":det<CR>"].into_iter().enumerate() {
+            h.input(typed);
+            // still attached: a line typed after it runs
+            h.typed();
+            // the message comes on the next turn; one at a time, it needs no
+            // hit-enter
+            h.sync(&format!(
+                "assert(vim.wait(2500, function() \
+                   return select(2, vim.fn.execute('messages'):gsub('{refused}', '')) == {} \
+                 end), vim.fn.execute('messages'))",
+                n + 1
+            ));
+        }
+    }
+
+    #[test]
     fn windows_become_external_the_anchor_stays_hidden() {
         let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
             return;
