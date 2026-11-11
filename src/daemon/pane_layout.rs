@@ -306,7 +306,7 @@ impl PaneLayout {
         };
         let floors: Vec<u32> = kids.iter().map(|k| floor(&k.node, *dir, current)).collect();
         let mut sizes = share_out(kids, &floors, total, current_kid(kids, current));
-        if sizes.iter().any(|&s| s == 0) {
+        if sizes.contains(&0) {
             // some are cut: no room to give
             return;
         }

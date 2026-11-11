@@ -126,6 +126,34 @@ pub enum Note {
     Direction(Move),
     /// Where the windows of a tab page made after setup sit in it.
     Layout(Layout),
+    /// The options a pane layout splits and closes windows by.
+    Options(SplitOptions),
+    /// Neovim sized external window `win` itself, as `:resize` does, to
+    /// `cols` x `rows`, its statusline included.
+    Resized { win: i64, cols: u32, rows: u32 },
+}
+
+/// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
+/// draws separators with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct SplitOptions {
+    pub(crate) equalalways: bool,
+    pub(crate) splitbelow: bool,
+    pub(crate) splitright: bool,
+    pub(crate) separator: char,
+}
+
+impl Default for SplitOptions {
+    /// Neovim's defaults.
+    fn default() -> SplitOptions {
+        SplitOptions {
+            equalalways: true,
+            splitbelow: false,
+            splitright: false,
+            separator: '│',
+        }
+    }
 }
 
 /// The layout of a tab page's windows: nested rows, columns and windows,
@@ -313,6 +341,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         Tabline,
         Cmdheight,
         Layout,
+        Resized,
     }
     // `<name>_<method>`
     let Some(method) = method
@@ -324,6 +353,9 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
     if method == b"direction" {
         return parse_direction(params).map(Some);
     }
+    if method == b"options" {
+        return parse_options(params).map(Some);
+    }
     let tag = match method {
         b"win" => Tag::Current,
         b"reopen" => Tag::Reopen,
@@ -334,10 +366,12 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         b"tabline" => Tag::Tabline,
         b"cmdheight" => Tag::Cmdheight,
         b"layout" => Tag::Layout,
+        b"resized" => Tag::Resized,
         _ => return Ok(None),
     };
     let want: u32 = match tag {
         Tag::Split => 5,
+        Tag::Resized => 3,
         Tag::Reopened | Tag::Layout => 2,
         _ => 1,
     };
@@ -373,6 +407,15 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             }
             Note::Layout(layout)
         }
+        Tag::Resized => {
+            let mut size =
+                || u32::try_from(rpc::expect_int(params)?).map_err(|_| rpc::Error::BadMessage);
+            Note::Resized {
+                win,
+                cols: size()?,
+                rows: size()?,
+            }
+        }
         Tag::Split => Note::Split(Split {
             win,
             side_by_side: rpc::expect_bool(params)?,
@@ -380,6 +423,28 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             from: rpc::expect_handle(params)?,
             tab: rpc::expect_handle(params)?,
         }),
+    }))
+}
+
+/// `[equalalways, splitbelow, splitright, vert]`: three booleans, and the one
+/// character separators are drawn with.
+fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
+    if rpc::expect_array(params)? < 4 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let equalalways = rpc::expect_bool(params)?;
+    let splitbelow = rpc::expect_bool(params)?;
+    let splitright = rpc::expect_bool(params)?;
+    let vert = std::str::from_utf8(rpc::expect_str(params)?).map_err(|_| rpc::Error::BadMessage)?;
+    let mut chars = vert.chars();
+    let (Some(separator), None) = (chars.next(), chars.next()) else {
+        return Err(rpc::Error::BadMessage);
+    };
+    Ok(Note::Options(SplitOptions {
+        equalalways,
+        splitbelow,
+        splitright,
+        separator,
     }))
 }
 
@@ -2700,6 +2765,115 @@ mod tests {
         assert!(h.until(|x| x.last_cmdheight() == Some(1)));
         h.input(":tabprevious<CR>");
         assert!(h.until(|x| x.last_cmdheight() == Some(2)));
+    }
+
+    fn last_options(h: &Harness) -> Option<SplitOptions> {
+        h.notes.iter().rev().find_map(|n| match n {
+            Note::Options(o) => Some(*o),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn split_options_are_reported_at_setup_and_when_they_change() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        assert!(h.until(|x| last_options(x) == Some(SplitOptions::default())));
+        h.input(":set noequalalways splitbelow splitright fillchars=vert:\\|<CR>");
+        assert!(h.until(|x| last_options(x)
+            == Some(SplitOptions {
+                equalalways: false,
+                splitbelow: true,
+                splitright: true,
+                separator: '|',
+            })));
+    }
+
+    #[test]
+    fn a_size_neovim_gives_an_external_window_is_reported_once_statusline_included() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let win = h.wins[0];
+        let resized = |x: &Harness, cols: u32, rows: u32| {
+            x.notes.contains(&Note::Resized { win, cols, rows })
+        };
+        // 40 x 9 at setup: 8 rows of text and the statusline
+        h.input(":resize 5<CR>");
+        assert!(h.until(|x| resized(x, 40, 6)));
+        h.input(":vertical resize 30<CR>");
+        assert!(h.until(|x| resized(x, 30, 6)));
+        // told once: the barrier is all that follows
+        h.notes.clear();
+        h.barrier();
+        h.expect_notes(&[]);
+        // fitted to its pane again, the same size again is told again
+        size(&mut h.nvim, win, 40, 9);
+        h.nvim.flush().unwrap();
+        // (typed keys can overtake a request)
+        h.sync("");
+        h.notes.clear();
+        h.barrier();
+        h.expect_notes(&[]);
+        h.notes.clear();
+        h.input(":vertical resize 30 | resize 5<CR>");
+        assert!(h.until(|x| resized(x, 30, 6)));
+    }
+
+    #[test]
+    fn options_and_resized_notes_are_read_and_bad_ones_are_errors() {
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 4);
+        msgpack::write_bool(&mut buf, false);
+        msgpack::write_bool(&mut buf, true);
+        msgpack::write_bool(&mut buf, false);
+        msgpack::write_str(&mut buf, "\u{2503}");
+        assert_eq!(
+            Some(Note::Options(SplitOptions {
+                equalalways: false,
+                splitbelow: true,
+                splitright: false,
+                separator: '\u{2503}',
+            })),
+            parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf)).unwrap()
+        );
+        // a separator of two characters, or none
+        for vert in ["ab", ""] {
+            let mut buf = Vec::new();
+            msgpack::write_array_header(&mut buf, 4);
+            for _ in 0..3 {
+                msgpack::write_bool(&mut buf, true);
+            }
+            msgpack::write_str(&mut buf, vert);
+            assert_eq!(
+                Err(rpc::Error::BadMessage),
+                parse_note(format!("{NAME}_options").as_bytes(), &mut Decoder::of(&buf))
+            );
+        }
+
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        msgpack::write_int(&mut buf, 1000);
+        msgpack::write_int(&mut buf, 30);
+        msgpack::write_int(&mut buf, 6);
+        assert_eq!(
+            Some(Note::Resized {
+                win: 1000,
+                cols: 30,
+                rows: 6
+            }),
+            parse_note(format!("{NAME}_resized").as_bytes(), &mut Decoder::of(&buf)).unwrap()
+        );
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        msgpack::write_int(&mut buf, 1000);
+        msgpack::write_int(&mut buf, -1);
+        msgpack::write_int(&mut buf, 6);
+        assert_eq!(
+            Err(rpc::Error::BadMessage),
+            parse_note(format!("{NAME}_resized").as_bytes(), &mut Decoder::of(&buf))
+        );
     }
 
     #[test]
