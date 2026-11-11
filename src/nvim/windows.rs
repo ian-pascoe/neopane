@@ -3250,7 +3250,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_page_that_isnt_floating_reports_its_layout_too() {
+    fn a_tab_page_without_a_tab_page_area_reports_its_layout_too() {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;
         };
@@ -3263,6 +3263,26 @@ mod tests {
                 .iter()
                 .all(|n| !matches!(n, Note::Split(s) if s.tab != 0))
         );
+    }
+
+    #[test]
+    fn a_window_closing_while_another_tab_page_is_current_reports_its_own_tab_pages_layout() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        let first = h.wins[0];
+        let split = h.split_and_adopt();
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len == 3)));
+
+        // another tab page current: the first's layout is only looked at as
+        // its window closes
+        h.lua("vim.cmd('tabnew')");
+        h.barrier();
+        h.notes.clear();
+        close(&mut h.nvim, split);
+        h.nvim.flush().unwrap();
+        assert!(h.until(|x| x.last_layout(1).is_some_and(|l| l.len == 1)));
+        assert_eq!(first, h.last_layout(1).unwrap().items()[0].win);
     }
 
     #[test]

@@ -21,8 +21,8 @@ local last
 -- The record also holds its window layout, as the daemon is told of it, and
 -- how many of its windows are being reopened (`reopening`).
 local floating = {}
--- tab page that isn't floating -> its window layout, as the daemon is told of
--- it: the daemon decides which tab pages it places
+-- a tab page without a tab page area -> its window layout, as the daemon is
+-- told of it: the daemon decides which tab pages it places
 local layouts = {}
 -- window -> the tab page it belongs to: the one it was made in, or its
 -- origin's for a split. External windows follow the current tab page, so
@@ -1416,13 +1416,13 @@ local function close_tab(tab)
 end
 
 -- Opens external `win`, about to close, again with its buffer and view, in
--- tab page `from`. The daemon gives the new window its pane. A floating tab
--- page's layout waits for it, and has it where `win` was.
+-- tab page `from`. The daemon gives the new window its pane. Its tab page's
+-- layout waits for it, and has it where `win` was.
 local function reopen(win, from, enter)
   local c = api.nvim_win_get_config(win)
   local buf = api.nvim_win_get_buf(win)
   local view = api.nvim_win_call(win, vim.fn.winsaveview)
-  local t = floating[from]
+  local t = from and layout_record(from)
   if t then t.reopening = (t.reopening or 0) + 1 end
   note('reopen', win)
   vim.schedule(function()
@@ -1442,7 +1442,7 @@ local function reopen(win, from, enter)
     end
     note('reopened', win, new)
     -- unless the tab page closed meanwhile
-    if t and floating[from] == t then
+    if t and layout_record(from) == t then
       if t.layout then swap_win(t.layout, win, new) end
       refresh_layout(from)
     end
@@ -1471,13 +1471,15 @@ api.nvim_create_autocmd('WinClosed', {
     -- before its home tab page's own close: a floating one stays
     local followed = closing_tab and not closing_ours and from and from ~= closing_tab and api.nvim_tabpage_is_valid(from)
     if external and followed then return reopen(win, from, false) end
-    if from and floating[from] then
-      -- after the command, which may open more windows in it
+    if from then
+      -- after the command, which may open more windows in it; its layout
+      -- too, as it may not be the current tab page's
+      local floats = floating[from]
       vim.schedule(function()
-        close_tab(from)
+        if floats then close_tab(from) end
         refresh_layout(from)
       end)
-      return
+      if floats then return end
     end
     if external and not others_shown(win) then reopen(win, from, true) end
   end,
