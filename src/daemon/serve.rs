@@ -1,7 +1,7 @@
 //! `neorex daemon DIR [nvim args]`: the background half of `neorex`. Takes
-//! the launching pane's terminal, runs Neovim with `--listen`, and shows
-//! each of its windows in a Rex pane (see `Daemon`). Exits when Neovim does
-//! or the last pane goes away.
+//! the launching pane's terminal, runs Neovim under `--embed`, speaking RPC
+//! over its stdin and stdout, and shows each of its windows in a Rex pane (see
+//! `Daemon`). Exits when Neovim does or the last pane goes away.
 //!
 //! Teardown is by values whose `Drop` does it, declared in the order they
 //! must end: the daemon (its panes, then the loop, Rex and Neovim), Neovim's
@@ -13,11 +13,13 @@
 
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::os::fd::AsRawFd;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::daemon::{Daemon, StopReason, Token};
@@ -27,8 +29,9 @@ use super::pane::{self, Pane, RexBlock};
 use super::pane_helper;
 use super::surface::Surface;
 use crate::log::{self, log_info, log_warn};
-use crate::name::NAME;
-use crate::nvim::nvim::{self, Nvim};
+use crate::name::{self, NAME};
+use crate::nvim::nvim::{Frame, Nvim};
+use crate::nvim::{msgpack, rpc};
 use crate::rex::client::Client;
 use crate::rex::session::Session as RexSession;
 
@@ -133,8 +136,8 @@ pub(crate) struct Config<'a> {
     pub(crate) session_id: &'a str,
     /// Starts Neovim: its arguments follow.
     pub(crate) nvim_command: &'a [&'a str],
-    /// Connects to Neovim's socket, waiting for it to appear.
-    pub(crate) connect: fn(&str) -> nvim::Result<Nvim>,
+    /// How long Neovim has to answer its first request.
+    pub(crate) nvim_timeout: Duration,
     /// Called once the helpers' socket listens: the launcher may connect.
     pub(crate) ready: Box<dyn FnMut() -> Result<()> + 'a>,
 }
@@ -146,24 +149,52 @@ impl<'a> Config<'a> {
             rex_url,
             session_id,
             nvim_command: &["nvim"],
-            connect: connect_nvim,
+            nvim_timeout: NVIM_START_TIMEOUT,
             ready: Box::new(tell_launcher),
         }
     }
 }
 
-fn connect_nvim(nvim_sock: &str) -> nvim::Result<Nvim> {
-    Nvim::connect_retry(nvim_sock)
-}
+/// How long Neovim has to answer its first request. It answers once it
+/// waits for input, after the user's config has run.
+const NVIM_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn run<S: AsRef<OsStr>>(dir: &str, nvim_args: &[S]) -> Result<()> {
     // out of the pane's session, so closing the pane doesn't signal us
     // SAFETY: setsid has no memory effects.
     unsafe { libc::setsid() };
     log::init_daemon();
+    // what the daemon was started with, such as a pipe its shell had, never
+    // reaches Neovim
+    for fd in inherited_fds() {
+        close_on_exec(fd);
+    }
     let rex_url = env("REX_SERVER").ok_or(Error::NotInRex)?;
     let session_id = env("REX_SESSION").ok_or(Error::NotInRex)?;
     serve(dir, nvim_args, Config::new(&rex_url, &session_id))
+}
+
+/// The open fds above stderr.
+fn inherited_fds() -> Vec<RawFd> {
+    let Ok(dir) = fs::read_dir("/dev/fd") else {
+        return Vec::new();
+    };
+    // (the directory's own fd is among them, closed by the time they're used)
+    dir.flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > libc::STDERR_FILENO)
+        .collect()
+}
+
+/// Makes `fd` close-on-exec, if it's open.
+fn close_on_exec(fd: RawFd) {
+    // SAFETY: fcntl on an fd number, open or not.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
 }
 
 /// One byte on stdout says we're listening; then stdout goes nowhere.
@@ -199,35 +230,54 @@ impl Drop for RemoveFiles {
     }
 }
 
-/// Neovim's process. As it drops, after the terminals are restored: SIGHUP
-/// makes Neovim save swap files and exit, and it's waited for. Not one that
-/// has already ended, such as one that quit by itself and ended within the
-/// grace [`NvimChild::wait_for_exit`] gives it.
+/// Neovim's process, and the thread copying its stderr into the log.
 ///
-/// A Neovim that doesn't end within `grace` of the SIGHUP is killed: one
-/// caught in a `system()` call, such as a clipboard read from an autocommand,
-/// can hang on its way out, and would keep the daemon waiting for good.
+/// The daemon ends Neovim by closing its `--embed` channel, dropping its
+/// `Nvim` before this: Neovim then exits through `preserve_exit()`, running
+/// VimLeave, keeping the swap files of changed buffers and deleting the rest.
+/// As this drops, after the terminals are restored, Neovim is waited for, and
+/// killed if it hasn't ended within `grace`: one caught in a `system()`
+/// call, such as a clipboard read from an autocommand, can hang on its way
+/// out, and would keep the daemon waiting for good. Never `:qa`, which can
+/// wait at a prompt nobody sees.
 struct NvimChild {
     child: Child,
     grace: Duration,
+    /// How long a Neovim that closed the channel has to exit by itself before
+    /// it's sent SIGHUP.
+    exiting: Duration,
+    /// Copies Neovim's stderr into ours, the log, until Neovim closes it;
+    /// then returns the first bytes.
+    stderr: Option<JoinHandle<Vec<u8>>>,
 }
 
-/// How long Neovim has to exit after SIGHUP before it's killed.
+/// How long Neovim has to exit after its channel closes before it's killed.
 const NVIM_EXIT_GRACE: Duration = Duration::from_secs(3);
 
+/// How long a Neovim that closed the channel itself has to exit before it's
+/// sent SIGHUP. One that's exiting ends within milliseconds of closing it.
+const NVIM_EXITING: Duration = Duration::from_millis(500);
+
+/// How much of Neovim's stderr is kept for the reason a start failed.
+const STDERR_HEAD: usize = 4096;
+
 impl NvimChild {
-    fn new(child: Child) -> NvimChild {
+    fn new(mut child: Child) -> NvimChild {
+        let stderr = child
+            .stderr
+            .take()
+            .map(|from| std::thread::spawn(move || drain_stderr(from)));
         NvimChild {
             child,
             grace: NVIM_EXIT_GRACE,
+            exiting: NVIM_EXITING,
+            stderr,
         }
     }
 
-    /// Waits up to the grace for Neovim to end; whether it did. One that
-    /// closed its socket is exiting by itself: it closes the socket before it
-    /// deletes its swap files, so a SIGHUP in between keeps them.
-    fn wait_for_exit(&mut self) -> bool {
-        let deadline = Instant::now() + self.grace;
+    /// Waits up to `limit` for Neovim to end; whether it did.
+    fn wait_for_exit(&mut self, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
         loop {
             if !matches!(self.child.try_wait(), Ok(None)) {
                 return true;
@@ -238,21 +288,274 @@ impl NvimChild {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-}
 
-impl Drop for NvimChild {
-    fn drop(&mut self) {
-        if !matches!(self.child.try_wait(), Ok(None)) {
+    /// Neovim closed the channel: it's exiting, or a plugin's `:detach` left
+    /// it running with no UI. One still running after `exiting` is sent
+    /// SIGHUP, which makes it keep its swap files and exit; dropping waits
+    /// for it. One that's exiting isn't: a SIGHUP while it deletes its swap
+    /// files would keep them.
+    fn closed_by_nvim(&mut self) {
+        if self.wait_for_exit(self.exiting) {
             return;
         }
         // SAFETY: signalling our own child, which hasn't been reaped.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP) };
-        if self.wait_for_exit() {
+    }
+
+    /// Why a Neovim that closed the channel before it answered failed to
+    /// start: how it ended, and the first line it wrote to stderr.
+    fn exited_at_once(&mut self) -> StartFailure {
+        let exit = if self.wait_for_exit(self.grace) {
+            nvim_exit(&mut self.child)
+        } else {
+            None
+        };
+        let head = self.stderr_head(Duration::from_secs(1));
+        StartFailure::Exited {
+            exit,
+            message: start_reason(&head),
+        }
+    }
+
+    /// The first bytes Neovim wrote to stderr, once it has closed it, waiting
+    /// up to `limit` for that. Empty if it hasn't.
+    fn stderr_head(&mut self, limit: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + limit;
+        while self.stderr.as_ref().is_some_and(|t| !t.is_finished()) {
+            if Instant::now() >= deadline {
+                return Vec::new();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.stderr
+            .take()
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for NvimChild {
+    fn drop(&mut self) {
+        if self.wait_for_exit(self.grace) {
             return;
         }
-        log_warn!("{NAME} daemon: Neovim didn't exit after SIGHUP; killing it");
+        log_warn!(
+            "{NAME} daemon: Neovim didn't exit within {:?} of its channel closing; killing it",
+            self.grace
+        );
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Copies Neovim's stderr, `from`, into ours, the log, until Neovim closes
+/// it. Returns its first `STDERR_HEAD` bytes.
+fn drain_stderr(mut from: ChildStderr) -> Vec<u8> {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut log = std::io::stderr();
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) => return head,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return head,
+        };
+        let keep = n.min(STDERR_HEAD - head.len());
+        head.extend_from_slice(&buf[..keep]);
+        let _ = log.write_all(&buf[..n]);
+    }
+}
+
+/// The reason a start failed, from what Neovim wrote to stderr: its first
+/// line, without `nvim: `, passing over `More info with "nvim -h"`.
+fn start_reason(stderr: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != r#"More info with "nvim -h""#)
+        .map(|line| line.strip_prefix("nvim: ").unwrap_or(line).to_string())
+}
+
+/// The oldest Neovim the daemon runs.
+const MIN_VERSION: Version = Version {
+    major: 0,
+    minor: 12,
+    patch: 0,
+};
+
+/// A Neovim version, from `nvim_get_api_info`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    major: i64,
+    minor: i64,
+    patch: i64,
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// The version in `frame`, Neovim's answer to `nvim_get_api_info`:
+/// `[channel, {version = {major, minor, patch, ...}, ...}]`.
+fn api_info_version(frame: &Frame) -> std::result::Result<Version, String> {
+    let rpc::Message::Response {
+        err, mut result, ..
+    } = frame.message().map_err(|e| e.to_string())?
+    else {
+        return Err("not an answer".to_string());
+    };
+    if let Some(err) = err {
+        return Err(String::from_utf8_lossy(err).into_owned());
+    }
+    match parse_api_info(&mut result) {
+        Ok(Some(version)) => Ok(version),
+        Ok(None) => Err("no version in nvim_get_api_info".to_string()),
+        Err(e) => Err(format!("nvim_get_api_info: {e}")),
+    }
+}
+
+/// The version in `d`, at the result of `nvim_get_api_info`.
+fn parse_api_info(d: &mut msgpack::Decoder<'_>) -> rpc::Result<Option<Version>> {
+    rpc::expect_array(d)?;
+    rpc::skip(d)?;
+    for _ in 0..rpc::expect_map(d)? {
+        if rpc::expect_str(d)? != b"version" {
+            rpc::skip(d)?;
+            continue;
+        }
+        let mut v = [None; 3];
+        for _ in 0..rpc::expect_map(d)? {
+            let slot = match rpc::expect_str(d)? {
+                b"major" => &mut v[0],
+                b"minor" => &mut v[1],
+                b"patch" => &mut v[2],
+                _ => {
+                    rpc::skip(d)?;
+                    continue;
+                }
+            };
+            *slot = Some(rpc::expect_int(d)?);
+        }
+        let [Some(major), Some(minor), Some(patch)] = v else {
+            return Ok(None);
+        };
+        return Ok(Some(Version {
+            major,
+            minor,
+            patch,
+        }));
+    }
+    Ok(None)
+}
+
+/// Whether Neovim's answer to `nvim_get_api_info` says it's new enough.
+fn check_version(frame: &Frame) -> std::result::Result<(), StartFailure> {
+    let version = api_info_version(frame).map_err(StartFailure::Nvim)?;
+    if version < MIN_VERSION {
+        return Err(StartFailure::TooOld(version));
+    }
+    Ok(())
+}
+
+/// Starts Neovim for the daemon in `dir`: `command`, then the daemon's
+/// arguments, then `nvim_args`, in the launch directory, its RPC on its stdin
+/// and stdout and `$<NAME>` the daemon's address. Waits up to `timeout` for
+/// it to answer `nvim_get_api_info`, and checks its version.
+///
+/// Drop the `Nvim` before the `NvimChild`: closing the channel ends Neovim.
+fn start_nvim<S: AsRef<OsStr>>(
+    command: &[&str],
+    dir: &str,
+    nvim_args: &[S],
+    timeout: Duration,
+) -> std::result::Result<(NvimChild, Nvim), StartFailure> {
+    let nvim_sock = path(dir, "nvim.sock");
+    // before the user's config, so it can tell it runs under neorex
+    let mut child = Command::new(command[0])
+        .args(&command[1..])
+        .args([
+            "--embed",
+            "--headless",
+            "--listen",
+            &nvim_sock,
+            "--cmd",
+            &format!("let g:{NAME} = 1"),
+        ])
+        .args(nvim_args)
+        // Neovim's alone: nothing else the daemon runs gets it
+        .env(name::upper(), path(dir, "sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(StartFailure::CantRun)?;
+    let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+    let mut child = NvimChild::new(child);
+    let mut nvim = Nvim::from_pipes(stdin.unwrap(), stdout.unwrap());
+
+    match first_answer(&mut nvim, timeout) {
+        Ok(frame) => {
+            if let Err(failure) = check_version(&frame) {
+                drop(nvim);
+                return Err(failure);
+            }
+        }
+        Err(None) => return Err(child.exited_at_once()),
+        Err(Some(failure)) => {
+            drop(nvim);
+            return Err(failure);
+        }
+    }
+    // Neovim makes its socket under its umask, which its files need. It's
+    // there once Neovim answers.
+    if let Err(err) = owner_only(&nvim_sock) {
+        drop(nvim);
+        return Err(StartFailure::Nvim(format!("{nvim_sock}: {err}")));
+    }
+    Ok((child, nvim))
+}
+
+/// Asks Neovim for `nvim_get_api_info` and waits up to `timeout` for the
+/// answer. Err(None) when Neovim closes the channel first.
+fn first_answer(
+    nvim: &mut Nvim,
+    timeout: Duration,
+) -> std::result::Result<Frame, Option<StartFailure>> {
+    let id = nvim.request("nvim_get_api_info", 0);
+    // only a Neovim that has closed its stdin refuses it
+    nvim.flush().map_err(|_| None)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        while let Some(frame) = nvim
+            .next()
+            .map_err(|e| Some(StartFailure::Nvim(e.to_string())))?
+        {
+            if matches!(frame.message(), Ok(rpc::Message::Response { id: got, .. }) if got == id) {
+                return Ok(frame);
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let mut fds = [libc::pollfd {
+            fd: nvim.read_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 1, left.as_millis() as libc::c_int) };
+        if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if n <= 0 {
+            return Err(Some(StartFailure::NoAnswer));
+        }
+        match nvim.read() {
+            Ok(true) => {}
+            Ok(false) => return Err(None),
+            Err(e) => return Err(Some(StartFailure::Nvim(e.to_string()))),
+        }
     }
 }
 
@@ -305,49 +608,19 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         launch: Some(Pane::startup(rex_block, take_pane(&server)?)),
     };
 
-    // before the user's config, so it can tell it runs under neorex
-    let spawned = Command::new(config.nvim_command[0])
-        .args(&config.nvim_command[1..])
-        .args([
-            "--headless",
-            "--listen",
-            &nvim_sock,
-            "--cmd",
-            &format!("let g:{NAME} = 1"),
-        ])
-        .args(nvim_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        // its stderr is ours: the log
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => NvimChild::new(child),
-        Err(err) => return Err(startup.give_up(StartStep::StartNvim, Box::new(err), None)),
-    };
-
-    // Neovim makes its socket under its umask, which its files need
-    let connected = (config.connect)(&nvim_sock).and_then(|nvim| {
-        owner_only(&nvim_sock)?;
-        Ok(nvim)
-    });
-    let nvim = match connected {
-        Ok(nvim) => nvim,
-        Err(err) => {
-            return Err(startup.give_up(
-                StartStep::ConnectNvim,
-                Box::new(err),
-                Some(&mut child.child),
-            ));
-        }
-    };
+    // declared in this order so the channel closes before Neovim is waited for
+    let mut child;
+    let nvim;
+    match start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout) {
+        Ok(started) => (child, nvim) = started,
+        Err(failure) => return Err(startup.give_up(failure)),
+    }
     let rex = match Client::connect(config.rex_url, NAME) {
         Ok(rex) => rex,
         Err(err) => {
-            return Err(startup.give_up(
-                StartStep::ConnectRex,
-                Box::new(err),
-                Some(&mut child.child),
-            ));
+            let failure = startup.give_up(StartFailure::Rex(err.to_string()));
+            drop(nvim);
+            return Err(failure);
         }
     };
 
@@ -355,7 +628,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         event_loop.add_signal(sig, Token::Signal as usize)?;
     }
-    event_loop.add_read(nvim.read_fd(), Token::NvimSocket as usize)?;
+    event_loop.add_read(nvim.read_fd(), Token::NvimChannel as usize)?;
     event_loop.add_read(server.as_raw_fd(), Token::HelperListener as usize)?;
     event_loop.add_read(rex.fd(), Token::RexSocket as usize)?;
 
@@ -374,8 +647,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     if stop_reason == StopReason::NvimExited {
         // panes first: Neovim may take a while to finish exiting
         drop(d);
-        // one still running is sent SIGHUP as it drops
-        child.wait_for_exit();
+        child.closed_by_nvim();
     }
     // a clean end needs no log, unless it was asked for in full
     if !log::tracing() {
@@ -384,13 +656,61 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     Ok(())
 }
 
-/// What the daemon was doing when it gave up before showing any window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartStep {
-    StartNvim,
-    ConnectNvim,
-    ConnectRex,
+/// Why the daemon gave up before showing any window, for the user.
+#[derive(Debug)]
+enum StartFailure {
+    /// `nvim` couldn't be run.
+    CantRun(std::io::Error),
+    /// Neovim closed its channel before it answered: how it ended, if it
+    /// has, and the reason it gave (`start_reason`).
+    Exited {
+        exit: Option<NvimExit>,
+        message: Option<String>,
+    },
+    TooOld(Version),
+    /// Neovim didn't answer in time.
+    NoAnswer,
+    /// Talking to Neovim went wrong.
+    Nvim(String),
+    Rex(String),
 }
+
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartFailure::CantRun(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                write!(f, "can't run nvim: not found on PATH")
+            }
+            StartFailure::CantRun(e) => write!(f, "can't run nvim: {e}"),
+            StartFailure::Exited { exit, message } => {
+                match exit {
+                    Some(NvimExit::Status(n)) => write!(f, "Neovim exited at once (status {n})")?,
+                    Some(NvimExit::Signal(n)) => {
+                        write!(f, "Neovim was killed at once (signal {n})")?
+                    }
+                    None => write!(f, "Neovim closed its channel before it was ready")?,
+                }
+                match message {
+                    Some(m) => write!(f, ": {m}"),
+                    None if exit.is_some() => write!(f, " with no message"),
+                    None => Ok(()),
+                }
+            }
+            StartFailure::TooOld(v) => {
+                write!(
+                    f,
+                    "Neovim {}.{} or later is needed; nvim is {v}",
+                    MIN_VERSION.major, MIN_VERSION.minor
+                )
+            }
+            StartFailure::NoAnswer => write!(f, "Neovim didn't start in time"),
+            StartFailure::Nvim(e) => write!(f, "couldn't talk to Neovim: {e}"),
+            StartFailure::Rex(e) => write!(f, "couldn't connect to Rex: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StartFailure {}
 
 /// How Neovim ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,73 +743,28 @@ impl Startup<'_> {
     }
 
     /// Restores the pane and tells it why we're stopping, then returns
-    /// `err`, which `main` prints to the log. `nvim_child` is Neovim, once
-    /// it's started.
-    fn give_up(
-        &mut self,
-        step: StartStep,
-        err: Box<dyn std::error::Error>,
-        nvim_child: Option<&mut Child>,
-    ) -> Box<dyn std::error::Error> {
-        let message = failure_message(step, err.as_ref(), nvim_exit(nvim_child), self.log);
+    /// `failure`, which `main` prints to the log.
+    fn give_up(&mut self, failure: StartFailure) -> Box<dyn std::error::Error> {
+        let message = failure_message(&failure, self.log);
         let launch = self.release();
         launch.deinit_with_message(&message);
-        err
+        Box::new(failure)
     }
 }
 
-/// How Neovim ended, if it has: a Neovim that exited never made its
-/// socket. Doesn't wait. A Neovim found ended is reaped.
-fn nvim_exit(child: Option<&mut Child>) -> Option<NvimExit> {
-    let status = child?.try_wait().ok()??;
+/// How `child`, which has ended, ended. Reaps it.
+fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
+    let status = child.try_wait().ok()??;
     if let Some(code) = status.code() {
         return Some(NvimExit::Status(code as u8));
     }
     status.signal().map(|sig| NvimExit::Signal(sig as u32))
 }
 
-/// A line for the user: what failed, and where the log is. At most 256 bytes
-/// plus a path.
-fn failure_message(
-    step: StartStep,
-    err: &(dyn std::error::Error + 'static),
-    nvim_exit: Option<NvimExit>,
-    log: &str,
-) -> Vec<u8> {
-    let mut w = format!("{NAME}: ");
-    match step {
-        StartStep::StartNvim => {
-            if err
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                w.push_str("nvim not found");
-            } else {
-                w.push_str(&format!("couldn't start nvim: {err}"));
-            }
-        }
-        StartStep::ConnectNvim => match nvim_exit {
-            Some(NvimExit::Status(n)) => {
-                w.push_str(&format!("Neovim exited (status {n}) before it was ready"))
-            }
-            Some(NvimExit::Signal(n)) => w.push_str(&format!(
-                "Neovim was killed (signal {n}) before it was ready"
-            )),
-            None => {
-                if matches!(
-                    err.downcast_ref::<nvim::Error>(),
-                    Some(nvim::Error::Timeout)
-                ) {
-                    w.push_str("Neovim didn't start in time");
-                } else {
-                    w.push_str(&format!("couldn't connect to Neovim: {err}"));
-                }
-            }
-        },
-        StartStep::ConnectRex => w.push_str(&format!("couldn't connect to Rex: {err}")),
-    }
-    w.push_str(&format!("; see {log}\r\n"));
-    let mut bytes = w.into_bytes();
+/// A line for the user: why the start failed, and where the log is. At most
+/// 256 bytes plus a path.
+fn failure_message(failure: &StartFailure, log: &str) -> Vec<u8> {
+    let mut bytes = format!("{NAME}: {failure}; see {log}\r\n").into_bytes();
     bytes.truncate(256 + MAX_PATH);
     bytes
 }
@@ -528,23 +803,42 @@ mod tests {
     use crate::daemon::fdpass;
     use std::os::fd::RawFd;
 
-    #[test]
-    fn a_neovim_that_wont_exit_on_sighup_is_killed_after_the_grace() {
-        // ignores SIGHUP, as a Neovim stuck on its way out does
-        let child = Command::new("sh")
-            .args(["-c", "trap '' HUP; echo ready; while :; do sleep 0.1; done"])
+    /// `script` run by `sh` as Neovim, its stdin a pipe like Neovim's
+    /// channel, with `grace`. Returns once it has written its first line.
+    fn sh_child(script: &str, grace: Duration) -> (NvimChild, std::process::ChildStdin) {
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let pid = child.id() as libc::pid_t;
-        let mut child = NvimChild {
-            child,
-            grace: Duration::from_millis(200),
-        };
-        // the trap is set once it says so
+        let stdin = child.stdin.take().unwrap();
+        let mut child = NvimChild::new(child);
+        child.grace = grace;
+        // its traps are set once it says so
         let mut ready = [0u8; 6];
         std::io::Read::read_exact(child.child.stdout.as_mut().unwrap(), &mut ready).unwrap();
+        (child, stdin)
+    }
+
+    /// A file in the temporary directory for test `name`, not there yet.
+    fn temp_file(name: &str) -> std::path::PathBuf {
+        let file = std::env::temp_dir().join(format!("{NAME}-{name}-{}", std::process::id()));
+        let _ = fs::remove_file(&file);
+        file
+    }
+
+    #[test]
+    fn a_neovim_that_wont_exit_when_its_channel_closes_is_killed_after_the_grace() {
+        // ignores its stdin closing and SIGHUP, as a Neovim stuck on its way
+        // out does
+        let (child, stdin) = sh_child(
+            "trap '' HUP; echo ready; while :; do sleep 0.1; done",
+            Duration::from_millis(200),
+        );
+        let pid = child.child.id() as libc::pid_t;
         let started = Instant::now();
+        drop(stdin);
         drop(child);
         assert!(started.elapsed() < Duration::from_secs(5));
         // reaped: no such process
@@ -552,27 +846,32 @@ mod tests {
     }
 
     #[test]
+    fn a_neovim_whose_channel_closed_is_waited_for_not_signalled() {
+        // exits once its stdin closes, noting whether it got that far
+        let done = temp_file("closed");
+        let script = format!("echo ready; cat >/dev/null; touch {}", done.display());
+        let (child, stdin) = sh_child(&script, Duration::from_secs(30));
+        let started = Instant::now();
+        drop(stdin);
+        drop(child);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let exited_itself = done.exists();
+        let _ = fs::remove_file(&done);
+        assert!(exited_itself, "Neovim was killed");
+    }
+
+    #[test]
     fn a_neovim_exiting_by_itself_is_waited_for_not_sent_sighup() {
-        // Neovim closes its socket before it deletes its swap files: a SIGHUP
-        // in between keeps them. This one notes a SIGHUP, then ends itself.
-        let marker = std::env::temp_dir().join(format!("{NAME}-hup-{}", std::process::id()));
-        let _ = fs::remove_file(&marker);
+        // Neovim closes its channel a moment before it exits: a SIGHUP in
+        // between could keep swap files it's deleting. This one notes a
+        // SIGHUP, then ends itself.
+        let marker = temp_file("hup");
         let script = format!(
-            "trap 'echo hup > {}; exit 1' HUP; echo ready; sleep 0.3",
+            "trap 'echo hup > {}; exit 1' HUP; echo ready; sleep 0.1",
             marker.display()
         );
-        let child = Command::new("sh")
-            .args(["-c", &script])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut child = NvimChild {
-            child,
-            grace: Duration::from_secs(3),
-        };
-        let mut ready = [0u8; 6];
-        std::io::Read::read_exact(child.child.stdout.as_mut().unwrap(), &mut ready).unwrap();
-        child.wait_for_exit();
+        let (mut child, _stdin) = sh_child(&script, Duration::from_secs(3));
+        child.closed_by_nvim();
         drop(child);
         let sent_sighup = marker.exists();
         let _ = fs::remove_file(&marker);
@@ -583,17 +882,40 @@ mod tests {
     }
 
     #[test]
-    fn a_neovim_that_exits_on_sighup_is_waited_for_not_killed() {
-        let child = Command::new("sleep").arg("60").spawn().unwrap();
-        let child = NvimChild {
-            child,
-            grace: Duration::from_secs(30),
-        };
-        let pid = child.child.id() as libc::pid_t;
+    fn a_neovim_still_running_after_closing_its_channel_is_sent_sighup() {
+        // as after a plugin's `:detach`
+        let marker = temp_file("detached");
+        let script = format!(
+            "trap 'echo hup > {}; exit 1' HUP; echo ready; while :; do sleep 0.1; done",
+            marker.display()
+        );
+        let (mut child, _stdin) = sh_child(&script, Duration::from_secs(30));
+        child.exiting = Duration::from_millis(100);
         let started = Instant::now();
+        child.closed_by_nvim();
         drop(child);
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(-1, unsafe { libc::kill(pid, 0) });
+        let sent_sighup = marker.exists();
+        let _ = fs::remove_file(&marker);
+        assert!(sent_sighup);
+    }
+
+    #[test]
+    fn an_inherited_fd_is_made_close_on_exec() {
+        let mut pipe = [-1; 2];
+        // SAFETY: room for two fds; neither is close-on-exec.
+        assert_eq!(0, unsafe { libc::pipe(pipe.as_mut_ptr()) });
+        let inherited = inherited_fds();
+        for fd in pipe {
+            assert!(inherited.contains(&fd), "{fd} in {inherited:?}");
+            close_on_exec(fd);
+            // SAFETY: reading the flags of our pipe, then closing it.
+            unsafe {
+                assert_ne!(0, libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC);
+                libc::close(fd);
+            }
+        }
+        assert!(!inherited.contains(&libc::STDERR_FILENO));
     }
 
     #[test]
@@ -743,23 +1065,16 @@ mod tests {
         text
     }
 
-    /// Neovim that never answers, leaving its socket file behind. Takes a moment,
-    /// as the real one does: enough for a Neovim that is quitting to quit.
-    fn connect_never(nvim_sock: &str) -> nvim::Result<Nvim> {
-        std::thread::sleep(Duration::from_millis(300));
-        fs::File::create(nvim_sock)?;
-        Err(nvim::Error::Timeout)
-    }
-
     fn exists(file: &str) -> bool {
         fs::symlink_metadata(file).is_ok()
     }
 
-    /// How a test's start goes: `nvim_command` and `connect` for Neovim, Rex
-    /// at `rex_url`. `on_ready` runs once the helpers' socket listens.
+    /// How a test's start goes: `nvim_command` for Neovim, answering within
+    /// `nvim_timeout`, and Rex at `rex_url`. `on_ready` runs once the helpers'
+    /// socket listens.
     struct TestStart<'a> {
         nvim_command: &'a [&'a str],
-        connect: fn(&str) -> nvim::Result<Nvim>,
+        nvim_timeout: Duration,
         rex_url: &'a str,
         on_ready: &'a mut dyn FnMut(),
     }
@@ -794,7 +1109,7 @@ mod tests {
             &[] as &[&str],
             Config {
                 nvim_command: start.nvim_command,
-                connect: start.connect,
+                nvim_timeout: start.nvim_timeout,
                 ready: Box::new(|| {
                     on_ready();
                     launcher = Some(fake_launcher_ready(&sock, slave)?);
@@ -819,27 +1134,34 @@ mod tests {
         (err, String::from_utf8_lossy(&shown).into_owned())
     }
 
-    /// Runs a start whose Neovim connect fails, with `nvim_command` standing in
-    /// for Neovim, and checks the pane shows `reason`.
-    fn expect_failed_start(nvim_command: &[&str], reason: &str) {
+    /// Runs a start whose Neovim fails, with `nvim_command` standing in for
+    /// Neovim, and checks the pane shows `reason`.
+    fn expect_failed_start(nvim_command: &[&str], nvim_timeout: Duration, reason: &str) {
         let dir = private_dir().unwrap();
         let (err, shown) = failed_start(
             &dir,
             TestStart {
                 nvim_command,
-                connect: connect_never,
+                nvim_timeout,
                 rex_url: "ws://unused",
                 on_ready: &mut || {},
             },
         );
-        assert!(
-            matches!(
-                err.downcast_ref::<nvim::Error>(),
-                Some(nvim::Error::Timeout)
-            ),
-            "{err}"
-        );
+        assert!(err.downcast_ref::<StartFailure>().is_some(), "{err}");
         assert!(shown.contains(reason), "{shown:?}");
+    }
+
+    /// Whether `nvim` is installed. Without it, a test skips (a panic under
+    /// `CI`).
+    fn have_nvim() -> bool {
+        match Command::new("nvim")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .status()
+        {
+            Ok(_) => true,
+            Err(_) => crate::nvim::nvim::nvim_missing::<()>().is_some(),
+        }
     }
 
     #[test]
@@ -867,7 +1189,7 @@ mod tests {
             &dir,
             TestStart {
                 nvim_command: &["nvim", "--clean"],
-                connect: connect_nvim,
+                nvim_timeout: NVIM_START_TIMEOUT,
                 rex_url: &rex_url,
                 on_ready: &mut || sock_mode = mode(&sock),
             },
@@ -884,18 +1206,375 @@ mod tests {
     }
 
     #[test]
-    fn a_start_whose_neovim_is_still_running_says_it_didnt_start_in_time() {
+    fn a_start_whose_neovim_doesnt_answer_says_it_didnt_start_in_time() {
         expect_failed_start(
             &["sh", "-c", "exec sleep 30", "--"],
+            Duration::from_millis(300),
             "Neovim didn't start in time",
         );
     }
 
     #[test]
-    fn a_start_whose_neovim_exited_says_so_with_its_status() {
+    fn a_start_whose_neovim_exited_silently_says_so_with_its_status() {
         expect_failed_start(
             &["sh", "-c", "exit 3", "--"],
-            "Neovim exited (status 3) before it was ready",
+            Duration::from_secs(10),
+            "Neovim exited at once (status 3) with no message",
         );
+    }
+
+    #[test]
+    fn a_start_with_an_unknown_option_gives_neovims_reason() {
+        if !have_nvim() {
+            return;
+        }
+        expect_failed_start(
+            &["nvim", "--fo"],
+            Duration::from_secs(10),
+            r#"Neovim exited at once (status 1): Unknown option argument: "--fo"; see "#,
+        );
+    }
+
+    #[test]
+    fn a_start_without_nvim_on_path_says_so() {
+        let missing = format!("{NAME}-no-such-nvim");
+        expect_failed_start(
+            &[&missing],
+            Duration::from_secs(10),
+            "can't run nvim: not found on PATH",
+        );
+    }
+
+    /// A clean Neovim started as the daemon starts it, in a new daemon
+    /// directory, with its swap files in `<dir>/swap` and `args` after.
+    struct TestNvim {
+        dir: String,
+        nvim: Option<Nvim>,
+        child: Option<NvimChild>,
+    }
+
+    impl TestNvim {
+        /// None (the test skips) without `nvim`.
+        fn start(args: &[&str]) -> Option<TestNvim> {
+            let dir = private_dir().unwrap();
+            let swap = path(&dir, "swap");
+            fs::create_dir(&swap).unwrap();
+            let directory = format!("set directory={swap}//");
+            let mut all = vec!["--cmd", &directory];
+            all.extend_from_slice(args);
+            match start_nvim(&["nvim", "--clean"], &dir, &all, Duration::from_secs(10)) {
+                Ok((child, mut nvim)) => {
+                    // it answered nvim_get_api_info as soon as it could; this
+                    // waits for the main loop, its files read
+                    let id = nvim.request("nvim_eval", 1);
+                    msgpack::write_str(nvim.writer(), "1");
+                    nvim.flush().unwrap();
+                    until_readable(&nvim);
+                    crate::nvim::nvim::wait_response(&mut nvim, id);
+                    Some(TestNvim {
+                        dir,
+                        nvim: Some(nvim),
+                        child: Some(child),
+                    })
+                }
+                Err(StartFailure::CantRun(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    fs::remove_dir_all(&dir).unwrap();
+                    crate::nvim::nvim::nvim_missing()
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+
+        fn nvim(&mut self) -> &mut Nvim {
+            self.nvim.as_mut().unwrap()
+        }
+
+        /// How many swap files there are.
+        fn swap_files(&self) -> usize {
+            fs::read_dir(path(&self.dir, "swap")).unwrap().count()
+        }
+
+        /// Closes the channel and waits for Neovim to end.
+        fn close(&mut self) {
+            self.nvim = None;
+            self.child = None;
+        }
+
+        /// Reads until Neovim closes the channel.
+        fn until_closed(&mut self) {
+            let nvim = self.nvim();
+            loop {
+                until_readable(nvim);
+                if !nvim.read().unwrap() {
+                    return;
+                }
+                while nvim.next().unwrap().is_some() {}
+            }
+        }
+    }
+
+    /// Waits up to 10 s for Neovim to say something, or panics.
+    fn until_readable(nvim: &Nvim) {
+        let mut fds = [libc::pollfd {
+            fd: nvim.read_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        assert!(
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, 10_000) } > 0,
+            "TestTimedOut"
+        );
+    }
+
+    impl Drop for TestNvim {
+        fn drop(&mut self) {
+            self.close();
+            if !self.dir.is_empty() {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
+
+    /// Waits up to 5 s for `done`.
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        for _ in 0..500 {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn closing_the_channel_runs_vimleave_and_removes_an_unchanged_buffers_swap() {
+        let marker = temp_file("vimleave");
+        let file = temp_file("unchanged");
+        fs::write(&file, "text\n").unwrap();
+        let vimleave = format!(
+            "autocmd VimLeave * call writefile(['left'], '{}')",
+            marker.display()
+        );
+        let Some(mut nvim) = TestNvim::start(&["--cmd", &vimleave, file.to_str().unwrap()]) else {
+            return;
+        };
+        assert_eq!(1, nvim.swap_files());
+        nvim.close();
+        let (left, swap) = (marker.exists(), nvim.swap_files());
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&file);
+        assert!(left, "no VimLeave");
+        assert_eq!(0, swap);
+    }
+
+    #[test]
+    fn a_plugins_detach_ends_neovim_keeping_a_changed_buffers_swap() {
+        let file = temp_file("detached");
+        let Some(mut nvim) = TestNvim::start(&[file.to_str().unwrap(), "-c", "normal! ichanged"])
+        else {
+            return;
+        };
+        // `:detach` leaves a UI
+        nvim.nvim()
+            .ui_attach(40, 10, crate::nvim::nvim::UiOptions::default())
+            .unwrap();
+        nvim.nvim().exec_lua("vim.cmd('detach')", 0);
+        nvim.nvim().flush().unwrap();
+        nvim.until_closed();
+        // as the daemon does once Neovim has closed the channel
+        let started = Instant::now();
+        let mut child = nvim.child.take().unwrap();
+        child.closed_by_nvim();
+        // ended by the SIGHUP, not killed after the grace
+        assert!(child.wait_for_exit(Duration::from_secs(2)), "still running");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(child);
+        let _ = fs::remove_file(&file);
+        assert_eq!(1, nvim.swap_files());
+    }
+
+    #[test]
+    fn neovims_terminals_see_the_daemons_address() {
+        let Some(mut nvim) = TestNvim::start(&[]) else {
+            return;
+        };
+        let out = path(&nvim.dir, "out");
+        let cmd = format!("terminal echo \"${}\" > {out}", name::upper());
+        let id = nvim.nvim().request("nvim_command", 1);
+        msgpack::write_str(nvim.nvim().writer(), &cmd);
+        nvim.nvim().flush().unwrap();
+        let frame = crate::nvim::nvim::wait_response(nvim.nvim(), id);
+        let rpc::Message::Response { err, .. } = frame.message().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(None, err.map(String::from_utf8_lossy));
+        assert!(eventually(
+            || fs::read_to_string(&out).is_ok_and(|s| s.ends_with('\n'))
+        ));
+        let seen = fs::read_to_string(&out).unwrap();
+        assert_eq!(path(&nvim.dir, "sock"), seen.trim_end());
+    }
+
+    /// The environment variable that makes `sigkill_helper` run, naming the
+    /// file it edits.
+    fn sigkill_helper_var() -> String {
+        format!("{}_TEST_SIGKILL", name::upper())
+    }
+
+    /// For `a_sigkilled_daemons_neovim_exits_keeping_a_changed_buffers_swap`,
+    /// in a process of its own: starts Neovim with a changed buffer, says
+    /// `ready <Neovim's pid> <swap directory>`, and waits to be killed.
+    #[test]
+    #[ignore = "a helper process, run by another test"]
+    fn sigkill_helper() {
+        let Some(file) = std::env::var_os(sigkill_helper_var()) else {
+            return;
+        };
+        let file = file.to_str().unwrap();
+        let mut nvim = TestNvim::start(&[file, "-c", "normal! ichanged"]).unwrap();
+        let pid = nvim.child.as_ref().unwrap().child.id();
+        println!("ready {pid} {}", path(&nvim.dir, "swap"));
+        std::io::stdout().flush().unwrap();
+        // the directory is the test's to remove
+        nvim.dir = String::new();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn a_sigkilled_daemons_neovim_exits_keeping_a_changed_buffers_swap() {
+        if !have_nvim() {
+            return;
+        }
+        let file = temp_file("killed");
+        let mut daemon = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::serve::tests::sigkill_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(sigkill_helper_var(), &file)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = daemon.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+                let Ok(line) = line else { return };
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        // what it said before `ready`, for a failure
+        let mut said = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let ready = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                // the test harness may have begun the line
+                Ok(line) => match line.split_once("ready ") {
+                    Some((_, ready)) => break ready.to_string(),
+                    None => said.push(line),
+                },
+                Err(e) => {
+                    let status = daemon.try_wait();
+                    let _ = daemon.kill();
+                    let _ = daemon.wait();
+                    panic!("the helper's Neovim didn't start ({e}, {status:?}): {said:?}");
+                }
+            }
+        };
+        let (pid, swap) = ready.split_once(' ').unwrap();
+        let pid: libc::pid_t = pid.parse().unwrap();
+        daemon.kill().unwrap();
+        daemon.wait().unwrap();
+
+        // SAFETY: probing a pid.
+        let gone = eventually(|| unsafe { libc::kill(pid, 0) } == -1);
+        if !gone {
+            // SAFETY: killing the Neovim the helper started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let swap_files = fs::read_dir(swap).unwrap().count();
+        let dir = std::path::Path::new(swap).parent().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_file(&file);
+        assert!(gone, "Neovim outlived its daemon");
+        assert_eq!(1, swap_files);
+    }
+
+    /// Neovim's answer to `nvim_get_api_info`, as recorded from `version`.
+    fn api_info(version: &str) -> Frame {
+        let bytes: &[u8] = match version {
+            "0.11.2" => include_bytes!("../nvim/testdata/nvim_get_api_info_0.11.2.mpack"),
+            "0.12.6" => include_bytes!("../nvim/testdata/nvim_get_api_info_0.12.6.mpack"),
+            "0.13.0" => include_bytes!("../nvim/testdata/nvim_get_api_info.mpack"),
+            _ => unreachable!(),
+        };
+        Frame(bytes.to_vec())
+    }
+
+    fn reason(failure: StartFailure) -> String {
+        let message = failure_message(&failure, "/tmp/x/log");
+        String::from_utf8(message).unwrap()
+    }
+
+    #[test]
+    fn a_neovim_older_than_0_12_is_refused_with_its_version() {
+        let failure = check_version(&api_info("0.11.2")).unwrap_err();
+        assert_eq!(
+            format!("{NAME}: Neovim 0.12 or later is needed; nvim is 0.11.2; see /tmp/x/log\r\n"),
+            reason(failure)
+        );
+        for newer in ["0.12.6", "0.13.0"] {
+            assert!(check_version(&api_info(newer)).is_ok(), "{newer}");
+        }
+        assert_eq!(
+            Ok(Version {
+                major: 0,
+                minor: 12,
+                patch: 6
+            }),
+            api_info_version(&api_info("0.12.6"))
+        );
+    }
+
+    #[test]
+    fn failed_start_reasons() {
+        // as `nvim --fo` writes it
+        let stderr = b"nvim: Unknown option argument: \"--fo\"\nMore info with \"nvim -h\"\n";
+        let cases = [
+            (
+                StartFailure::Exited {
+                    exit: Some(NvimExit::Status(1)),
+                    message: start_reason(stderr),
+                },
+                r#"Neovim exited at once (status 1): Unknown option argument: "--fo""#,
+            ),
+            (
+                StartFailure::Exited {
+                    exit: Some(NvimExit::Status(1)),
+                    message: start_reason(b""),
+                },
+                "Neovim exited at once (status 1) with no message",
+            ),
+            (
+                StartFailure::CantRun(std::io::ErrorKind::NotFound.into()),
+                "can't run nvim: not found on PATH",
+            ),
+        ];
+        for (failure, why) in cases {
+            assert_eq!(
+                format!("{NAME}: {why}; see /tmp/x/log\r\n"),
+                reason(failure)
+            );
+        }
+        // the hint alone is no reason
+        assert_eq!(None, start_reason(b"More info with \"nvim -h\"\n"));
     }
 }

@@ -111,7 +111,7 @@ impl StopReason {
 #[repr(usize)]
 pub(crate) enum Token {
     Signal,
-    NvimSocket,
+    NvimChannel,
     HelperListener,
     RexSocket,
     FocusTimer,
@@ -125,7 +125,7 @@ impl Token {
     pub(crate) fn of(token: usize) -> Option<Token> {
         Some(match token {
             0 => Token::Signal,
-            1 => Token::NvimSocket,
+            1 => Token::NvimChannel,
             2 => Token::HelperListener,
             3 => Token::RexSocket,
             4 => Token::FocusTimer,
@@ -304,7 +304,7 @@ impl Daemon {
     fn handle(&mut self, e: Event) -> Result<()> {
         match Token::of(e.token) {
             Some(Token::Signal) => self.stop(StopReason::Signal),
-            Some(Token::NvimSocket) => self.on_nvim()?,
+            Some(Token::NvimChannel) => self.on_nvim()?,
             Some(Token::RexSocket) => self.on_rex()?,
             Some(Token::FocusTimer) => self.send_focus(true)?,
             Some(Token::LayoutTimer) => self.layout_wait_over()?,
