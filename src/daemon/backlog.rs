@@ -75,23 +75,25 @@ impl Backlog {
             self.len = self.frames[0].len() - self.written;
             self.dropped = true;
         }
-        self.drain(fd)
+        self.drain(fd).map(|_| ())
     }
 
-    /// Writes what waits, as far as `fd` takes it now. An error means the
-    /// terminal is gone.
-    pub(crate) fn drain(&mut self, fd: RawFd) -> io::Result<()> {
+    /// Writes what waits, as far as `fd` takes it now. Whether that wrote the
+    /// last of it: false if it all waits still, or nothing waited. An error
+    /// means the terminal is gone.
+    pub(crate) fn drain(&mut self, fd: RawFd) -> io::Result<bool> {
+        let waited = !self.is_empty();
         while let Some(first) = self.frames.front() {
             let n = write_some(fd, &first[self.written..])?;
             self.written += n;
             self.len -= n;
             if self.written < first.len() {
-                return Ok(());
+                return Ok(false);
             }
             self.frames.pop_front();
             self.written = 0;
         }
-        Ok(())
+        Ok(waited)
     }
 
     /// True once, when frames were dropped and nothing waits any more: time
@@ -192,4 +194,67 @@ fn write_some(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
         unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    /// Reads what's there from `theirs` without waiting.
+    fn read_all(theirs: &mut UnixStream) {
+        theirs.set_nonblocking(true).unwrap();
+        let mut buf = [0u8; 64 * 1024];
+        while theirs.read(&mut buf).is_ok_and(|n| n > 0) {}
+    }
+
+    #[test]
+    fn a_drain_says_whether_it_wrote_the_last_of_what_waited() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let fd = ours.as_raw_fd();
+        let mut b = Backlog::default();
+        // more than the socket takes: some waits
+        let mut frame = vec![b'x'; 4 << 20];
+        b.send(fd, &mut frame).unwrap();
+        assert!(!b.is_empty());
+        assert!(!b.drain(fd).unwrap());
+        // the terminal took it: the rest goes, the last of it
+        let mut done = false;
+        for _ in 0..1000 {
+            read_all(&mut theirs);
+            if b.drain(fd).unwrap() {
+                done = true;
+                break;
+            }
+        }
+        assert!(done && b.is_empty());
+        // nothing waits: a drain writes no last of anything
+        assert!(!b.drain(fd).unwrap());
+    }
+
+    #[test]
+    fn a_send_that_writes_what_waited_leaves_nothing_for_a_drain() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let fd = ours.as_raw_fd();
+        let mut b = Backlog::default();
+        let mut frame = vec![b'x'; 4 << 20];
+        b.send(fd, &mut frame).unwrap();
+        assert!(!b.is_empty());
+        // the next frame's send writes the rest and itself, as a draw does
+        let mut sent = false;
+        for _ in 0..1000 {
+            read_all(&mut theirs);
+            let mut next = b"y".to_vec();
+            b.send(fd, &mut next).unwrap();
+            if b.is_empty() {
+                sent = true;
+                break;
+            }
+        }
+        assert!(sent);
+        // the write interest still registered fires: no frame finished here
+        assert!(!b.drain(fd).unwrap());
+    }
 }

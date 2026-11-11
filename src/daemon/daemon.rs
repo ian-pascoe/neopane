@@ -516,14 +516,16 @@ impl Daemon {
             .and_then(|p| p.terminal_surface.as_deref_mut())
             .expect("a pane with events has a terminal");
         let fd = s.terminal.fd;
-        if s.backlog.drain(fd).is_err() {
+        let Ok(finished) = s.backlog.drain(fd) else {
             return self.pane_gone(id);
-        }
+        };
         if !s.backlog.is_empty() {
             return Ok(());
         }
-        // the rest of the frame has gone out
-        log::trace(Point::Frame, u64::from(id));
+        // the rest of the frame went out here, not in a draw's send since
+        if finished {
+            log::trace(Point::Frame, u64::from(id));
+        }
         let repaint = s.backlog.take_dropped();
         if repaint {
             s.view.full = true;

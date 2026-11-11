@@ -224,85 +224,67 @@ macro_rules! log_debug {
 #[allow(unused_imports)]
 pub(crate) use {log_debug, log_info, log_warn};
 
-/// A moment a latency criterion is timed from or to (`docs/latency.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Point {
+/// Declares `Point` and `Point::ALL` from one list, so `ALL` has every point.
+macro_rules! points {
+    ($($(#[doc = $doc:literal])* $point:ident => $tag:literal,)*) => {
+        /// A moment a latency criterion is timed from or to (`docs/latency.md`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Point {
+            $($(#[doc = $doc])* $point,)*
+        }
+
+        impl Point {
+            /// Every point, in the order declared.
+            pub const ALL: &'static [Point] = &[$(Point::$point),*];
+
+            /// The point's name, as traced.
+            pub fn tag_name(self) -> &'static str {
+                match self {
+                    $(Point::$point => $tag,)*
+                }
+            }
+        }
+    };
+}
+
+points! {
     /// L6: the launcher started. Its id is the launcher's pid.
-    Exec,
+    Exec => "exec",
     /// L1: a new pane's split asked for.
-    Split,
+    Split => "split",
     /// L1, L3, L6: a frame written to a pane in full, its last byte gone out.
-    Frame,
+    Frame => "frame",
     /// L4: a read's keys written to Neovim as `nvim_input`, straight away.
     /// Its `from` is when the read came.
-    Input,
+    Input => "input",
     /// L2: as `Input`, for a read held behind a window switch.
-    HeldInput,
+    HeldInput => "held_input",
     /// L2: a focus request written to Rex.
-    Focus,
+    Focus => "focus",
     /// L3: a pane of another tab page became the current pane.
-    TabMove,
+    TabMove => "tab_move",
     /// L5: a pane's terminal was resized.
-    Resize,
+    Resize => "resize",
     /// L5: the pane's window asked to resize to fit it.
-    ResizeSent,
+    ResizeSent => "resize_sent",
     /// L8: the panes of a tab page asked to be placed.
-    Place,
+    Place => "place",
     /// L8: the last placement answered.
-    Placed,
+    Placed => "placed",
     /// L7: a pane accepted, its find asked for. Fires from #114.
-    Accept,
+    Accept => "accept",
     /// L7: the find confirmed. Fires from #114.
-    Found,
+    Found => "found",
     /// L9: a hello received. Fires from #101.
-    Hello,
+    Hello => "hello",
     /// L9: the hello accepted. Fires from #101.
-    Accepted,
+    Accepted => "accepted",
 }
 
 impl Point {
-    pub const ALL: [Point; 15] = [
-        Point::Exec,
-        Point::Split,
-        Point::Frame,
-        Point::Input,
-        Point::HeldInput,
-        Point::Focus,
-        Point::TabMove,
-        Point::Resize,
-        Point::ResizeSent,
-        Point::Place,
-        Point::Placed,
-        Point::Accept,
-        Point::Found,
-        Point::Hello,
-        Point::Accepted,
-    ];
-
-    /// The point's name, as traced.
-    pub fn tag_name(self) -> &'static str {
-        match self {
-            Point::Exec => "exec",
-            Point::Split => "split",
-            Point::Frame => "frame",
-            Point::Input => "input",
-            Point::HeldInput => "held_input",
-            Point::Focus => "focus",
-            Point::TabMove => "tab_move",
-            Point::Resize => "resize",
-            Point::ResizeSent => "resize_sent",
-            Point::Place => "place",
-            Point::Placed => "placed",
-            Point::Accept => "accept",
-            Point::Found => "found",
-            Point::Hello => "hello",
-            Point::Accepted => "accepted",
-        }
-    }
-
     /// The point named `tag`, as `tag_name` gives it.
     pub fn from_tag(tag: &str) -> Option<Point> {
-        Point::ALL.into_iter().find(|p| p.tag_name() == tag)
+        Point::ALL.iter().copied().find(|p| p.tag_name() == tag)
     }
 }
 
@@ -449,34 +431,17 @@ mod tests {
     #[test]
     fn levels_order_from_warn_to_debug() {
         assert!(LogLevel::Warn < LogLevel::Info && LogLevel::Info < LogLevel::Debug);
-        for p in Point::ALL {
+        for &p in Point::ALL {
             assert_eq!(Some(p), Point::from_tag(p.tag_name()));
         }
         assert_eq!(None, Point::from_tag("nothing"));
     }
 
     #[test]
-    fn every_point_is_in_all() {
-        // a point added to the enum fails to compile here until it's listed
-        let index = |p: Point| match p {
-            Point::Exec => 0,
-            Point::Split => 1,
-            Point::Frame => 2,
-            Point::Input => 3,
-            Point::HeldInput => 4,
-            Point::Focus => 5,
-            Point::TabMove => 6,
-            Point::Resize => 7,
-            Point::ResizeSent => 8,
-            Point::Place => 9,
-            Point::Placed => 10,
-            Point::Accept => 11,
-            Point::Found => 12,
-            Point::Hello => 13,
-            Point::Accepted => 14,
-        };
-        for (i, p) in Point::ALL.into_iter().enumerate() {
-            assert_eq!(i, index(p), "{p:?}");
+    fn every_point_has_its_own_tag() {
+        // `ALL` has every point: `points!` declares both from one list
+        for (i, p) in Point::ALL.iter().enumerate() {
+            assert!(Point::ALL[..i].iter().all(|q| q.tag_name() != p.tag_name()));
         }
     }
 
