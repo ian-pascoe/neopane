@@ -669,7 +669,9 @@ impl Multi {
                                 | Note::Entered(_)
                                 | Note::Tabline(_)
                                 | Note::Direction(_)
-                                | Note::Layout(_) => {}
+                                | Note::Layout(_)
+                                | Note::Options(_)
+                                | Note::Resized { .. } => {}
                             }
                         }
                     }

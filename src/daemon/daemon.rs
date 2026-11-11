@@ -700,6 +700,10 @@ impl Daemon {
         p.layout
             .get_or_insert_with(|| PaneLayout::new(shown))
             .split(win, origin, sp.side_by_side, sp.before, equalalways);
+        // Neovim said it was current before it was drawn
+        if self.nvim.current_win == win {
+            p.neovim_window_handle = Some(win);
+        }
         self.changes.forget_split(win);
     }
 
@@ -3245,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn with_rex_closed_a_new_window_stays_in_neovim() {
+    fn with_rex_closed_a_tab_pages_window_or_one_with_no_pane_to_join_stays_unshown() {
         let mut fx = two_windows_of_a_tab_page();
         fx.d.rex.conn = Conn::Closed;
         fx.d.new_pane(1).unwrap();
@@ -3306,13 +3310,17 @@ mod tests {
         draw_external(&mut fx.d, 2, 1000, 81, 23);
         fx.d.reconcile().unwrap();
 
-        // :vsplit, without 'splitright': the new window on the left
+        // :vsplit, without 'splitright': the new window on the left, current
+        // before it's drawn
         note_split_from(&mut fx.d, 1001, 1000, true, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
         draw_external(&mut fx.d, 3, 1001, 40, 23);
         fx.d.reconcile().unwrap();
         assert_eq!(vec![id], pane_ids(&fx.d));
         let pane = fx.d.panes.by_id(id).unwrap();
         assert_eq!(vec![1001, 1000], pane.windows());
+        // keys typed in the pane go to it, not back to the window it came from
+        assert_eq!(Some(1001), pane.neovim_window_handle);
         // 40 columns each, the separator between
         let (wins, separators) = fx.d.split_view(pane);
         assert_eq!(

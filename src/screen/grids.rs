@@ -927,6 +927,8 @@ mod tests {
         assert_eq!(WinKind::Ordinary, gs.win_on(first).unwrap().kind);
         assert_eq!(first, gs.cursor_grid);
         assert_eq!(4, gs.get(first).unwrap().cursor_col);
+        // a highlight to draw separators in
+        assert_ne!(0, gs.separator_hl);
 
         // a split gets another grid; the first window, made external, keeps its own
         nvim.exec_lua(
