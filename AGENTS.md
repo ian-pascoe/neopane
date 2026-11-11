@@ -5,6 +5,7 @@
 - `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `<name>_*` notes, `<name>` being `NAME` in `src/name.rs`. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
 - `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows, in its Rex floating pane, as the `<name>_layout` notes say (`TabPlacement`).
 - `src/cli/` parses the command line by hand: own options first, then Neovim's arguments, read by Neovim's rules (ADR 0014).
+- `src/config/` runs the user's `init.lua` in a config child, the hidden `config-child` command, and checks what its `provider` returned with the daemon's own rules (ADR 0007). The child sends a plain tree back in a frozen encoding (`tree.rs`, `wire.rs`): a daemon reads answers from a newer binary after an upgrade in place.
 - `src/attach/` defines the attach protocol: its frames, hello, pane ids and attach command (`docs/attach-protocol.md`).
 - With Rex closed, a new window is drawn in its origin pane, laid out as Neovim lays out splits: `src/daemon/pane_layout.rs` keeps each pane's layout, and `PaneView::frame_laid_out` draws it (ADR 0009).
 - `src/screen/` draws grids into panes. `src/rex/` is the Rex WebSocket client. `src/term/` handles key input and the terminal.
