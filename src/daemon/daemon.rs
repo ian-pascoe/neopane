@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use super::asks::{self, Asks, Step};
 use super::attach_conn::Pending;
 use super::event_loop::{Event, Kind, Loop};
-use super::exe_stamp::{self, ExeStamp};
+use super::exe_stamp::VersionRefused;
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
@@ -114,9 +114,9 @@ pub(crate) struct Daemon {
     /// When the attach timer is set to fire, if it is.
     attach_timer_due: Option<Instant>,
     /// Set once a requested pane's terminal was refused for its version:
-    /// the file at `exe` as it was then. Until it changes, new windows are
-    /// drawn in their origin panes (#91 decision 24).
-    version_refused: Option<Option<ExeStamp>>,
+    /// while it holds, new windows are drawn in their origin panes (#91
+    /// decision 24).
+    version_refused: Option<VersionRefused>,
     /// Windows of the first tab page whose terminal won't come, waiting for
     /// a pane to be drawn in, and how they were split off.
     awaiting_origin: Vec<(i64, windows::Split)>,
@@ -918,11 +918,12 @@ impl Daemon {
     }
 
     /// Whether a window of the first tab page, split off as `sp`, gets a
-    /// terminal of its own (#112): the pane provider can open one, beside its
-    /// origin pane or to be placed there, which is in reach, the daemon's binary wasn't refused for
-    /// its version since it last changed, and a window opened without being
-    /// entered can have focus given back to the current window's terminal
-    /// (#86 D5).
+    /// terminal of its own (#112). It does when:
+    /// - the pane provider can open one, beside its origin pane or to be
+    ///   placed there, and that pane is in reach;
+    /// - opened without being entered, focus can be given back to the
+    ///   current pane's terminal (#86 D5);
+    /// - no version refusal holds (#91 decision 24).
     fn opens_terminal(&mut self, sp: windows::Split) -> bool {
         let p = self.provider.as_ref().map(Held::seam_ref);
         let opens =
@@ -933,10 +934,10 @@ impl Daemon {
         if sp.win != self.nvim.current_win && !self.can_give_focus_back() {
             return false;
         }
-        let Some(then) = self.version_refused else {
+        let Some(refused) = self.version_refused else {
             return true;
         };
-        if !exe_stamp::changed(then, ExeStamp::of(&self.exe)) {
+        if refused.holds(&self.exe) {
             return false;
         }
         log_info!(
@@ -1984,7 +1985,7 @@ impl Daemon {
         let wait = self
             .provider
             .as_ref()
-            .map_or(crate::config::check::ATTACH_TIMEOUT, |p| {
+            .map_or(super::provider::default_attach_timeout(), |p| {
                 p.seam_ref().attach_timeout()
             });
         wait.min(crate::config::check::MAX_TIMEOUT)

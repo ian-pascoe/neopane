@@ -359,6 +359,11 @@ pub(crate) trait PaneProvider {
     /// done, before its window is drawn in its origin pane (#88 decision
     /// 15). The daemon cuts it to `MAX_TIMEOUT`.
     fn attach_timeout(&self) -> Duration {
-        crate::config::check::ATTACH_TIMEOUT
+        default_attach_timeout()
     }
+}
+
+/// The attach timeout of a pane provider that sets none.
+pub(crate) fn default_attach_timeout() -> Duration {
+    crate::config::check::ATTACH_TIMEOUT
 }

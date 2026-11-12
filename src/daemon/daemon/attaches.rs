@@ -242,7 +242,7 @@ impl Daemon {
         ) || (ours && self.version_refused.is_some());
         let mut line = format!("a pane's terminal was refused: {}", z.message);
         if ours && self.version_refused.is_none() {
-            self.version_refused = Some(ExeStamp::of(&self.exe));
+            self.version_refused = Some(VersionRefused::of(&self.exe));
             line += &format!(
                 "; new windows are drawn in their origin panes until {} changes",
                 self.exe

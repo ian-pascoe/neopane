@@ -109,6 +109,6 @@ impl PaneProvider for FakeProvider {
 
     fn attach_timeout(&self) -> Duration {
         self.attach_timeout
-            .unwrap_or(crate::config::check::ATTACH_TIMEOUT)
+            .unwrap_or_else(super::default_attach_timeout)
     }
 }
