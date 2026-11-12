@@ -247,7 +247,11 @@ impl Rig {
                 (surface, Emulator::relayed(pane))
             }
         };
-        d.start(Some(TerminalId::from(TERMINAL)), surface0).unwrap();
+        d.start(&mut Some(SelfAttach {
+            surface: surface0,
+            terminal: Some(TerminalId::from(TERMINAL)),
+        }))
+        .unwrap();
 
         // one per rig: the tests run side by side
         static RIGS: AtomicU32 = AtomicU32::new(0);

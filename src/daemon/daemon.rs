@@ -26,7 +26,7 @@ use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
-use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing};
+use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing, SelfAttach};
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, TerminalId};
@@ -321,25 +321,36 @@ impl Daemon {
         }
     }
 
-    /// Adds the first self-attached pane, already accepted, its terminal
-    /// `surface` with the pane provider's id `terminal` if known, and starts
-    /// talking to Neovim, sized to it, and the pane provider.
-    pub(crate) fn start(
-        &mut self,
-        terminal: Option<TerminalId>,
-        surface: Box<Surface>,
-    ) -> Result<()> {
+    /// Takes the `first` self-attach, already accepted, as a pane, and
+    /// starts talking to Neovim, sized to it, and the pane provider. On a
+    /// failure, `first` is given back, for its attach to end with why.
+    pub(crate) fn start(&mut self, first: &mut Option<SelfAttach>) -> Result<()> {
         // only ever called on startup
         debug_assert!(self.panes.list.is_empty());
 
-        let pane = self.panes.add_self_attached(terminal, surface);
+        let attach = first.take().expect("the first self-attach is taken once");
+        let id = self.panes.add_self_attached(attach).id;
+        let started = self.start_with(id);
+        if started.is_err() {
+            let pane = self.panes.list.pop().expect("the pane just added");
+            pane.unregister_from(&self.event_loop);
+            *first = pane.into_self_attach();
+        }
+        started
+    }
+
+    /// `start`, once pane `id` is added.
+    fn start_with(&mut self, id: u32) -> Result<()> {
+        let pane = self.panes.by_id_mut(id).unwrap();
         pane.register_with(&self.event_loop)?;
         // no requested pane: its own area until a live layout places it,
         // drawn and fitted as before there was any
         pane.area = Area::Own;
         let view = &pane.terminal_surface.as_ref().unwrap().view;
         let (cols, rows) = (view.cols, view.rows);
-        self.nvim.attach_ui(cols, rows)?;
+        self.nvim
+            .attach_ui(cols, rows)
+            .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
         if let Some(r) = self.rex() {
             r.session.attach()?;
         }
@@ -1060,7 +1071,7 @@ impl Daemon {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
             // the first window is the self-attached pane's (#83)
-            let Some(first) = self.panes.unshown_self_attached() else {
+            let Some(first) = self.panes.self_attached_awaiting_window() else {
                 return Ok(());
             };
             let size = self.geometry().window_size(first);
@@ -1071,7 +1082,7 @@ impl Daemon {
         } else if id == self.nvim.setup_req {
             let mut result = result;
             let wins = windows::parse_setup(&mut result)?;
-            if let Some(first) = self.panes.unshown_self_attached_mut() {
+            if let Some(first) = self.panes.self_attached_awaiting_window_mut() {
                 first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
@@ -2287,7 +2298,7 @@ impl Daemon {
     /// self-attached pane waiting for the first window.
     fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
-            return self.panes.unshown_self_attached();
+            return self.panes.self_attached_awaiting_window();
         }
         self.panes.by_win(self.nvim.current_win)
     }
@@ -2389,7 +2400,7 @@ fn observe_window(
         };
     };
     // a self-attached pane is never moved
-    if p.closing.is_some() || p.attach_id.is_none() {
+    if p.closing.is_some() || p.is_self_attached() {
         return WindowState::Skipped;
     }
     if p.terminal.is_none() {
@@ -3569,7 +3580,12 @@ mod tests {
     fn a_self_attached_pane_is_its_own_area_until_a_live_layout_places_it() {
         let mut fx = TablineFixture::init();
         let s = fx.surface(80, 24);
-        fx.d().start(Some(TerminalId::from("t0")), s).unwrap();
+        fx.d()
+            .start(&mut Some(SelfAttach {
+                surface: s,
+                terminal: Some(TerminalId::from("t0")),
+            }))
+            .unwrap();
         // no wait for a report: a tabline pane, the screen its size
         let d = fx.d();
         assert_eq!(Area::Own, d.panes.list[0].area);
@@ -3652,7 +3668,12 @@ mod tests {
     fn with_no_pane_provider_each_pane_is_its_own_area_with_its_own_tabline() {
         let mut fx = TablineFixture::on(with_provider(None));
         let s = fx.surface(80, 24);
-        fx.d().start(None, s).unwrap();
+        fx.d()
+            .start(&mut Some(SelfAttach {
+                surface: s,
+                terminal: None,
+            }))
+            .unwrap();
         fx.d().nvim.ready = true;
         let other = fx.add(2, 60, Area::Unreported);
         fx.d().wait_for_report(other, Instant::now()).unwrap();

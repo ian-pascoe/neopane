@@ -19,11 +19,26 @@ use crate::screen::float_groups::Group;
 /// Never 0: Neovim's API reads 0 as the current window.
 pub(crate) type NeovimWindowHandle = i64;
 
+/// An accepted self-attach: its terminal, and the pane provider's id for it
+/// if known.
+pub(crate) struct SelfAttach {
+    pub surface: Box<Surface>,
+    pub terminal: Option<TerminalId>,
+}
+
+impl SelfAttach {
+    /// Ends the attach as failed, with `message` for its helper to print.
+    pub(crate) fn fail(self, message: &str) {
+        self.surface.destroy(Ending::Failed, message);
+    }
+}
+
 pub(crate) struct Pane {
     /// The daemon's own number for it, for its loop tokens.
     pub id: u32,
     /// The pane id its helper's hello names, for a requested pane. None for
-    /// a self-attached pane, which placement never moves.
+    /// a self-attached pane until #105 gives it one as it attaches;
+    /// placement never moves a self-attached pane.
     pub attach_id: Option<PaneId>,
     /// Its terminal's id, from the pane provider: Rex's is its block.
     pub terminal: Option<TerminalId>,
@@ -264,18 +279,29 @@ impl Pane {
         }
     }
 
-    /// A self-attached pane: a terminal that attached of its own accord,
-    /// with its terminal's id if known. It has no window yet.
-    pub(crate) fn self_attached(
-        id: u32,
-        terminal: Option<TerminalId>,
-        surface: Box<Surface>,
-    ) -> Pane {
+    /// A self-attached pane for `attach`, a terminal that attached of its
+    /// own accord. It has no window yet.
+    pub(crate) fn self_attached(id: u32, attach: SelfAttach) -> Pane {
         Pane {
-            terminal,
-            terminal_surface: Some(surface),
+            terminal: attach.terminal,
+            terminal_surface: Some(attach.surface),
             ..Pane::blank(id)
         }
+    }
+
+    /// Whether its terminal attached of its own accord rather than for a
+    /// pane the daemon asked for: it has no pane id (until #105).
+    pub(crate) fn is_self_attached(&self) -> bool {
+        self.attach_id.is_none()
+    }
+
+    /// The self-attach a self-attached pane was made for, taken back from
+    /// it; None once its terminal is gone.
+    pub(crate) fn into_self_attach(mut self) -> Option<SelfAttach> {
+        Some(SelfAttach {
+            surface: self.terminal_surface.take()?,
+            terminal: self.terminal.take(),
+        })
     }
 
     /// A floating pane ready to draw its floats.
@@ -352,14 +378,24 @@ mod tests {
         assert_eq!(1000, from_window.neovim_window_handle.unwrap());
         assert!(from_window.terminal.is_none() && from_window.terminal_surface.is_none());
 
-        let attached =
-            Pane::self_attached(1, Some(TerminalId::from("t")), Surface::for_test(80, 24));
+        let attached = Pane::self_attached(1, attach(Some(TerminalId::from("t"))));
         assert_eq!(1, attached.id);
         assert!(attached.terminal.is_some() && attached.terminal_surface.is_some());
-        assert!(attached.neovim_window_handle.is_none() && attached.attach_id.is_none());
+        assert!(attached.neovim_window_handle.is_none() && attached.is_self_attached());
+        let back = attached.into_self_attach().unwrap();
+        assert_eq!(Some(TerminalId::from("t")), back.terminal);
 
-        let without_block = Pane::self_attached(2, None, Surface::for_test(80, 24));
+        let without_block = Pane::self_attached(2, attach(None));
         assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
+    }
+
+    /// A self-attach of an 80×24 terminal, with the pane provider's id
+    /// `terminal`.
+    fn attach(terminal: Option<TerminalId>) -> SelfAttach {
+        SelfAttach {
+            surface: Surface::for_test(80, 24),
+            terminal,
+        }
     }
 
     /// `{attach}` ends in `--transport relay` when the daemon started
@@ -411,8 +447,10 @@ mod tests {
         let (socket, mut helper) = UnixStream::pair().unwrap();
         let pane = Pane::self_attached(
             1,
-            None,
-            Surface::create(socket, slave, super::super::surface::cells(80, 24)),
+            SelfAttach {
+                surface: Surface::create(socket, slave, super::super::surface::cells(80, 24)),
+                terminal: None,
+            },
         );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();
@@ -457,8 +495,10 @@ mod tests {
         let (socket, mut helper) = UnixStream::pair().unwrap();
         let pane = Pane::self_attached(
             1,
-            None,
-            Surface::create(socket, slave, super::super::surface::cells(80, 24)),
+            SelfAttach {
+                surface: Surface::create(socket, slave, super::super::surface::cells(80, 24)),
+                terminal: None,
+            },
         );
         let event_loop = Loop::init().unwrap();
         pane.register_with(&event_loop).unwrap();

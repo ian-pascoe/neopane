@@ -6,9 +6,7 @@
 //! Each lookup has a `_mut` twin.
 
 use super::event_loop::Loop;
-use super::pane::{NeovimWindowHandle, Pane};
-use super::provider::TerminalId;
-use super::surface::Surface;
+use super::pane::{NeovimWindowHandle, Pane, SelfAttach};
 use crate::attach::{Ending, PaneId, PaneIdRegistry};
 use crate::screen::float_groups::Group;
 
@@ -50,30 +48,26 @@ impl Panes {
         self.list.last_mut().unwrap()
     }
 
-    /// Adds a self-attached pane for `surface`, with the next id, and the
-    /// pane provider's id for its terminal if known.
-    pub(crate) fn add_self_attached(
-        &mut self,
-        terminal: Option<TerminalId>,
-        surface: Box<Surface>,
-    ) -> &mut Pane {
+    /// Adds a self-attached pane for `attach`, with the next id.
+    pub(crate) fn add_self_attached(&mut self, attach: SelfAttach) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
-        self.add(Pane::self_attached(id, terminal, surface))
+        self.add(Pane::self_attached(id, attach))
     }
 
-    /// The self-attached pane still waiting for a window, if any.
-    pub(crate) fn unshown_self_attached(&self) -> Option<&Pane> {
+    /// The self-attached pane still waiting for a window to show, if any.
+    pub(crate) fn self_attached_awaiting_window(&self) -> Option<&Pane> {
         self.list.iter().find(|p| {
-            p.attach_id.is_none()
+            p.is_self_attached()
                 && p.layer.is_none()
                 && p.neovim_window_handle.is_none()
                 && p.terminal_surface.is_some()
         })
     }
 
-    pub(crate) fn unshown_self_attached_mut(&mut self) -> Option<&mut Pane> {
-        let id = self.unshown_self_attached()?.id;
+    /// `self_attached_awaiting_window`, to change.
+    pub(crate) fn self_attached_awaiting_window_mut(&mut self) -> Option<&mut Pane> {
+        let id = self.self_attached_awaiting_window()?.id;
         self.by_id_mut(id)
     }
 
@@ -167,6 +161,8 @@ impl Drop for Panes {
 #[cfg(test)]
 mod tests {
     use super::super::pane::Close;
+    use super::super::provider::TerminalId;
+    use super::super::surface::Surface;
     use super::*;
     use crate::attach::Refusal;
 
@@ -263,7 +259,10 @@ mod tests {
     #[test]
     fn dropping_panes_hangs_up_their_terminals() {
         let mut panes = Panes::default();
-        panes.add_self_attached(None, Surface::for_test(80, 24));
+        panes.add_self_attached(SelfAttach {
+            surface: Surface::for_test(80, 24),
+            terminal: None,
+        });
         drop(panes);
     }
 }

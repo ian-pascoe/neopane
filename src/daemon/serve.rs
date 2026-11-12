@@ -31,9 +31,10 @@ use super::daemon::{Daemon, StopReason, Token};
 use super::dir::{self, Claimed};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
+use super::pane::SelfAttach;
 use super::provider::TerminalId;
 use super::surface::Surface;
-use crate::attach::{End, Ending, Purpose, Refusal, Transport};
+use crate::attach::{End, Purpose, Refusal, Transport};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
@@ -586,8 +587,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         Ok(started) => (child, d) = started,
         Err(err) => {
             if let Some(first) = first.take() {
-                let message = start_error(&*err, Some((name, log)));
-                first.surface.destroy(Ending::Failed, &message);
+                first.fail(&start_error(&*err, Some((name, log))));
             }
             return Err(err);
         }
@@ -611,7 +611,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     config: Config<'_>,
     server: &UnixListener,
     exe: String,
-    first: &mut Option<FirstAttach>,
+    first: &mut Option<SelfAttach>,
 ) -> Result<(NvimChild, Daemon)> {
     let (started, rex) = std::thread::scope(|s| {
         let rex = s.spawn(|| Client::connect(config.rex_url, NAME));
@@ -648,8 +648,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     // requested panes' helpers relay too under the diagnostic
     d.transport = config.transport;
     d.log = dir.log();
-    let first = first.take().expect("the first attach is taken once");
-    d.start(first.terminal, first.surface)?;
+    d.start(first)?;
     Ok((child, d))
 }
 
@@ -730,18 +729,11 @@ fn env(name: &str) -> Option<String> {
     std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
 }
 
-/// The first attach, accepted before Neovim starts: its terminal, and the
-/// pane provider's id for it if known.
-struct FirstAttach {
-    surface: Box<Surface>,
-    terminal: Option<TerminalId>,
-}
-
 /// Waits up to 5 s for the first attach, the launcher's, and accepts it:
 /// a self-attach, the one this daemon takes of its own accord (#105 opens
 /// it up). Its hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running
 /// yet.
-fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<FirstAttach> {
+fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
     let mut fds = [libc::pollfd {
         fd: server.as_raw_fd(),
         events: libc::POLLIN,
@@ -791,7 +783,7 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<FirstAtt
     log::trace_at(Point::Hello, 0, a.at);
     log::trace(Point::Accepted, 0);
     surface.helper_in = a.rest;
-    Ok(FirstAttach {
+    Ok(SelfAttach {
         surface,
         terminal: block,
     })
@@ -814,7 +806,7 @@ fn rex_block(env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attach::Message;
+    use crate::attach::{Ending, Message};
     use crate::daemon::dir::testing::Scratch;
     use crate::daemon::dir::{Address, MAX_PATH};
     use std::os::unix::fs::PermissionsExt;
@@ -1592,6 +1584,39 @@ mod tests {
         assert_eq!(
             format!(
                 "d didn't start: Neovim exited at once (status 1): it broke (log: {})",
+                dir.log()
+            ),
+            shown
+        );
+    }
+
+    #[test]
+    fn a_start_that_fails_as_the_daemon_attaches_its_ui_ends_the_attach_with_the_failure_line() {
+        // a Neovim that answers nvim_get_api_info with its stdin closed, so
+        // attaching the UI can't be written: $4 is its --listen socket
+        let answer = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/nvim/testdata/nvim_get_api_info_0.12.6.mpack"
+        );
+        let script = format!("head -c 1 >/dev/null; exec 0<&-; : >\"$4\"; cat '{answer}'");
+        let (_base, dir) = test_dir();
+        let rex_dir = Scratch::new();
+        let rex_sock = rex_dir.file("rex.sock");
+        let rex = silent_rex(&rex_sock);
+        let rex_url = format!("unix://{rex_sock}");
+        let (_, shown) = failed_start(
+            &dir,
+            TestStart {
+                nvim_command: &["sh", "-c", &script, "--"],
+                nvim_timeout: Duration::from_secs(10),
+                rex_url: &rex_url,
+                on_ready: &mut || {},
+            },
+        );
+        rex.join().unwrap();
+        assert_eq!(
+            format!(
+                "d didn't start: couldn't talk to Neovim: Broken pipe (os error 32) (log: {})",
                 dir.log()
             ),
             shown
