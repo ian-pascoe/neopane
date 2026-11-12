@@ -105,7 +105,7 @@ fn within_10s(mut done: impl FnMut() -> bool) -> bool {
 }
 
 /// Quits the Neovim listening at its socket as it drops, unless disarmed:
-/// a driver that fails mustn't leave its daemon kept for unsaved changes.
+/// a driver that fails mustn't leave its daemon unattached for good.
 struct QuitOnDrop(Option<std::path::PathBuf>);
 
 impl Drop for QuitOnDrop {
@@ -119,6 +119,18 @@ impl Drop for QuitOnDrop {
             let _ = nvim.flush();
         }
     }
+}
+
+/// The current window of the Neovim listening at `sock`.
+fn current_win_at(sock: &std::path::Path) -> i64 {
+    let mut nvim = crate::nvim::nvim::for_test_on(UnixStream::connect(sock).unwrap());
+    let id = nvim.request("nvim_get_current_win", 0);
+    nvim.flush().unwrap();
+    let frame = crate::nvim::nvim::wait_response(&mut nvim, id);
+    let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
+        unreachable!()
+    };
+    rpc::expect_handle(&mut result).unwrap()
 }
 
 /// Runs Ex command `cmd` in the Neovim listening at `sock`.
@@ -174,6 +186,7 @@ fn with_unsaved_changes_the_daemon_outlives_its_last_pane_until_they_are_saved()
     let (result, said) = driven(&dir, &args, move |mut l| {
         let mut quit = QuitOnDrop(Some(nvim_sock.clone()));
         let mut said = vec![l.until_shows("changedtext")];
+        let window = current_win_at(&nvim_sock);
         l.hang_up();
         // it stays, listing the file
         let listed = format!("unsaved 1\n{file_in}\n");
@@ -183,6 +196,7 @@ fn with_unsaved_changes_the_daemon_outlives_its_last_pane_until_they_are_saved()
         // an attach takes the window it kept, and the list goes
         let mut again = Launcher::attach(&address).unwrap();
         said.push(again.until_shows("changedtext"));
+        said.push(current_win_at(&nvim_sock) == window);
         said.push(within_10s(|| !exists(&unsaved)));
         // unattached again; saved, it ends
         again.hang_up();
@@ -193,7 +207,7 @@ fn with_unsaved_changes_the_daemon_outlives_its_last_pane_until_they_are_saved()
     });
     let saved = fs::read_to_string(&file);
     let _ = fs::remove_file(&file);
-    assert_eq!(vec![true; 5], said);
+    assert_eq!(vec![true; 6], said);
     assert!(result.is_ok(), "{result:?}");
     assert_eq!("changedtext\n", saved.unwrap());
     assert!(!exists(dir.unsaved_path()));
@@ -232,18 +246,23 @@ fn an_attach_once_neovim_is_ending_is_refused_as_stopping() {
     }
     let (_base, dir) = test_dir();
     let address = dir.address();
-    // Neovim takes a while to end
-    let args = ["--cmd", "autocmd VimLeavePre * lua vim.uv.sleep(2500)"];
-    let (result, refused) = driven(&dir, &args, move |mut l| {
+    // Neovim says it's ending, then takes a while to
+    let ending = temp_file("ending");
+    let vimleavepre = format!(
+        "autocmd VimLeavePre * call writefile([], '{}') | lua vim.uv.sleep(2000)",
+        ending.display()
+    );
+    let ending_in = ending.clone();
+    let (result, refused) = driven(&dir, &["--cmd", &vimleavepre], move |mut l| {
         l.until_shows("~");
         l.hang_up();
-        // past the SafeState wait, into the end
-        std::thread::sleep(Duration::from_millis(800));
+        within_10s(|| exists(&ending_in));
         let stream = address.connect().unwrap();
         let hello = attach_conn::self_hello(attach_conn::test_terminal(80, 24));
         (&stream).write_all(&hello).unwrap();
         attach_conn::read_all_frames(&stream)
     });
+    let _ = fs::remove_file(&ending);
     assert!(result.is_ok(), "{result:?}");
     let [Message::End(z)] = &refused[..] else {
         panic!("{refused:?}")
@@ -315,12 +334,8 @@ fn the_log_names_the_unsaved_changes_a_daemon_stays_for() {
     let want = format!("staying unattached for unsaved changes in {file}\n");
     let named = within_10s(|| log.lock().unwrap().contains(&want));
     // saved, it ends; and anyway, it's killed
-    if let Ok(stream) = UnixStream::connect(dir.join("nvim.sock")) {
-        let mut nvim = crate::nvim::nvim::for_test_on(stream);
-        let id = nvim.request("nvim_command", 1);
-        msgpack::write_str(nvim.writer(), "wall");
-        nvim.flush().unwrap();
-        crate::nvim::nvim::wait_response(&mut nvim, id);
+    if exists(dir.join("nvim.sock")) {
+        command_at(&dir.join("nvim.sock"), "wall");
     }
     let ended = within_10s(|| matches!(daemon.try_wait(), Ok(Some(_))));
     if !ended {
