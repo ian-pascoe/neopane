@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use super::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, TerminalId,
 };
-use crate::config::seconds;
 use crate::log::{log_info, log_warn};
 use crate::name::NAME;
+use crate::util::seconds;
 
 /// Most characters of a failure's reason a warning shows (#93 decision 20).
 const WHY_MAX: usize = 200;

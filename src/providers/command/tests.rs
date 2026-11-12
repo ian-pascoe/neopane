@@ -500,3 +500,33 @@ fn every_capability_it_runs_and_every_variable_it_sets_is_in_the_docs() {
         assert!(doc.contains(&format!("`{v}`")), "{v}");
     }
 }
+
+#[test]
+fn a_command_doesnt_inherit_the_daemons_ignored_signals() {
+    // the daemon ignores SIGTERM, as it watches it on its loop
+    // SAFETY: plain sigaction calls; the old action is put back below.
+    let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+    unsafe {
+        let mut ignore: libc::sigaction = std::mem::zeroed();
+        ignore.sa_sigaction = libc::SIG_IGN;
+        libc::sigaction(libc::SIGTERM, &ignore, &mut was);
+    }
+    let mut p = runner(
+        &[(Capability::Close, &["sh", "-c", "exec sleep 30"])],
+        Duration::from_millis(300),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    );
+    let started = Instant::now();
+    p.ask(AskId(1), close());
+    // SAFETY: as above.
+    unsafe { libc::sigaction(libc::SIGTERM, &was, std::ptr::null_mut()) };
+    // the timeout's SIGTERM ends it, well before the SIGKILL 1 s later
+    while !p.running.is_empty() {
+        assert!(
+            started.elapsed() < Duration::from_millis(1200),
+            "SIGTERM didn't end it"
+        );
+        assert_eq!(None, answer(&mut p, Duration::from_millis(50)));
+    }
+}

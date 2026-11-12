@@ -175,14 +175,14 @@ impl Inputs {
     pub(crate) fn argv(&self, template: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut argv = Vec::with_capacity(template.len());
         for word in template {
-            if let Some(name) = crate::config::check::whole_placeholder(word) {
+            if let Some(name) = crate::placeholder::whole_placeholder(word) {
                 match (name, &self.attach) {
                     ("attach", Some(words)) => {
                         argv.extend(words.iter().map(|w| w.as_bytes().to_vec()))
                     }
                     _ => argv.push(self.value(name).unwrap_or("").as_bytes().to_vec()),
                 }
-            } else if crate::config::check::is_escaped(word) {
+            } else if crate::placeholder::is_escaped(word) {
                 argv.push(word[1..word.len() - 1].to_vec());
             } else {
                 argv.push(word.clone());

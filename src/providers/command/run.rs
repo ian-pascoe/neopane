@@ -84,6 +84,10 @@ impl Run {
             .stdout(stdout)
             .stderr(stderr_w)
             .process_group(0);
+        // SAFETY: `default_signals` is async-signal-safe and allocates nothing.
+        unsafe {
+            command.pre_exec(|| crate::util::default_signals());
+        }
         // the daemon's own fds are all close-on-exec: only stdio goes along
         let child = command.spawn()?;
         drop(command);
