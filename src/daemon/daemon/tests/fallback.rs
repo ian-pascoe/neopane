@@ -421,3 +421,52 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
         reader.join().unwrap();
     }
 }
+
+/// A self-attached pane in terminal `terminal`, with no window yet. Its id,
+/// and its terminal's other ends.
+fn windowless_pane(fx: &mut Fixture, terminal: &str) -> (u32, Live) {
+    let (surface, live) = attached_surface(80, 24);
+    let terminal = Some(TerminalId::from(terminal));
+    let p =
+        fx.d.panes
+            .add_self_attached(SelfAttach { surface, terminal });
+    p.area = Area::Own;
+    (p.id, live)
+}
+
+#[test]
+fn a_pane_with_no_window_yet_is_no_origin_pane() {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    let _windowless = windowless_pane(&mut fx, "t0");
+    let (shown, _live) = live_pane(&mut fx, 51, 2000, None);
+    split_from(&mut fx, 1003, 0);
+    fx.d.new_pane(1003).unwrap();
+    assert_eq!(Some(shown), fx.d.panes.by_win(1003).map(|p| p.id));
+}
+
+#[test]
+fn a_window_whose_open_failed_with_no_pane_to_join_waits_for_one_unasked() {
+    let mut fx = fixture();
+    fx.d.nvim.ready = true;
+    let (origin, _live) = windowless_pane(&mut fx, "t0");
+    split_from(&mut fx, 1002, 0);
+    fx.d.reconcile().unwrap();
+    let asked = fx.d.panes.by_win(1002).unwrap().id;
+    open_ends(&mut fx, Outcome::Failed("refused: no".into()));
+    assert!(fx.d.panes.by_id(asked).is_none());
+    assert!(fx.d.panes.by_win(1002).is_none());
+
+    // flushes ask nothing more while no pane can take it
+    fx.d.reconcile().unwrap();
+    assert_eq!(1, fake(&mut fx.d).asks.len());
+    assert!(fx.d.panes.by_win(1002).is_none());
+
+    // a pane that can, once it shows a window
+    draw_external(&mut fx.d, 100, 1000, 80, 23);
+    fx.d.panes.by_id_mut(origin).unwrap().neovim_window_handle = Some(1000);
+    fx.d.reconcile().unwrap();
+    assert_eq!(Some(origin), fx.d.panes.by_win(1002).map(|p| p.id));
+    assert!(fx.d.awaiting_origin.is_empty());
+    assert_eq!(1, sent_by(fx).asks.len());
+}

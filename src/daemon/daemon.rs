@@ -117,6 +117,9 @@ pub(crate) struct Daemon {
     /// the file at `exe` as it was then. Until it changes, new windows are
     /// drawn in their origin panes (#91 decision 24).
     version_refused: Option<Option<ExeStamp>>,
+    /// Windows of the first tab page whose terminal won't come, waiting for
+    /// a pane to be drawn in, and how they were split off.
+    awaiting_origin: Vec<(i64, windows::Split)>,
     /// Which terminal the pane provider has focused, as last said or asked.
     pub focus: ProviderFocus,
     /// A pane with no terminal id whose terminal reported a focus-in, and
@@ -323,6 +326,7 @@ impl Daemon {
             ask_timer_due: None,
             attach_timer_due: None,
             version_refused: None,
+            awaiting_origin: Vec::new(),
             focus: ProviderFocus::default(),
             focus_in: None,
             just_opened: Vec::new(),
@@ -954,13 +958,14 @@ impl Daemon {
     /// The pane a window split off as `sp` is drawn in when it has no
     /// terminal of its own: its origin window's, else the current one's, else
     /// the first that can take it. Only a pane of the first tab page, with no
-    /// floats, showing what it is drawn in or able to once its terminal
-    /// attaches, and not one still waiting for a terminal of its own.
+    /// floats, already showing a window to split, and not one still waiting
+    /// for a terminal of its own.
     fn origin_pane(&self, sp: windows::Split) -> Option<u32> {
         let takes = |p: &&Pane| {
             p.layer.is_none()
                 && p.tab == 0
                 && p.closing.is_none()
+                && p.neovim_window_handle.is_some()
                 && (p.attach_id.is_none() || p.terminal_surface.is_some())
         };
         self.panes
@@ -1389,6 +1394,7 @@ impl Daemon {
         let grids = &self.grids;
         self.pending_sizes
             .retain(|&(w, ..)| grids.grid_of(w).is_some());
+        self.home_awaiting_origin()?;
 
         // a copy: making panes below doesn't touch the grids, but borrows all of `self`
         let wins: Vec<_> = self.grids.wins.values().copied().collect();
@@ -1406,7 +1412,10 @@ impl Daemon {
                 }
                 WinKind::External => {
                     self.changes.became_external(w.win);
-                    if self.panes.by_win(w.win).is_some() || self.changes.is_closing(w.win) {
+                    if self.panes.by_win(w.win).is_some()
+                        || self.changes.is_closing(w.win)
+                        || self.awaiting_origin.iter().any(|&(a, _)| a == w.win)
+                    {
                         continue;
                     }
                     self.new_pane(w.win)?;
@@ -1890,9 +1899,9 @@ impl Daemon {
     }
 
     /// Gives up requested pane `id`, whose terminal won't come: its id
-    /// expires, and a terminal it has is closed. A window of the first tab
-    /// page is drawn in its origin pane, and the pane goes (#112). Any other
-    /// pane, or one whose window has no pane to join, stays given up: a float
+    /// expires, and a terminal it has is closed. The pane of a window of the
+    /// first tab page goes, and its window is drawn in its origin pane, or
+    /// once a pane can take it (#112). Any other pane stays given up: a float
     /// group pane's floats are drawn in the pane, and a tab page's other
     /// windows ask for their own.
     pub(super) fn give_up(&mut self, id: u32) -> Result<()> {
@@ -1910,15 +1919,33 @@ impl Daemon {
         let alone = p.layer.is_none() && p.tab == 0 && p.layout.is_none();
         if let Some(win) = p.neovim_window_handle.filter(|_| alone) {
             let sp = p.split.unwrap_or_else(|| self.changes.split_of(win));
-            if self.origin_pane(sp).is_some() {
-                let i = self.panes.index_of(id).unwrap();
-                self.panes.remove(i, &self.event_loop);
-                self.lay_out_in_origin(win, sp, None);
+            let i = self.panes.index_of(id).unwrap();
+            self.panes.remove(i, &self.event_loop);
+            if self.lay_out_in_origin(win, sp, None) {
                 self.show_current_in_origin(win)?;
+            } else {
+                // no pane can take it yet: it waits for one, unasked
+                self.awaiting_origin.push((win, sp));
             }
         }
         self.reconcile()?;
         self.draw()
+    }
+
+    /// Draws each window waiting for a pane to join in one that can take it
+    /// now, and forgets those that closed.
+    fn home_awaiting_origin(&mut self) -> Result<()> {
+        let grids = &self.grids;
+        self.awaiting_origin
+            .retain(|&(w, _)| grids.grid_of(w).is_some());
+        for (win, sp) in std::mem::take(&mut self.awaiting_origin) {
+            if self.lay_out_in_origin(win, sp, None) {
+                self.show_current_in_origin(win)?;
+            } else {
+                self.awaiting_origin.push((win, sp));
+            }
+        }
+        Ok(())
     }
 
     /// Window `win` was just drawn in its origin pane: if it's current, Neovim's
@@ -3073,10 +3100,7 @@ mod tests {
             assert!(z.message.contains(&part), "{}", z.message);
         }
         // its pane, named in the hello, is given up, and Neovim warned
-        assert_eq!(
-            Some(Close::RequestFailed),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert_given_up(&fx.d, id);
         assert_eq!(Err(Refusal::PaneExpired), fx.d.panes.ids.check(&pane));
         let sent = sent_to_nvim(&mut fx);
         assert!(
@@ -3114,10 +3138,7 @@ mod tests {
             (Some(Refusal::Hello), "missing field transport"),
             (z.as_refusal(), z.message.as_str())
         );
-        assert_eq!(
-            Some(Close::RequestFailed),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert_given_up(&fx.d, id);
         assert!(sent_to_nvim(&mut fx).contains("missing field transport"));
     }
 
@@ -3268,10 +3289,7 @@ mod tests {
                 refusal(&helper).as_refusal(),
                 "{tty}"
             );
-            assert_eq!(
-                Some(Close::RequestFailed),
-                fx.d.panes.by_id(id).unwrap().closing
-            );
+            assert_given_up(&fx.d, id);
             unsafe {
                 libc::close(pipe[0]);
                 libc::close(pipe[1]);
@@ -5025,11 +5043,11 @@ mod tests {
         id
     }
 
+    /// Pane `pane`, of a window of the first tab page, was given up: it's
+    /// gone, and with no pane to draw its window in, the window waits for one.
     fn assert_given_up(d: &Daemon, pane: u32) {
-        assert_eq!(
-            Some(Close::RequestFailed),
-            d.panes.by_id(pane).unwrap().closing
-        );
+        assert!(d.panes.by_id(pane).is_none());
+        assert!(!d.awaiting_origin.is_empty());
     }
 
     #[test]
