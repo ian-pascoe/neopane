@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::bounds::LAYER_FRAME;
 use crate::daemon::live_layout::{LayoutArea, LiveLayout, PlacedTerminal};
 use crate::daemon::provider::TerminalId;
-use crate::rex::client;
+use crate::rex::{client, ids};
 
 /// The cells of a Rex floating pane's frame at each edge: left, top, right,
 /// bottom. `LAYER_FRAME`'s cells across and down, the lesser half before.
@@ -21,6 +21,19 @@ pub(crate) const FRAME_INSET: [u16; 4] = {
         (down - top) as u16,
     ]
 };
+
+/// The focused block of a view's active window, if it has a good one.
+pub(crate) fn focused_block(snapshot: &Value) -> Option<String> {
+    let active_id = client::get_str(snapshot, "active_window_id")?;
+    let Value::Array(windows) = client::get(snapshot, "windows")? else {
+        return None;
+    };
+    let win = windows
+        .iter()
+        .find(|w| client::get_str(*w, "window_id") == Some(active_id))?;
+    let block = ids::block(client::get_str(win, "focused_block_id")?.as_bytes()).ok()?;
+    Some(String::from_utf8_lossy(&block).into_owned())
+}
 
 /// The layout `wins` says, its focused block being `current`. A block in
 /// `float_blocks`, opened for a float group, is placed at its floating

@@ -98,7 +98,7 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
         Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
         Command::DebugPanes(socket) => done(debug::panes::run(&socket)),
-        Command::DebugRex(socket) => done(debug::rex::run(&socket)),
+        Command::DebugRex(socket) => done(neorex::providers::rex::debug::run(&socket)),
         Command::DebugLatency(path) => done(debug::latency::run(&path)),
         Command::DebugRelay { address, pane } => Ok(helper_exit(debug::relay::run(
             &Address::from_arg(address),

@@ -426,6 +426,21 @@ fn focus_is_focus_block_done_once_rex_answers() {
 }
 
 #[test]
+fn a_refused_focus_fetches_the_view_only_with_no_other_on_its_way() {
+    let (mut p, mut theirs) = rex();
+    p.ask(AskId(1), focus(&block_id(1)));
+    p.ask(AskId(2), focus(&block_id(2)));
+    refuse(&mut p, &mut theirs, 1, "not_found");
+    refuse(&mut p, &mut theirs, 2, "not_found");
+    events(&mut p);
+    let methods: Vec<String> = requests(p, theirs).into_iter().map(|(m, _)| m).collect();
+    assert_eq!(
+        vec!["session.focus_block", "session.focus_block", "session.view"],
+        methods
+    );
+}
+
+#[test]
 fn focus_direction_is_count_requests_without_wrapping_done_once_the_last_is_answered() {
     let (mut p, mut theirs) = rex();
     assert!(p.capabilities().has(Capability::FocusDirection));

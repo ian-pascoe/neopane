@@ -589,7 +589,9 @@ fn eql(a: Option<&str>, b: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::name::NAME;
+
+    /// Who the tests are to Rex: the client knows nothing of who uses it.
+    const CLIENT: &str = "rex-client-test";
 
     fn parse_sample(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
@@ -726,7 +728,7 @@ pub(crate) mod tests {
             eprintln!("skipping: REX_SERVER is not set");
             return;
         };
-        let mut c = Client::connect(&url, NAME).unwrap();
+        let mut c = Client::connect(&url, CLIENT).unwrap();
         assert!(c.max_message >= 65536);
 
         let id = c.request("server.version", None).unwrap();
@@ -737,7 +739,10 @@ pub(crate) mod tests {
         assert!(!get_str(payload, "rex_version").unwrap().is_empty());
 
         let bad = c
-            .request(&format!("{NAME}.no_such_method"), Some(&json!({ "x": 1 })))
+            .request(
+                &format!("{CLIENT}.no_such_method"),
+                Some(&json!({ "x": 1 })),
+            )
             .unwrap();
         let ResponseResult::Err(e) = wait_for(&mut c, bad).unwrap().result else {
             panic!("expected an error");
