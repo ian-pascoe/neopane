@@ -1,8 +1,8 @@
 # Issue tracker: Linear
 
-Issues and specs for this repo live in **Linear**: workspace `spiritledsoftware`, team **SPI** (Spirit-Led Software), project **ian-pascoe/neopane** (neorex's future name, SPI-672). The team also holds other repos' projects (Commissary, cloudpid, lspctl, …), so create every issue for this repo in project `ian-pascoe/neopane`, and scope every read to it.
+Issues and specs for this repo live in **Linear**: workspace `spiritledsoftware`, team **SPI** (Spirit-Led Software), and this repo's **project**, whose id is `195685cc-087f-4ec9-9bc8-0a0606dd056d`. Name the project by that id everywhere, never by its name, which may change. The team also holds other repos' projects, so create every issue for this repo in that project, and scope every read to it.
 
-**GitHub Issues are the public intake.** Outside users open issues on `ian-pascoe/neorex` (not the original `alexrlocke/neorex`, a separate project). A one-way sync (GitHub → Linear) copies each new one into team SPI, carrying its GitHub URL as an attachment. Comments in its synced thread sync both ways (**Comment on an issue**), and closing it in Linear closes it on GitHub. The sync puts the copy in no project; the workflow `linear project` (`.github/workflows/linear-project.yml`, `scripts/linear-project.sh`) moves it into ian-pascoe/neopane once it appears. Dispatch that workflow with an issue number to retry one whose run failed (`gh workflow run linear-project.yml -f issue=<n>`). It reads the repository secret `LINEAR_API_KEY`, a Linear API key that may edit SPI's issues (1Password `op://Agents/Linear GitHub/credential`; set it with `gh secret set LINEAR_API_KEY`). Work every issue in Linear and refer to it by its Linear identifier (`SPI-123`). A GitHub number (`#95`) resolves to the Linear issue that carries its URL (**Read an issue** below).
+**GitHub Issues are the public intake.** Outside users open issues on `ian-pascoe/neorex` (not the original `alexrlocke/neorex`, a separate project). A one-way sync (GitHub → Linear) copies each new one into team SPI, carrying its GitHub URL as an attachment. Comments in its synced thread sync both ways (**Comment on an issue**), and closing it in Linear closes it on GitHub. The sync puts the copy in no project; the workflow `linear project` (`.github/workflows/linear-project.yml`, `scripts/linear-project.sh`) moves it into the project once it appears. Dispatch that workflow with an issue number to retry one whose run failed (`gh workflow run linear-project.yml -f issue=<n>`). It reads the repository secret `LINEAR_API_KEY`, a Linear API key that may edit SPI's issues (1Password `op://Agents/Linear GitHub/credential`; set it with `gh secret set LINEAR_API_KEY`). Work every issue in Linear and refer to it by its Linear identifier (`SPI-123`). A GitHub number (`#95`) resolves to the Linear issue that carries its URL (**Read an issue** below).
 
 ## How to reach Linear
 
@@ -23,11 +23,11 @@ Issues and specs for this repo live in **Linear**: workspace `spiritledsoftware`
 
 Both reach the same API, so the GraphQL selections below work in either.
 
-| Thing                        | Value                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Team `SPI`                   | `86ad747a-262a-4ab8-a716-3a7b3cd5a6af`                                                                                                                                                                                                                                                                                                                                                                                      |
-| Project `ian-pascoe/neopane` | `195685cc-087f-4ec9-9bc8-0a0606dd056d`                                                                                                                                                                                                                                                                                                                                                                                      |
-| States (name: type)          | Backlog: backlog `0b2345bf-8a16-4fd5-8150-ab08e0d74a26` · Todo: unstarted `ad8f9e8b-f89d-4623-8571-68607c315057` · Blocked: unstarted `e417759b-5003-44fd-bfdd-fc6159afb145` · In Progress: started `a52ed858-c23e-4098-8fd1-a313fb0f2204` · In Review: started `62d08185-be69-4fe5-873a-1710a52fb9aa` · Done: completed `d8e326e4-cff3-4cca-a760-5b19efccf264` · Canceled: canceled `9bff72eb-c2dc-4f1a-a6a5-c7522d98fc15` |
+| Thing               | Value                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Team `SPI`          | `86ad747a-262a-4ab8-a716-3a7b3cd5a6af`                                                                                                                                                                                                                                                                                                                                                                                      |
+| Project             | `195685cc-087f-4ec9-9bc8-0a0606dd056d`                                                                                                                                                                                                                                                                                                                                                                                      |
+| States (name: type) | Backlog: backlog `0b2345bf-8a16-4fd5-8150-ab08e0d74a26` · Todo: unstarted `ad8f9e8b-f89d-4623-8571-68607c315057` · Blocked: unstarted `e417759b-5003-44fd-bfdd-fc6159afb145` · In Progress: started `a52ed858-c23e-4098-8fd1-a313fb0f2204` · In Review: started `62d08185-be69-4fe5-873a-1710a52fb9aa` · Done: completed `d8e326e4-cff3-4cca-a760-5b19efccf264` · Canceled: canceled `9bff72eb-c2dc-4f1a-a6a5-c7522d98fc15` |
 
 Label ids are in `docs/agents/triage-labels.md`. For any other label: `tools.linear.query_issueLabels` with `filter: { name: { eq: "<name>" }, team: { key: { eq: "SPI" } } }`, or `linear label list --team SPI --json`.
 
@@ -35,14 +35,14 @@ Label ids are in `docs/agents/triage-labels.md`. For any other label: `tools.lin
 
 - **Create an issue**:
   - Executor: `tools.linear.mutation_issueCreate`, `arguments: { input: { teamId, projectId, title, description, labelIds?, parentId? } }`, `select: "identifier url"`.
-  - CLI: `linear issue create --team SPI --project ian-pascoe/neopane --title "…" --description-file body.md [--label <name>] [--parent SPI-1] --no-input`.
+  - CLI: `linear issue create --team SPI --project 195685cc-087f-4ec9-9bc8-0a0606dd056d --title "…" --description-file body.md [--label <name>] [--parent SPI-1] --no-input`.
 - **Read an issue**:
   - Executor: `tools.linear.query_issue`, `arguments: { id: "SPI-123" }`, `select: "identifier title description url state { name type } labels { nodes { name } } assignee { name } parent { identifier } children { nodes { identifier title state { type } } } comments { nodes { body createdAt user { name } } } attachments { nodes { url } }"`.
   - CLI: `linear issue view SPI-123 --json`.
   - From a GitHub number: Executor `tools.linear.query_attachmentsForURL`, `arguments: { url: "https://github.com/ian-pascoe/neorex/issues/<n>" }`, `select: "nodes { sourceType issue { identifier } }"`; take the node whose `sourceType` is `github` (the sync's; another issue may link the same URL by hand). The CLI uses the same query through `linear api`.
 - **List issues**:
-  - Executor: `tools.linear.query_issues`, `arguments: { first: 100, filter: { project: { id: { eq: "<ian-pascoe/neopane>" } }, state: { type: { nin: ["completed", "canceled"] } }, labels: { name: { eq: "<label>" } } } }`, `select: "nodes { identifier title state { name } labels { nodes { name } } assignee { name } }"`.
-  - CLI: `linear issue query --team SPI --project ian-pascoe/neopane [--label <name>] [--state backlog --state unstarted --state started] --json`.
+  - Executor: `tools.linear.query_issues`, `arguments: { first: 100, filter: { project: { id: { eq: "195685cc-087f-4ec9-9bc8-0a0606dd056d" } }, state: { type: { nin: ["completed", "canceled"] } }, labels: { name: { eq: "<label>" } } } }`, `select: "nodes { identifier title state { name } labels { nodes { name } } assignee { name } }"`.
+  - CLI: `linear issue query --team SPI --project 195685cc-087f-4ec9-9bc8-0a0606dd056d [--label <name>] [--state backlog --state unstarted --state started] --json`.
 - **Make an issue a sub-issue of a parent**:
   - Executor: `parentId: "SPI-1"` at creation, or `tools.linear.mutation_issueUpdate` with `arguments: { id, input: { parentId } }`.
   - CLI: `--parent SPI-1` on `issue create` / `issue update`.
@@ -70,7 +70,7 @@ Code and PRs stay on GitHub (`gh`, the `code-host` skill). This clone's `gh` def
 
 ## When a skill says "publish to the issue tracker"
 
-Create a Linear issue in team SPI, project ian-pascoe/neopane.
+Create a Linear issue in team SPI, in the project `195685cc-087f-4ec9-9bc8-0a0606dd056d`.
 
 ## When a skill says "fetch the relevant ticket"
 
@@ -80,7 +80,7 @@ Read it as in **Read an issue** above; a GitHub number resolves through its URL.
 
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: an issue labelled `wayfinder:map` in project ian-pascoe/neopane, holding the Notes / Decisions-so-far / Fog body. The current map, "Build the attach core, pane providers and CLI, then rename to neopane", is `SPI-633` (GitHub #95).
+- **Map**: an issue labelled `wayfinder:map` in the project, holding the Notes / Decisions-so-far / Fog body. The current map, "Build the attach core, pane providers and CLI, then rename to neopane", is `SPI-633` (GitHub #95).
 - **Child ticket**: a sub-issue of the map (**Make an issue a sub-issue of a parent**), labelled `wayfinder:<type>` (`research` / `prototype` / `grilling` / `task`). Once claimed, it is assigned to the driving dev.
 - **Blocking**: see **Blocking** under Conventions.
 - **Frontier query**: one query lists every child with its state, labels, assignee and blockers.

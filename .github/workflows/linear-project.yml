@@ -1,4 +1,4 @@
-# Puts each new GitHub issue's Linear copy into the Linear project ian-pascoe/neopane (scripts/linear-project.sh).
+# Puts each new GitHub issue's Linear copy into this repo's Linear project (scripts/linear-project.sh).
 # Linear's GitHub Issues sync copies the issue into the team SPI but into no project, and agents read issues by project
 # (docs/agents/issue-tracker.md). A dispatch takes an issue number, to retry one whose run failed. An issue opened before
 # the sync existed has no copy to move. Needs the repository secret LINEAR_API_KEY: a Linear API key that may edit SPI's
@@ -38,7 +38,7 @@ jobs:
       - name: Add to the project
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          # The Linear project ian-pascoe/neopane (team SPI).
+          # This repo's Linear project (team SPI), by id: its name may change.
           LINEAR_PROJECT: 195685cc-087f-4ec9-9bc8-0a0606dd056d
           ISSUE_URL: ${{ github.event.issue.html_url || format('{0}/{1}/issues/{2}', github.server_url, github.repository, inputs.issue) }}
         run: scripts/linear-project.sh
