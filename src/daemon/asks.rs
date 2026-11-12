@@ -76,7 +76,7 @@ impl Asks {
         if cap.is_layout() {
             self.queue.push_back((id, ask));
             self.next_layout_act(p, now);
-        } else if self.sent.iter().any(|s| !s.ask.capability().is_layout()) {
+        } else if self.focus_running() {
             if let Some((_, old)) = self.focus_waiting.replace((id, ask)) {
                 self.steps.push_back(Step::Replaced(old));
             }
@@ -111,9 +111,14 @@ impl Asks {
         }
     }
 
+    /// Whether a focus act is asked and unanswered.
+    fn focus_running(&self) -> bool {
+        self.sent.iter().any(|s| !s.ask.capability().is_layout())
+    }
+
     /// Asks for the focus act waiting, if none is running.
     fn next_focus_act(&mut self, p: &mut dyn PaneProvider, now: Instant) {
-        if self.sent.iter().any(|s| !s.ask.capability().is_layout()) {
+        if self.focus_running() {
             return;
         }
         let Some((id, ask)) = self.focus_waiting.take() else {

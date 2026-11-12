@@ -37,7 +37,7 @@ use super::window_changes::WindowChanges;
 use crate::attach::{Ending, Size, Transport};
 use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
-use crate::nvim::forwarder::{self, Forwarder, Taking};
+use crate::nvim::forwarder::{self, FocusReport, Forwarder, Taking};
 use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
@@ -112,6 +112,9 @@ pub(crate) struct Daemon {
     /// A pane with no terminal id whose terminal reported a focus-in, and
     /// when: it becomes current if the report stands `FOCUS_IN_SETTLE_MS`.
     focus_in: Option<(u32, Instant)>,
+    /// Terminals just opened whose windows weren't current, until their first
+    /// focus report or a deadline: one that took focus gives it back (#86 D8).
+    just_opened: Vec<(TerminalId, Instant)>,
     // Dropped last, in this order: the loop, then the pane provider, then
     // Neovim.
     pub event_loop: Loop,
@@ -193,6 +196,10 @@ const FOCUS_OUT_DELAY_MS: u32 = 80;
 /// must stand before the pane becomes current: one that a focus-out follows
 /// sooner was focus passing through (#92 decision 19).
 const FOCUS_IN_SETTLE_MS: u32 = 80;
+
+/// How long after its open is done a terminal's first focus report may still
+/// be the focus it took as it was made (#86 D8).
+const JUST_OPENED_MS: u64 = 1000;
 
 /// How often a window switch still unanswered is checked for waiting behind
 /// a command that needs a key.
@@ -306,6 +313,7 @@ impl Daemon {
             ask_timer_due: None,
             focus: ProviderFocus::default(),
             focus_in: None,
+            just_opened: Vec::new(),
             event_loop,
             provider,
             nvim,
@@ -662,18 +670,17 @@ impl Daemon {
     /// Pane `id`, with no terminal id, reported focus `report` at `at`: a
     /// focus-in starts the wait for it to stand, unless its window is current
     /// or it may be the echo of a focus asked; a focus-out ends the wait.
-    fn watch_focus_in(&mut self, id: u32, report: Option<bool>, at: Instant) -> Result<()> {
+    fn watch_focus_in(&mut self, id: u32, report: Option<FocusReport>, at: Instant) -> Result<()> {
         match report {
-            Some(true) => {
+            Some(FocusReport::In) => {
                 let win = self.panes.by_id(id).and_then(|p| p.neovim_window_handle);
-                let current = win == Some(self.nvim.current_win) && self.nvim.current_float == 0;
-                if current || self.focus.unanswered(at) {
+                if win.is_some_and(|w| self.is_current_win(w)) || self.focus.unanswered(at) {
                     return Ok(());
                 }
                 self.focus_in = Some((id, at));
                 self.add_timer(Token::FocusInTimer, FOCUS_IN_SETTLE_MS)
             }
-            Some(false) => {
+            Some(FocusReport::Out) => {
                 if self.focus_in.is_some_and(|(p, _)| p == id) {
                     self.focus_in = None;
                 }
@@ -700,7 +707,7 @@ impl Daemon {
         let Some(win) = p.neovim_window_handle else {
             return Ok(());
         };
-        if p.layer.is_some() || (win == self.nvim.current_win && self.nvim.current_float == 0) {
+        if p.layer.is_some() || self.is_current_win(win) {
             return Ok(());
         }
         let from_tab = self.current_pane().map(|p| p.tab);
@@ -709,6 +716,25 @@ impl Daemon {
         self.trace_tab_move(from_tab, id);
         self.nvim.client.flush()?;
         self.draw()
+    }
+
+    /// Whether `win` is Neovim's current window, no float over it current.
+    fn is_current_win(&self, win: i64) -> bool {
+        win == self.nvim.current_win && self.nvim.current_float == 0
+    }
+
+    /// Whether pane `id` shows what is current in Neovim: its window, or
+    /// the current float, in a float group pane.
+    fn shows_current(&self, id: u32) -> bool {
+        let Some(p) = self.panes.by_id(id) else {
+            return false;
+        };
+        if p.neovim_window_handle == Some(self.nvim.current_win) {
+            return true;
+        }
+        self.nvim.current_float != 0
+            && floating_panes::layer_of_win(&self.grids, &self.panes, self.nvim.current_float)
+                .is_some_and(|q| q.id == id)
     }
 
     /// Pane `id`'s surface, which a pane that gets fd events has.
@@ -1531,11 +1557,7 @@ impl Daemon {
                     }
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
-                ProviderEvent::Focused(t) => {
-                    if self.focus.reported(&t, Instant::now()) {
-                        self.on_provider_focus(&t)?;
-                    }
-                }
+                ProviderEvent::Focused(t) => self.on_focused(&t, Instant::now())?,
                 ProviderEvent::Closed(t) => {
                     if let Some(id) = self.panes.by_terminal(t.as_str()).map(|p| p.id) {
                         self.pane_gone(id)?;
@@ -1558,6 +1580,7 @@ impl Daemon {
         }
         self.provider = None;
         self.focus = ProviderFocus::default();
+        self.just_opened.clear();
         self.asks.gone();
         self.live_layout = None;
         // nothing will lay a new split out now: its size is its own
@@ -1637,10 +1660,15 @@ impl Daemon {
             self.on_live_layout(l)?;
         }
         self.wait_for_report(pane_id, Instant::now())?;
-        // made, it took focus from the current window's: given back (#86 D8)
-        if self.focus.settled_on(&t) && handle != Some(self.nvim.current_win) {
-            let current = self.current_pane().and_then(|p| p.terminal.clone());
-            self.focus_terminal(current.as_ref());
+        // made, it may take focus from the current window's: given back,
+        // whether its focus was told before this or comes after (#86 D8)
+        if !self.shows_current(pane_id) {
+            if self.focus.settled_on(&t) {
+                self.give_focus_back();
+            } else {
+                let due = Instant::now() + Duration::from_millis(JUST_OPENED_MS);
+                self.just_opened.push((t.clone(), due));
+            }
         }
         match ask {
             Ask::OpenBeside { .. } => {
@@ -1694,6 +1722,34 @@ impl Daemon {
         self.draw()
     }
 
+    /// The pane provider says it has focused `t`, at `now`. The user's move
+    /// is followed; a terminal just opened that took focus gives it back.
+    fn on_focused(&mut self, t: &TerminalId, now: Instant) -> Result<()> {
+        self.just_opened.retain(|(_, due)| now < *due);
+        let fresh = match self.just_opened.iter().position(|(o, _)| o == t) {
+            Some(i) => {
+                self.just_opened.swap_remove(i);
+                true
+            }
+            None => false,
+        };
+        if !self.focus.reported(t) {
+            return Ok(());
+        }
+        let shown = self.panes.by_terminal(t.as_str()).map(|p| p.id);
+        if fresh && shown.is_some_and(|id| !self.shows_current(id)) {
+            self.give_focus_back();
+            return Ok(());
+        }
+        self.on_provider_focus(t)
+    }
+
+    /// Asks the pane provider to focus the current pane's terminal again.
+    fn give_focus_back(&mut self) {
+        let current = self.current_pane().and_then(|p| p.terminal.clone());
+        self.focus_terminal(current.as_ref());
+    }
+
     /// The user focused one of our panes's terminals: make its window current.
     fn on_provider_focus(&mut self, t: &TerminalId) -> Result<()> {
         let Some(p) = self.panes.by_terminal(t.as_str()) else {
@@ -1720,7 +1776,7 @@ impl Daemon {
             return Ok(());
         };
         // back from a float to the window under it counts as a move
-        if win == self.nvim.current_win && self.nvim.current_float == 0 {
+        if self.is_current_win(win) {
             return Ok(());
         }
         let from_tab = self.current_pane().map(|p| p.tab);
@@ -4811,11 +4867,9 @@ mod tests {
         fx.d.drain_provider().unwrap();
     }
 
-    /// Past the echo span of a focus that worked.
-    fn after_echo() {
-        std::thread::sleep(Duration::from_millis(
-            super::super::provider_focus::ECHO_MS + 10,
-        ));
+    /// Past the echo span of a focus that worked by now.
+    fn after_echo() -> Instant {
+        Instant::now() + Duration::from_millis(super::super::provider_focus::ECHO_MS)
     }
 
     #[test]
@@ -4840,7 +4894,8 @@ mod tests {
     }
 
     #[test]
-    fn another_terminals_focus_is_an_echo_while_a_focus_is_unanswered_and_250_ms_after() {
+    fn another_terminal_reported_while_our_focus_lands_is_ignored_and_a_user_move_just_after_followed()
+     {
         let mut fx = focusing();
         let a = focus_pane(&mut fx, 1, 1000, Some("t1"));
         focus_pane(&mut fx, 2, 1001, Some("t2"));
@@ -4849,16 +4904,44 @@ mod tests {
         // Neovim moved to t2's window: the pane provider is asked to follow
         fx.d.nvim.current_win = 1001;
         fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        // from before ours landed
         provider_focused(&mut fx, "t1");
         assert_eq!(1001, fx.d.nvim.current_win);
         focus_done(&mut fx);
-        provider_focused(&mut fx, "t1");
-        assert_eq!(1001, fx.d.nvim.current_win);
-        // after it, the user's move
-        after_echo();
+        provider_focused(&mut fx, "t2");
+        // the user moves back in the pane provider, within 250 ms: followed
         provider_focused(&mut fx, "t1");
         assert_eq!(1000, fx.d.nvim.current_win);
         assert_eq!(Some(a), fx.d.current_pane_id());
+    }
+
+    #[test]
+    fn a_directional_move_just_after_a_focus_is_followed() {
+        let mut fx = focusing();
+        focus_pane(&mut fx, 1, 1000, Some("t1"));
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
+        focus_pane(&mut fx, 3, 1002, Some("t3"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(&mut fx, "t1");
+        // <C-w>w, then <C-w>l at once: the direction waits behind the focus
+        fx.d.nvim.current_win = 1001;
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        fx.d.on_direction(windows::Move {
+            dir: windows::Direction::Right,
+            count: 1,
+        })
+        .unwrap();
+        assert_eq!(1, fake(&mut fx.d).asks.len());
+        focus_done(&mut fx);
+        let right = Ask::FocusDirection {
+            dir: Direction::Right,
+            count: 1,
+        };
+        assert_eq!(Some(&right), fake(&mut fx.d).asked().last());
+        focus_done(&mut fx);
+        // the pane provider moved focus right, inside the echo span
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
     }
 
     #[test]
@@ -4869,12 +4952,21 @@ mod tests {
         fx.d.nvim.current_win = 1001;
         fx.d.focus_terminal(Some(&TerminalId::from("t2")));
         let now = Instant::now();
-        // typed into t1 as focus leaves it: stays with t2's window
+        sent_to_nvim(&mut fx);
+        // typed into t1 as focus leaves it: sent as it is, with no switch,
+        // to Neovim's current window, t2's
         fx.d.on_read(a, b"x", now).unwrap();
+        let sent = sent_to_nvim(&mut fx);
+        assert!(
+            sent.contains("nvim_input") && sent.contains('x'),
+            "{sent:?}"
+        );
+        assert!(!sent.contains("nvim_set_current_win"), "{sent:?}");
         assert_eq!(1001, fx.d.nvim.current_win);
         assert_eq!(vec![focus_ask("t2")], fake(&mut fx.d).asked());
         // a click is no echo: it moves at once
         fx.d.on_read(a, b"\x1b[<0;5;5M", now).unwrap();
+        assert!(sent_to_nvim(&mut fx).contains("nvim_set_current_win"));
         assert_eq!(1000, fx.d.nvim.current_win);
         focus_done(&mut fx);
         assert_eq!(
@@ -4883,8 +4975,7 @@ mod tests {
         );
         focus_done(&mut fx);
         // once focus has landed, keys move too
-        after_echo();
-        fx.d.on_read(b, b"x", Instant::now()).unwrap();
+        fx.d.on_read(b, b"x", after_echo()).unwrap();
         assert_eq!(1001, fx.d.nvim.current_win);
         assert_eq!(focus_ask("t2"), fake(&mut fx.d).asked()[2]);
     }
@@ -4913,23 +5004,64 @@ mod tests {
     }
 
     #[test]
-    fn a_new_terminal_that_took_focus_gives_it_back_to_the_current_windows() {
+    fn a_focus_in_within_the_echo_span_is_ignored() {
         let mut fx = focusing();
-        focus_pane(&mut fx, 50, 1000, Some("t1"));
+        let a = focus_pane(&mut fx, 1, 1000, None);
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
+        fx.d.nvim.current_win = 1001;
+        let before = Instant::now();
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        focus_done(&mut fx);
+        // focus passing through, as ours landed
+        fx.d.on_read(a, b"\x1b[I", before).unwrap();
+        assert_eq!(None, fx.d.focus_in);
+        // after the span, it waits to stand
+        let at = after_echo();
+        fx.d.on_read(a, b"\x1b[I", at).unwrap();
+        assert_eq!(Some((a, at)), fx.d.focus_in);
+    }
+
+    /// A pane waiting on its open whose window isn't current, beside the
+    /// current pane, of terminal t1: the pane's id and the open's.
+    fn opening_beside_current(fx: &mut Fixture) -> (u32, super::super::provider::AskId) {
+        focus_pane(fx, 50, 1000, Some("t1"));
         fx.d.nvim.current_win = 1000;
-        provider_focused(&mut fx, "t1");
+        provider_focused(fx, "t1");
         let id = opening(&mut fx.d);
-        let open = fake(&mut fx.d).last_id();
-        provider_focused(&mut fx, "block:n");
-        let f = fake(&mut fx.d);
-        f.opened(open, "block:n");
-        fx.d.drain_provider().unwrap();
-        assert_eq!(
-            Some(1000),
-            fx.d.current_pane().and_then(|p| p.neovim_window_handle)
-        );
+        (id, fake(&mut fx.d).last_id())
+    }
+
+    fn assert_focus_given_back(fx: &mut Fixture, id: u32) {
+        assert_eq!(Some(50), fx.d.current_pane_id());
         assert_ne!(Some(id), fx.d.current_pane_id());
         assert_eq!(Some(&focus_ask("t1")), fake(&mut fx.d).asked().last());
+    }
+
+    #[test]
+    fn a_new_terminal_that_took_focus_before_its_open_was_done_gives_it_back() {
+        let mut fx = focusing();
+        let (id, open) = opening_beside_current(&mut fx);
+        provider_focused(&mut fx, "block:n");
+        fake(&mut fx.d).opened(open, "block:n");
+        fx.d.drain_provider().unwrap();
+        assert_focus_given_back(&mut fx, id);
+    }
+
+    #[test]
+    fn a_new_terminal_whose_focus_is_told_after_its_open_was_done_gives_it_back() {
+        let mut fx = focusing();
+        let (id, open) = opening_beside_current(&mut fx);
+        fake(&mut fx.d).opened(open, "block:n");
+        fx.d.drain_provider().unwrap();
+        assert_eq!(1, fake(&mut fx.d).asks.len());
+        provider_focused(&mut fx, "block:n");
+        assert_focus_given_back(&mut fx, id);
+        // only its first report: later, focus there is the user's
+        focus_done(&mut fx);
+        provider_focused(&mut fx, "t1");
+        let now = Instant::now();
+        fx.d.on_focused(&TerminalId::from("block:n"), now).unwrap();
+        assert_eq!(Some(id), fx.d.current_pane_id());
     }
 
     // Pane lifecycle. Already pinned above: a window waiting for its tab

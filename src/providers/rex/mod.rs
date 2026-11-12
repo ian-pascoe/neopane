@@ -59,6 +59,15 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Events,
 ];
 
+/// A `focus_direction` ask, done once Rex answered its last request.
+struct Directing {
+    tag: u64,
+    /// Its requests still unanswered.
+    left: u32,
+    /// The first refusal, which fails it.
+    refused: Option<client::Error>,
+}
+
 pub(crate) struct RexProvider {
     /// The daemon reaches its connection's fd through it.
     pub session: Session,
@@ -68,9 +77,8 @@ pub(crate) struct RexProvider {
     float_asks: Vec<u64>,
     /// The blocks opened for float groups, framed in the layout.
     float_blocks: Vec<TerminalId>,
-    /// The `focus_direction` asks: their requests still unanswered, and the
-    /// first refusal.
-    directions: Vec<(u64, u32, Option<client::Error>)>,
+    /// The `focus_direction` asks waiting for their requests' answers.
+    directions: Vec<Directing>,
     /// The layout of the last view.
     layout: Option<LiveLayout>,
     events: VecDeque<ProviderEvent>,
@@ -193,11 +201,13 @@ impl RexProvider {
                 self.session.focus_block(tag, terminal.as_str())?;
             }
             Ask::FocusDirection { dir, count } => {
-                if count == 0 {
-                    self.answer(tag, Outcome::Done(Answer::Nothing));
-                    return Ok(true);
-                }
-                self.directions.push((tag, count, None));
+                // the daemon asks one at least
+                debug_assert!(count > 0);
+                self.directions.push(Directing {
+                    tag,
+                    left: count,
+                    refused: None,
+                });
                 for _ in 0..count {
                     self.session.focus_direction(tag, rex_direction(dir))?;
                 }
@@ -312,19 +322,18 @@ impl RexProvider {
     /// One of the requests of `focus_direction` ask `tag` was answered: the
     /// last answers the ask, failed if any was refused.
     fn on_direction_answer(&mut self, tag: u64, result: ResponseResult) {
-        let Some(i) = self.directions.iter().position(|d| d.0 == tag) else {
+        let Some(i) = self.directions.iter().position(|d| d.tag == tag) else {
             return;
         };
         let d = &mut self.directions[i];
-        d.1 -= 1;
+        d.left -= 1;
         if let ResponseResult::Err(e) = result {
-            d.2.get_or_insert(e);
+            d.refused.get_or_insert(e);
         }
-        if d.1 > 0 {
+        if d.left > 0 {
             return;
         }
-        let (_, _, refused) = self.directions.swap_remove(i);
-        let outcome = match refused {
+        let outcome = match self.directions.swap_remove(i).refused {
             Some(e) => outcome_of_error(&e),
             None => Outcome::Done(Answer::Nothing),
         };

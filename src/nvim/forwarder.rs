@@ -37,6 +37,13 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Room for the keys of one read.
 const KEYS_CAPACITY: usize = 4096;
 
+/// A terminal's focus report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusReport {
+    In,
+    Out,
+}
+
 /// What input does that takes focus to its pane (`Forwarder::taking`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Taking {
@@ -265,15 +272,15 @@ impl Forwarder {
         taking
     }
 
-    /// The last focus report in `bytes`, read as `feed` reads them: true for
-    /// a focus-in. Changes nothing.
-    pub(crate) fn focus_report(&self, bytes: &[u8]) -> Option<bool> {
+    /// The last focus report in `bytes`, read as `feed` reads them. Changes
+    /// nothing.
+    pub(crate) fn focus_report(&self, bytes: &[u8]) -> Option<FocusReport> {
         let mut parser = self.parser.clone();
         parser.feed(bytes);
         let mut report = None;
         while let Some(event) = parser.next() {
             if let Event::Focus(f) = event {
-                report = Some(f);
+                report = Some(if f { FocusReport::In } else { FocusReport::Out });
             }
         }
         report
@@ -707,8 +714,8 @@ mod tests {
     fn the_last_focus_report_in_a_read_is_the_one_that_stands() {
         let f = Forwarder::default();
         assert_eq!(None, f.focus_report(b"x"));
-        assert_eq!(Some(true), f.focus_report(b"\x1b[I"));
-        assert_eq!(Some(false), f.focus_report(b"\x1b[Ix\x1b[O"));
+        assert_eq!(Some(FocusReport::In), f.focus_report(b"\x1b[I"));
+        assert_eq!(Some(FocusReport::Out), f.focus_report(b"\x1b[Ix\x1b[O"));
     }
 
     #[test]

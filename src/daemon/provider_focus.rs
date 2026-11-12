@@ -1,19 +1,25 @@
 //! Which terminal the pane provider has focused, as the daemon last saw or
-//! asked, and the echo filter (#92 decision 10, #86 decision D8).
+//! asked (#92 decisions 10 and 19, #86 decision D8).
 //!
-//! The daemon asks `focus` through the focus queue (`asks.rs`); until the
-//! last focus act it asked ends, and for 250 ms after one that worked, another
-//! terminal the pane provider says has focus is only the echo of how things
-//! were before: it's ignored. The same span is the one in which keys typed
-//! into another terminal go to Neovim's current window. A focus act that
-//! failed or was replaced brings no echo, so no span follows it.
+//! The daemon asks `focus` through the focus queue (`asks.rs`). What the
+//! pane provider then says has focus is the daemon's own focus landing while
+//! a focus act is asked or waiting, and the user's move (or a
+//! `focus_direction`'s) once none is: a pane provider tells nothing older
+//! than the focus it answered, as Rex's revisions see to.
+//!
+//! The echo span is narrower: until the last focus act ends, and for 250 ms
+//! after one that worked, a terminal's own focus-in report from a terminal
+//! other than the one asked is taken for focus leaving it, not the user's
+//! move, and keys typed into another terminal go to Neovim's current window.
+//! A focus act that failed or was replaced brings no echo, so no span follows
+//! it.
 
 use std::time::{Duration, Instant};
 
 use super::provider::TerminalId;
 
-/// How long after a focus act worked the pane provider's focus reports of
-/// other terminals are still taken for echoes.
+/// How long after a focus act worked terminals' focus-in reports are still
+/// taken for echoes, and keys typed into another terminal rerouted.
 pub(crate) const ECHO_MS: u64 = 250;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -24,8 +30,8 @@ pub(crate) enum ProviderFocus {
     /// The pane provider said it has focused this terminal.
     Settled(TerminalId),
     /// The daemon asked it to focus `terminal`: `in_flight` focus acts are
-    /// asked or waiting, and once none is, reports of other terminals are
-    /// echoes until `until`, if the last one worked.
+    /// asked or waiting, and once none is, the echo span lasts until `until`,
+    /// if the last one worked.
     Asked {
         terminal: TerminalId,
         in_flight: u32,
@@ -80,21 +86,14 @@ impl ProviderFocus {
     /// The pane provider says it has focused `t`. Whether that's the user
     /// moving focus, for the daemon to follow: not the first report, which
     /// only tells where focus starts, nor one of what it was already known to
-    /// have, nor an echo of how things were before the daemon's own focus.
-    pub(crate) fn reported(&mut self, t: &TerminalId, now: Instant) -> bool {
-        let echo = self.unanswered(now);
+    /// have, nor one while a focus act of the daemon's is still landing.
+    pub(crate) fn reported(&mut self, t: &TerminalId) -> bool {
         let user = match self {
             ProviderFocus::Unknown => false,
             ProviderFocus::Settled(s) => s != t,
-            // ours, landing: settled once nothing more is asked
-            ProviderFocus::Asked {
-                terminal,
-                in_flight,
-                ..
-            } if terminal == t && *in_flight > 0 => return false,
-            ProviderFocus::Asked { terminal, .. } if terminal == t => false,
-            ProviderFocus::Asked { .. } if echo => return false,
-            ProviderFocus::Asked { .. } => true,
+            // landing: settled once nothing more is asked
+            ProviderFocus::Asked { in_flight, .. } if *in_flight > 0 => return false,
+            ProviderFocus::Asked { terminal, .. } => terminal != t,
         };
         *self = ProviderFocus::Settled(t.clone());
         user
@@ -106,7 +105,7 @@ impl ProviderFocus {
     }
 
     /// Whether a focus act is asked or waiting, or one worked less than
-    /// 250 ms ago.
+    /// 250 ms ago: the echo span.
     pub(crate) fn unanswered(&self, now: Instant) -> bool {
         match self {
             ProviderFocus::Asked {
@@ -131,12 +130,12 @@ mod tests {
 
     #[test]
     fn the_first_report_only_says_where_focus_starts() {
-        let (mut f, now) = (ProviderFocus::default(), Instant::now());
-        assert!(!f.reported(&t("a"), now));
+        let mut f = ProviderFocus::default();
+        assert!(!f.reported(&t("a")));
         assert!(f.has_focused(&t("a")));
         // the same again is nothing new; another is the user's move
-        assert!(!f.reported(&t("a"), now));
-        assert!(f.reported(&t("b"), now));
+        assert!(!f.reported(&t("a")));
+        assert!(f.reported(&t("b")));
         assert!(!f.has_focused(&t("a")));
     }
 
@@ -158,20 +157,29 @@ mod tests {
     }
 
     #[test]
-    fn another_terminals_report_is_an_echo_while_a_focus_is_unanswered_and_250_ms_after() {
+    fn the_echo_span_lasts_while_a_focus_is_unanswered_and_250_ms_after() {
         let (mut f, now) = (ProviderFocus::default(), Instant::now());
-        f.reported(&t("a"), now);
+        f.reported(&t("a"));
         f.asked(t("b"));
-        // from before ours landed
-        assert!(!f.reported(&t("a"), now));
         assert!(f.unanswered(now));
         f.ended(true, now);
-        assert!(!f.reported(&t("a"), now + ms(249)));
         assert!(f.unanswered(now + ms(249)));
         assert!(!f.unanswered(now + ms(250)));
-        // after it, the user's
-        assert!(f.reported(&t("a"), now + ms(250)));
-        assert_eq!(ProviderFocus::Settled(t("a")), f);
+    }
+
+    #[test]
+    fn another_terminal_reported_while_a_focus_lands_is_ignored_and_after_it_followed() {
+        let mut f = ProviderFocus::default();
+        f.reported(&t("a"));
+        f.asked(t("b"));
+        // from before ours landed
+        assert!(!f.reported(&t("a")));
+        assert!(f.has_focused(&t("b")));
+        // answered: a move at once, the span or not, is the user's or a
+        // focus_direction's
+        f.ended(true, Instant::now());
+        assert!(f.reported(&t("c")));
+        assert_eq!(ProviderFocus::Settled(t("c")), f);
     }
 
     #[test]
@@ -179,10 +187,10 @@ mod tests {
         let (mut f, now) = (ProviderFocus::default(), Instant::now());
         f.asked(t("b"));
         // landed before its answer came: still asked
-        assert!(!f.reported(&t("b"), now));
+        assert!(!f.reported(&t("b")));
         assert!(f.unanswered(now));
         f.ended(true, now);
-        assert!(!f.reported(&t("b"), now));
+        assert!(!f.reported(&t("b")));
         assert_eq!(ProviderFocus::Settled(t("b")), f);
         assert!(!f.unanswered(now));
     }
@@ -190,28 +198,27 @@ mod tests {
     #[test]
     fn only_the_last_of_two_focus_acts_settles() {
         let (mut f, now) = (ProviderFocus::default(), Instant::now());
-        f.reported(&t("o"), now);
+        f.reported(&t("o"));
         f.asked(t("a"));
         f.asked(t("b"));
         f.ended(true, now);
-        // the first one's echo, while the second is out
-        assert!(!f.reported(&t("a"), now + ms(300)));
+        // the first one's landing, while the second is out
+        assert!(!f.reported(&t("a")));
         assert!(f.has_focused(&t("b")));
-        assert!(f.unanswered(now + ms(300)));
-        f.ended(true, now + ms(300));
-        assert!(!f.reported(&t("b"), now + ms(310)));
+        f.ended(true, now);
+        assert!(!f.reported(&t("b")));
         assert_eq!(ProviderFocus::Settled(t("b")), f);
     }
 
     #[test]
     fn a_focus_that_failed_brings_no_echo_and_isnt_taken_as_landing() {
         let (mut f, now) = (ProviderFocus::default(), Instant::now());
-        f.reported(&t("a"), now);
+        f.reported(&t("a"));
         f.asked(t("b"));
         f.ended(false, now);
         assert!(!f.unanswered(now));
         assert!(!f.has_focused(&t("b")));
         // where focus really is, at once
-        assert!(f.reported(&t("a"), now));
+        assert!(f.reported(&t("a")));
     }
 }
