@@ -605,7 +605,8 @@ fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Ce
             argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
             timeout: Duration::from_secs(2),
             protocol: 1,
-        }],        attach_timeout: config::check::ATTACH_TIMEOUT,
+        }],
+        attach_timeout: config::check::ATTACH_TIMEOUT,
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
     let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();

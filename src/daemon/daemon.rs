@@ -949,11 +949,19 @@ impl Daemon {
     }
 
     /// Whether `give_focus_back` can have the pane provider focus the
-    /// current pane's terminal: it can focus, and has an id for it.
+    /// current pane's terminal: it can focus, and has an id for it, or will
+    /// have. A current window made in the same flush, as `:vsplit | vsplit`
+    /// or a session load make them, may have no pane yet, or one whose open
+    /// is still on its way: its id comes with the open.
     fn can_give_focus_back(&self) -> bool {
         let p = self.provider.as_ref().map(Held::seam_ref);
-        let current = self.current_pane().and_then(|q| q.terminal.as_ref());
-        current.is_some() && self.asks.may_ask(p, Capability::Focus)
+        if !self.asks.may_ask(p, Capability::Focus) {
+            return false;
+        }
+        match self.current_pane() {
+            Some(q) => q.terminal.is_some() || (q.attach_id.is_some() && q.closing.is_none()),
+            None => true,
+        }
     }
 
     /// Whether the origin pane of a window split off as `sp` is in the pane

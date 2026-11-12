@@ -281,6 +281,26 @@ fn a_window_opened_unentered_is_drawn_in_its_origin_pane_unless_focus_can_be_giv
     }
 }
 
+#[test]
+fn two_splits_in_one_flush_each_open_a_terminal_though_the_current_ones_id_is_on_its_way() {
+    let mut fx = focusing();
+    let (origin, _live) = split_off_origin(&mut fx, 1002);
+    // `:vsplit | vsplit`: the second is current, and neither has a pane
+    split_from(&mut fx, 1003, 1002);
+    fx.d.reconcile().unwrap();
+    let [a, b] = [1002, 1003].map(|w| fx.d.panes.by_win(w).unwrap().id);
+    assert!(a != origin && b != origin && a != b);
+    // one asked, one waiting its turn
+    assert_eq!(2, fx.d.asks.waiting());
+
+    // another, unentered, while the current one's open is on its way
+    draw_external(&mut fx.d, 104, 1004, 80, 11);
+    note_split_from(&mut fx.d, 1004, 1000, false, false);
+    fx.d.new_pane(1004).unwrap();
+    assert_ne!(Some(origin), fx.d.panes.by_win(1004).map(|p| p.id));
+    assert_eq!(3, fx.d.asks.waiting());
+}
+
 /// A hello for `pane` from a build of another attach protocol.
 fn hello_of_another_version(pane: crate::attach::PaneId) -> Vec<u8> {
     let mut hello = Hello::new(Purpose::Requested {
