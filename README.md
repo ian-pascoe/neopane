@@ -23,7 +23,8 @@ incrementally. Contributions are welcome.
 ## Requirements
 
 - macOS, or Linux: it builds and passes its tests there, but hasn't been tried live yet (#43)
-- [Rex](https://www.superlogical.com/rex)
+- [Rex](https://www.superlogical.com/rex), for windows in panes of their own;
+  without it, neorex runs as plain Neovim in its terminal
 - A recent Neovim, 0.12 or later.
 - Rust (stable, 2024 edition) to build
 - Zig 0.17, only for the golden tests: they build Ghostty
@@ -62,7 +63,8 @@ just prefix=/usr/local install
 It replaces the binary rather than writing over it, which on macOS gets a
 new build killed at launch.
 
-Run it in a Rex pane, with any Neovim arguments:
+Run it with any Neovim arguments, in a Rex pane to have each window open in a
+pane of its own:
 
 ```sh
 target/debug/neorex some/file.txt
@@ -130,21 +132,34 @@ own: keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 ## How it runs
 
-Running `neorex` in a Rex pane starts a daemon in the background, which runs
-one headless Neovim and gives each of its windows a Rex pane. The pane you ran
-it in attaches to the daemon first: Neovim starts only once the daemon has
-accepted that attach, at that pane's size, and the pane shows its first
-window. When Neovim quits, `neorex` exits with Neovim's status: `:q` 0, `:cq`
-1, `:cq 3` 3, so `:cq` aborts a `git commit` as it does in plain Neovim. It
-takes its bearings from the environment Rex sets in every pane:
+Running `neorex` starts a daemon in the background, which runs one headless
+Neovim. The terminal you ran it in attaches to the daemon first: Neovim starts
+only once the daemon has accepted that attach, at that terminal's size, and
+the terminal shows its first window. When Neovim quits, `neorex` exits with
+Neovim's status: `:q` 0, `:cq` 1, `:cq 3` 3, so `:cq` aborts a `git commit` as
+it does in plain Neovim.
 
-- `REX_SERVER`: the URL of the Rex server to connect to. Required.
-- `REX_SESSION`: the Rex session to open panes in. Required.
-- `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
-  reads it from the attach's environment, uses it as the first window's
-  pane, and logs a note if it isn't a block id.
+That first attach chooses the daemon's pane provider, which gives windows
+terminals of their own: Rex is chosen, not required. With `REX_SERVER` and
+`REX_SESSION` set in the attach's environment, as Rex sets them in every pane,
+the daemon connects to that Rex server and session without holding anything
+up: the first window shows at once, and the windows Neovim opened at the
+start, such as `-O a b`'s second, wait for the choice and then open in Rex
+panes beside the first. Rex checks the choice: the terminal must be the Rex
+pane `REX_BLOCK` names, its terminal compared with the terminal of that pane's
+process. Without the variables, every window is drawn in the terminal it was
+opened from, as plain Neovim draws splits. So is it when the choice fails,
+with a warning in Neovim: in a terminal started from a Rex shell, such as a
+Ghostty window, which inherited stale `REX_*`, or one whose `REX_BLOCK` is
+unset or names another pane. The variables, from the attach's environment,
+never the daemon's own:
+
+- `REX_SERVER`: the URL of the Rex server to connect to.
+- `REX_SESSION`: the Rex session to open panes in.
+- `REX_BLOCK`: the id of the pane the attach runs in, which Rex checks.
 - `NEOREX_PROVIDER`: a hint at the pane provider, sent with the attach;
-  nothing reads it yet.
+  `none` chooses none, even in Rex. Other values are for your config, which
+  comes later.
 - `NEOREX_LOG`: how much the daemon logs, read as it starts. `warn`: what
   went wrong; `info`, the default: that, and what happened; `debug`: that,
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
@@ -179,16 +194,17 @@ second terminal shows `b`; with none, a new window, as `:split` opens one.
 `neorex attach --address A notes.md` opens `notes.md` there in a new window
 instead, and `+12 notes.md` puts the cursor on line 12. The window it shows
 becomes current. Closing that terminal closes its windows, and only those;
-the terminal goes back to its shell. In a Rex pane of the daemon's own
-session, the daemon uses its `REX_BLOCK`, so `:vsplit` there opens a pane
-beside it. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
+the terminal goes back to its shell. With no pane provider yet, the attach
+chooses one, as the first did. In a Rex pane of the chosen Rex server and
+session, Rex finds its pane by its `REX_BLOCK`, so `:vsplit` there opens a
+pane beside it; from another session or terminal, `:vsplit` draws the new
+window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
 terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
 name comes later.
 
 If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
-to start a daemon without one, use --detach` and exits 1. In a terminal but
-without `REX_SERVER` or `REX_SESSION`, it prints `neorex: run it in a Rex
-pane` and exits 1. The `debug-rex` command reads the same three variables.
+to start a daemon without one, use --detach` and exits 1. The `debug-rex`
+command reads the same three Rex variables, from its own environment.
 
 Each daemon has a name: the name of the directory `neorex` was started in,
 cut to its letters, digits, `.`, `_` and `-`, and to 32 characters (`default`
@@ -296,8 +312,12 @@ quietly.
 
 ## Troubleshooting
 
-- "run it in a Rex pane": `REX_SERVER` or `REX_SESSION` is missing. Start
-  `neorex` from a Rex pane, or set both (see above) to a session you made.
+- Windows open in the terminal you ran `neorex` in, not in Rex panes: the
+  daemon chose no pane provider. With a warning in Neovim (`:messages`), Rex
+  couldn't be reached or attached, or didn't confirm the terminal is the pane
+  `REX_BLOCK` names, as for a terminal started from a Rex shell; without one,
+  `REX_SERVER` or `REX_SESSION` is unset, or `NEOREX_PROVIDER` is `none`. The
+  log says which.
 - `neorex: work didn't start: <why> (log: <path>)`: read the log at that
   path. A daemon that failed before it had a log says only why, such as
   `neorex: /tmp/neorex-501 isn't a private directory (owner 0, mode 0755); set

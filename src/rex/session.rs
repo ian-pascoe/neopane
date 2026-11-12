@@ -461,10 +461,10 @@ impl Session {
         match req {
             Request::FocusBlock(_) => {
                 self.on_focus_block_result(&res.result)?;
-                return Ok(Some(Update::Answered {
+                Ok(Some(Update::Answered {
                     req,
                     result: res.result,
-                }));
+                }))
             }
             Request::NewSplit(_)
             | Request::NewLayer(_)
@@ -474,12 +474,10 @@ impl Session {
             | Request::MoveBlock(_)
             | Request::ResizePane(_)
             | Request::FocusDirection(_)
-            | Request::Process(_) => {
-                return Ok(Some(Update::Answered {
-                    req,
-                    result: res.result,
-                }));
-            }
+            | Request::Process(_) => Ok(Some(Update::Answered {
+                req,
+                result: res.result,
+            })),
             Request::View => self.on_view_result(&res.result),
             Request::Attach => self.on_attach_result(&res.result),
         }

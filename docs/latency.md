@@ -31,7 +31,8 @@ otherwise.
 | `resize_sent` | Its window asked to resize to fit, if its size changed. |
 | `place` | A tab page's panes asked to be placed (moved or resized; id: the tab page). |
 | `placed` | The last placement answered (id 0). |
-| `accept`, `found` | L7's points. Named, not yet fired: #114 fires them. |
+| `accept` | A self-attached pane's `find` asked: as it chooses the pane provider, or arrives with one. |
+| `found` | Its `find` answered: in reach. |
 | `hello` | A hello read whole, its last byte read (the pane's id; the launcher's is 0). |
 | `accepted` | Its `a` written to the helper. |
 

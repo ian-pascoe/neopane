@@ -314,6 +314,56 @@ mod tests {
         assert_eq!(None, tty_nr_of_stat(b"garbage"));
     }
 
+    /// In a Rex pane, its own block, as a self-attach from it finds it, on
+    /// macOS (and on Linux, #133). Skips elsewhere.
+    #[test]
+    fn live_find_proves_its_own_block() {
+        let var = |name: &str| std::env::var(name).ok();
+        let (Some(url), Some(session), Some(block)) =
+            (var("REX_SERVER"), var("REX_SESSION"), var("REX_BLOCK"))
+        else {
+            eprintln!("skipping: not in a Rex pane");
+            return;
+        };
+        let Ok(tty) = std::fs::File::open("/dev/tty") else {
+            eprintln!("skipping: no controlling terminal");
+            return;
+        };
+        let device = crate::daemon::attach_conn::tty_device(Some(&tty.into()), b"");
+        assert!(device.is_some());
+        let stream = crate::rex::client::connect_to(&url).unwrap();
+        let mut p = RexProvider::connecting(stream, &session).unwrap();
+        let mut ask = find(Some(&block), device);
+        if let Ask::Find { pid, .. } = &mut ask {
+            *pid = std::process::id();
+        }
+        p.ask(AskId(9), ask);
+        let fd = p.session.client.fd();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no answer from Rex");
+            let mut fds = [libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            // SAFETY: one valid pollfd.
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
+            p.on_ready(0);
+            while let Some(e) = p.next() {
+                if let ProviderEvent::Answered { outcome, .. } = e {
+                    assert_eq!(
+                        Outcome::Done(Answer::Terminal(block.as_str().into())),
+                        outcome
+                    );
+                    // proven, not trusted
+                    assert!(!p.trusted, "REX_BLOCK was trusted unproved");
+                    return;
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_process_with_no_terminal_or_none_at_all_has_no_tty() {
         assert_eq!(None, tty_of_pid(u32::MAX - 1));

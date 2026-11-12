@@ -101,7 +101,7 @@ pub(crate) struct RexProvider {
     /// The controlling terminal of a process; a fake in tests.
     pub(crate) tty_of_pid: find::TtyOfPid,
     /// A `find` trusted `REX_BLOCK` unproved, which is logged once.
-    trusted: bool,
+    pub(crate) trusted: bool,
     /// What was asked before Rex attached us to its session, asked once it
     /// has: Rex runs some requests out of order.
     deferred: Vec<(AskId, Ask)>,
