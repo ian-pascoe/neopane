@@ -264,13 +264,20 @@ fn a_terminal_hanging_up_closes_every_window_its_pane_draws() {
 
 #[test]
 fn a_window_opened_unentered_is_drawn_in_its_origin_pane_unless_focus_can_be_given_back() {
-    for can_focus in [false, true] {
+    // whether the provider can focus, and the current pane's terminal id
+    for (can_focus, current_id) in [(false, true), (true, false), (true, true)] {
         let mut fx = if can_focus { focusing() } else { fixture() };
         let (origin, _live) = split_off_origin(&mut fx, 1002);
+        // without one, another terminal to open beside all the same
+        let _other = (!current_id).then(|| {
+            fx.d.panes.by_id_mut(origin).unwrap().terminal = None;
+            live_pane(&mut fx, 51, 2000, Some("t2"))
+        });
         fx.d.nvim.current_win = 1000;
         fx.d.new_pane(1002).unwrap();
         let p = fx.d.panes.by_win(1002).unwrap().id;
-        assert_eq!(can_focus, p != origin, "{can_focus}");
+        let opened = can_focus && current_id;
+        assert_eq!(opened, p != origin, "{can_focus} {current_id}");
     }
 }
 

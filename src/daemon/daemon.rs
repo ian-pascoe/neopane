@@ -930,8 +930,7 @@ impl Daemon {
         if !opens || !self.in_reach(sp) {
             return false;
         }
-        let entered = sp.win == self.nvim.current_win;
-        if !entered && !self.asks.may_ask(p, Capability::Focus) {
+        if sp.win != self.nvim.current_win && !self.can_give_focus_back() {
             return false;
         }
         let Some(then) = self.version_refused else {
@@ -946,6 +945,14 @@ impl Daemon {
         );
         self.version_refused = None;
         true
+    }
+
+    /// Whether `give_focus_back` can have the pane provider focus the
+    /// current pane's terminal: it can focus, and has an id for it.
+    fn can_give_focus_back(&self) -> bool {
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        let current = self.current_pane().and_then(|q| q.terminal.as_ref());
+        current.is_some() && self.asks.may_ask(p, Capability::Focus)
     }
 
     /// Whether the origin pane of a window split off as `sp` is in the pane
