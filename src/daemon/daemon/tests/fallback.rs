@@ -366,41 +366,50 @@ fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
     }
 }
 
+/// A daemon over a real Neovim started with `flag`, such as `-o3`, and
+/// `provider`, its first pane attached in terminal t0 and read: the daemon,
+/// the terminal's other ends, and its reader. None without Neovim.
+fn started_with(
+    flag: &str,
+    provider: Option<Held>,
+) -> Option<(Daemon, Live, std::thread::JoinHandle<()>)> {
+    use crate::nvim::nvim::spawn_for_test_with;
+    let nvim = spawn_for_test_with(&["nvim", "--clean", "--embed", "-n", flag])?;
+    let event_loop = Loop::init().unwrap();
+    event_loop
+        .add_read(nvim.read_fd(), Token::NvimChannel as usize)
+        .unwrap();
+    let mut d = Daemon::new(
+        event_loop,
+        NvimSession::new(nvim),
+        provider,
+        String::new(),
+        crate::daemon::dir::Address::from_arg(Default::default()),
+    );
+    let (surface, live) = attached_surface(120, 40);
+    // what the daemon draws, read so it never waits
+    // SAFETY: a copy of the pty's master, for the reader to own.
+    let master = unsafe { libc::dup(live.pty.master) };
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is valid for its length.
+        while unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        // SAFETY: the reader's copy.
+        unsafe { libc::close(master) };
+    });
+    let terminal = Some(TerminalId::from("t0"));
+    d.start(&mut Some(SelfAttach { surface, terminal }))
+        .unwrap();
+    Some((d, live, reader))
+}
+
 #[test]
 fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_first_pane_as_neovim_had_them()
  {
-    use crate::nvim::nvim::spawn_for_test_with;
     for (flag, across) in [("-o3", false), ("-O3", true)] {
-        let argv = ["nvim", "--clean", "--embed", "-n", flag];
-        let Some(nvim) = spawn_for_test_with(&argv) else {
+        let Some((mut d, live, reader)) = started_with(flag, None) else {
             return;
         };
-        let event_loop = Loop::init().unwrap();
-        event_loop
-            .add_read(nvim.read_fd(), Token::NvimChannel as usize)
-            .unwrap();
-        let mut d = Daemon::new(
-            event_loop,
-            NvimSession::new(nvim),
-            None,
-            String::new(),
-            crate::daemon::dir::Address::from_arg(Default::default()),
-        );
-        let (surface, live) = attached_surface(120, 40);
-        // what the daemon draws, read so it never waits
-        // SAFETY: a copy of the pty's master, for the reader to own.
-        let master = unsafe { libc::dup(live.pty.master) };
-        let reader = std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            // SAFETY: `buf` is valid for its length.
-            while unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-            // SAFETY: the reader's copy.
-            unsafe { libc::close(master) };
-        });
-        let terminal = None;
-        d.start(&mut Some(SelfAttach { surface, terminal }))
-            .unwrap();
-
         pump(&mut d, |d| {
             d.nvim.ready
                 && d.panes
@@ -427,6 +436,30 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
         drop(live);
         reader.join().unwrap();
     }
+}
+
+#[test]
+fn with_a_pane_provider_windows_opened_with_o_open_as_before_beside_the_first_pane() {
+    let mut f = FakeProvider::opening();
+    f.caps.insert(Capability::Focus);
+    let Some((mut d, live, reader)) = started_with("-o3", Some(Held::Fake(f))) else {
+        return;
+    };
+    let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });
+    pump(&mut d, |d| match &d.provider {
+        Some(Held::Fake(f)) => f.asked().iter().any(open),
+        _ => false,
+    });
+    // the first asked, the next waiting their turn: to the right of t0, as
+    // any window Neovim didn't say the place of, not below it
+    let asked = fake(&mut d).asked();
+    let Some(Ask::OpenBeside { origin, dir, .. }) = asked.iter().find(|a| open(a)) else {
+        unreachable!()
+    };
+    assert_eq!(("t0", Direction::Right), (origin.as_str(), *dir));
+    drop(d);
+    drop(live);
+    reader.join().unwrap();
 }
 
 /// A self-attached pane in terminal `terminal`, with no window yet. Its id,
