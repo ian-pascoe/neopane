@@ -210,7 +210,7 @@ fn a_choice_rex_cant_attach_or_reach_is_none_with_a_warning() {
     assert!(fx.d.provider.is_none());
     let warned = sent_to_nvim(&mut fx);
     assert!(
-        warned.contains("can't reach Rex at unix:///fake/rex.sock")
+        warned.contains("rex: can't reach Rex: connection refused")
             && warned.contains("no pane provider"),
         "{warned:?}"
     );

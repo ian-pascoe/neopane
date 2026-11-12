@@ -1168,6 +1168,12 @@ impl Daemon {
                         if self.grids.apply_redraw(&mut params)? {
                             self.reconcile()?;
                             self.draw()?;
+                            // once Neovim has drawn its start: before, it
+                            // would wait at a hit-enter prompt
+                            if self.nvim.ready && !self.held_warnings.is_empty() {
+                                self.warn_held();
+                                self.nvim.client.flush()?;
+                            }
                         }
                     } else if let Some(note) = parse_note_or_log(method, &mut params) {
                         self.on_note(note)?;
@@ -1262,7 +1268,6 @@ impl Daemon {
                 first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
-            self.warn_held();
             // its window is in its pane now: the editor can span the Rex window
             if let Some(f) = self.current_pane_id() {
                 self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;

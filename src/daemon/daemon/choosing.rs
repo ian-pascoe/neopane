@@ -238,8 +238,9 @@ impl Daemon {
                 .is_some_and(|f| f.reach == Reach::Finding)
     }
 
-    /// Shows `message` in Neovim as a warning once it is set up: before, at
-    /// a hit-enter prompt, it would hide the first window until a key.
+    /// Shows `message` in Neovim as a warning once it is set up and has
+    /// drawn: before, it would wait at a hit-enter prompt with the start's
+    /// own messages, hiding the first window until a key.
     pub(super) fn warn_when_ready(&mut self, message: String) {
         if self.nvim.ready {
             self.warn_in_nvim(&message);
@@ -248,7 +249,7 @@ impl Daemon {
         }
     }
 
-    /// Shows the warnings held until Neovim was set up.
+    /// Shows the warnings held until Neovim was set up and drew.
     pub(super) fn warn_held(&mut self) {
         for w in std::mem::take(&mut self.held_warnings) {
             self.warn_in_nvim(&w);

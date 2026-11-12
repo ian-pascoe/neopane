@@ -11,6 +11,8 @@ use std::os::unix::net::UnixStream;
 use super::Held;
 use super::rex::RexProvider;
 use crate::config::{self, Builtin, Choice};
+use crate::log::log_warn;
+use crate::name::NAME;
 
 /// An attach's environment: names and values, raw.
 pub(crate) type Env = [(Vec<u8>, Vec<u8>)];
@@ -81,10 +83,14 @@ fn start_rex(env: &Env, connect: &mut Connect) -> Chosen {
     });
     match started {
         Ok(rex) => Chosen::Provider(Held::Rex(Box::new(rex))),
-        Err(e) => Chosen::None {
-            why: format!("rex: can't reach Rex at {server}: {e}"),
-            warn: true,
-        },
+        Err(e) => {
+            // where, for the log: a warning that long would wait at a prompt
+            log_warn!("{NAME} daemon: rex: can't reach Rex at {server}: {e}");
+            Chosen::None {
+                why: format!("rex: can't reach Rex: {e}"),
+                warn: true,
+            }
+        }
     }
 }
 
@@ -143,7 +149,7 @@ mod tests {
         let mut refused: Connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
         let (why, warn) = none(choose(&stale, None, &mut refused));
         assert!(warn);
-        assert!(why.contains("unix:///gone"), "{why}");
+        assert!(why.starts_with("rex: can't reach Rex: "), "{why}");
     }
 
     #[test]
