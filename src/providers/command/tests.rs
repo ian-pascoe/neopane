@@ -792,22 +792,12 @@ fn a_command_doesnt_inherit_the_daemons_ignored_signals() {
     }
 }
 
-/// A checked table named `name` giving `caps`, each running `name`, with
-/// attach timeout `secs`.
-fn table(name: &str, caps: &[config::Capability], secs: u64) -> config::Provider {
+/// A checked table named `name` with attach timeout `secs`.
+fn table(name: &str, secs: u64) -> config::Provider {
     config::Provider {
         name: name.into(),
         path: format!("provider().{name}"),
-        capabilities: caps
-            .iter()
-            .map(|&c| {
-                let command = config::check::Command {
-                    argv: vec![name.as_bytes().to_vec()],
-                    timeout: Some(Duration::from_secs(3)),
-                };
-                (c, command)
-            })
-            .collect(),
+        capabilities: Vec::new(),
         attach_timeout: Duration::from_secs(secs),
         protocol: 1,
         context_vars: Vec::new(),
@@ -816,44 +806,30 @@ fn table(name: &str, caps: &[config::Capability], secs: u64) -> config::Provider
 }
 
 #[test]
-fn a_pairs_spec_runs_its_terminal_halfs_open_and_close_with_its_attach_timeout_and_the_rest_from_its_layout_half()
- {
-    use config::Capability as C;
-    let terminal = table("ghostty", &[C::Open, C::Close], 9);
-    let layout = table("aerospace", &[C::PlaceBeside, C::Focus], 2);
-    let pair = config::Choice::Pair(config::Pair {
-        name: "ghostty+aerospace".into(),
-        terminal: Some(terminal.clone()),
-        layout: Some(layout.clone()),
-    });
-    let spec = Spec::of(&pair).unwrap();
-    let ran: Vec<(Capability, &[u8])> = spec
-        .commands
-        .iter()
-        .map(|c| (c.cap, &c.argv[0][..]))
-        .collect();
-    assert_eq!(
-        vec![
-            (Capability::Open, &b"ghostty"[..]),
-            (Capability::Close, b"ghostty"),
-            (Capability::PlaceBeside, b"aerospace"),
-            (Capability::Focus, b"aerospace"),
-        ],
-        ran
-    );
-    assert_eq!(Duration::from_secs(9), spec.attach_timeout);
+fn the_attach_timeout_is_the_terminal_halfs_or_the_tables_else_the_default() {
+    let pair = |terminal: Option<config::Provider>| {
+        config::Choice::Pair(config::Pair {
+            name: "pair".into(),
+            terminal,
+            layout: Some(table("aerospace", 2)),
+        })
+    };
+    let nine = Duration::from_secs(9);
+    assert_eq!(nine, attach_timeout_of(&pair(Some(table("ghostty", 9)))));
+    let default = config::check::ATTACH_TIMEOUT;
+    assert_eq!(default, attach_timeout_of(&pair(None)));
+    let whole = config::Choice::Whole(table("tmux", 9));
+    assert_eq!(nine, attach_timeout_of(&whole));
+    assert_eq!(default, attach_timeout_of(&config::Choice::None));
+}
+
+#[test]
+fn a_runner_has_its_specs_attach_timeout() {
+    let spec = Spec {
+        name: "test".into(),
+        commands: Vec::new(),
+        attach_timeout: Duration::from_secs(9),
+    };
     let p = CommandProvider::new(spec, &[], b"/").unwrap();
     assert_eq!(Duration::from_secs(9), p.attach_timeout());
-
-    // a layout half alone has the default; a whole table its own
-    let alone = config::Choice::Pair(config::Pair {
-        name: "aerospace".into(),
-        terminal: None,
-        layout: Some(layout),
-    });
-    let default = config::check::ATTACH_TIMEOUT;
-    assert_eq!(default, Spec::of(&alone).unwrap().attach_timeout);
-    let whole = Spec::of(&config::Choice::Whole(terminal)).unwrap();
-    assert_eq!(Duration::from_secs(9), whole.attach_timeout);
-    assert_eq!(None, Spec::of(&config::Choice::None));
 }

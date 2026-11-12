@@ -98,68 +98,16 @@ pub(crate) struct Spec {
     pub attach_timeout: Duration,
 }
 
-impl Spec {
-    /// The runner's spec for the pane provider the config chose, or None for
-    /// none or a built-in: a table's every command, or a pair's terminal half's
-    /// `open` and `close` and its layout half's other capabilities, with the
-    /// terminal half's attach timeout.
-    pub(crate) fn of(choice: &config::Choice) -> Option<Spec> {
-        let (name, sides) = match choice {
-            config::Choice::None | config::Choice::Builtin(_) => return None,
-            config::Choice::Whole(p) => (&p.name, [(Some(p), true), (Some(p), false)]),
-            config::Choice::Pair(pair) => (
-                &pair.name,
-                [
-                    (pair.terminal.as_ref(), true),
-                    (pair.layout.as_ref(), false),
-                ],
-            ),
-        };
-        let mut commands = Vec::new();
-        for (side, terminal) in sides {
-            let Some(p) = side else {
-                continue;
-            };
-            for (cap, command) in &p.capabilities {
-                if cap.is_terminal() != terminal {
-                    continue;
-                }
-                let cap = capability_of(*cap);
-                commands.push(CapCommand {
-                    cap,
-                    argv: command.argv.clone(),
-                    timeout: command.timeout.unwrap_or(cap.default_timeout()),
-                    protocol: p.protocol,
-                });
-            }
-        }
-        let attach_timeout = sides[0]
-            .0
-            .map_or(config::check::ATTACH_TIMEOUT, |t| t.attach_timeout);
-        Some(Spec {
-            name: name.clone(),
-            commands,
-            attach_timeout,
-        })
-    }
-}
-
-/// The daemon's capability for one the config names.
-fn capability_of(c: config::Capability) -> Capability {
-    match c {
-        config::Capability::Open => Capability::Open,
-        config::Capability::Close => Capability::Close,
-        config::Capability::Find => Capability::Find,
-        config::Capability::PlaceBeside => Capability::PlaceBeside,
-        config::Capability::Resize => Capability::Resize,
-        config::Capability::Focus => Capability::Focus,
-        config::Capability::FocusDirection => Capability::FocusDirection,
-        config::Capability::ReportLayout => Capability::ReportLayout,
-        config::Capability::Events => Capability::Events,
-        config::Capability::OpenBeside => Capability::OpenBeside,
-        config::Capability::OpenFloat => Capability::OpenFloat,
-        config::Capability::OpenTabPage => Capability::OpenTabPage,
-    }
+/// The attach timeout of the pane provider the config chose, for its
+/// `Spec`: its terminal half's, or a whole table's; the default without one
+/// (#88 decision 15).
+pub(crate) fn attach_timeout_of(choice: &config::Choice) -> Duration {
+    let terminal = match choice {
+        config::Choice::Whole(p) => Some(p),
+        config::Choice::Pair(pair) => pair.terminal.as_ref(),
+        config::Choice::None | config::Choice::Builtin(_) => None,
+    };
+    terminal.map_or(config::check::ATTACH_TIMEOUT, |t| t.attach_timeout)
 }
 
 /// One capability's command.
