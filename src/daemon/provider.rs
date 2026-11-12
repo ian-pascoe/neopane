@@ -306,6 +306,10 @@ pub(crate) enum ProviderEvent {
     },
     /// The terminals' places, as they changed.
     Layout(LiveLayout),
+    /// The terminals' places or focus may have changed: the daemon asks for
+    /// a report, through its layout queue. The command runner's `events`
+    /// tells it for each line.
+    LayoutChanged,
     /// The user focused this terminal.
     Focused(TerminalId),
     /// This terminal closed: only logged for now.

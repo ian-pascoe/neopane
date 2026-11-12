@@ -677,7 +677,7 @@ impl Daemon {
         let report = pane
             .terminal_surface
             .as_ref()
-            .filter(|_| terminal.is_none() || self.reads_layouts_again())
+            .filter(|_| terminal.is_none() || self.reads_after_changes())
             .and_then(|s| s.forwarder.focus_report(bytes));
         if report == Some(FocusReport::In) {
             self.read_layout_again();
@@ -1621,6 +1621,7 @@ impl Daemon {
                     }
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
+                ProviderEvent::LayoutChanged => self.ask_for_report(),
                 ProviderEvent::Focused(t) => self.on_focused(&t, Instant::now())?,
                 // its pane hangs up by itself; ending a requested pane's
                 // wait on it is for later
@@ -1684,9 +1685,10 @@ impl Daemon {
             if self.asks.settles_placement(&step) {
                 log::trace(Point::Placed, 0);
             }
-            // what an act of its own did is read back; a report asked once a
-            // layout act ended, as they go one at a time, sees it already
-            if let Step::Done(ask, _) = &step
+            // what an act of its own did, or a failed or killed one may have
+            // done, is read back; a report asked once a layout act ended, as
+            // they go one at a time, sees it already
+            if let Step::Done(ask, _) | Step::FallBack(ask) = &step
                 && *ask != Ask::ReportLayout
                 && !(ask.capability().is_layout() && self.asks.asked(Capability::ReportLayout))
             {
@@ -1951,7 +1953,7 @@ impl Daemon {
     }
 
     /// Whether the pane provider tells its live layouts and focus unasked.
-    fn tells_layouts(&self) -> bool {
+    fn has_events(&self) -> bool {
         self.provider
             .as_ref()
             .is_some_and(|p| p.seam_ref().capabilities().has(Capability::Events))
@@ -1962,21 +1964,29 @@ impl Daemon {
     /// one waits its turn already, which will see it (#86 decision D5).
     /// Never on a timer.
     fn read_layout_again(&mut self) {
-        if self.reads_layouts_again() && !self.asks.waits(Capability::ReportLayout) {
+        if self.reads_after_changes() {
+            self.ask_for_report();
+        }
+    }
+
+    /// Asks for a report through the layout queue, unless one waits its
+    /// turn already: as `events` says, or for `read_layout_again`.
+    fn ask_for_report(&mut self) {
+        if self.reports_layouts() && !self.asks.waits(Capability::ReportLayout) {
             self.act(Ask::ReportLayout);
         }
     }
 
     /// Whether the pane provider reports layouts but doesn't tell them: it is
     /// asked again after what may move terminals or focus.
-    fn reads_layouts_again(&self) -> bool {
-        self.reports_layouts() && !self.tells_layouts()
+    fn reads_after_changes(&self) -> bool {
+        self.reports_layouts() && !self.has_events()
     }
 
     /// A report came: the live layout, and, from a pane provider that
     /// doesn't tell focus unasked, where focus is.
     fn on_reported(&mut self, l: LiveLayout) -> Result<()> {
-        let current = l.current.clone().filter(|_| !self.tells_layouts());
+        let current = l.current.clone().filter(|_| !self.has_events());
         self.on_live_layout(l)?;
         match current {
             Some(t) => self.on_focused(&t, Instant::now()),
@@ -5137,15 +5147,23 @@ mod tests {
         }
     }
 
+    /// This thread's number, for names of its own: its id's digits.
+    fn thread_number() -> String {
+        format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect()
+    }
+
     /// A file of `sh` a test's command runs, rewritten between its acts.
     struct Script(std::path::PathBuf);
 
     impl Script {
         fn new(tag: &str) -> Script {
             let dir = std::env::temp_dir().join(format!(
-                "{NAME}-{tag}-{}-{:?}",
+                "{NAME}-{tag}-{}-{}",
                 std::process::id(),
-                std::thread::current().id()
+                thread_number()
             ));
             std::fs::create_dir_all(&dir).unwrap();
             Script(dir.join("script"))
@@ -5227,6 +5245,20 @@ mod tests {
         report(&mut fx);
         assert_eq!(Area::Own, area_of(&fx, id));
         assert!(fx.d.live_layout.is_none());
+    }
+
+    #[test]
+    fn an_events_line_whose_report_exits_69_makes_every_pane_its_own_area() {
+        let script = Script::new("events-69");
+        script.set("exit 69");
+        let mut fx = commanded_by(&[
+            (Capability::Events, &["sh", "-c", "echo; exec sleep 30"]),
+            (Capability::ReportLayout, &["sh", script.path()]),
+        ]);
+        fx.d.nvim.ready = true;
+        let id = focus_pane(&mut fx, 1, 1000, Some("t1"));
+        fx.d.panes.by_id_mut(id).unwrap().area = live("w", [0.0, 0.0, 0.5, 1.0]);
+        pump_until(&mut fx, |d| d.panes.by_id(id).unwrap().area == Area::Own);
     }
 
     #[test]
@@ -5338,7 +5370,7 @@ mod tests {
     }
 
     #[test]
-    fn with_events_no_act_resize_or_focus_in_asks_for_a_report() {
+    fn with_events_no_act_resize_focus_in_or_hang_up_asks_for_a_report() {
         let (mut fx, b) = reporting_fixture();
         fake(fx.d()).caps.insert(Capability::Events);
         fx.d().act(Ask::Close {
@@ -5356,7 +5388,35 @@ mod tests {
             )
             .unwrap();
         fx.d().on_read(b, b"\x1b[I", Instant::now()).unwrap();
+        fx.d().pane_gone(b).unwrap();
         assert_eq!(0, reports_asked(&mut fx));
+        // what it says changed is read, through the layout queue
+        fake(fx.d()).push(ProviderEvent::LayoutChanged);
+        fake(fx.d()).push(ProviderEvent::LayoutChanged);
+        fx.d().drain_provider().unwrap();
+        assert_eq!(1, reports_asked(&mut fx));
+    }
+
+    #[test]
+    fn without_events_an_act_that_failed_or_timed_out_reads_the_layout_again() {
+        let (mut fx, _) = reporting_fixture();
+        fx.d().act(Ask::Close {
+            terminal: TerminalId::from("t9"),
+        });
+        answer_last(&mut fx, Outcome::Failed("killed".into()));
+        assert_eq!(1, reports_asked(&mut fx));
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        fx.d().act(Ask::Close {
+            terminal: TerminalId::from("t9"),
+        });
+        let late = Instant::now() + Duration::from_secs(60);
+        let d = fx.d();
+        d.asks.time_out(d.provider.as_mut().unwrap().seam(), late);
+        d.run_steps().unwrap();
+        assert_eq!(2, reports_asked(&mut fx));
     }
 
     #[test]

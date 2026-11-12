@@ -45,7 +45,7 @@ fn terminal(t: &Value, at: &str) -> Result<PlacedTerminal, String> {
         return Err(format!("{at}.terminal: empty"));
     }
     let rect = numbers(t.get("rect"))
-        .ok_or_else(|| format!("{at}.rect: {}", what(t.get("rect"), "not 4 numbers")))?;
+        .ok_or_else(|| format!("{at}.rect: {}", missing_or(t.get("rect"), "not 4 numbers")))?;
     let floating = match t.get("floating") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -91,7 +91,8 @@ fn missing(at: &str, key: &str) -> String {
     format!("{}: missing", path(at, key))
 }
 
-fn what(v: Option<&Value>, wrong: &str) -> String {
+/// Why field `v` is wrong: missing, or as `wrong` says.
+fn missing_or(v: Option<&Value>, wrong: &str) -> String {
     if v.is_none() { "missing" } else { wrong }.to_string()
 }
 

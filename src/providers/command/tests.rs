@@ -463,22 +463,49 @@ fn a_malformed_or_too_long_report_fails_and_exit_69_is_unsupported() {
     assert_eq!(Outcome::Unsupported, outcome(&mut p, Ask::ReportLayout));
 }
 
-/// A layout report naming terminal `x` alone.
-const REPORT_X: &str =
-    r#"echo '{"areas":[{"id":"w","terminals":[{"terminal":"x","rect":[0,0,1,1]}]}]}'"#;
-
-/// A runner whose `events` runs `script` under `sh -c`, and whose
-/// `report_layout` prints `REPORT_X`.
+/// A runner whose `events` runs `script` under `sh -c`.
 fn telling(script: &str) -> CommandProvider {
     runner(
-        &[
-            (Capability::Events, &["sh", "-c", script]),
-            (Capability::ReportLayout, &["sh", "-c", REPORT_X]),
-        ],
+        &[(Capability::Events, &["sh", "-c", script])],
         Duration::from_secs(5),
         &[("PATH", "/usr/bin:/bin")],
         "/",
     )
+}
+
+/// This thread's number, for names of its own: its id's digits.
+fn thread_number() -> String {
+    format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect()
+}
+
+/// A directory of a test's own, named for this process and thread, removed
+/// when dropped.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!(
+            "{}-{tag}-{}-{}",
+            name::NAME,
+            std::process::id(),
+            thread_number()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    fn join(&self, file: &str) -> std::path::PathBuf {
+        self.0.join(file)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// What `p` tells, other than answers, until `enough` says it's enough,
@@ -486,14 +513,16 @@ fn telling(script: &str) -> CommandProvider {
 fn told(p: &mut CommandProvider, enough: impl Fn(&[ProviderEvent]) -> bool) -> Vec<ProviderEvent> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut told = Vec::new();
-    while !enough(&told) {
-        assert!(Instant::now() < deadline, "only told {told:?}");
+    loop {
         while let Some(e) = p.next() {
             told.push(e);
         }
+        if enough(&told) {
+            return told;
+        }
+        assert!(Instant::now() < deadline, "only told {told:?}");
         wait_ready(p, Duration::from_millis(100));
     }
-    told
 }
 
 /// Waits up to `most` for `p`'s loop to be ready, then hands it on.
@@ -512,33 +541,29 @@ fn focused(t: &str) -> ProviderEvent {
     ProviderEvent::Focused(TerminalId::from(t))
 }
 
-fn layouts(told: &[ProviderEvent]) -> usize {
+fn changes(told: &[ProviderEvent]) -> usize {
     told.iter()
-        .filter(|e| matches!(e, ProviderEvent::Layout(_)))
+        .filter(|e| **e == ProviderEvent::LayoutChanged)
         .count()
 }
 
 #[test]
-fn each_events_line_reads_the_layout_again_and_tells_focus_and_closed() {
-    let mut p = telling(
-        r#"sleep 0.2; echo '{"focus":"x","closed":"y","other":1}'; echo again; exec sleep 30"#,
-    );
+fn each_events_line_says_the_layout_changed_after_its_focus_and_closed() {
+    let mut p =
+        telling(r#"echo '{"focus":"x","closed":"y","other":1}'; echo again; exec sleep 30"#);
     assert!(p.capabilities().has(Capability::Events));
-    // read once at its start, then again for the lines
-    let told = told(&mut p, |t| layouts(t) >= 2);
-    let rest: Vec<_> = told
-        .iter()
-        .filter(|e| !matches!(e, ProviderEvent::Layout(_)))
-        .cloned()
-        .collect();
+    // once at its start, as it may have missed changes, then for each line
+    let told = told(&mut p, |t| changes(t) >= 3);
     assert_eq!(
-        vec![focused("x"), ProviderEvent::Closed(TerminalId::from("y"))],
-        rest
+        vec![
+            ProviderEvent::LayoutChanged,
+            focused("x"),
+            ProviderEvent::Closed(TerminalId::from("y")),
+            ProviderEvent::LayoutChanged,
+            ProviderEvent::LayoutChanged,
+        ],
+        told
     );
-    let Some(ProviderEvent::Layout(l)) = told.last() else {
-        panic!("{told:?}");
-    };
-    assert!(l.area_of(&TerminalId::from("x")).is_some());
 }
 
 #[test]
@@ -554,17 +579,13 @@ fn an_events_line_over_64_kib_is_dropped() {
             .any(|e| matches!(e, ProviderEvent::Focused(t) if t.as_str() != "z")),
         "{told:?}"
     );
+    // the start's, and the short line's
+    assert_eq!(2, changes(&told));
 }
 
-#[test]
-fn a_crashing_events_starts_again_after_1_s_then_2_s_and_1_s_after_a_minute_running() {
-    let dir = std::env::temp_dir().join(format!("{}-events-{}", name::NAME, std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let starts = dir.join("starts");
-    let script = format!("echo >> {}; exit 1", starts.display());
-    let argv = ["sh", "-c", script.as_str()];
-    let started = Instant::now();
-    let now = std::rc::Rc::new(std::cell::Cell::new(started));
+/// A runner whose `events` is `argv`, its time told by the returned cell.
+fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Cell<Instant>>) {
+    let now = std::rc::Rc::new(std::cell::Cell::new(Instant::now()));
     let clock = {
         let now = now.clone();
         Box::new(move || now.get())
@@ -579,46 +600,100 @@ fn a_crashing_events_starts_again_after_1_s_then_2_s_and_1_s_after_a_minute_runn
         }],
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
-    let mut p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
-    let count = || {
-        std::fs::read_to_string(&starts)
-            .map(|s| s.lines().count())
-            .unwrap_or(0)
-    };
-    // its end is seen at `at`: when it starts again
-    let ended_at = |p: &mut CommandProvider, at: Instant| {
-        now.set(at);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while p.events_running() {
-            assert!(Instant::now() < deadline, "it doesn't end");
-            wait_ready(p, Duration::from_millis(100));
-        }
-    };
-    let at = |p: &mut CommandProvider, t: Instant| {
-        now.set(t);
-        p.on_ready(RUN_TOKEN);
-        p.events_running()
-    };
-    ended_at(&mut p, started);
-    assert_eq!(1, count());
-    let s = Duration::from_secs(1);
-    let ms = Duration::from_millis(1);
-    assert!(!at(&mut p, started + s - ms));
-    assert!(at(&mut p, started + s));
-    ended_at(&mut p, started + s);
-    assert_eq!(2, count());
-    assert!(!at(&mut p, started + 3 * s - ms));
-    assert!(at(&mut p, started + 3 * s));
-    // a minute running: the wait is 1 s again
-    ended_at(&mut p, started + 63 * s);
-    assert_eq!(3, count());
-    assert!(!at(&mut p, started + 64 * s - ms));
-    assert!(at(&mut p, started + 64 * s));
-    let _ = std::fs::remove_dir_all(&dir);
+    let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
+    (p, now)
+}
+
+/// Waits for `p`'s `events` to end, its end seen at `at`.
+fn ended_at(p: &mut CommandProvider, now: &std::cell::Cell<Instant>, at: Instant) {
+    now.set(at);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while p.events_running() {
+        assert!(Instant::now() < deadline, "it doesn't end");
+        wait_ready(p, Duration::from_millis(100));
+    }
+}
+
+/// Whether `p`'s `events` runs once its loop is handed on at `t`.
+fn running_at(p: &mut CommandProvider, now: &std::cell::Cell<Instant>, t: Instant) -> bool {
+    now.set(t);
+    p.on_ready(RUN_TOKEN);
+    p.events_running()
+}
+
+/// How many lines file `f` has.
+fn lines_in(f: &std::path::Path) -> usize {
+    std::fs::read_to_string(f)
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
 }
 
 #[test]
-fn events_exiting_69_is_unsupported_and_never_starts_again() {
+fn a_crashing_events_starts_again_after_1_s_then_2_s_and_1_s_after_a_minute_running() {
+    let dir = Scratch::new("events");
+    let starts = dir.join("starts");
+    let script = format!("echo >> {}; exit 1", starts.display());
+    let (mut p, now) = events_on_clock(&["sh", "-c", script.as_str()]);
+    let t0 = now.get();
+    let s = Duration::from_secs(1);
+    let ms = Duration::from_millis(1);
+    ended_at(&mut p, &now, t0);
+    assert_eq!(1, lines_in(&starts));
+    assert!(!running_at(&mut p, &now, t0 + s - ms));
+    assert!(running_at(&mut p, &now, t0 + s));
+    ended_at(&mut p, &now, t0 + s);
+    assert_eq!(2, lines_in(&starts));
+    assert!(!running_at(&mut p, &now, t0 + 3 * s - ms));
+    assert!(running_at(&mut p, &now, t0 + 3 * s));
+    // a minute running: the wait is 1 s again
+    ended_at(&mut p, &now, t0 + 63 * s);
+    assert_eq!(3, lines_in(&starts));
+    assert!(!running_at(&mut p, &now, t0 + 64 * s - ms));
+    assert!(running_at(&mut p, &now, t0 + 64 * s));
+}
+
+#[test]
+fn an_events_restart_that_cant_start_waits_longer_and_tries_again() {
+    let dir = Scratch::new("events-restart");
+    let program = dir.join("events");
+    let starts = dir.join("starts");
+    let script = format!("#!/bin/sh\necho >> {}\nexit 1\n", starts.display());
+    let write = || {
+        std::fs::write(&program, &script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write();
+    let (mut p, now) = events_on_clock(&[program.to_str().unwrap()]);
+    let t0 = now.get();
+    let s = Duration::from_secs(1);
+    ended_at(&mut p, &now, t0);
+    std::fs::remove_file(&program).unwrap();
+    // the restart at 1 s can't start: it waits 2 s more
+    assert!(!running_at(&mut p, &now, t0 + s));
+    assert!(p.capabilities().has(Capability::Events));
+    write();
+    assert!(!running_at(
+        &mut p,
+        &now,
+        t0 + 3 * s - Duration::from_millis(1)
+    ));
+    assert!(running_at(&mut p, &now, t0 + 3 * s));
+    ended_at(&mut p, &now, t0 + 3 * s);
+    assert_eq!(2, lines_in(&starts));
+}
+
+#[test]
+fn events_that_cant_start_at_first_or_exit_69_are_unsupported_for_good() {
+    let p = runner(
+        &[(Capability::Events, &["/no/such/program"])],
+        Duration::from_secs(5),
+        &[],
+        "/",
+    );
+    assert!(!p.capabilities().has(Capability::Events));
+    assert!(p.events_run.is_none());
+
     let mut p = telling("exit 69");
     let deadline = Instant::now() + Duration::from_secs(5);
     while p.capabilities().has(Capability::Events) {
@@ -630,9 +705,7 @@ fn events_exiting_69_is_unsupported_and_never_starts_again() {
 
 #[test]
 fn events_dies_with_the_pane_provider() {
-    let dir =
-        std::env::temp_dir().join(format!("{}-events-die-{}", name::NAME, std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("events-die");
     let pid_file = dir.join("pid");
     // a grandchild in its group, as well as itself
     let script = format!("sleep 30 & echo $$ $! > {}; wait", pid_file.display());
@@ -655,7 +728,6 @@ fn events_dies_with_the_pane_provider() {
         assert!(gone.elapsed() < Duration::from_secs(3), "events lives");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

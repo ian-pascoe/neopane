@@ -35,6 +35,26 @@ pub(crate) enum Stdout {
     Lines,
 }
 
+/// What is kept of stdout so far, as its `Stdout` says. A part that went
+/// past its limit is None.
+enum Kept {
+    Null,
+    /// The first line so far, and whether it ended.
+    FirstLine {
+        line: Option<Vec<u8>>,
+        ended: bool,
+    },
+    /// All of it so far.
+    Whole(Option<Vec<u8>>),
+    /// The line being read; the lines ended and not yet taken; and how many
+    /// were dropped as too long, not yet told.
+    Lines {
+        line: Option<Vec<u8>>,
+        ended: Vec<Vec<u8>>,
+        dropped: usize,
+    },
+}
+
 /// What a command is run with.
 pub(crate) struct Start<'a> {
     pub argv: &'a [Vec<u8>],
@@ -48,19 +68,7 @@ pub(crate) struct Run {
     child: Child,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
-    mode: Stdout,
-    /// What is kept of stdout so far: its first line, all of it, or the
-    /// line not yet ended.
-    out: Vec<u8>,
-    /// No more is kept: the first line ended.
-    out_ended: bool,
-    /// Past its limit: the first line or all of it, or the current line,
-    /// which is dropped.
-    out_over: bool,
-    /// Lines ended, not yet taken.
-    lines: Vec<Vec<u8>>,
-    /// Lines dropped as too long, not yet told.
-    lines_dropped: usize,
+    kept: Kept,
     /// Stderr's first `MAX_STDERR` bytes.
     stderr_kept: Vec<u8>,
     stderr_cut: bool,
@@ -125,12 +133,19 @@ impl Run {
             child,
             stdout: stdout_r,
             stderr: Some(stderr_r),
-            mode: start.stdout,
-            out: Vec::new(),
-            out_ended: false,
-            out_over: false,
-            lines: Vec::new(),
-            lines_dropped: 0,
+            kept: match start.stdout {
+                Stdout::Null => Kept::Null,
+                Stdout::FirstLine => Kept::FirstLine {
+                    line: Some(Vec::new()),
+                    ended: false,
+                },
+                Stdout::Whole => Kept::Whole(Some(Vec::new())),
+                Stdout::Lines => Kept::Lines {
+                    line: Some(Vec::new()),
+                    ended: Vec::new(),
+                    dropped: 0,
+                },
+            },
             stderr_kept: Vec::new(),
             stderr_cut: false,
         })
@@ -167,68 +182,56 @@ impl Run {
 
     /// Keeps what `bytes`, read from stdout, add, as its mode says.
     fn keep(&mut self, bytes: &[u8]) {
-        match self.mode {
-            Stdout::Null => {}
-            Stdout::FirstLine => {
-                if self.out_ended || self.out_over {
+        match &mut self.kept {
+            Kept::Null => {}
+            Kept::FirstLine { line, ended } => {
+                if *ended {
                     return;
                 }
-                let (part, ended) = match bytes.iter().position(|&b| b == b'\n') {
+                let (part, end) = match bytes.iter().position(|&b| b == b'\n') {
                     Some(i) => (&bytes[..i], true),
                     None => (bytes, false),
                 };
-                self.keep_upto(part, MAX_LINE);
-                self.out_ended = ended;
+                append(line, part, MAX_LINE);
+                *ended = end;
             }
-            Stdout::Whole => self.keep_upto(bytes, MAX_REPORT),
-            Stdout::Lines => {
+            Kept::Whole(all) => append(all, bytes, MAX_REPORT),
+            Kept::Lines {
+                line,
+                ended,
+                dropped,
+            } => {
                 let mut rest = bytes;
                 while let Some(i) = rest.iter().position(|&b| b == b'\n') {
-                    self.keep_upto(&rest[..i], MAX_LINE);
-                    self.end_line();
+                    append(line, &rest[..i], MAX_LINE);
+                    end_line(line, ended, dropped);
                     rest = &rest[i + 1..];
                 }
-                self.keep_upto(rest, MAX_LINE);
+                append(line, rest, MAX_LINE);
             }
-        }
-    }
-
-    /// Keeps `bytes` unless what is kept goes past `max`, which drops it.
-    fn keep_upto(&mut self, bytes: &[u8], max: usize) {
-        if self.out_over {
-            return;
-        }
-        if self.out.len() + bytes.len() > max {
-            self.out_over = true;
-            self.out = Vec::new();
-            return;
-        }
-        self.out.extend_from_slice(bytes);
-    }
-
-    /// The line being read ended: it is taken, or dropped if too long.
-    fn end_line(&mut self) {
-        if std::mem::take(&mut self.out_over) {
-            self.lines_dropped += 1;
-        } else {
-            self.lines.push(std::mem::take(&mut self.out));
         }
     }
 
     /// Stdout closed: a last line with no end is a line all the same.
     fn stdout_ended(&mut self) {
-        if self.mode == Stdout::Lines && (!self.out.is_empty() || self.out_over) {
-            self.end_line();
+        if let Kept::Lines {
+            line,
+            ended,
+            dropped,
+        } = &mut self.kept
+            && line.as_ref().is_none_or(|l| !l.is_empty())
+        {
+            end_line(line, ended, dropped);
         }
     }
 
     /// The lines read since last taken, and how many were dropped as too
     /// long: `Stdout::Lines`'.
     pub(crate) fn take_lines(&mut self) -> (Vec<Vec<u8>>, usize) {
-        (
-            std::mem::take(&mut self.lines),
-            std::mem::take(&mut self.lines_dropped),
-        )
+        match &mut self.kept {
+            Kept::Lines { ended, dropped, .. } => (std::mem::take(ended), std::mem::take(dropped)),
+            _ => (Vec::new(), 0),
+        }
     }
 
     /// How it ended, if it has: what its pipes held by then is read, and
@@ -247,7 +250,11 @@ impl Run {
         }
         Some(Ended {
             status,
-            out: (!self.out_over).then(|| std::mem::take(&mut self.out)),
+            out: match &mut self.kept {
+                Kept::FirstLine { line, .. } => line.take(),
+                Kept::Whole(all) => all.take(),
+                Kept::Null | Kept::Lines { .. } => None,
+            },
             stderr: std::mem::take(&mut self.stderr_kept),
             stderr_cut: self.stderr_cut,
         })
@@ -263,6 +270,25 @@ impl Run {
         {
             let _ = event_loop.remove(pipe.as_raw_fd());
         }
+    }
+}
+
+/// Adds `bytes` to `kept`, unless that takes it past `max`, which drops it.
+fn append(kept: &mut Option<Vec<u8>>, bytes: &[u8], max: usize) {
+    if kept.as_ref().is_some_and(|k| k.len() + bytes.len() > max) {
+        *kept = None;
+    }
+    if let Some(k) = kept {
+        k.extend_from_slice(bytes);
+    }
+}
+
+/// The line being read ended: it is taken, or counted as dropped if too
+/// long; the next starts empty.
+fn end_line(line: &mut Option<Vec<u8>>, ended: &mut Vec<Vec<u8>>, dropped: &mut usize) {
+    match line.replace(Vec::new()) {
+        Some(l) => ended.push(l),
+        None => *dropped += 1,
     }
 }
 
