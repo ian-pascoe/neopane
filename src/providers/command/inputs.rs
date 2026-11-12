@@ -2,7 +2,7 @@
 //! `<NAME>_*` variables, the same values as whole-word placeholders, and the
 //! environment it runs in.
 
-use crate::daemon::provider::{Ask, Direction};
+use crate::daemon::provider::{Ask, Capability, Direction};
 use crate::name;
 
 /// Every variable the daemon sets for some capability, besides the `ENV_*`
@@ -104,13 +104,21 @@ pub(crate) struct Inputs {
 }
 
 impl Inputs {
+    /// The inputs of a run of `cap` with none of its own, such as
+    /// `report_layout` and `events`, under protocol number `protocol`.
+    pub(crate) fn bare(cap: Capability, protocol: i64) -> Inputs {
+        Inputs {
+            attach: None,
+            vars: vec![
+                (Var::Capability, Some(cap.name().to_string())),
+                (Var::Protocol, Some(protocol.to_string())),
+            ],
+        }
+    }
+
     /// The inputs of `ask`, run under protocol number `protocol`.
     pub(crate) fn of(ask: &Ask, protocol: i64) -> Inputs {
-        let cap = ask.capability();
-        let mut vars: Vec<(Var, Option<String>)> = vec![
-            (Var::Capability, Some(cap.name().to_string())),
-            (Var::Protocol, Some(protocol.to_string())),
-        ];
+        let Inputs { mut vars, .. } = Inputs::bare(ask.capability(), protocol);
         let mut attach = None;
         let mut opened = |words: &[String], title: &str, pane: String| {
             attach = Some(words.to_vec());
@@ -223,7 +231,7 @@ impl Inputs {
                 (Var::Direction, Some(direction(*dir).into())),
                 (Var::Count, n(*count)),
             ]),
-            // `find`'s and `report_layout`'s are #126's and #127's
+            // `find`'s are #127's
             Ask::Find { .. } | Ask::ReportLayout => {}
         }
         Inputs { attach, vars }

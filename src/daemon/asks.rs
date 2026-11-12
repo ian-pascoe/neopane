@@ -62,6 +62,9 @@ pub(crate) struct Asks {
     unsupported: CapabilitySet,
     /// Capabilities whose failure has warned.
     warned: CapabilitySet,
+    /// The capabilities of acts the pane provider answered, whatever came
+    /// of them, not yet taken.
+    ran: Vec<Capability>,
     steps: VecDeque<Step>,
 }
 
@@ -163,6 +166,7 @@ impl Asks {
         };
         let Sent { ask, .. } = self.sent.remove(i);
         let cap = ask.capability();
+        self.ran.push(cap);
         match outcome {
             Outcome::Done(answer) => self.steps.push_back(Step::Done(ask, answer)),
             Outcome::Unsupported => {
@@ -238,6 +242,19 @@ impl Asks {
         }
     }
 
+    /// Whether an act of `cap` waits its turn, not asked yet.
+    pub(crate) fn waits(&self, cap: Capability) -> bool {
+        let queued = self.queue.iter().map(|(_, a)| a);
+        queued
+            .chain(self.focus_waiting.as_ref().map(|(_, a)| a))
+            .any(|a| a.capability() == cap)
+    }
+
+    /// Whether an act of `cap` is asked and unanswered.
+    pub(crate) fn asked(&self, cap: Capability) -> bool {
+        self.sent.iter().any(|s| s.ask.capability() == cap)
+    }
+
     /// Whether a `place_beside` or `resize` is asked or waiting.
     pub(crate) fn placing(&self) -> bool {
         let asked = self.sent.iter().map(|s| &s.ask);
@@ -254,6 +271,12 @@ impl Asks {
             Step::Replaced(_) | Step::Warn(_) => false,
         };
         ends_one && !self.placing()
+    }
+
+    /// The capabilities of the acts answered since last taken: acts that
+    /// ran, unlike those that fell back unasked or timed out.
+    pub(crate) fn take_ran(&mut self) -> Vec<Capability> {
+        std::mem::take(&mut self.ran)
     }
 
     /// The next thing the daemon has to do about an act.

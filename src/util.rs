@@ -48,6 +48,15 @@ pub(crate) unsafe fn default_signals() -> io::Result<()> {
     Ok(())
 }
 
+/// This thread's number, for names of a test's own: its id's digits.
+#[cfg(test)]
+pub(crate) fn thread_number() -> String {
+    format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,6 +10,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
+use super::layout::MAX_REPORT;
 use crate::daemon::event_loop::Loop;
 
 /// The longest terminal id (#93 decision 19).
@@ -17,16 +18,49 @@ pub(crate) const MAX_ID: usize = 4 << 10;
 /// The most of a run's stderr that is kept, for the log.
 pub(crate) const MAX_STDERR: usize = 64 << 10;
 /// The most of stdout's first line kept: past it, the id is too long
-/// whatever its spaces.
-const MAX_LINE: usize = 64 << 10;
+/// whatever its spaces. Also the longest `events` line (#93 decision 19).
+pub(crate) const MAX_LINE: usize = 64 << 10;
+
+/// What becomes of a command's stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stdout {
+    /// `/dev/null`.
+    Null,
+    /// Its first line is kept, up to `MAX_LINE`: the opens'.
+    FirstLine,
+    /// All of it is kept, up to `MAX_REPORT`: `report_layout`'s.
+    Whole,
+    /// Each line is taken as it comes (`take_lines`); longer ones than
+    /// `MAX_LINE` are dropped: `events`'.
+    Lines,
+}
+
+/// What is kept of stdout so far, as its `Stdout` says. A part that went
+/// past its limit is None.
+enum Kept {
+    Null,
+    /// The first line so far, and whether it ended.
+    FirstLine {
+        line: Option<Vec<u8>>,
+        ended: bool,
+    },
+    /// All of it so far.
+    Whole(Option<Vec<u8>>),
+    /// The line being read; the lines ended and not yet taken; and how many
+    /// were dropped as too long, not yet told.
+    Lines {
+        line: Option<Vec<u8>>,
+        ended: Vec<Vec<u8>>,
+        dropped: usize,
+    },
+}
 
 /// What a command is run with.
 pub(crate) struct Start<'a> {
     pub argv: &'a [Vec<u8>],
     pub env: &'a [(Vec<u8>, Vec<u8>)],
     pub cwd: &'a Path,
-    /// Whether its stdout's first line is read: the opens'.
-    pub reads_id: bool,
+    pub stdout: Stdout,
 }
 
 /// A command running, or ended and not yet finished with.
@@ -34,10 +68,7 @@ pub(crate) struct Run {
     child: Child,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
-    /// Stdout's first line so far, up to `MAX_LINE`.
-    line: Vec<u8>,
-    line_ended: bool,
-    line_over: bool,
+    kept: Kept,
     /// Stderr's first `MAX_STDERR` bytes.
     stderr_kept: Vec<u8>,
     stderr_cut: bool,
@@ -47,8 +78,9 @@ pub(crate) struct Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ended {
     pub status: ExitStatus,
-    /// Stdout's first line, untrimmed, or None if it was too long to keep.
-    pub line: Option<Vec<u8>>,
+    /// Stdout's first line, untrimmed, or all of it, as `Stdout` says; None
+    /// if it was too long to keep.
+    pub out: Option<Vec<u8>>,
     pub stderr: Vec<u8>,
     /// Whether stderr went past `MAX_STDERR`.
     pub stderr_cut: bool,
@@ -63,11 +95,11 @@ impl Run {
             .split_first()
             .ok_or_else(|| io::Error::other("an empty argv"))?;
         let (stderr_r, stderr_w) = io::pipe()?;
-        let (stdout_r, stdout) = if start.reads_id {
+        let (stdout_r, stdout) = if start.stdout == Stdout::Null {
+            (None, Stdio::null())
+        } else {
             let (r, w) = io::pipe()?;
             (Some(r), Stdio::from(w))
-        } else {
-            (None, Stdio::null())
         };
         let mut command = Command::new(OsStr::from_bytes(program));
         command
@@ -101,9 +133,19 @@ impl Run {
             child,
             stdout: stdout_r,
             stderr: Some(stderr_r),
-            line: Vec::new(),
-            line_ended: false,
-            line_over: false,
+            kept: match start.stdout {
+                Stdout::Null => Kept::Null,
+                Stdout::FirstLine => Kept::FirstLine {
+                    line: Some(Vec::new()),
+                    ended: false,
+                },
+                Stdout::Whole => Kept::Whole(Some(Vec::new())),
+                Stdout::Lines => Kept::Lines {
+                    line: Some(Vec::new()),
+                    ended: Vec::new(),
+                    dropped: 0,
+                },
+            },
             stderr_kept: Vec::new(),
             stderr_cut: false,
         })
@@ -116,31 +158,19 @@ impl Run {
 
     /// Reads what its pipes have now. A pipe that ended leaves `event_loop`.
     pub(crate) fn read(&mut self, event_loop: &Loop) {
+        let mut stdout = self.stdout.take();
+        let open = stdout.is_some();
+        drain(&mut stdout, event_loop, |bytes| self.keep(bytes));
+        self.stdout = stdout;
+        if open && self.stdout.is_none() {
+            self.stdout_ended();
+        }
         let Run {
-            stdout,
             stderr,
-            line,
-            line_ended,
-            line_over,
             stderr_kept,
             stderr_cut,
             ..
         } = self;
-        drain(stdout, event_loop, |bytes| {
-            if *line_ended || *line_over {
-                return;
-            }
-            let (part, ended) = match bytes.iter().position(|&b| b == b'\n') {
-                Some(i) => (&bytes[..i], true),
-                None => (bytes, false),
-            };
-            line.extend_from_slice(part);
-            *line_ended = ended;
-            if line.len() > MAX_LINE {
-                *line_over = true;
-                line.clear();
-            }
-        });
         drain(stderr, event_loop, |bytes| {
             let room = MAX_STDERR - stderr_kept.len();
             if bytes.len() > room {
@@ -150,11 +180,68 @@ impl Run {
         });
     }
 
+    /// Keeps what `bytes`, read from stdout, add, as its mode says.
+    fn keep(&mut self, bytes: &[u8]) {
+        match &mut self.kept {
+            Kept::Null => {}
+            Kept::FirstLine { line, ended } => {
+                if *ended {
+                    return;
+                }
+                let (part, end) = match bytes.iter().position(|&b| b == b'\n') {
+                    Some(i) => (&bytes[..i], true),
+                    None => (bytes, false),
+                };
+                append(line, part, MAX_LINE);
+                *ended = end;
+            }
+            Kept::Whole(all) => append(all, bytes, MAX_REPORT),
+            Kept::Lines {
+                line,
+                ended,
+                dropped,
+            } => {
+                let mut rest = bytes;
+                while let Some(i) = rest.iter().position(|&b| b == b'\n') {
+                    append(line, &rest[..i], MAX_LINE);
+                    end_line(line, ended, dropped);
+                    rest = &rest[i + 1..];
+                }
+                append(line, rest, MAX_LINE);
+            }
+        }
+    }
+
+    /// Stdout closed: a last line with no end is a line all the same.
+    fn stdout_ended(&mut self) {
+        if let Kept::Lines {
+            line,
+            ended,
+            dropped,
+        } = &mut self.kept
+            && line.as_ref().is_none_or(|l| !l.is_empty())
+        {
+            end_line(line, ended, dropped);
+        }
+    }
+
+    /// The lines read since last taken, and how many were dropped as too
+    /// long: `Stdout::Lines`'.
+    pub(crate) fn take_lines(&mut self) -> (Vec<Vec<u8>>, usize) {
+        match &mut self.kept {
+            Kept::Lines { ended, dropped, .. } => (std::mem::take(ended), std::mem::take(dropped)),
+            _ => (Vec::new(), 0),
+        }
+    }
+
     /// How it ended, if it has: what its pipes held by then is read, and
     /// they close, though something it started may still hold them.
     pub(crate) fn ended(&mut self, event_loop: &Loop) -> Option<Ended> {
         let status = self.child.try_wait().ok()??;
         self.read(event_loop);
+        if self.stdout.is_some() {
+            self.stdout_ended();
+        }
         for pipe in [self.stdout.take(), self.stderr.take()]
             .into_iter()
             .flatten()
@@ -163,7 +250,11 @@ impl Run {
         }
         Some(Ended {
             status,
-            line: (!self.line_over).then(|| std::mem::take(&mut self.line)),
+            out: match &mut self.kept {
+                Kept::FirstLine { line, .. } => line.take(),
+                Kept::Whole(all) => all.take(),
+                Kept::Null | Kept::Lines { .. } => None,
+            },
             stderr: std::mem::take(&mut self.stderr_kept),
             stderr_cut: self.stderr_cut,
         })
@@ -179,6 +270,25 @@ impl Run {
         {
             let _ = event_loop.remove(pipe.as_raw_fd());
         }
+    }
+}
+
+/// Adds `bytes` to `kept`, unless that takes it past `max`, which drops it.
+fn append(kept: &mut Option<Vec<u8>>, bytes: &[u8], max: usize) {
+    if kept.as_ref().is_some_and(|k| k.len() + bytes.len() > max) {
+        *kept = None;
+    }
+    if let Some(k) = kept {
+        k.extend_from_slice(bytes);
+    }
+}
+
+/// The line being read ended: it is taken, or counted as dropped if too
+/// long; the next starts empty.
+fn end_line(line: &mut Option<Vec<u8>>, ended: &mut Vec<Vec<u8>>, dropped: &mut usize) {
+    match line.replace(Vec::new()) {
+        Some(l) => ended.push(l),
+        None => *dropped += 1,
     }
 }
 
@@ -240,7 +350,7 @@ mod tests {
             argv: &argv,
             env: &env,
             cwd: Path::new("/"),
-            reads_id: true,
+            stdout: Stdout::FirstLine,
         };
         let mut run = Run::start(&start, &event_loop, 1).unwrap();
         // the loop is never waited on: `ended` reaps it by itself
@@ -253,6 +363,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert_eq!(Some(3), ended.status.code());
-        assert_eq!(Some(b"id".to_vec()), ended.line);
+        assert_eq!(Some(b"id".to_vec()), ended.out);
     }
 }
