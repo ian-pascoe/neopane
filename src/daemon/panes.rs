@@ -6,13 +6,13 @@
 //! Each lookup has a `_mut` twin.
 
 use super::event_loop::Loop;
-use super::pane::{NeovimWindowHandle, Pane};
+use super::pane::{NeovimWindowHandle, Pane, SelfAttach};
 use crate::attach::{Ending, PaneId, PaneIdRegistry};
 use crate::screen::float_groups::Group;
 
 pub(crate) struct Panes {
     pub list: Vec<Pane>,
-    /// Never reused, so a stale token can't reach a newer pane. 0 is the startup pane.
+    /// Never reused, so a stale token can't reach a newer pane.
     pub next_id: u32,
     /// The pane id of every requested pane, minted as it is added: good for
     /// one attach until its pane goes.
@@ -30,21 +30,45 @@ impl Default for Panes {
 }
 
 impl Panes {
-    /// Hangs up every pane still open, its attach ending as `ending` says.
-    /// (Dropping `Panes` does the same, as stopped.)
-    pub(crate) fn deinit(&mut self, ending: Ending) {
+    /// Hangs up every pane still open, its attach ending as `ending` says,
+    /// with Neovim's `exit` status if Neovim quit. (Dropping `Panes` does
+    /// the same, as stopped.)
+    pub(crate) fn deinit(&mut self, ending: Ending, exit: Option<u8>) {
         for mut p in self.list.drain(..) {
             if p.closing.is_none() {
                 p.closing = Some(super::pane::Close::Shutdown);
             }
-            p.deinit(ending);
+            p.deinit(ending, exit);
         }
     }
 
-    /// Adds a pane that already has its id, such as the startup pane.
+    /// Adds a pane that already has its id.
     pub(crate) fn add(&mut self, pane: Pane) -> &mut Pane {
         self.list.push(pane);
         self.list.last_mut().unwrap()
+    }
+
+    /// Adds a self-attached pane for `attach`, with the next id.
+    pub(crate) fn add_self_attached(&mut self, attach: SelfAttach) -> &mut Pane {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.add(Pane::self_attached(id, attach))
+    }
+
+    /// The self-attached pane still waiting for a window to show, if any.
+    pub(crate) fn self_attached_awaiting_window(&self) -> Option<&Pane> {
+        self.list.iter().find(|p| {
+            p.is_self_attached()
+                && p.layer.is_none()
+                && p.neovim_window_handle.is_none()
+                && p.terminal_surface.is_some()
+        })
+    }
+
+    /// `self_attached_awaiting_window`, to change.
+    pub(crate) fn self_attached_awaiting_window_mut(&mut self) -> Option<&mut Pane> {
+        let id = self.self_attached_awaiting_window()?.id;
+        self.by_id_mut(id)
     }
 
     /// Adds a pane for `win`, with the next id and a new pane id.
@@ -80,7 +104,7 @@ impl Panes {
             self.ids.expire(id);
         }
         pane.unregister_from(event_loop);
-        pane.deinit(Ending::Closed);
+        pane.deinit(Ending::Closed, None);
     }
 
     /// The pane whose helper's hello names `id`.
@@ -130,7 +154,7 @@ impl Panes {
 
 impl Drop for Panes {
     fn drop(&mut self) {
-        self.deinit(Ending::Stopped);
+        self.deinit(Ending::Stopped, None);
     }
 }
 
@@ -220,7 +244,7 @@ mod tests {
 
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
-        panes.deinit(Ending::Stopped);
+        panes.deinit(Ending::Stopped, None);
         assert!(panes.list.is_empty());
         // the helper is told the daemon stopped, then hung up on
         let said = crate::daemon::attach_conn::read_all_frames(&helper);
@@ -235,7 +259,10 @@ mod tests {
     #[test]
     fn dropping_panes_hangs_up_their_terminals() {
         let mut panes = Panes::default();
-        panes.add(Pane::startup(None, Surface::for_test(80, 24)));
+        panes.add_self_attached(SelfAttach {
+            surface: Surface::for_test(80, 24),
+            terminal: None,
+        });
         drop(panes);
     }
 }

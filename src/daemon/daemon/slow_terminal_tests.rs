@@ -174,7 +174,7 @@ impl Drop for Emulator {
 }
 
 /// A daemon over a real Neovim and a pane provider that answers nothing, with the
-/// startup pane (`panes[0]`) and a pane for a split beside it (`panes[1]`).
+/// self-attached pane (`panes[0]`) and a pane for a split beside it (`panes[1]`).
 struct Rig {
     /// Dropped first: its panes are hung up while the emulators still read.
     d: Daemon,
@@ -194,8 +194,13 @@ impl Drop for Rig {
     }
 }
 
+/// The daemon's ids for the rig's panes: the self-attached pane's, and the
+/// split's.
+const FIRST: u32 = 1;
+const SPLIT: u32 = 2;
+
 /// A relayed pane's socket buffers, as small as a pty's, so a frame of the
-/// startup pane is more than they hold.
+/// self-attached pane is more than they hold.
 const SMALL: i32 = 4096;
 
 impl Rig {
@@ -222,7 +227,7 @@ impl Rig {
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
 
-        // the startup pane: big, so a frame of it is bigger than a pty, or
+        // the self-attached pane: big, so a frame of it is bigger than a pty, or
         // a socket made small, holds
         let (socket0, helper0) = UnixStream::pair().unwrap();
         let mut helper_ends = Vec::new();
@@ -242,8 +247,11 @@ impl Rig {
                 (surface, Emulator::relayed(pane))
             }
         };
-        let startup = Pane::startup(Some(TerminalId::from(TERMINAL)), surface0);
-        d.start(startup).unwrap();
+        d.start(&mut Some(SelfAttach {
+            surface: surface0,
+            terminal: Some(TerminalId::from(TERMINAL)),
+        }))
+        .unwrap();
 
         // one per rig: the tests run side by side
         static RIGS: AtomicU32 = AtomicU32::new(0);
@@ -265,9 +273,9 @@ impl Rig {
         // a split: Neovim's new window asks for a pane, whose helper connects
         // as its terminal would run it
         rig.lua("vim.cmd('vsplit | enew')");
-        rig.pump(|r| r.d.panes.by_id(1).is_some());
+        rig.pump(|r| r.d.panes.by_id(SPLIT).is_some());
         let helper = UnixStream::connect(&rig.sock).unwrap();
-        let id = rig.d.panes.by_id(1).unwrap().attach_id.unwrap();
+        let id = rig.d.panes.by_id(SPLIT).unwrap().attach_id.unwrap();
         let emulator = match transport {
             Transport::Fd => {
                 let hello = attach_conn::requested_hello(id, attach_conn::test_terminal(100, 30));
@@ -288,8 +296,8 @@ impl Rig {
         rig.d.accept(&server).unwrap();
         if transport == Transport::Relay {
             // its hello, which the emulator sends as it reads
-            rig.pump(|r| r.d.panes.by_id(1).unwrap().terminal_surface.is_some());
-            relay::shrink(&rig.surface(1).helper_socket, SMALL).unwrap();
+            rig.pump(|r| r.d.panes.by_id(SPLIT).unwrap().terminal_surface.is_some());
+            relay::shrink(&rig.surface(SPLIT).helper_socket, SMALL).unwrap();
         }
         rig.pump(|r| !r.panes[1].seen().is_empty());
         Some(rig)
@@ -375,9 +383,9 @@ fn a_pane_nobody_reads_doesnt_stop_another_pane_or_its_input(transport: Transpor
         return;
     };
     rig.panes[0].held.store(true, Ordering::SeqCst);
-    rig.churn(0, 10);
+    rig.churn(FIRST, 10);
     // its output backed up: a daemon that waited for it would stall
-    assert!(!rig.surface(0).backlog.is_empty(), "nothing backed up");
+    assert!(!rig.surface(FIRST).backlog.is_empty(), "nothing backed up");
     rig.panes[1].type_text("ihello");
     rig.pump(|r| r.panes[1].seen().contains("hello"));
     // (had it stalled, its emulator would have let it go on, to end the test)
@@ -422,13 +430,13 @@ fn a_pane_whose_frames_were_dropped_is_drawn_in_full_once_it_reads_again(transpo
     let Some(mut rig) = Rig::start(transport) else {
         return;
     };
-    rig.surface(0).backlog.cap = 16 * 1024;
+    rig.surface(FIRST).backlog.cap = 16 * 1024;
     let msg_rows = rig.d.msg_rows;
     // the window's text, over its status line
-    let rows = rig.surface(0).window_size(msg_rows)[1] - 1;
+    let rows = rig.surface(FIRST).window_size(msg_rows)[1] - 1;
     rig.panes[0].held.store(true, Ordering::SeqCst);
     let before = rig.panes[0].seen_len();
-    rig.churn(0, 10);
+    rig.churn(FIRST, 10);
     rig.panes[0].held.store(false, Ordering::SeqCst);
     // the second row has `A`s in the last of them only
     let second = churned_row(1, 200);
@@ -459,11 +467,11 @@ fn a_pane_nobody_reads_closes_without_stopping_the_others(transport: Transport) 
         return;
     };
     rig.panes[1].held.store(true, Ordering::SeqCst);
-    rig.churn(1, 20);
-    assert!(!rig.surface(1).backlog.is_empty(), "nothing backed up");
-    let win = rig.win(1);
+    rig.churn(SPLIT, 20);
+    assert!(!rig.surface(SPLIT).backlog.is_empty(), "nothing backed up");
+    let win = rig.win(SPLIT);
     rig.lua(&format!("vim.api.nvim_win_close({win}, true)"));
-    rig.pump(|r| r.d.panes.by_id(1).is_none());
+    rig.pump(|r| r.d.panes.by_id(SPLIT).is_none());
     let before = rig.panes[0].seen_len();
     rig.panes[0].type_text("ihello");
     rig.pump(|r| r.panes[0].seen_from(before).contains("hello"));

@@ -26,7 +26,7 @@ use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
-use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing};
+use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing, SelfAttach};
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, TerminalId};
@@ -103,6 +103,9 @@ pub(crate) struct Daemon {
     escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
+    /// Neovim's exit status, once it has quit and exited: the self-attached
+    /// panes' helpers exit with it.
+    pub quit_status: Option<u8>,
     /// The acts asked of the pane provider, or waiting to be.
     pub asks: Asks,
     /// When the ask timer is set to fire, if it is.
@@ -183,9 +186,6 @@ impl Token {
 
 // the fixed tokens must stay below the pane tokens
 const _: () = assert!((Token::FocusInTimer as usize) < pane::TOKEN_BASE);
-
-/// The id `Pane::startup` gives the pane neorex was run in.
-const STARTUP_PANE_ID: u32 = 0;
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -273,7 +273,7 @@ impl Drop for Daemon {
             Some(StopReason::PaneGone) => Ending::Closed,
             None => Ending::Failed,
         };
-        self.panes.deinit(ending);
+        self.panes.deinit(ending, self.quit_status);
         log::flush_traces();
     }
 }
@@ -309,6 +309,7 @@ impl Daemon {
             area_timer_due: None,
             escape_timer_due: None,
             stopped: None,
+            quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
             focus: ProviderFocus::default(),
@@ -320,23 +321,39 @@ impl Daemon {
         }
     }
 
-    /// Adds the launcher's pane, already connected, and starts talking to
-    /// Neovim and the pane provider.
-    pub(crate) fn start(&mut self, launch_pane: Pane) -> Result<()> {
+    /// Takes the `first` self-attach, already accepted, as a pane, and
+    /// starts talking to Neovim, sized to it, and the pane provider. On a
+    /// failure, `first` is given back, for its attach to end with why.
+    pub(crate) fn start(&mut self, first: &mut Option<SelfAttach>) -> Result<()> {
         // only ever called on startup
         debug_assert!(self.panes.list.is_empty());
 
-        let pane = self.panes.add(launch_pane);
+        let attach = first.take().expect("the first self-attach is taken once");
+        let id = self.panes.add_self_attached(attach).id;
+        let started = self.start_with(id);
+        if started.is_err() {
+            let pane = self.panes.list.pop().expect("the pane just added");
+            pane.unregister_from(&self.event_loop);
+            *first = pane.into_self_attach();
+        }
+        started
+    }
+
+    /// `start`, once pane `id` is added.
+    fn start_with(&mut self, id: u32) -> Result<()> {
+        let pane = self.panes.by_id_mut(id).unwrap();
         pane.register_with(&self.event_loop)?;
+        // no requested pane: its own area until a live layout places it,
+        // drawn and fitted as before there was any
+        pane.area = Area::Own;
         let view = &pane.terminal_surface.as_ref().unwrap().view;
         let (cols, rows) = (view.cols, view.rows);
-        self.nvim.attach_ui(cols, rows)?;
+        self.nvim
+            .attach_ui(cols, rows)
+            .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
         if let Some(r) = self.rex() {
             r.session.attach()?;
         }
-        // no requested pane: its own area until a live layout places it,
-        // drawn and fitted as before there was any
-        self.panes.by_id_mut(STARTUP_PANE_ID).unwrap().area = Area::Own;
         Ok(())
     }
 
@@ -350,7 +367,8 @@ impl Daemon {
                 if Token::of(e.token) == Some(Token::HelperListener) {
                     helper_waiting = true;
                 }
-                self.handle(e)?;
+                let handled = self.handle(e);
+                self.unless_nvim_gone(handled)?;
                 if self.stopped.is_some() {
                     break;
                 }
@@ -363,10 +381,26 @@ impl Daemon {
                 log_warn!("{NAME} daemon: a pane failed: {err}");
             }
             if self.stopped.is_none() {
-                self.after_batch()?;
+                let done = self.after_batch();
+                self.unless_nvim_gone(done)?;
             }
         }
         Ok(self.stopped.unwrap())
+    }
+
+    /// `result`, unless it failed as Neovim's stdin had closed: Neovim is
+    /// gone, or going, as when `:q` exits after its last redraw and the
+    /// answer to that can't be written. That ends the loop as Neovim
+    /// exiting, for its status to be waited for, rather than as a failure.
+    fn unless_nvim_gone(&mut self, result: Result<()>) -> Result<()> {
+        match result {
+            Err(_) if self.nvim.client.is_closed() => {
+                log_info!("{NAME} daemon: Neovim closed its stdin");
+                self.stop(StopReason::NvimExited);
+                Ok(())
+            }
+            r => r,
+        }
     }
 
     /// Ends `run` once the current event is handled.
@@ -1053,9 +1087,11 @@ impl Daemon {
         if let Some(e) = err {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
-            let size = self
-                .geometry()
-                .window_size(self.panes.by_id(STARTUP_PANE_ID).unwrap());
+            // the first window is the self-attached pane's (#83)
+            let Some(first) = self.panes.self_attached_awaiting_window() else {
+                return Ok(());
+            };
+            let size = self.geometry().window_size(first);
             let mut result = result;
             let chan = windows::parse_channel(&mut result)?;
             self.nvim.setup_req = windows::setup(&mut self.nvim.client, chan, size[0], size[1]);
@@ -1063,8 +1099,8 @@ impl Daemon {
         } else if id == self.nvim.setup_req {
             let mut result = result;
             let wins = windows::parse_setup(&mut result)?;
-            if let Some(launch) = self.panes.by_id_mut(STARTUP_PANE_ID) {
-                launch.neovim_window_handle = Some(wins[0]);
+            if let Some(first) = self.panes.self_attached_awaiting_window_mut() {
+                first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
             // its window is in its pane now: the editor can span the Rex window
@@ -2275,10 +2311,11 @@ impl Daemon {
         }
     }
 
-    /// The pane showing Neovim's current window; before setup, the launcher's.
+    /// The pane showing Neovim's current window; before setup, the
+    /// self-attached pane waiting for the first window.
     fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
-            return self.panes.by_id(STARTUP_PANE_ID);
+            return self.panes.self_attached_awaiting_window();
         }
         self.panes.by_win(self.nvim.current_win)
     }
@@ -2380,7 +2417,7 @@ fn observe_window(
         };
     };
     // a self-attached pane is never moved
-    if p.closing.is_some() || p.attach_id.is_none() {
+    if p.closing.is_some() || p.is_self_attached() {
         return WindowState::Skipped;
     }
     if p.terminal.is_none() {
@@ -3557,11 +3594,33 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_pane_is_its_own_area_until_a_live_layout_places_it() {
+    fn a_neovim_gone_before_its_last_message_is_answered_ends_the_loop_as_it_exiting() {
+        // what `:q` can do: Neovim's last message, here a request, comes
+        // with its stdin already closed, so the answer can't be written
+        let mut fx = fixture();
+        let address = Address::new("nvim-gone");
+        let fd = fx.d.nvim.client.read_fd();
+        fx.d.event_loop
+            .add_read(fd, Token::NvimChannel as usize)
+            .unwrap();
+        // [0, 1, "x", []]
+        fx.nvim_end
+            .write_all(&[0x94, 0x00, 0x01, 0xa1, b'x', 0x90])
+            .unwrap();
+        drop(fx.nvim_end);
+        assert_eq!(StopReason::NvimExited, fx.d.run(&address.server).unwrap());
+        assert!(fx.d.nvim.client.is_closed());
+    }
+
+    #[test]
+    fn a_self_attached_pane_is_its_own_area_until_a_live_layout_places_it() {
         let mut fx = TablineFixture::init();
         let s = fx.surface(80, 24);
         fx.d()
-            .start(Pane::startup(Some(TerminalId::from("t0")), s))
+            .start(&mut Some(SelfAttach {
+                surface: s,
+                terminal: Some(TerminalId::from("t0")),
+            }))
             .unwrap();
         // no wait for a report: a tabline pane, the screen its size
         let d = fx.d();
@@ -3645,9 +3704,14 @@ mod tests {
     fn with_no_pane_provider_each_pane_is_its_own_area_with_its_own_tabline() {
         let mut fx = TablineFixture::on(with_provider(None));
         let s = fx.surface(80, 24);
-        fx.d().start(Pane::startup(None, s)).unwrap();
+        fx.d()
+            .start(&mut Some(SelfAttach {
+                surface: s,
+                terminal: None,
+            }))
+            .unwrap();
         fx.d().nvim.ready = true;
-        let other = fx.add(1, 60, Area::Unreported);
+        let other = fx.add(2, 60, Area::Unreported);
         fx.d().wait_for_report(other, Instant::now()).unwrap();
         let d = fx.d();
         for p in &d.panes.list {

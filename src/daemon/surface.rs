@@ -93,7 +93,11 @@ impl Surface {
     /// terminal. The helper then undoes what the daemon wrote and restores
     /// the terminal.
     pub(crate) fn destroy(self: Box<Surface>, ending: Ending, message: &str) {
-        let end = End::ending(ending, message, false);
+        self.end_with(End::ending(ending, message, false));
+    }
+
+    /// `destroy`, telling the helper `end`.
+    pub(crate) fn end_with(self: Box<Surface>, end: End) {
         self.io.end(&self.helper_socket, &self.backlog, end);
         // the terminal's fd and the helper socket are closed as `self` drops
     }
