@@ -193,6 +193,7 @@ impl Daemon {
             .and_then(|p| p.seam_ref().unlaid_size());
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.terminal_surface = Some(surface);
+        pane.attach_due = None;
         pane.register_with(&self.event_loop)?;
         if pane.awaiting_size {
             let v = &pane.terminal_surface.as_ref().unwrap().view;
@@ -223,8 +224,10 @@ impl Daemon {
 
     /// Refuses a requested pane's terminal with `z`. Unless the pane is no
     /// longer wanted or its id unknown, Neovim shows a warning. A pane still
-    /// waiting for its terminal, `failed`, gives up on it and closes its
-    /// Rex block.
+    /// waiting for its terminal, `failed`, is given up. Its terminal refused
+    /// for its version, the binary at the daemon's exe path is another than
+    /// it runs: until that file changes again, new windows are drawn in their
+    /// origin panes, which warns once (#91 decision 24).
     fn refuse_requested(
         &mut self,
         stream: UnixStream,
@@ -232,11 +235,19 @@ impl Daemon {
         failed: Option<(u32, PaneId)>,
     ) -> Result<()> {
         let reason = z.as_refusal();
+        let ours = failed.is_some() && reason == Some(Refusal::Version);
         let quiet = matches!(
             reason,
             Some(Refusal::PaneExpired | Refusal::PaneUnknown | Refusal::Stopping)
-        );
-        let line = format!("a pane's terminal was refused: {}", z.message);
+        ) || (ours && self.version_refused.is_some());
+        let mut line = format!("a pane's terminal was refused: {}", z.message);
+        if ours && self.version_refused.is_none() {
+            self.version_refused = Some(ExeStamp::of(&self.exe));
+            line += &format!(
+                "; new windows are drawn in their origin panes until {} changes",
+                self.exe
+            );
+        }
         if quiet {
             log_info!("{NAME} daemon: {line}");
         } else {
@@ -244,15 +255,8 @@ impl Daemon {
             self.warn_in_nvim(&format!("{NAME}: {line}"));
         }
         attach_conn::refuse(stream, z);
-        if let Some((id, pane)) = failed {
-            self.panes.ids.expire(&pane);
-            let p = self.panes.by_id_mut(id).unwrap();
-            p.closing = Some(Close::RequestFailed);
-            if let Some(t) = p.terminal.clone() {
-                self.act(asks::close(t));
-            }
-            self.reconcile()?;
-            self.draw()?;
+        if let Some((id, _)) = failed {
+            self.give_up(id)?;
         }
         self.nvim.client.flush()?;
         Ok(())

@@ -354,4 +354,11 @@ pub(crate) trait PaneProvider {
     /// The variables a self-attached terminal must share with the choosing
     /// attach to be in its reach.
     fn context_vars(&self) -> &[&str];
+
+    /// How long a terminal it opened has to attach, from its open being
+    /// done, before its window is drawn in its origin pane (#88 decision
+    /// 15). The daemon cuts it to `MAX_TIMEOUT`.
+    fn attach_timeout(&self) -> Duration {
+        crate::config::check::ATTACH_TIMEOUT
+    }
 }
