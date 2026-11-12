@@ -45,6 +45,27 @@ impl Dir {
             Dir::Column => Axis::Rows,
         }
     }
+
+    /// The row or column a move runs along, and whether it goes forward
+    /// (right or down) in it.
+    fn of_move(dir: Direction) -> (Dir, bool) {
+        match dir {
+            Direction::Left => (Dir::Row, false),
+            Direction::Right => (Dir::Row, true),
+            Direction::Up => (Dir::Column, false),
+            Direction::Down => (Dir::Column, true),
+        }
+    }
+}
+
+impl Axis {
+    /// Cell `at`'s (col, row) place along it.
+    fn of(self, at: [u32; 2]) -> u32 {
+        match self {
+            Axis::Cols => at[0],
+            Axis::Rows => at[1],
+        }
+    }
 }
 
 /// The options that decide where space goes.
@@ -100,6 +121,16 @@ pub(crate) struct Placed {
 pub(crate) struct Laid {
     pub wins: Vec<Placed>,
     pub separators: Vec<Separator>,
+}
+
+impl Placed {
+    /// Where it ends along `axis`: the column or row past it.
+    fn end(&self, axis: Axis) -> u32 {
+        match axis {
+            Axis::Cols => self.col + self.cols,
+            Axis::Rows => self.row + self.rows,
+        }
+    }
 }
 
 impl Laid {
@@ -359,12 +390,7 @@ impl PaneLayout {
         let Some(mut path) = path_to(&self.root, from) else {
             return (from, count);
         };
-        let (along, forward) = match dir {
-            Direction::Left => (Dir::Row, false),
-            Direction::Right => (Dir::Row, true),
-            Direction::Up => (Dir::Column, false),
-            Direction::Down => (Dir::Column, true),
-        };
+        let (along, forward) = Dir::of_move(dir);
         let laid = self.lay_out(area, from);
         let mut win = from;
         for done in 0..count {
@@ -482,19 +508,12 @@ fn level_with(kids: &[Kid], dir: Dir, laid: &Laid, at: [u32; 2]) -> usize {
         let end = wins
             .iter()
             .filter_map(|&w| laid.of(w))
-            .map(|p| match dir {
-                Dir::Row => p.col + p.cols,
-                Dir::Column => p.row + p.rows,
-            })
+            .map(|p| p.end(dir.axis()))
             .max();
         let Some(end) = end else {
             continue;
         };
-        let at = match dir {
-            Dir::Row => at[0],
-            Dir::Column => at[1],
-        };
-        if at < end {
+        if dir.axis().of(at) < end {
             return i;
         }
         last = i;

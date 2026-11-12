@@ -75,8 +75,9 @@ pub(crate) struct Forwarder {
     pub targets_len: u8,
     /// The windows of a pane layout as drawn, below the tabline, each without
     /// a statusline neorex draws: mouse events under the floats go to the one
-    /// under them, and off them (on a separator, say) nowhere. Empty for a
-    /// pane showing one window, which `grid` takes them all for.
+    /// under them; off them (on a separator, say) nowhere, but below them all,
+    /// on the messages, to `grid`. Empty for a pane showing one window, which
+    /// `grid` takes them all for.
     pub windows: Vec<Target>,
     /// The float or window a button went down on: its drags and release go
     /// there too.
@@ -110,7 +111,8 @@ impl Default for Forwarder {
     }
 }
 
-/// A float's grid and where it's drawn, in terminal cells.
+/// A float, or rows of a window of a pane layout, as drawn: its grid, and
+/// where it's drawn, in terminal cells below the tabline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Target {
     pub grid: u32,
@@ -118,6 +120,9 @@ pub(crate) struct Target {
     pub col: i32,
     pub width: u32,
     pub height: u32,
+    /// The grid row its top row shows: 0 but for a window's last row
+    /// showing its statusline under rows cut for want of room.
+    pub grid_row: u32,
 }
 
 pub(crate) const MAX_TARGETS: usize = 16;
@@ -150,10 +155,9 @@ impl Forwarder {
         self.targets_len = n as u8;
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_windows(&mut self, windows: &[Target]) {
+    pub(crate) fn set_windows(&mut self, windows: impl IntoIterator<Item = Target>) {
         self.windows.clear();
-        self.windows.extend_from_slice(windows);
+        self.windows.extend(windows);
     }
 
     /// The grid a mouse event lands on, and where on it; None off every
@@ -197,7 +201,9 @@ impl Forwarder {
             self.grab = None;
         }
         let Some(t) = hit else {
-            if !self.windows.is_empty() {
+            // between windows, not below them all
+            let bottom = self.windows.iter().map(|t| t.row + t.height as i32).max();
+            if bottom.is_some_and(|b| i32::from(m.row) < b) {
                 return None;
             }
             return Some(Route {
@@ -208,7 +214,7 @@ impl Forwarder {
         };
         Some(Route {
             grid: t.grid,
-            row: (m.row as i64 - t.row as i64).clamp(0, u16::MAX as i64) as u16,
+            row: (m.row as i64 - t.row as i64 + t.grid_row as i64).clamp(0, u16::MAX as i64) as u16,
             col: (m.col as i64 - t.col as i64).clamp(0, u16::MAX as i64) as u16,
         })
     }
@@ -620,6 +626,7 @@ mod tests {
                 col: 1,
                 width: 10,
                 height: 5,
+                ..Target::default()
             },
             // above the first
             Target {
@@ -628,6 +635,7 @@ mod tests {
                 col: 2,
                 width: 3,
                 height: 1,
+                ..Target::default()
             },
         ]);
         let off = f
@@ -663,7 +671,9 @@ mod tests {
     #[test]
     fn mouse_events_in_a_pane_layout_go_to_the_window_under_them_and_off_them_nowhere() {
         // two windows side by side under the tabline, a separator at column
-        // 5, and the left one's last row a statusline of neorex's
+        // 5, and the messages below: the left one's last row a statusline of
+        // neorex's; the right one cut to 4 rows, its last its statusline,
+        // its grid's row 7
         let mut f = Forwarder {
             grid: 2,
             tabline_rows: 1,
@@ -671,25 +681,31 @@ mod tests {
         };
         let left = Target {
             grid: 2,
-            row: 0,
-            col: 0,
             width: 5,
             height: 3,
+            ..Target::default()
         };
         let right = Target {
             grid: 3,
-            row: 0,
             col: 6,
             width: 4,
-            height: 4,
+            height: 3,
+            ..Target::default()
         };
-        f.set_windows(&[left, right]);
+        let right_statusline = Target {
+            row: 3,
+            height: 1,
+            grid_row: 7,
+            ..right
+        };
+        f.set_windows([left, right, right_statusline]);
         f.set_targets(&[Target {
             grid: 9,
             row: 3,
             col: 7,
             width: 2,
             height: 1,
+            ..Target::default()
         }]);
         let press = |f: &mut Forwarder, row, col| {
             let at = f.route(mouse(MouseButton::Left, MouseAction::Press, row, col));
@@ -702,6 +718,10 @@ mod tests {
         assert_eq!(None, press(&mut f, 2, 5));
         assert_eq!(None, press(&mut f, 4, 1));
         assert_eq!(None, f.grab);
+        // the statusline of the window cut short: its grid's last row
+        assert_eq!(Some((3, 7, 3)), press(&mut f, 4, 9));
+        // the messages, below them all: the current window's grid, as with one
+        assert_eq!(Some((2, 4, 3)), press(&mut f, 5, 3));
         // a float over a window first, the tabline as ever
         assert_eq!(Some((9, 0, 1)), press(&mut f, 4, 8));
         assert_eq!(Some((1, 0, 5)), press(&mut f, 0, 5));
@@ -712,7 +732,7 @@ mod tests {
         f.route(mouse(MouseButton::Left, MouseAction::Release, 1, 7));
         assert_eq!(None, f.grab);
         // one window again: its grid takes them all
-        f.set_windows(&[]);
+        f.set_windows([]);
         assert_eq!(Some((2, 1, 5)), press(&mut f, 2, 5));
     }
 
@@ -730,6 +750,7 @@ mod tests {
             col: 0,
             width: 5,
             height: 1,
+            ..Target::default()
         }]);
         let tab = f
             .route(mouse(MouseButton::Left, MouseAction::Press, 0, 3))

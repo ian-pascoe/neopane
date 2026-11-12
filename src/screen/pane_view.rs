@@ -975,6 +975,49 @@ fn shown_row(g: &Grid, s: &Shown, i: u32) -> Option<u32> {
     (i < g.height).then_some(i)
 }
 
+/// A run of a rect's rows showing its grid's rows in order, as `shown_row`
+/// draws them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Run {
+    /// Its first row, of the rect.
+    pub row: u32,
+    pub rows: u32,
+    /// The grid row its first row shows.
+    pub grid_row: u32,
+}
+
+/// The runs of rect `s`'s rows that show rows of grid `g`: its first rows,
+/// and the grid's last in the rect's last row when it is cut short. A
+/// statusline neorex draws is in none. Rows past the grid's end, not yet
+/// resized, are in the first.
+pub(crate) fn runs(g: &Grid, s: &Shown) -> impl Iterator<Item = Run> {
+    let cut = s.statusline.is_none() && g.height > s.rows;
+    let top = if s.statusline.is_some() || cut {
+        s.rows.saturating_sub(1)
+    } else {
+        s.rows
+    };
+    let first = (top > 0).then_some(Run {
+        row: 0,
+        rows: top,
+        grid_row: 0,
+    });
+    let last = (cut && s.rows > 0).then_some(Run {
+        row: s.rows - 1,
+        rows: 1,
+        grid_row: g.height - 1,
+    });
+    first.into_iter().chain(last)
+}
+
+/// The row of rect `s` that shows row `row` of grid `g`; for a row it
+/// hides, its last row of text.
+pub(crate) fn rect_row(g: &Grid, s: &Shown, row: u32) -> u32 {
+    (0..s.rows)
+        .find(|&i| shown_row(g, s, i) == Some(row))
+        .unwrap_or_else(|| row.min(s.rows.saturating_sub(2)))
+}
+
 fn screen_rows(grids: &Grids) -> u32 {
     grids.get(1).map_or(0, |g| g.height)
 }
@@ -1155,6 +1198,56 @@ fn blend_cell(style: &mut Style, cell: Cell, line: &[Cell], i: usize) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_runs_and_rect_rows_follow_the_rows_it_shows() {
+        let grid = |h| {
+            let mut g = Grid::default();
+            g.resize(10, h);
+            g
+        };
+        let rect = |rows, statusline| Shown {
+            grid: 2,
+            rows,
+            cols: 10,
+            statusline,
+            ..Shown::default()
+        };
+        let run = |row, rows, grid_row| Run {
+            row,
+            rows,
+            grid_row,
+        };
+        // whole: one run
+        let (g, s) = (grid(5), rect(5, None));
+        assert_eq!(vec![run(0, 5, 0)], runs(&g, &s).collect::<Vec<_>>());
+        assert_eq!(3, rect_row(&g, &s, 3));
+        // cut to 3 rows: two of text, then its statusline, the grid's last
+        let (g, s) = (grid(8), rect(3, None));
+        assert_eq!(
+            vec![run(0, 2, 0), run(2, 1, 7)],
+            runs(&g, &s).collect::<Vec<_>>()
+        );
+        assert_eq!(2, rect_row(&g, &s, 7));
+        // a hidden row: the last of text
+        assert_eq!(1, rect_row(&g, &s, 5));
+        // with a statusline of ours: its rows less that one
+        let (g, s) = (grid(4), rect(5, Some(9)));
+        assert_eq!(vec![run(0, 4, 0)], runs(&g, &s).collect::<Vec<_>>());
+        // squeezed to that statusline: no run
+        let (g, s) = (grid(4), rect(1, Some(9)));
+        assert_eq!(0, runs(&g, &s).count());
+        assert_eq!(0, rect_row(&g, &s, 2));
+        // every run maps as it is drawn
+        for (h, rows, sl) in [(5, 5, None), (8, 3, None), (4, 5, Some(9)), (9, 1, None)] {
+            let (g, s) = (grid(h), rect(rows, sl));
+            for r in runs(&g, &s) {
+                for i in 0..r.rows {
+                    assert_eq!(Some(r.grid_row + i), shown_row(&g, &s, r.row + i));
+                }
+            }
+        }
+    }
 
     fn contains(hay: &[u8], needle: &str) -> bool {
         find(hay, needle.as_bytes()).is_some()
