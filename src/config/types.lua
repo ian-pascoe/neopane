@@ -11,12 +11,12 @@
 ---table used whole, or a pair.
 ---@alias __NAME__.Choice nil|false|"rex"|__NAME__.Provider|__NAME__.Pair
 
----The terminal choosing the pane provider. Plain tables: editing them changes
----nothing outside this run.
+---The choosing attach: the self-attach the pane provider is being chosen for.
+---Plain tables: editing them changes nothing outside this run.
 ---@class __NAME__.Attach
----@field env table<string, string> Its environment, raw bytes
----@field cwd string Its working directory, absolute
----@field tty string Its tty, such as "/dev/ttys014"; "" when it has none
+---@field env table<string, string> Its terminal's environment, raw bytes
+---@field cwd string Its terminal's working directory, absolute
+---@field tty string Its terminal's tty, such as "/dev/ttys014"; "" when it has none
 ---@field pid integer The attaching helper's pid
 ---@field daemon string The daemon's name
 ---@field provider? string The hint: --provider, else $__UPPER___PROVIDER; nil without one
@@ -46,17 +46,17 @@
 
 ---Timeouts in seconds, over 0 and at most 60. `events` has none.
 ---@class __NAME__.Timeouts
----@field open? number Default 5
----@field close? number Default 2
----@field find? number Default 3, its own retries included
----@field place_beside? number Default 2
----@field resize? number Default 2
----@field focus? number Default 2
----@field focus_direction? number Default 2
----@field report_layout? number Default 1
----@field open_beside? number Default 5
----@field open_float? number Default 5
----@field open_tab_page? number Default 5
+---@field open? number|false Default 5
+---@field close? number|false Default 2
+---@field find? number|false Default 3, its own retries included
+---@field place_beside? number|false Default 2
+---@field resize? number|false Default 2
+---@field focus? number|false Default 2
+---@field focus_direction? number|false Default 2
+---@field report_layout? number|false Default 1
+---@field open_beside? number|false Default 5
+---@field open_float? number|false Default 5
+---@field open_tab_page? number|false Default 5
 
 ---A terminal provider and a layout provider, or one side alone. The terminal
 ---side gives open, close and the attach timeout; the layout side the layout

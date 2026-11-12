@@ -11,7 +11,8 @@ use crate::attach::{PaneId, Transport};
 use crate::daemon::dir::valid_name;
 use crate::name::NAME;
 
-pub use help::{PANE_PROVIDER_PROTOCOLS, debug_help, help, repo_url, version};
+pub use crate::name::repo_url;
+pub use help::{PANE_PROVIDER_PROTOCOLS, debug_help, help, version};
 pub use nvim_args::Reading;
 
 /// What the command line asks for.
@@ -305,6 +306,10 @@ fn provider_show(words: &[OsString]) -> Result<Command, UsageError> {
         [] => Ok(Command::ProviderShow(None)),
         [name] if !name.as_encoded_bytes().starts_with(b"-") => Ok(Command::ProviderShow(Some(
             name.to_string_lossy().into_owned(),
+        ))),
+        [option] => Err(UsageError(format!(
+            "provider show: unknown option {}",
+            option.to_string_lossy()
         ))),
         _ => Err(UsageError("provider show takes at most one NAME".into())),
     }

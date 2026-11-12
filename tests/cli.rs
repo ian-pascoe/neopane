@@ -445,19 +445,27 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
 
 #[test]
 fn provider_types_writes_both_files_then_keeps_luarc() {
+    /// Removed when dropped, even on failure.
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let home = std::env::temp_dir().join(format!("{NAME}-cli-types-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     // as the working directory reads it, symlinks resolved
-    let home = home.canonicalize().unwrap();
+    let tmp = Temp(home.canonicalize().unwrap());
+    let home = &tmp.0;
     let config_var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
     let types = |args: &[&str], config: Option<&str>| {
         let mut command = Command::new(exe());
         command
             .args(["provider", "types"])
             .args(args)
-            .current_dir(&home)
-            .env("HOME", &home)
+            .current_dir(home)
+            .env("HOME", home)
             .env_remove("XDG_CONFIG_HOME")
             .stdin(Stdio::null());
         match config {
@@ -520,5 +528,4 @@ fn provider_types_writes_both_files_then_keeps_luarc() {
         "{}",
         text(&out.stdout)
     );
-    std::fs::remove_dir_all(&home).unwrap();
 }

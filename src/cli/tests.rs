@@ -259,7 +259,11 @@ fn provider_show_takes_one_name_at_most() {
         parsed("provider show rex"),
         Ok(Command::ProviderShow(Some("rex".into())))
     );
-    for line in ["provider show a b", "provider show --x"] {
+    assert_eq!(
+        refused("provider show --x"),
+        "provider show: unknown option --x"
+    );
+    for line in ["provider show a b", "provider show rex --x"] {
         assert_eq!(
             refused(line),
             "provider show takes at most one NAME",

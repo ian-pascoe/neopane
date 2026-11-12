@@ -33,11 +33,36 @@ pub enum Choice {
     Pair(Pair),
 }
 
-/// The keys of the table the config file returns.
-pub const FILE_KEYS: [&str; 1] = ["provider"];
+/// The only key of the table the config file returns.
+pub const PROVIDER_KEY: &str = "provider";
 
-/// The keys of a pair: its `name`, then its two sides.
-pub const PAIR_KEYS: [&str; 3] = ["name", "terminal", "layout"];
+/// A key of a pair (#93 decision 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairKey {
+    Name,
+    Terminal,
+    Layout,
+}
+
+impl PairKey {
+    pub const ALL: [PairKey; 3] = [PairKey::Name, PairKey::Terminal, PairKey::Layout];
+    /// The keys that make a table a pair, or one side alone.
+    pub const SIDES: [PairKey; 2] = [PairKey::Terminal, PairKey::Layout];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PairKey::Name => "name",
+            PairKey::Terminal => "terminal",
+            PairKey::Layout => "layout",
+        }
+    }
+
+    pub fn from_name(name: &[u8]) -> Option<PairKey> {
+        PairKey::ALL
+            .into_iter()
+            .find(|k| k.name().as_bytes() == name)
+    }
+}
 
 /// The built-in pane providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,8 +73,10 @@ pub enum Builtin {
 impl Builtin {
     pub const ALL: [Builtin; 1] = [Builtin::Rex];
 
-    pub fn from_name(name: &str) -> Option<Builtin> {
-        Builtin::ALL.into_iter().find(|b| b.name() == name)
+    pub fn from_name(name: &[u8]) -> Option<Builtin> {
+        Builtin::ALL
+            .into_iter()
+            .find(|b| b.name().as_bytes() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -457,7 +484,7 @@ impl Checker {
         let mut found = false;
         let mut has_provider = false;
         for (k, v) in pairs {
-            if !is_key(k, FILE_KEYS[0]) {
+            if !is_key(k, PROVIDER_KEY) {
                 self.warn(format!(
                     "{file} returned an unknown key, {}; only provider is read",
                     key_shown(k)
@@ -503,14 +530,16 @@ impl Checker {
         };
         match tree {
             Tree::Nil | Tree::Bool(false) => Some(Choice::None),
-            Tree::String(s) if s == b"rex" => Some(Choice::Builtin(Builtin::Rex)),
-            Tree::String(s) => {
-                self.error(format!(
-                    "{ROOT} returned {}; the only built-in name is \"rex\"",
-                    quoted(s)
-                ));
-                None
-            }
+            Tree::String(s) => match Builtin::from_name(s) {
+                Some(builtin) => Some(Choice::Builtin(builtin)),
+                None => {
+                    self.error(format!(
+                        "{ROOT} returned {}; the only built-in name is \"rex\"",
+                        quoted(s)
+                    ));
+                    None
+                }
+            },
             Tree::Marker(super::tree::Marker::Function) => {
                 self.error(format!(
                     "{ROOT} returned a function (call it: return f(attach), not f)"
@@ -541,16 +570,16 @@ impl Checker {
                 continue;
             }
             let path = format!("{ROOT}{}", segment(k));
-            let key = key_bytes(k);
-            match key {
-                Some(b"terminal") | Some(b"layout") => {
-                    let (i, role) = if key == Some(b"terminal") {
+            let key = key_bytes(k).unwrap_or(b"");
+            match PairKey::from_name(key) {
+                Some(side @ (PairKey::Terminal | PairKey::Layout)) => {
+                    let (i, role) = if side == PairKey::Terminal {
                         (0, Role::Terminal)
                     } else {
                         (1, Role::Layout)
                     };
                     match v {
-                        Tree::String(s) if s == b"rex" => {
+                        Tree::String(s) if Builtin::from_name(s) == Some(Builtin::Rex) => {
                             self.error(format!("{path}: rex is never half of a pair"));
                             ok = false;
                         }
@@ -571,18 +600,18 @@ impl Checker {
                         }
                     }
                 }
-                Some(b"name") => match self.name(v, &path) {
+                Some(PairKey::Name) => match self.name(v, &path) {
                     Some(n) => name = Some(n),
                     None => ok = false,
                 },
-                Some(k) if Capability::from_name(k).is_some() => {
+                None if Capability::from_name(key).is_some() => {
                     self.error(format!(
                         "{path}: a capability can't sit beside terminal and layout; move it \
                          into one of them"
                     ));
                     ok = false;
                 }
-                _ => self.warn(format!("{path}: unknown field; ignored")),
+                None => self.warn(format!("{path}: unknown field; ignored")),
             }
         }
         if !ok {
@@ -942,9 +971,9 @@ impl Checker {
 /// Whether `tree` is a pair or one side alone: it has `terminal` or
 /// `layout`, other than `false`.
 fn is_pair(tree: &Tree) -> bool {
-    PAIR_KEYS[1..]
+    PairKey::SIDES
         .iter()
-        .any(|k| !matches!(tree.get(k), None | Some(Tree::Bool(false))))
+        .any(|k| !matches!(tree.get(k.name()), None | Some(Tree::Bool(false))))
 }
 
 /// The highest protocol number both the table and the daemon speak.

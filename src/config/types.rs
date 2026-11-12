@@ -3,11 +3,9 @@
 //! so lua-language-server knows the API when the config's directory is the
 //! editor's workspace folder.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::cli::repo_url;
-use crate::name::{NAME, upper};
+use crate::name::{NAME, repo_url, upper};
 
 /// The `---@meta` file, with its name, build and `<NAME>` filled in.
 pub fn meta(build: &str) -> String {
@@ -25,28 +23,6 @@ pub const LUARC: &str = "{\n  \
     \"$schema\": \"https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json\",\n  \
     \"runtime.version\": \"Lua 5.1\"\n}\n";
 
-/// `$<NAME>_CONFIG`'s name.
-pub fn config_var() -> String {
-    format!("{}_CONFIG", upper())
-}
-
-/// The config file, as the daemon finds it (#94 decisions 33 and 39):
-/// `$<NAME>_CONFIG`, made absolute against `cwd`, else
-/// `$XDG_CONFIG_HOME/<name>/init.lua`, else `~/.config/<name>/init.lua`.
-/// Empty variables count as unset, and a relative `XDG_CONFIG_HOME` is
-/// ignored. None without `HOME`.
-pub fn default_file(var: impl Fn(&str) -> Option<OsString>, cwd: &Path) -> Option<PathBuf> {
-    let set = |name: &str| var(name).filter(|v| !v.is_empty());
-    if let Some(file) = set(&config_var()) {
-        return Some(cwd.join(file));
-    }
-    let base = match set("XDG_CONFIG_HOME").map(PathBuf::from) {
-        Some(xdg) if xdg.is_absolute() => xdg,
-        _ => PathBuf::from(set("HOME")?).join(".config"),
-    };
-    Some(base.join(NAME).join("init.lua"))
-}
-
 /// What `types` did: its stdout lines, then the error that stopped it, if
 /// any (exit 1).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -56,7 +32,7 @@ pub struct Report {
 }
 
 /// Writes the types for the config `file` (`--config`, else
-/// [`default_file`]), into its directory, which it creates. `home` shortens
+/// [`super::default_file`]), into its directory, which it creates. `home` shortens
 /// paths as `~`.
 pub fn write(file: &Path, build: &str, home: Option<&Path>) -> Report {
     let mut report = Report::default();
@@ -92,10 +68,12 @@ pub fn write(file: &Path, build: &str, home: Option<&Path>) -> Report {
         }
     }
     if file.symlink_metadata().is_err() {
+        // `no init.lua yet` (#94 decision 35), unless --config or
+        // $<NAME>_CONFIG names a file called otherwise
         let name = file
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "init.lua".into());
+            .unwrap_or_else(|| super::FILE_NAME.into());
         report.out += &format!(
             "no {name} yet: see {}/blob/main/docs/config.md\n",
             repo_url()

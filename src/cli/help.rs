@@ -4,15 +4,10 @@
 use crate::attach::{ATTACH_PROTOCOL_VERSION, build};
 use crate::daemon::dir::tmpdir_var;
 use crate::log;
-use crate::name::NAME;
+use crate::name::{NAME, repo_url};
 
 /// The pane provider protocol versions this build speaks.
 pub const PANE_PROVIDER_PROTOCOLS: &[i64] = &[1];
-
-/// The project's home, named after the tool.
-pub fn repo_url() -> String {
-    format!("https://github.com/ian-pascoe/{NAME}")
-}
 
 /// `--version`: the hello's `build`, then the protocols it speaks.
 pub fn version() -> String {

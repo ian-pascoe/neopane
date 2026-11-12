@@ -42,7 +42,7 @@ pub fn show(name: Option<&str>, build: &str) -> Result<String, String> {
         return Ok(listing());
     };
     let names: Vec<&str> = Builtin::ALL.iter().map(|b| b.name()).collect();
-    let builtin = Builtin::from_name(name).ok_or_else(|| {
+    let builtin = Builtin::from_name(name.as_bytes()).ok_or_else(|| {
         format!(
             "no built-in pane provider named {name} (built-ins: {})",
             names.join(", ")

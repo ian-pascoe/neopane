@@ -172,7 +172,7 @@ fn the_environment_is_the_attachs_less_the_name_and_the_per_act_variables() {
         up.clone(),
         format!("{up}_TITLE"),
         format!("{up}_ENV_TMUX_PANE"),
-        format!("{up}_CONFIG"),
+        crate::config::config_var(),
     );
     let pane_x = format!("{up}_PANE_X");
     let mut p = runner(

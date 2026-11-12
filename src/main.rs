@@ -53,7 +53,7 @@ fn run(command: Command) -> Result<ExitCode> {
                 Err(why) => Ok(fail(&why)),
             }
         }
-        Command::ProviderTypes { config } => Ok(provider_types(config)),
+        Command::ProviderTypes { config } => Ok(write_types(config)),
         // started by the launcher, not by people
         Command::Daemon {
             name,
@@ -92,12 +92,12 @@ fn run(command: Command) -> Result<ExitCode> {
 
 /// `provider types`: the file is `--config`, else where the daemon would
 /// look, made absolute against the working directory.
-fn provider_types(config: Option<OsString>) -> ExitCode {
+fn write_types(config: Option<OsString>) -> ExitCode {
     use neorex::config::types;
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let file = match config {
         Some(file) => Some(cwd.join(file)),
-        None => types::default_file(|name| std::env::var_os(name), &cwd),
+        None => neorex::config::default_file(|name| std::env::var_os(name), &cwd),
     };
     let Some(file) = file else {
         return fail("can't find the config directory: HOME isn't set");

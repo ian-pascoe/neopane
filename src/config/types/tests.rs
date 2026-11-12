@@ -1,18 +1,29 @@
 use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
 
 use super::*;
-use crate::config::check::{Capability, FILE_KEYS, PAIR_KEYS, Setting};
+use crate::config::check::{ATTACH_TIMEOUT, Builtin, Capability, PROVIDER_KEY, PairKey, Setting};
 use crate::config::wire::{Attach, Request};
+use crate::config::{config_var, default_file};
 
-/// A fresh directory for one test.
-fn temp(test: &str) -> PathBuf {
+/// A fresh directory for one test, removed when dropped, even on failure.
+struct Temp(PathBuf);
+
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp(test: &str) -> Temp {
     let dir = std::env::temp_dir().join(format!("{NAME}-types-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Temp(dir)
 }
 
 #[test]
@@ -59,9 +70,10 @@ fn the_default_file_follows_the_daemons_order() {
 
 #[test]
 fn types_writes_both_files_then_keeps_luarc() {
-    let home = temp("write");
+    let tmp = temp("write");
+    let home = &tmp.0;
     let file = home.join("cfg/init.lua");
-    let report = write(&file, "B 1", Some(&home));
+    let report = write(&file, "B 1", Some(home));
     let url = format!("{}/blob/main/docs/config.md", repo_url());
     assert_eq!(
         report,
@@ -98,12 +110,12 @@ fn types_writes_both_files_then_keeps_luarc() {
             .unwrap()
             .starts_with("---@meta\n-- B 2\n")
     );
-    std::fs::remove_dir_all(&home).unwrap();
 }
 
 #[test]
 fn a_write_error_stops_it() {
-    let dir = temp("error");
+    let tmp = temp("error");
+    let dir = &tmp.0;
     // types can't be a directory: a file is in the way
     std::fs::write(dir.join("types"), "").unwrap();
     let report = write(&dir.join("init.lua"), "B", None);
@@ -113,7 +125,6 @@ fn a_write_error_stops_it() {
         error.starts_with(&format!("can't write {}", dir.join("types").display())),
         "{error}"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -208,8 +219,48 @@ fn the_meta_file_keeps_in_step_with_the_checker() {
         .filter(|c| c.default_timeout().is_some())
         .map(Capability::name);
     assert_eq!(fields(&meta, "Timeouts"), set(timed));
-    assert_eq!(fields(&meta, "Pair"), set(PAIR_KEYS));
-    assert_eq!(fields(&meta, "Config"), set(FILE_KEYS));
+    assert_eq!(fields(&meta, "Pair"), set(PairKey::ALL.map(PairKey::name)));
+    assert_eq!(fields(&meta, "Config"), set([PROVIDER_KEY]));
+    // the built-in names a choice can be
+    let alias = meta
+        .lines()
+        .find_map(|l| l.strip_prefix(&format!("---@alias {NAME}.Choice ")))
+        .unwrap();
+    let names = alias
+        .split('|')
+        .filter_map(|t| t.strip_prefix('"')?.strip_suffix('"'));
+    assert_eq!(set(names), set(Builtin::ALL.map(Builtin::name)));
+}
+
+/// The text after `---@field <field>`'s type in `class`.
+fn field_doc<'m>(meta: &'m str, class: &str, field: &str) -> &'m str {
+    let header = format!("---@class {NAME}.{class}");
+    let at = meta.find(&header).unwrap();
+    meta[at..]
+        .lines()
+        .find_map(|l| {
+            let rest = l.strip_prefix("---@field ")?;
+            let (name, rest) = rest.split_once(' ')?;
+            (name.trim_end_matches('?') == field).then(|| rest.split_once(' ').unwrap().1)
+        })
+        .unwrap_or_else(|| panic!("no {class}.{field}"))
+}
+
+/// The defaults the meta file states are the checker's.
+#[test]
+fn the_meta_files_defaults_are_the_checkers() {
+    let meta = meta("B");
+    for cap in Capability::ALL {
+        let Some(default) = cap.default_timeout() else {
+            continue;
+        };
+        let doc = field_doc(&meta, "Timeouts", cap.name());
+        let want = format!("Default {}", default.as_secs());
+        assert!(doc.starts_with(&want), "{}: {doc}", cap.name());
+    }
+    let doc = field_doc(&meta, "Provider", Setting::AttachTimeout.name());
+    let want = format!("default {},", ATTACH_TIMEOUT.as_secs());
+    assert!(doc.contains(&want), "{doc}");
 }
 
 /// The meta file lists what the child gives the config: the global's
