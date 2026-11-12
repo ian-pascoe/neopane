@@ -3952,6 +3952,25 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_page_whose_label_counts_no_window_doesnt_end_neovim() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        h.sync("vim.o.showtabline = 2");
+        h.focus_pane(a);
+        h.focus_pane(c);
+        // the first tab page's windows take no focus: its label counts none,
+        // and Neovim's last current window of it, `a`, sits in the second
+        h.sync(&format!(
+            "for _, w in ipairs({{ {a}, {b} }}) do vim.api.nvim_win_set_config(w, {{ focusable = false }}) end\n\
+             vim.cmd.redrawtabline()"
+        ));
+        h.barrier();
+        h.until_tabline_starts_with(" ");
+    }
+
+    #[test]
     fn gt_goes_to_the_tab_pages_last_current_window_its_own_even_if_that_closed() {
         let Some(mut h) = Harness::start() else {
             return;

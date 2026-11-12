@@ -89,8 +89,10 @@ end
 
 -- Each tab page's own windows: tab page -> { wins = the windows its label
 -- counts, in Neovim's order, label = the one it names }. That's its own
--- window focused last, else its first shown one, else the one Neovim
--- remembers for it.
+-- window focused last, else its first shown one, else the first Neovim
+-- keeps in it. Not the one Neovim remembers for it: that may be an external
+-- window sitting in another tab page, and nvim_tabpage_get_win() ends Neovim
+-- then (0.12.6).
 local function own_windows()
   local by_tab = {}
   for _, tab in ipairs(api.nvim_list_tabpages()) do by_tab[tab] = { wins = {} } end
@@ -109,7 +111,7 @@ local function own_windows()
         end
       end
     end
-    mine.label = label or api.nvim_tabpage_get_win(tab)
+    mine.label = label or api.nvim_tabpage_list_wins(tab)[1]
   end
   return by_tab
 end
