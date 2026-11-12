@@ -367,7 +367,8 @@ impl Daemon {
                 if Token::of(e.token) == Some(Token::HelperListener) {
                     helper_waiting = true;
                 }
-                self.handle(e)?;
+                let handled = self.handle(e);
+                self.unless_nvim_gone(handled)?;
                 if self.stopped.is_some() {
                     break;
                 }
@@ -380,10 +381,26 @@ impl Daemon {
                 log_warn!("{NAME} daemon: a pane failed: {err}");
             }
             if self.stopped.is_none() {
-                self.after_batch()?;
+                let done = self.after_batch();
+                self.unless_nvim_gone(done)?;
             }
         }
         Ok(self.stopped.unwrap())
+    }
+
+    /// `result`, unless it failed as Neovim's stdin had closed: Neovim is
+    /// gone, or going, as when `:q` exits after its last redraw and the
+    /// answer to that can't be written. That ends the loop as Neovim
+    /// exiting, for its status to be waited for, rather than as a failure.
+    fn unless_nvim_gone(&mut self, result: Result<()>) -> Result<()> {
+        match result {
+            Err(_) if self.nvim.client.is_closed() => {
+                log_info!("{NAME} daemon: Neovim closed its stdin");
+                self.stop(StopReason::NvimExited);
+                Ok(())
+            }
+            r => r,
+        }
     }
 
     /// Ends `run` once the current event is handled.
@@ -3574,6 +3591,25 @@ mod tests {
         // no terminal was moved for it
         assert!(fake(fx.d()).asks.is_empty());
         assert_eq!(vec![Some(60), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn a_neovim_gone_before_its_last_message_is_answered_ends_the_loop_as_it_exiting() {
+        // what `:q` can do: Neovim's last message, here a request, comes
+        // with its stdin already closed, so the answer can't be written
+        let mut fx = fixture();
+        let address = Address::new("nvim-gone");
+        let fd = fx.d.nvim.client.read_fd();
+        fx.d.event_loop
+            .add_read(fd, Token::NvimChannel as usize)
+            .unwrap();
+        // [0, 1, "x", []]
+        fx.nvim_end
+            .write_all(&[0x94, 0x00, 0x01, 0xa1, b'x', 0x90])
+            .unwrap();
+        drop(fx.nvim_end);
+        assert_eq!(StopReason::NvimExited, fx.d.run(&address.server).unwrap());
+        assert!(fx.d.nvim.client.is_closed());
     }
 
     #[test]

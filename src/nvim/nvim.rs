@@ -146,7 +146,8 @@ impl Nvim {
         &mut self.out
     }
 
-    /// Sends everything written so far.
+    /// Sends everything written so far. Neovim's stdin found closed stays
+    /// closed (`is_closed`).
     pub fn flush(&mut self) -> io::Result<()> {
         if self.out.is_empty() {
             return Ok(());
@@ -156,7 +157,16 @@ impl Nvim {
             None => Err(io::Error::from(io::ErrorKind::BrokenPipe)),
         };
         self.out.clear();
+        if matches!(&result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe) {
+            self.writer = None;
+        }
         result
+    }
+
+    /// Whether Neovim's stdin is closed: a write found it so, as Neovim
+    /// exited or is exiting.
+    pub fn is_closed(&self) -> bool {
+        self.writer.is_none()
     }
 
     /// Answers request `id` with an error, so Neovim stops waiting, and flushes.

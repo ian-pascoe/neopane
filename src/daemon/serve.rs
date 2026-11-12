@@ -1499,13 +1499,18 @@ mod tests {
         (result, said)
     }
 
-    /// How the launcher exits after an attach that `said` ended.
+    /// How the launcher exits after an attach that `said` ended, which must
+    /// carry Neovim's status: a launcher told none exits 0 anyway.
     fn launcher_exit(said: &[Message]) -> u8 {
         let Some(Message::End(z)) = said.last() else {
             panic!("{said:?}")
         };
         assert_eq!(Ending::Quit, z.as_ending(), "{z:?}");
-        crate::daemon::pane_helper::ended(crate::daemon::pane_helper::Want::SelfAttach, z).status
+        let status =
+            crate::daemon::pane_helper::ended(crate::daemon::pane_helper::Want::SelfAttach, z)
+                .status;
+        assert_eq!(Some(status), z.exit, "{z:?}");
+        status
     }
 
     #[test]
