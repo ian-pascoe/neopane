@@ -1681,18 +1681,20 @@ impl Daemon {
 
     /// Does what became of the acts.
     fn run_steps(&mut self) -> Result<()> {
+        // what an act of its own that ran did, or may have done if it
+        // failed, is read back; a report asked once a layout act ended, as
+        // they go one at a time, sees it already. One that timed out is
+        // read back once its command is gone, as the command runner tells.
+        for cap in self.asks.take_ran() {
+            if cap != Capability::ReportLayout
+                && !(cap.is_layout() && self.asks.asked(Capability::ReportLayout))
+            {
+                self.read_layout_again();
+            }
+        }
         while let Some(step) = self.asks.next_step() {
             if self.asks.settles_placement(&step) {
                 log::trace(Point::Placed, 0);
-            }
-            // what an act of its own did, or a failed or killed one may have
-            // done, is read back; a report asked once a layout act ended, as
-            // they go one at a time, sees it already
-            if let Step::Done(ask, _) | Step::FallBack(ask) = &step
-                && *ask != Ask::ReportLayout
-                && !(ask.capability().is_layout() && self.asks.asked(Capability::ReportLayout))
-            {
-                self.read_layout_again();
             }
             match step {
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
@@ -1952,7 +1954,8 @@ impl Daemon {
         self.asks.may_ask(p, Capability::ReportLayout)
     }
 
-    /// Whether the pane provider tells its live layouts and focus unasked.
+    /// Whether the pane provider has `events`: it tells focus moves, and
+    /// its live layouts or when they changed, unasked.
     fn has_events(&self) -> bool {
         self.provider
             .as_ref()
@@ -5147,14 +5150,6 @@ mod tests {
         }
     }
 
-    /// This thread's number, for names of its own: its id's digits.
-    fn thread_number() -> String {
-        format!("{:?}", std::thread::current().id())
-            .chars()
-            .filter(char::is_ascii_digit)
-            .collect()
-    }
-
     /// A file of `sh` a test's command runs, rewritten between its acts.
     struct Script(std::path::PathBuf);
 
@@ -5163,7 +5158,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!(
                 "{NAME}-{tag}-{}-{}",
                 std::process::id(),
-                thread_number()
+                crate::util::thread_number()
             ));
             std::fs::create_dir_all(&dir).unwrap();
             Script(dir.join("script"))
@@ -5398,17 +5393,18 @@ mod tests {
     }
 
     #[test]
-    fn without_events_an_act_that_failed_or_timed_out_reads_the_layout_again() {
+    fn without_events_an_act_that_failed_reads_the_layout_again_one_timed_out_once_its_gone() {
         let (mut fx, _) = reporting_fixture();
         fx.d().act(Ask::Close {
             terminal: TerminalId::from("t9"),
         });
-        answer_last(&mut fx, Outcome::Failed("killed".into()));
+        answer_last(&mut fx, Outcome::Failed("exit 1".into()));
         assert_eq!(1, reports_asked(&mut fx));
         answer_last(
             &mut fx,
             Outcome::Done(Answer::Layout(LiveLayout::default())),
         );
+        // timed out, its command may still be moving terminals
         fx.d().act(Ask::Close {
             terminal: TerminalId::from("t9"),
         });
@@ -5416,7 +5412,50 @@ mod tests {
         let d = fx.d();
         d.asks.time_out(d.provider.as_mut().unwrap().seam(), late);
         d.run_steps().unwrap();
+        assert_eq!(1, reports_asked(&mut fx));
+        // the command runner says so once it has been killed
+        fake(fx.d()).push(ProviderEvent::LayoutChanged);
+        fx.d().drain_provider().unwrap();
         assert_eq!(2, reports_asked(&mut fx));
+    }
+
+    #[test]
+    fn an_act_that_falls_back_unasked_reads_no_layout() {
+        let (mut fx, _) = reporting_fixture();
+        // no place_beside: it never runs
+        fx.d().act(Ask::PlaceBeside {
+            terminal: TerminalId::from("t2"),
+            origin: TerminalId::from("t1"),
+            dir: Direction::Right,
+            size: 40,
+            ratio: 0.5,
+        });
+        fx.d().drain_provider().unwrap();
+        // nor does one found unsupported before
+        let f = fake(fx.d());
+        f.caps.insert(Capability::Resize);
+        fx.d().act(Ask::Resize {
+            terminal: TerminalId::from("t2"),
+            origin: TerminalId::from("t1"),
+            dir: Direction::Right,
+            size: 40,
+            ratio: 0.5,
+        });
+        answer_last(&mut fx, Outcome::Unsupported);
+        assert_eq!(1, reports_asked(&mut fx));
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        fx.d().act(Ask::Resize {
+            terminal: TerminalId::from("t2"),
+            origin: TerminalId::from("t1"),
+            dir: Direction::Right,
+            size: 40,
+            ratio: 0.5,
+        });
+        fx.d().drain_provider().unwrap();
+        assert_eq!(1, reports_asked(&mut fx));
     }
 
     #[test]

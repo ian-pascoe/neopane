@@ -45,9 +45,12 @@ group when the pane provider is dropped. When it ends it is started again
 after 1 s, the wait doubling up to 60 s and back to 1 s once it has run for
 60 s, and a restart that can't start waits the same way. Exit 69, or a
 command that can't start at its first start, ends it until the pane provider
-is chosen again. Each line it prints only says the layout changed: the daemon
-asks `report_layout` through its layout queue, one at a time like every
-layout act, at most one waiting.
+is chosen again. Each line it prints says the layout changed, and a JSON
+object line may also say which terminal has focus (`focus`) or closed
+(`closed`); for the layout, the daemon asks `report_layout` through its
+layout queue, one at a time like every layout act, at most one waiting, as
+it does at each start and restart of `events`. An act timed out is read back
+only once its command has been killed and has ended.
 
 A pane provider gives the daemon terminals for Neovim's windows, and may place
 and focus them (#86). Each thing it can do when the daemon asks is a

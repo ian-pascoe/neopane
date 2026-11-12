@@ -62,6 +62,9 @@ pub(crate) struct Asks {
     unsupported: CapabilitySet,
     /// Capabilities whose failure has warned.
     warned: CapabilitySet,
+    /// The capabilities of acts the pane provider answered, whatever came
+    /// of them, not yet taken.
+    ran: Vec<Capability>,
     steps: VecDeque<Step>,
 }
 
@@ -163,6 +166,7 @@ impl Asks {
         };
         let Sent { ask, .. } = self.sent.remove(i);
         let cap = ask.capability();
+        self.ran.push(cap);
         match outcome {
             Outcome::Done(answer) => self.steps.push_back(Step::Done(ask, answer)),
             Outcome::Unsupported => {
@@ -267,6 +271,12 @@ impl Asks {
             Step::Replaced(_) | Step::Warn(_) => false,
         };
         ends_one && !self.placing()
+    }
+
+    /// The capabilities of the acts answered since last taken: acts that
+    /// ran, unlike those that fell back unasked or timed out.
+    pub(crate) fn take_ran(&mut self) -> Vec<Capability> {
+        std::mem::take(&mut self.ran)
     }
 
     /// The next thing the daemon has to do about an act.

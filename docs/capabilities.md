@@ -112,10 +112,11 @@ last layout it read.
   a change here is how the daemon learns the user moved focus.
 - Unknown fields are ignored.
 
-Without `events`, the daemon runs `report_layout` after each of its own acts,
-whether it worked or not, and after a terminal attaches, resizes, hangs up or
+Without `events`, the daemon runs `report_layout` after each of its own
+commands has ended, whether it worked or not (one past its timeout once it
+has been killed), and after a terminal attaches, resizes, hangs up or
 reports focus; never on a timer. With `events`, it runs it when `events`
-says. Either way it is a layout act, run one at a time with the others, and
+says, and at each start and restart of `events`. Either way it is a layout act, run one at a time with the others, and
 at most one waits. Exit 69 makes every pane its own layout area.
 
 ### Events

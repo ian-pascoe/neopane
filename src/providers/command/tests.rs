@@ -369,6 +369,21 @@ fn a_command_past_its_time_is_ended_with_its_group_and_answers_nothing() {
 }
 
 #[test]
+fn a_command_past_its_time_says_the_layout_changed_once_it_ends() {
+    let mut p = runner(
+        &[(Capability::Close, &["sleep", "30"])],
+        Duration::from_millis(200),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    );
+    p.ask(AskId(1), close());
+    // SIGTERM at 200 ms ends it; it answers nothing
+    let told = told(&mut p, |t| !t.is_empty());
+    assert_eq!(vec![ProviderEvent::LayoutChanged], told);
+    assert!(p.running.is_empty());
+}
+
+#[test]
 fn its_capabilities_are_its_commands_and_its_timeouts_theirs() {
     let p = runner(
         &[
@@ -473,14 +488,6 @@ fn telling(script: &str) -> CommandProvider {
     )
 }
 
-/// This thread's number, for names of its own: its id's digits.
-fn thread_number() -> String {
-    format!("{:?}", std::thread::current().id())
-        .chars()
-        .filter(char::is_ascii_digit)
-        .collect()
-}
-
 /// A directory of a test's own, named for this process and thread, removed
 /// when dropped.
 struct Scratch(std::path::PathBuf);
@@ -491,7 +498,7 @@ impl Scratch {
             "{}-{tag}-{}-{}",
             name::NAME,
             std::process::id(),
-            thread_number()
+            crate::util::thread_number()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         Scratch(dir)

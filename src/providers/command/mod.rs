@@ -17,7 +17,7 @@
 //!   to the log.
 //! - At its timeout its group gets SIGTERM, and SIGKILL 1 s later. The act
 //!   itself is timed out by `asks.rs`, at the same deadline: a run past it
-//!   answers nothing.
+//!   answers nothing, but says the layout may have changed once it ends.
 //! - `events` runs from the start, for as long as the runner lives (#86
 //!   decision D7, #93 decision 18, ADR 0006 as #126 amends it). Each line
 //!   it prints is told as `ProviderEvent::LayoutChanged`, for the daemon to
@@ -435,6 +435,10 @@ impl CommandProvider {
             if !r.timed_out {
                 self.events
                     .push_back(ProviderEvent::Answered { id: r.id, outcome });
+            } else if r.cap != Capability::ReportLayout {
+                // killed, it may have moved terminals: read once it's gone,
+                // not while it may still be moving them
+                self.events.push_back(ProviderEvent::LayoutChanged);
             }
         }
         self.kills.retain(|&(group, at)| {
