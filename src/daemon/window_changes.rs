@@ -20,6 +20,9 @@ pub(crate) struct WindowChanges {
     /// such as an autocommand that reads the clipboard, can flush a redraw
     /// before the new window is drawn, so their panes wait for it.
     pub reopened: IndexSet<i64>,
+    /// Windows a self-attached pane took, not drawn yet: the pane waits for
+    /// it, as for a reopened one.
+    pub taken: IndexSet<i64>,
     /// New windows without panes yet, and where Neovim put them.
     pub splits: IndexMap<i64, PendingSplit>,
 }
@@ -38,6 +41,7 @@ impl WindowChanges {
     pub(crate) fn forget_gone(&mut self, grids: &Grids) {
         // drawn: an ordinary window from here on
         self.reopened.retain(|&win| grids.grid_of(win).is_none());
+        self.taken.retain(|&win| grids.grid_of(win).is_none());
         for set in [&mut self.asked, &mut self.closing] {
             let mut j = set.len();
             while j > 0 {
@@ -99,6 +103,22 @@ impl WindowChanges {
     /// window not drawn yet.
     pub(crate) fn awaits_reopen(&self, win: i64) -> bool {
         self.reopening.contains(&win) || self.reopened.contains(&win)
+    }
+
+    /// `win` was taken by a self-attached pane, and isn't drawn yet.
+    pub(crate) fn mark_taken(&mut self, win: i64) {
+        self.taken.insert(win);
+    }
+
+    /// `win`, taken but not shown, was given back.
+    pub(crate) fn untake(&mut self, win: i64) {
+        self.taken.swap_remove(&win);
+    }
+
+    /// True while `win`'s pane waits for it to be drawn: reopening, or taken
+    /// by a self-attached pane.
+    pub(crate) fn awaits_drawing(&self, win: i64) -> bool {
+        self.awaits_reopen(win) || self.taken.contains(&win)
     }
 
     pub(crate) fn note_split(&mut self, sp: windows::Split) {

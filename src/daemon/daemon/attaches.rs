@@ -8,12 +8,26 @@ use std::time::Instant;
 
 use super::*;
 use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size, Transport};
-use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Pending, Step};
+use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Nesting, Pending, Step};
+use crate::daemon::pane::FileAt;
 use crate::nvim::msgpack;
 
 /// Loop tokens of connections waiting for their hello start here, far above
 /// any pane's.
 pub(crate) const PENDING_BASE: usize = 1 << (usize::BITS - 2);
+
+/// How long a self-attach that may be nested waits for Neovim to list its
+/// terminals; one it hasn't by then is refused as nested.
+const NESTED_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A self-attach whose environment says it may come from the daemon's own
+/// Neovim, waiting for Neovim's terminals, as request `req`, until
+/// `deadline`.
+pub(crate) struct NestedCheck {
+    arrived: Arrived,
+    pub(super) req: u32,
+    deadline: Instant,
+}
 
 impl Daemon {
     /// A new connection: it gets `HELLO_TIMEOUT` for its hello, read as it
@@ -70,13 +84,24 @@ impl Daemon {
                 p.time_out();
             }
         }
+        let mut i = self.nested_checks.len();
+        while i > 0 {
+            i -= 1;
+            if self.nested_checks[i].deadline <= now {
+                let c = self.nested_checks.swap_remove(i);
+                log_warn!("{NAME} daemon: Neovim didn't list its terminals in time");
+                self.refuse_nested(c.arrived.stream);
+            }
+        }
         self.arm_hello_timer()
     }
 
     /// Starts the hello timer for the earliest deadline, unless it runs for
     /// one that early.
-    fn arm_hello_timer(&mut self) -> Result<()> {
-        let Some(due) = self.pending.iter().map(|(_, p)| p.deadline).min() else {
+    pub(super) fn arm_hello_timer(&mut self) -> Result<()> {
+        let pending = self.pending.iter().map(|(_, p)| p.deadline);
+        let checks = self.nested_checks.iter().map(|c| c.deadline);
+        let Some(due) = pending.chain(checks).min() else {
             return Ok(());
         };
         if self.hello_timer_due.is_some_and(|armed| armed <= due) {
@@ -110,8 +135,11 @@ impl Daemon {
                 purpose: Purpose::Requested { .. },
                 ..
             }) => self.attach_requested(a),
-            // the first self-attach comes before the loop runs (#105 opens
-            // up the rest)
+            Ok(Hello {
+                purpose: Purpose::SelfAttach { .. },
+                ..
+            }) => self.attach_self(a),
+            // control requests come later
             Ok(h) => {
                 let z = End::refusal(
                     Refusal::Hello,
@@ -122,6 +150,163 @@ impl Daemon {
                 Ok(())
             }
         }
+    }
+
+    /// A terminal attaching of its own accord, `a`, at any time (#105): it
+    /// gets a pane at once, and its window once Neovim has one for it.
+    /// Refused from the daemon's own Neovim (`nested`): when the environment
+    /// says it may be, Neovim is asked for its terminals first.
+    fn attach_self(&mut self, a: Arrived) -> Result<()> {
+        let Ok(Hello {
+            build,
+            purpose: Purpose::SelfAttach { terminal, .. },
+            ..
+        }) = &a.hello
+        else {
+            unreachable!("on_hello checked it's a self-attach's hello");
+        };
+        log_info!(
+            "{NAME} daemon: hello: {}",
+            attach_conn::describe("self", None, terminal, build)
+        );
+        match attach_conn::nesting(terminal, self.sock.as_arg()) {
+            Nesting::No => self.accept_self(a),
+            Nesting::Yes => {
+                self.refuse_nested(a.stream);
+                Ok(())
+            }
+            Nesting::IfNeovims => {
+                let req = windows::list_chans(&mut self.nvim.client);
+                self.nvim.client.flush()?;
+                self.nested_checks.push(NestedCheck {
+                    arrived: a,
+                    req,
+                    deadline: Instant::now() + NESTED_WAIT,
+                });
+                self.arm_hello_timer()
+            }
+        }
+    }
+
+    /// Refuses a self-attach from the daemon's own Neovim.
+    fn refuse_nested(&self, stream: UnixStream) {
+        let z = End::refusal(
+            Refusal::Nested,
+            format!(
+                "a terminal in {}'s own Neovim can't attach to it",
+                self.name
+            ),
+        );
+        log_info!("{NAME} daemon: refused a hello: {}", z.message);
+        attach_conn::refuse(stream, z);
+    }
+
+    /// Neovim answered request `id`: true if it listed its channels for
+    /// self-attaches that may be nested, which are answered now.
+    pub(super) fn on_nested_answer(
+        &mut self,
+        id: u32,
+        err: Option<&[u8]>,
+        mut result: Decoder<'_>,
+    ) -> Result<bool> {
+        let Some(i) = self.nested_checks.iter().position(|c| c.req == id) else {
+            return Ok(false);
+        };
+        let check = self.nested_checks.remove(i);
+        let ptys = match err {
+            None => windows::parse_chan_ptys(&mut result)?,
+            Some(e) => {
+                log_warn!(
+                    "{NAME} daemon: couldn't list Neovim's terminals: {}",
+                    String::from_utf8_lossy(e)
+                );
+                Vec::new()
+            }
+        };
+        let tty = match &check.arrived.hello {
+            Ok(Hello {
+                purpose: Purpose::SelfAttach { terminal, .. },
+                ..
+            }) => &terminal.tty,
+            _ => unreachable!("only self-attaches are checked"),
+        };
+        if err.is_some() || ptys.contains(tty) {
+            self.refuse_nested(check.arrived.stream);
+            return Ok(true);
+        }
+        self.accept_self(check.arrived)?;
+        Ok(true)
+    }
+
+    /// Self-attach `a`, not from the daemon's own Neovim: accepted, unless
+    /// its terminal can't be taken.
+    fn accept_self(&mut self, a: Arrived) -> Result<()> {
+        let Arrived {
+            stream,
+            tty,
+            hello,
+            at,
+            rest,
+            ..
+        } = a;
+        let Ok(Hello {
+            purpose:
+                Purpose::SelfAttach {
+                    terminal,
+                    file,
+                    line,
+                    ..
+                },
+            ..
+        }) = hello
+        else {
+            unreachable!("on_hello checked it's a self-attach's hello");
+        };
+        if let Err(z) = attach_conn::check_terminal(&terminal, tty.as_ref()) {
+            log_warn!("{NAME} daemon: refused a hello: {}", z.message);
+            attach_conn::refuse(stream, z);
+            return Ok(());
+        }
+        let block = self.rex_block_of(&terminal.env);
+        let opening = file.map(|f| FileAt {
+            file: attach_conn::file_against_cwd(&f, &terminal.cwd),
+            line,
+        });
+        let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
+        if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
+            log_warn!("{NAME} daemon: a self-attach's helper went: {e}");
+            surface.destroy(crate::attach::Ending::Failed, "");
+            return Ok(());
+        }
+        surface.helper_socket.set_nonblocking(true)?;
+        surface.helper_in = rest;
+        let pane = self.panes.add_self_attached(SelfAttach {
+            surface,
+            terminal: block,
+        });
+        let id = pane.id;
+        pane.opening = opening;
+        log::trace_at(Point::Hello, u64::from(id), at);
+        log::trace(Point::Accepted, u64::from(id));
+        pane.register_with(&self.event_loop)?;
+        self.wait_for_report(id, Instant::now())?;
+        self.give_windows()?;
+        self.draw()?;
+        // a size sent right after the hello
+        if self.panes.by_id(id).is_some() {
+            self.read_helper_frames(id)?;
+        }
+        Ok(())
+    }
+
+    /// The Rex block of a self-attached terminal with environment `env`:
+    /// its `REX_BLOCK`, only while the pane provider is Rex's and `REX_SESSION`
+    /// is its session. A stopgap: #114 has the pane provider find it.
+    fn rex_block_of(&self, env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
+        let Some(crate::providers::Held::Rex(r)) = &self.provider else {
+            return None;
+        };
+        attach_conn::rex_block(env, &r.session.session_id)
     }
 
     /// The pane still waiting for the terminal `pane` names: its id is good,

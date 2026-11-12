@@ -169,6 +169,22 @@ pane id, such as `2-k3j9x2qpa8`, is good for that one pane's terminal only. A
 terminal left over from an older daemon, which ran `neorex pane`, exits with
 `neorex: pane was replaced by attach --pane (this came from an older daemon)`.
 
+### From another terminal
+
+Any other terminal can show the same Neovim: run `neorex attach --address
+$NEOREX_TMPDIR/neorex-<uid>/<daemon name>/sock` there (`/tmp` for an unset
+`NEOREX_TMPDIR`). It shows a window no terminal shows yet, Neovim's current
+one first, then by tab page and window order, so after `neorex -p a b c` a
+second terminal shows `b`; with none, a new window, as `:split` opens one.
+`neorex attach --address A notes.md` opens `notes.md` there in a new window
+instead, and `+12 notes.md` puts the cursor on line 12. The window it shows
+becomes current. Closing that terminal closes its windows, and only those;
+the terminal goes back to its shell. In a Rex pane of the daemon's own
+session, the daemon uses its `REX_BLOCK`, so `:vsplit` there opens a pane
+beside it. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
+terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
+name comes later.
+
 If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
 to start a daemon without one, use --detach` and exits 1. In a terminal but
 without `REX_SERVER` or `REX_SESSION`, it prints `neorex: run it in a Rex
@@ -214,10 +230,12 @@ Usage:
   …
 ```
 
-Not built yet: `attach` (but for the hidden `attach --pane` of a Rex pane),
-`list`, `status`, `kill`, `provider`, and the `--name`, `--address`,
-`--detach` and `--no-wait` options exit 1 with `neorex: list isn't built
-yet`. `--provider` is accepted and does nothing.
+Not built yet, each exiting 1 with `neorex: <what> isn't built yet`:
+`attach` without `--address`, and `attach --name` and `attach --provider`;
+`list`, `status`, `kill` and `provider check`; and the bare form's `--name`,
+`--address`, `--detach` and `--no-wait`. The bare form's `--provider` is
+accepted and does nothing. `attach --address A [+LINE] [FILE]` is built, as
+is the hidden `attach --pane` a Rex pane runs.
 
 ### Own options first, then Neovim's
 

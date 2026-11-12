@@ -11,7 +11,8 @@ use super::fdpass;
 use super::pane_helper;
 use crate::attach::{self, ATTACH_PROTOCOL_VERSION, Accept, End, Frame, Hello, Message, Refusal};
 use crate::attach::{PaneId, Terminal, Transport};
-use crate::log;
+use crate::log::{self, log_warn};
+use crate::name::NAME;
 use crate::term::modes;
 
 /// How long a connected peer has to send its hello.
@@ -242,6 +243,71 @@ pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), 
     Ok(())
 }
 
+/// The value of variable `name` in environment `env`, if set.
+fn env_var<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
+    env.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_slice())
+}
+
+/// Whether self-attaching terminal `t` comes from the daemon at
+/// `address`'s own Neovim (`nested`, ADR 0013, #91 decision 31): `$<NAME>`
+/// there is that address, and its tty is one of Neovim's terminals, or it
+/// has none. A tmux started from a `:terminal`, which inherited the
+/// variable, isn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nesting {
+    No,
+    Yes,
+    /// Its tty decides: whether it's one of Neovim's terminals' ptys.
+    IfNeovims,
+}
+
+/// How `nested` goes for self-attaching terminal `t` (see `Nesting`).
+pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
+    if env_var(&t.env, crate::name::upper().as_bytes()) != Some(address.as_encoded_bytes()) {
+        Nesting::No
+    } else if t.tty.is_empty() {
+        Nesting::Yes
+    } else {
+        Nesting::IfNeovims
+    }
+}
+
+/// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
+/// hello carries, when `REX_SESSION` there is `session`, the daemon's Rex
+/// session. A stopgap: #114 has the pane provider find it.
+pub(crate) fn rex_block(
+    env: &[(Vec<u8>, Vec<u8>)],
+    session: &str,
+) -> Option<crate::daemon::provider::TerminalId> {
+    if env_var(env, b"REX_SESSION") != Some(session.as_bytes()) {
+        return None;
+    }
+    let b = String::from_utf8_lossy(env_var(env, b"REX_BLOCK")?);
+    match crate::rex::ids::block(b.as_bytes()) {
+        Ok(_) => Some(crate::daemon::provider::TerminalId::from(b.as_ref())),
+        Err(_) => {
+            log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
+            None
+        }
+    }
+}
+
+/// A hello's `file` made absolute against its terminal's `cwd`, if it
+/// isn't already; links aren't resolved.
+pub(crate) fn file_against_cwd(file: &[u8], cwd: &[u8]) -> Vec<u8> {
+    if file.starts_with(b"/") || cwd.is_empty() {
+        return file.to_vec();
+    }
+    let mut out = cwd.to_vec();
+    if !out.ends_with(b"/") {
+        out.push(b'/');
+    }
+    out.extend_from_slice(file);
+    out
+}
+
 /// The refusal for a hello that can't be read: its reason, and a message
 /// naming the field, or both builds and versions.
 pub(crate) fn refusal_of(e: &attach::Error) -> End {
@@ -328,6 +394,54 @@ pub(crate) fn read_all_frames(stream: &UnixStream) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_self_attach_with_the_daemons_address_is_nested_by_its_tty() {
+        let ours = std::ffi::OsStr::new("/tmp/x/d/sock");
+        let from = |address: &[u8], tty: &[u8]| {
+            let mut t = test_terminal(80, 24);
+            t.env = vec![
+                (b"TERM".to_vec(), b"x".to_vec()),
+                (crate::name::upper().into_bytes(), address.to_vec()),
+            ];
+            t.tty = tty.to_vec();
+            nesting(&t, ours)
+        };
+        assert_eq!(Nesting::IfNeovims, from(b"/tmp/x/d/sock", b"/dev/ttys004"));
+        // relayed with no tty
+        assert_eq!(Nesting::Yes, from(b"/tmp/x/d/sock", b""));
+        assert_eq!(Nesting::No, from(b"/tmp/x/other/sock", b"/dev/ttys004"));
+        assert_eq!(Nesting::No, nesting(&test_terminal(80, 24), ours));
+    }
+
+    #[test]
+    fn a_self_attachs_rex_block_counts_only_in_the_daemons_session() {
+        let block = "block:01a1cfe7-c5b4-7d9c-8e1e-9fd2a65e8a50";
+        let env = |session: &str| {
+            vec![
+                (b"REX_SESSION".to_vec(), session.as_bytes().to_vec()),
+                (b"REX_BLOCK".to_vec(), block.as_bytes().to_vec()),
+            ]
+        };
+        let found =
+            |e: &[(Vec<u8>, Vec<u8>)]| rex_block(e, "session:a").map(|t| t.as_str().to_string());
+        assert_eq!(Some(block.to_string()), found(&env("session:a")));
+        assert_eq!(None, found(&env("session:b")));
+        assert_eq!(None, found(&env("session:a")[1..]));
+    }
+
+    #[test]
+    fn a_hellos_relative_file_is_made_absolute_against_its_cwd() {
+        assert_eq!(
+            b"/w/notes.md".to_vec(),
+            file_against_cwd(b"notes.md", b"/w")
+        );
+        assert_eq!(
+            b"/w/notes.md".to_vec(),
+            file_against_cwd(b"notes.md", b"/w/")
+        );
+        assert_eq!(b"/a/b".to_vec(), file_against_cwd(b"/a/b", b"/w"));
+    }
     use crate::attach::{PaneId, Purpose, Size};
 
     #[test]

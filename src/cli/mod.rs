@@ -44,6 +44,14 @@ pub enum Command {
         pane: PaneId,
         transport: Option<Transport>,
     },
+    /// `attach --address A [+LINE] [--] [FILE]`: shows the daemon at A in
+    /// this terminal, with FILE in a new window, the cursor on LINE. #121
+    /// brings the rest of `attach`.
+    AttachSelf {
+        address: OsString,
+        file: Option<OsString>,
+        line: Option<u32>,
+    },
     /// `pane`, which older daemons ran: it exits 1 with [`PANE_REPLACED`].
     Replaced,
     /// `daemon NAME [--dedup] [--detach] -- NVIM-ARGS…`, which the launcher
@@ -385,10 +393,11 @@ fn daemon(words: &[OsString]) -> Result<Command, UsageError> {
     })
 }
 
-/// `attach`'s words. Only the hidden `--pane` form is built yet.
+/// `attach`'s words: the hidden `--pane` form, and a self-attach to
+/// `--address`. Finding a daemon otherwise isn't built yet.
 fn attach(words: &[OsString]) -> Result<Command, UsageError> {
     if !words.iter().any(|w| long_option(w, &["--pane"]).is_some()) {
-        return Ok(Command::NotBuilt("attach".to_string()));
+        return attach_self(words);
     }
     let only =
         || UsageError("attach --pane takes only --address A and --transport fd|relay".into());
@@ -432,6 +441,67 @@ fn attach(words: &[OsString]) -> Result<Command, UsageError> {
         pane,
         transport,
     })
+}
+
+/// `attach [--address A] [+LINE] [--] [FILE]`, without `--pane`. Without
+/// `--address`, or with `--name` or `--provider`, it isn't built yet (#121);
+/// any other option is a usage error.
+fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
+    let (mut address, mut file, mut line) = (None, None, None);
+    let mut i = 0;
+    let mut files_only = false;
+    while let Some(word) = words.get(i) {
+        let bytes = word.as_encoded_bytes();
+        if !files_only && bytes == b"--" {
+            files_only = true;
+        } else if !files_only && let Some((option, attached)) = long_option(word, &["--address"]) {
+            let value = option_value(option, attached, words, &mut i)?;
+            if address.replace(value).is_some() {
+                return Err(UsageError(format!("{option} is given twice")));
+            }
+        } else if !files_only && let Some(n) = plus_line(bytes) {
+            if line.replace(n).is_some() {
+                return Err(UsageError("+LINE is given twice".into()));
+            }
+        } else if !files_only
+            && let Some((option, _)) = long_option(word, &["--name", "--provider"])
+        {
+            return Ok(Command::NotBuilt(format!("attach {option}")));
+        } else if !files_only && bytes.starts_with(b"-") && bytes.len() > 1 {
+            // ADR 0014: an unknown option is a usage error
+            return Err(UsageError(format!(
+                "attach doesn't take {}",
+                word.to_string_lossy()
+            )));
+        } else if file.replace(word.clone()).is_some() {
+            return Err(UsageError("attach takes one FILE".into()));
+        }
+        i += 1;
+    }
+    let Some(address) = address else {
+        return Ok(Command::NotBuilt("attach".to_string()));
+    };
+    if line.is_some() && file.is_none() {
+        return Err(UsageError("+LINE needs a FILE".into()));
+    }
+    Ok(Command::AttachSelf {
+        address,
+        file,
+        line,
+    })
+}
+
+/// The line in `+LINE`: digits, from 1.
+fn plus_line(word: &[u8]) -> Option<u32> {
+    let digits = word.strip_prefix(b"+")?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits)
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
 }
 
 #[cfg(test)]

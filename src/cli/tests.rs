@@ -567,3 +567,57 @@ fn attach_pane_takes_an_address_and_a_pane() {
         assert_eq!(refused(line), why, "{line}");
     }
 }
+
+#[test]
+fn attach_with_an_address_self_attaches_with_an_optional_file_and_line() {
+    let self_attach = |file: Option<&str>, line: Option<u32>| {
+        Ok(Command::AttachSelf {
+            address: "/tmp/x/sock".into(),
+            file: file.map(OsString::from),
+            line,
+        })
+    };
+    assert_eq!(
+        parsed("attach --address /tmp/x/sock"),
+        self_attach(None, None)
+    );
+    assert_eq!(
+        parsed("attach --address=/tmp/x/sock notes.md"),
+        self_attach(Some("notes.md"), None)
+    );
+    assert_eq!(
+        parsed("attach +12 --address /tmp/x/sock notes.md"),
+        self_attach(Some("notes.md"), Some(12))
+    );
+    // after --, anything is the file
+    assert_eq!(
+        parsed("attach --address /tmp/x/sock -- --address"),
+        self_attach(Some("--address"), None)
+    );
+    assert_eq!(
+        parsed("attach --address /tmp/x/sock -- +3"),
+        self_attach(Some("+3"), None)
+    );
+    for (line, why) in [
+        ("attach --address /a a b", "attach takes one FILE"),
+        ("attach --address /a +3", "+LINE needs a FILE"),
+        ("attach --address /a +3 +4 f", "+LINE is given twice"),
+        (
+            "attach --address /a --address /b",
+            "--address is given twice",
+        ),
+        ("attach --address", "--address needs a value"),
+        ("attach --address /a -x f", "attach doesn't take -x"),
+        ("attach --address /a --nope f", "attach doesn't take --nope"),
+    ] {
+        assert_eq!(refused(line), why, "{line}");
+    }
+    // what #121 brings
+    for (line, what) in [
+        ("attach --name n", "attach --name"),
+        ("attach --address /a --provider=p", "attach --provider"),
+        ("attach notes.md", "attach"),
+    ] {
+        assert_eq!(parsed(line), Ok(Command::NotBuilt(what.into())), "{line}");
+    }
+}

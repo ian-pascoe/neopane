@@ -32,6 +32,8 @@ fn live_pane(fx: &mut Fixture, id: u32, win: i64, terminal: Option<&str>) -> (u3
     p.terminal_surface = Some(surface);
     p.terminal = terminal.map(TerminalId::from);
     p.area = Area::Own;
+    // attached by hand
+    p.self_attached = true;
     (fx.d.panes.add(p).id, live)
 }
 
@@ -246,7 +248,8 @@ fn a_self_attached_panes_last_window_closing_ends_its_attach_and_closes_no_termi
         panic!("{said:?}")
     };
     assert_eq!(Ending::Closed, z.as_ending());
-    assert!(sent_by(fx).asks.is_empty());
+    let asks = sent_by(fx).asks;
+    assert!(asks.is_empty(), "{asks:?}");
 }
 
 #[test]

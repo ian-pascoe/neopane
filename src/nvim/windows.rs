@@ -93,6 +93,66 @@ pub(crate) fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
     id
 }
 
+/// Asks for the windows a self-attached pane could take; `parse_windows`
+/// reads the response.
+pub(crate) fn list_windows(nvim: &mut Nvim) -> u32 {
+    nvim.exec_lua(&format!("return {NAME}.windows()"), 0)
+}
+
+/// A self-attached pane takes unshown window `win` at `cols` x `rows`,
+/// which becomes current. The response is `win`, or 0 if it's gone.
+pub(crate) fn show(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.show(...)"), 3);
+    msgpack::write_int(nvim.writer(), win);
+    msgpack::write_int(nvim.writer(), cols.max(1));
+    msgpack::write_int(nvim.writer(), rows.max(1));
+    id
+}
+
+/// Opens a self-attached pane's new window at `cols` x `rows`, current, in
+/// the current tab page: on `file`, with the cursor on its line if given,
+/// else as `:split` would. It notes the window (`Note::Opened`) as it makes
+/// it; the response is the window too.
+pub(crate) fn open(
+    nvim: &mut Nvim,
+    file: Option<(&[u8], Option<u32>)>,
+    cols: u32,
+    rows: u32,
+) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.open(...)"), 4);
+    let w = nvim.writer();
+    let (file, line) = match file {
+        Some((f, l)) => (Some(f), l),
+        None => (None, None),
+    };
+    match file {
+        Some(f) => msgpack::write_str(w, f),
+        None => msgpack::write_nil(w),
+    }
+    match line {
+        Some(l) => msgpack::write_int(w, l),
+        None => msgpack::write_nil(w),
+    }
+    msgpack::write_int(w, cols.max(1));
+    msgpack::write_int(w, rows.max(1));
+    id
+}
+
+/// `list_windows`' response: the current window, then the windows a pane
+/// could show, by tab page and window order.
+pub(crate) fn parse_windows(result: &mut Decoder<'_>) -> rpc::Result<(i64, Vec<i64>)> {
+    let n = rpc::expect_array(result)?;
+    if n == 0 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let current = rpc::expect_int(result)?;
+    let mut wins = Vec::with_capacity(n as usize - 1);
+    for _ in 1..n {
+        wins.push(rpc::expect_int(result)?);
+    }
+    Ok((current, wins))
+}
+
 /// Asks for our channel id: the response to the returned id starts with it.
 #[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {
@@ -115,6 +175,9 @@ pub enum Note {
     Split(Split),
     /// The current window is now this float.
     Float(i64),
+    /// The window `open` made, sent before anything can flush a redraw that
+    /// shows it: the self-attached pane that asked shows it.
+    Opened(i64),
     /// This float was just entered; sent before the redraw that shows it.
     Entered(i64),
     /// The tabline's rows at the top of the screen.
@@ -331,6 +394,30 @@ pub struct Split {
     pub(crate) tab: i64,
 }
 
+/// Asks for Neovim's channels; `parse_chan_ptys` reads the response.
+pub(crate) fn list_chans(nvim: &mut Nvim) -> u32 {
+    nvim.request("nvim_list_chans", 0)
+}
+
+/// The ptys of the channels in `nvim_list_chans`' response: its terminals,
+/// `:terminal` and any other job on a pty.
+pub(crate) fn parse_chan_ptys(result: &mut Decoder<'_>) -> rpc::Result<Vec<Vec<u8>>> {
+    let mut ptys = Vec::new();
+    for _ in 0..rpc::expect_array(result)? {
+        for _ in 0..rpc::expect_map(result)? {
+            if rpc::expect_str(result)? != b"pty" {
+                rpc::skip(result)?;
+                continue;
+            }
+            let pty = rpc::expect_str(result)?;
+            if !pty.is_empty() {
+                ptys.push(pty.to_vec());
+            }
+        }
+    }
+    Ok(ptys)
+}
+
 /// A notification from the Lua, or None for any other.
 #[doc(hidden)]
 pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option<Note>> {
@@ -341,6 +428,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         Reopened,
         Split,
         Float,
+        Opened,
         Entered,
         Tabline,
         Cmdheight,
@@ -366,6 +454,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         b"reopened" => Tag::Reopened,
         b"split" => Tag::Split,
         b"float" => Tag::Float,
+        b"opened" => Tag::Opened,
         b"entered" => Tag::Entered,
         b"tabline" => Tag::Tabline,
         b"cmdheight" => Tag::Cmdheight,
@@ -391,6 +480,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             new: rpc::expect_handle(params)?,
         },
         Tag::Float => Note::Float(win),
+        Tag::Opened => Note::Opened(win),
         Tag::Entered => Note::Entered(win),
         Tag::Tabline => Note::Tabline(win),
         Tag::Cmdheight => {
@@ -502,6 +592,46 @@ mod tests {
     use crate::screen::grid::Grid;
     use crate::screen::grids::{Grids, WinKind};
     use crate::screen::style::Attr;
+
+    #[test]
+    fn a_window_list_is_the_current_window_then_the_rest_and_never_empty() {
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        for w in [1001, 1000, 1001] {
+            msgpack::write_int(&mut buf, w);
+        }
+        assert_eq!(
+            Ok((1001, vec![1000, 1001])),
+            parse_windows(&mut Decoder::of(&buf))
+        );
+        let mut empty = Vec::new();
+        msgpack::write_array_header(&mut empty, 0);
+        assert!(parse_windows(&mut Decoder::of(&empty)).is_err());
+    }
+
+    #[test]
+    fn a_channel_list_gives_the_ptys_of_its_terminals() {
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        // stdio, a :terminal, and a job without a pty
+        msgpack::write_map_header(&mut buf, 2);
+        msgpack::write_str(&mut buf, "id");
+        msgpack::write_int(&mut buf, 1);
+        msgpack::write_str(&mut buf, "mode");
+        msgpack::write_str(&mut buf, "rpc");
+        msgpack::write_map_header(&mut buf, 2);
+        msgpack::write_str(&mut buf, "id");
+        msgpack::write_int(&mut buf, 3);
+        msgpack::write_str(&mut buf, "pty");
+        msgpack::write_str(&mut buf, "/dev/ttys004");
+        msgpack::write_map_header(&mut buf, 1);
+        msgpack::write_str(&mut buf, "pty");
+        msgpack::write_str(&mut buf, "");
+        assert_eq!(
+            Ok(vec![b"/dev/ttys004".to_vec()]),
+            parse_chan_ptys(&mut Decoder::of(&buf))
+        );
+    }
 
     /// Made-up reports the tests wait for: a real window handle is never this big.
     const PING_BASE: i64 = 4000;

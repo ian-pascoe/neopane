@@ -52,6 +52,7 @@ use crate::term::input;
 use indexmap::IndexMap;
 
 mod attaches;
+mod self_attach;
 use attaches::PENDING_BASE;
 
 /// The daemon is a top layer: any error will do.
@@ -74,6 +75,12 @@ pub(crate) struct Daemon {
     next_pending: usize,
     /// When the hello timer is set to fire, if it is.
     hello_timer_due: Option<Instant>,
+    /// What a self-attached pane asked of Neovim for its window, while
+    /// unanswered: one at a time, in the order they attached.
+    window_ask: Option<self_attach::WindowAsk>,
+    /// Self-attaches that may come from Neovim's own terminals, waiting for
+    /// it to list them.
+    nested_checks: Vec<attaches::NestedCheck>,
     /// The user a connection's peer must run as: ours.
     uid: u32,
     pub grids: Grids,
@@ -308,6 +315,8 @@ impl Daemon {
             pending: Vec::new(),
             next_pending: 0,
             hello_timer_due: None,
+            window_ask: None,
+            nested_checks: Vec::new(),
             uid: super::attach_conn::euid(),
             grids: Grids::default(),
             panes: Panes::default(),
@@ -959,7 +968,7 @@ impl Daemon {
             return false;
         }
         match self.current_pane() {
-            Some(q) => q.terminal.is_some() || (q.attach_id.is_some() && q.closing.is_none()),
+            Some(q) => q.terminal.is_some() || (!q.is_self_attached() && q.closing.is_none()),
             None => true,
         }
     }
@@ -982,7 +991,7 @@ impl Daemon {
                 && p.tab == 0
                 && p.closing.is_none()
                 && p.neovim_window_handle.is_some()
-                && (p.attach_id.is_none() || p.terminal_surface.is_some())
+                && (p.is_self_attached() || p.terminal_surface.is_some())
         };
         self.panes
             .by_win(sp.from)
@@ -1039,7 +1048,7 @@ impl Daemon {
         {
             return Some(t.clone());
         }
-        self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none() && q.attach_id.is_some())
+        self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none() && !q.is_self_attached())
     }
 
     /// The terminal of the first pane `keep` keeps that has one.
@@ -1147,6 +1156,7 @@ impl Daemon {
                 }
             }
             windows::Note::Reopened { old, new } => self.on_reopened(old, new),
+            windows::Note::Opened(win) => self.on_window_opened(win)?,
             windows::Note::Split(sp) => {
                 if self.panes.by_win(sp.win).is_none() {
                     self.changes.note_split(sp);
@@ -1183,6 +1193,9 @@ impl Daemon {
         if show_now {
             self.draw()?;
         }
+        if self.on_window_answer(id, err, result)? || self.on_nested_answer(id, err, result)? {
+            return Ok(());
+        }
         if let Some(e) = err {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
@@ -1206,6 +1219,8 @@ impl Daemon {
             if let Some(f) = self.current_pane_id() {
                 self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
             }
+            // self-attaches that came meanwhile, in the order they came
+            self.give_windows()?;
             self.reconcile()?;
             self.draw()?;
         }
@@ -1420,13 +1435,13 @@ impl Daemon {
                 continue;
             }
             // its pane waits for the window that reopens it to be drawn
-            if self.changes.awaits_reopen(win) {
+            if self.changes.awaits_drawing(win) {
                 continue;
             }
             p.closing = Some(Close::WindowClosed);
             // a requested terminal is closed, whether or not its helper
             // connected; a self-attached one goes back to its shell (#86 D10)
-            if p.attach_id.is_some()
+            if !p.is_self_attached()
                 && let Some(t) = p.terminal.clone()
             {
                 self.act(asks::close(t));
@@ -1493,7 +1508,7 @@ impl Daemon {
         let Some(layout) = &mut p.layout else {
             return false;
         };
-        let gone = |w: i64| self.grids.grid_of(w).is_none() && !self.changes.awaits_reopen(w);
+        let gone = |w: i64| self.grids.grid_of(w).is_none() && !self.changes.awaits_drawing(w);
         for w in layout.windows() {
             if gone(w) && !layout.close(w, opts) {
                 // its last window: the pane ends with it
@@ -2278,7 +2293,7 @@ impl Daemon {
             return Ok(());
         }
         // a requested pane's id is on its way
-        if p.terminal.is_none() && p.attach_id.is_some() && reports {
+        if p.terminal.is_none() && !p.is_self_attached() && reports {
             return Ok(());
         }
         if !reports || p.terminal.is_none() {
@@ -2631,11 +2646,11 @@ impl Daemon {
         }
     }
 
-    /// The pane showing Neovim's current window; before setup, the
-    /// self-attached pane waiting for the first window.
+    /// The pane showing Neovim's current window; until Neovim says which
+    /// that is, the first self-attached pane, which takes the first window.
     fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
-            return self.panes.self_attached_awaiting_window();
+            return self.panes.first_self_attached();
         }
         self.panes.by_win(self.nvim.current_win)
     }
@@ -2823,6 +2838,8 @@ fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
     }));
 }
 
+#[cfg(test)]
+mod self_attach_tests;
 #[cfg(test)]
 mod slow_terminal_tests;
 
@@ -3528,20 +3545,294 @@ mod tests {
     }
 
     #[test]
-    fn a_later_self_attach_or_control_request_is_refused_for_now() {
-        use crate::daemon::attach_conn::{self_hello, test_terminal};
+    fn a_control_request_is_refused_for_now() {
+        use crate::attach::{Hello, Message, Purpose};
         let mut fx = fixture();
-        let at = Address::new("self");
-        let pty = Pty::new(80, 24);
-        let helper = at.send(&self_hello(test_terminal(80, 24)), Some(pty.slave));
+        let at = Address::new("status");
+        let hello = Message::Hello(Hello::new(Purpose::Status { pid: None }))
+            .encode()
+            .unwrap();
+        let helper = at.send(&hello, None);
         fx.d.accept(&at.server).unwrap();
         let z = refusal(&helper);
         assert_eq!(Some(crate::attach::Refusal::Hello), z.as_refusal());
-        assert_eq!("this daemon takes no self hello yet", z.message);
+        assert_eq!("this daemon takes no status hello yet", z.message);
     }
 
-    /// The daemon ends each attach saying why: Neovim quit, the daemon was
-    /// stopped, or the pane closed.
+    /// A self-attach's hello from a terminal on `tty` whose `$<NAME>` is
+    /// `address`, unset if empty, and, if `rex`, Rex's variables for session
+    /// `session:s`.
+    fn self_hello_from(address: &[u8], tty: &[u8], rex: bool) -> Vec<u8> {
+        use crate::daemon::attach_conn::{self_hello, test_terminal};
+        let mut t = test_terminal(80, 24);
+        if !address.is_empty() {
+            t.env = vec![(crate::name::upper().into_bytes(), address.to_vec())];
+        }
+        if rex {
+            t.env.push((b"REX_SESSION".to_vec(), b"session:s".to_vec()));
+            t.env
+                .push((b"REX_BLOCK".to_vec(), block_id(7).into_bytes()));
+        }
+        t.tty = tty.to_vec();
+        self_hello(t)
+    }
+
+    /// Sends `hello` to `fx`'s daemon, a pty handed over: the helper's end,
+    /// and the pty, kept open while the answer waits. (On Linux, a pty whose
+    /// master has closed is no terminal.)
+    fn self_attach_with(fx: &mut Fixture, tag: &str, hello: &[u8]) -> (UnixStream, Pty) {
+        // an address of its own: the tests run side by side
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = Address::new(&format!("{tag}-{n}"));
+        let pty = Pty::new(80, 24);
+        let helper = at.send(hello, Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        (helper, pty)
+    }
+
+    /// A fixture for daemon `proj` at `/tmp/x/proj/sock`, sent a
+    /// self-attach from a terminal on `tty` with `$<NAME>` that address: the
+    /// helper's end, and the pty.
+    fn maybe_nested(tty: &[u8]) -> (Fixture, (UnixStream, Pty)) {
+        let mut fx = fixture();
+        fx.d.name = "proj".into();
+        fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
+        let hello = self_hello_from(b"/tmp/x/proj/sock", tty, false);
+        let attached = self_attach_with(&mut fx, "nested", &hello);
+        (fx, attached)
+    }
+
+    /// Neovim's answer to the channel list the nested check asked for: one
+    /// channel on each of `ptys`.
+    fn chans_answer(fx: &mut Fixture, ptys: &[&str]) {
+        let req = fx.d.nested_checks[0].req;
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, ptys.len() as u32);
+        for pty in ptys {
+            msgpack::write_map_header(&mut buf, 1);
+            msgpack::write_str(&mut buf, "pty");
+            msgpack::write_str(&mut buf, pty);
+        }
+        assert!(fx.d.on_nested_answer(req, None, Decoder::of(&buf)).unwrap());
+    }
+
+    fn assert_nested(fx: &Fixture, helper: &UnixStream) {
+        let z = refusal(helper);
+        assert_eq!(Some(crate::attach::Refusal::Nested), z.as_refusal());
+        assert_eq!(
+            "a terminal in proj's own Neovim can't attach to it",
+            z.message
+        );
+        assert!(fx.d.panes.list.is_empty());
+    }
+
+    #[test]
+    fn a_self_attach_from_one_of_the_daemons_own_terminals_is_refused_as_nested() {
+        // relayed with no tty: at once
+        let (fx, (helper, _pty)) = maybe_nested(b"");
+        assert!(fx.d.nested_checks.is_empty());
+        assert_nested(&fx, &helper);
+        // on one of Neovim's terminals, once Neovim lists them
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys004");
+        assert!(sent_to_nvim(&mut fx).contains("nvim_list_chans"));
+        chans_answer(&mut fx, &["/dev/ttys001", "/dev/ttys004"]);
+        assert_nested(&fx, &helper);
+    }
+
+    #[test]
+    fn a_self_attach_that_only_inherited_the_daemons_address_is_accepted() {
+        // a tmux started from a :terminal
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys009");
+        chans_answer(&mut fx, &["/dev/ttys004"]);
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
+        let p = &fx.d.panes.list[0];
+        assert!(p.is_self_attached() && p.attach_id.is_some());
+        // another daemon's terminal: no question asked
+        let mut fx = fixture();
+        fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
+        let hello = self_hello_from(b"/tmp/x/other/sock", b"/dev/ttys004", false);
+        let (helper, _pty) = self_attach_with(&mut fx, "other", &hello);
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
+    }
+
+    #[test]
+    fn a_self_attach_neovim_doesnt_list_terminals_for_in_time_is_refused_as_nested() {
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys009");
+        fx.d.time_out_hellos(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        assert!(fx.d.nested_checks.is_empty());
+        assert_nested(&fx, &helper);
+    }
+
+    #[test]
+    fn a_self_attachs_rex_block_is_its_terminal_only_in_the_rex_session() {
+        // Rex's session is session:s
+        let (mut fx, _rex) = rex_fixture();
+        let (helper, _pty) = self_attach_with(&mut fx, "rex-in", &self_hello_from(b"", b"", true));
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
+        let t = fx.d.panes.list[0].terminal.clone();
+        assert_eq!(Some(TerminalId::from(block_id(7).as_str())), t);
+        // with no Rex: no terminal id
+        let mut fx = with_provider(None);
+        let (helper, _pty) =
+            self_attach_with(&mut fx, "rex-none", &self_hello_from(b"", b"", true));
+        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
+        assert_eq!(None, fx.d.panes.list[0].terminal);
+    }
+
+    /// A daemon set up, its first self-attached pane showing window 1000,
+    /// and a second self-attached pane waiting for a window: its id.
+    fn second_self_attach(provider: Option<Held>) -> (Fixture, u32) {
+        let mut fx = with_provider(provider);
+        draw_external(&mut fx.d, 2, 1000, 80, 23);
+        let first = fx.d.panes.add_self_attached(SelfAttach {
+            surface: Surface::for_test(80, 24),
+            terminal: None,
+        });
+        first.neovim_window_handle = Some(1000);
+        first.area = Area::Own;
+        fx.d.nvim.ready = true;
+        fx.d.nvim.current_win = 1000;
+        let second = fx.d.panes.add_self_attached(SelfAttach {
+            surface: Surface::for_test(80, 24),
+            terminal: None,
+        });
+        second.area = Area::Own;
+        let id = second.id;
+        (fx, id)
+    }
+
+    /// Neovim's answer to the window list: `current`, then `wins`.
+    fn list_answer(fx: &mut Fixture, current: i64, wins: &[i64]) {
+        let ask = fx.d.window_ask.expect("a window list asked");
+        assert_eq!(self_attach::AskKind::List, ask.kind);
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, wins.len() as u32 + 1);
+        msgpack::write_int(&mut buf, current);
+        for &w in wins {
+            msgpack::write_int(&mut buf, w);
+        }
+        assert!(
+            fx.d.on_window_answer(ask.req, None, Decoder::of(&buf))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_window_being_shown_gets_no_other_pane_from_a_flush_before_the_answer() {
+        let (mut fx, id) = second_self_attach(None);
+        fx.d.give_windows().unwrap();
+        list_answer(&mut fx, 1000, &[1000, 1001]);
+        assert_eq!(
+            Some(self_attach::AskKind::Show(1001)),
+            fx.d.window_ask.map(|a| a.kind)
+        );
+        // a flush draws it before Neovim answers
+        draw_external(&mut fx.d, 3, 1001, 80, 23);
+        fx.d.reconcile().unwrap();
+        assert_eq!(2, fx.d.panes.list.len());
+        assert_eq!(Some(id), fx.d.panes.by_win(1001).map(|p| p.id));
+    }
+
+    #[test]
+    fn a_window_being_opened_gets_no_other_pane_from_a_flush_before_the_answer() {
+        let (mut fx, id) = second_self_attach(None);
+        fx.d.give_windows().unwrap();
+        // nothing unshown: a new window
+        list_answer(&mut fx, 1000, &[1000]);
+        assert_eq!(
+            Some(self_attach::AskKind::Open),
+            fx.d.window_ask.map(|a| a.kind)
+        );
+        // the Lua notes it as it makes it, and a flush draws it
+        fx.d.on_note(windows::Note::Opened(1002)).unwrap();
+        draw_external(&mut fx.d, 3, 1002, 80, 23);
+        fx.d.reconcile().unwrap();
+        assert_eq!(2, fx.d.panes.list.len());
+        assert_eq!(Some(id), fx.d.panes.by_win(1002).map(|p| p.id));
+    }
+
+    /// The ask serving the second pane of `second_self_attach` for a new
+    /// window, the Lua having noted window 1002 as it made it.
+    fn opening_1002(provider: Option<Held>) -> (Fixture, u32, u32) {
+        let (mut fx, id) = second_self_attach(provider);
+        fx.d.give_windows().unwrap();
+        list_answer(&mut fx, 1000, &[1000]);
+        let req = fx.d.window_ask.unwrap().req;
+        fx.d.on_note(windows::Note::Opened(1002)).unwrap();
+        (fx, id, req)
+    }
+
+    #[test]
+    fn a_new_window_that_fails_ends_its_attach_and_closes_the_window() {
+        let (mut fx, id, req) = opening_1002(None);
+        let _ = sent_to_nvim(&mut fx);
+        let failed =
+            fx.d.on_window_answer(req, Some(b"E1: no"), Decoder::of(&[0xc0]));
+        assert!(failed.unwrap());
+        assert!(fx.d.panes.by_id(id).is_none());
+        assert!(fx.d.changes.is_closing(1002));
+        assert!(sent_to_nvim(&mut fx).contains(".close("));
+        assert_eq!(None, fx.d.stopped);
+        // a flush showing it gives it no pane
+        draw_external(&mut fx.d, 3, 1002, 80, 23);
+        fx.d.reconcile().unwrap();
+        assert!(fx.d.panes.by_win(1002).is_none());
+    }
+
+    #[test]
+    fn the_last_pane_failing_to_get_a_window_ends_the_daemon() {
+        let (mut fx, id, req) = opening_1002(None);
+        let first = fx.d.panes.list[0].id;
+        let i = fx.d.panes.index_of(first).unwrap();
+        fx.d.panes.remove(i, &fx.d.event_loop);
+        fx.d.on_window_answer(req, Some(b"E1: no"), Decoder::of(&[0xc0]))
+            .unwrap();
+        assert!(fx.d.panes.by_id(id).is_none());
+        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+    }
+
+    #[test]
+    fn a_new_window_whose_pane_went_while_it_was_asked_closes_without_a_pane() {
+        let (mut fx, id) = second_self_attach(None);
+        fx.d.give_windows().unwrap();
+        list_answer(&mut fx, 1000, &[1000]);
+        let i = fx.d.panes.index_of(id).unwrap();
+        fx.d.panes.remove(i, &fx.d.event_loop);
+        let _ = sent_to_nvim(&mut fx);
+        fx.d.on_note(windows::Note::Opened(1002)).unwrap();
+        assert!(fx.d.changes.is_closing(1002));
+        assert!(sent_to_nvim(&mut fx).contains(".close("));
+        draw_external(&mut fx.d, 3, 1002, 80, 23);
+        fx.d.reconcile().unwrap();
+        assert_eq!(1, fx.d.panes.list.len());
+        assert!(fx.d.panes.by_win(1002).is_none());
+    }
+
+    #[test]
+    fn a_window_waiting_for_a_pane_without_one_isnt_taken() {
+        let (mut fx, id) = second_self_attach(Some(Held::Fake(FakeProvider::opening())));
+        // 1001 waits for its tab page's floating pane, or an origin; 1002
+        // for a pane that can draw it
+        fx.d.changes.note_split(windows::Split {
+            win: 1001,
+            side_by_side: true,
+            before: false,
+            from: 1000,
+            tab: 5,
+        });
+        let sp = fx.d.changes.split_of(1002);
+        fx.d.unshown_awaiting_origin.push((1002, sp));
+        fx.d.give_windows().unwrap();
+        list_answer(&mut fx, 1001, &[1000, 1001, 1002, 1003]);
+        assert_eq!(
+            Some(self_attach::AskKind::Show(1003)),
+            fx.d.window_ask.map(|a| a.kind)
+        );
+        assert_eq!(Some(id), fx.d.panes.by_win(1003).map(|p| p.id));
+    }
+
     #[test]
     fn an_attach_ends_saying_why() {
         use crate::attach::{Ending, Message};
@@ -4518,7 +4809,7 @@ mod tests {
         let d = &mut fx.d;
         // window 1's terminal attached by hand
         let i = d.panes.index_of(d.panes.by_win(1).unwrap().id).unwrap();
-        d.panes.list[i].attach_id = None;
+        d.panes.list[i].self_attached = true;
         d.panes.by_win_mut(3).unwrap().terminal = Some(TerminalId::from(block_id(3).as_str()));
         d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
         done(d);
@@ -4535,7 +4826,7 @@ mod tests {
         // window 3's terminal, first in the layout, attached by hand: it may
         // be anywhere, so the next of the layout is what the rest go beside
         let i = d.panes.index_of(d.panes.by_win(3).unwrap().id).unwrap();
-        d.panes.list[i].attach_id = None;
+        d.panes.list[i].self_attached = true;
         d.panes.list[i].terminal = Some(TerminalId::from(block_id(3).as_str()));
         d.on_tab_layout(three_reversed(&[20, 40, 40])).unwrap();
         done(d);
@@ -4550,7 +4841,9 @@ mod tests {
         let mut fx = fixture();
         let d = &mut fx.d;
         // a self-attached pane of tab page 2 first, then a requested one
-        d.panes.add(Pane::from_neovim_window(50, 50)).tab = 2;
+        let p = d.panes.add(Pane::from_neovim_window(50, 50));
+        p.tab = 2;
+        p.self_attached = true;
         set_block(d, 50, 50);
         pane_in_block(d, 51, 2, 51);
         let sp = windows::Split {
@@ -5212,7 +5505,9 @@ mod tests {
         assert_eq!(0, fx.d.asks.waiting());
 
         // a later window is drawn in its origin pane, nothing asked
-        let origin = fx.d.panes.add(Pane::from_neovim_window(90, 1000)).id;
+        let origin = fx.d.panes.add(Pane::from_neovim_window(90, 1000));
+        origin.self_attached = true;
+        let origin = origin.id;
         note_split_from(&mut fx.d, 1002, 1000, true, false);
         fx.d.new_pane(1002).unwrap();
         assert_eq!(Some(origin), fx.d.panes.by_win(1002).map(|p| p.id));

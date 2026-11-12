@@ -623,6 +623,82 @@ function M.close(win)
   note_laid_sizes()
 end
 
+--- The windows a self-attached pane could take: the current window, then
+--- each tab page's own in tab page order, each in window order. A flat list,
+--- the current window first, never empty.
+function M.windows()
+  local by_tab = {}
+  for _, win in ipairs(api.nvim_list_wins()) do
+    if shown(win) then
+      local tab = tab_of(win) or api.nvim_win_get_tabpage(win)
+      by_tab[tab] = by_tab[tab] or {}
+      table.insert(by_tab[tab], win)
+    end
+  end
+  local out = { api.nvim_get_current_win() }
+  for _, tab in ipairs(api.nvim_list_tabpages()) do
+    for _, win in ipairs(by_tab[tab] or {}) do out[#out + 1] = win end
+  end
+  return out
+end
+
+-- `win` and its home tab page become current
+local function enter(win)
+  local tab = home[win]
+  if api.nvim_win_get_config(win).external and tab and api.nvim_tabpage_is_valid(tab) then
+    api.nvim_set_current_tabpage(tab)
+  end
+  api.nvim_set_current_win(win)
+end
+
+--- A self-attached pane takes `win`, an unshown window, at `w` x `h`: it
+--- becomes external and current, its home tab page too. Returns it, or 0 if
+--- it's gone.
+function M.show(win, w, h)
+  if not shown(win) then return 0 end
+  enter(win)
+  if api.nvim_win_get_config(win).external then
+    M.size(win, w, h)
+  else
+    M.adopt(win, w, h)
+  end
+  return win
+end
+
+--- A self-attached pane's new window, external at `w` x `h` and current, in
+--- the current tab page: on `file`, if given, its cursor on `line`, else on
+--- the buffer the current window shows, as :split opens it. Returns it.
+function M.open(file, line, w, h)
+  if file == vim.NIL then file = nil end
+  if line == vim.NIL then line = nil end
+  local cur = api.nvim_get_current_win()
+  if not shown(cur) and last and shown(last) then cur = last end
+  local buf = shown(cur) and api.nvim_win_get_buf(cur) or api.nvim_create_buf(true, false)
+  local view = shown(cur) and api.nvim_win_call(cur, vim.fn.winsaveview)
+  -- made with no autocommands, so it's noted before one can flush a redraw
+  -- that shows it: its pane is the one that asked. WinNew, then entering
+  -- it, follow as they would have.
+  local config = { external = true, width = w, height = math.max(h - 1, 1), noautocmd = true }
+  local win = api.nvim_open_win(buf, false, config)
+  note('opened', win)
+  api.nvim_win_call(win, function() api.nvim_exec_autocmds('WinNew', { modeline = false }) end)
+  api.nvim_set_current_win(win)
+  keep_edgy_out(win)
+  home[win] = api.nvim_get_current_tabpage()
+  if file then
+    local ok, err = pcall(vim.cmd.edit, { args = { file }, magic = { file = false } })
+    if not ok then api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {}) end
+    if line then
+      local last_line = api.nvim_buf_line_count(api.nvim_win_get_buf(win))
+      api.nvim_win_set_cursor(win, { math.min(line, last_line), 0 })
+    end
+  elseif view then
+    vim.fn.winrestview(view)
+  end
+  M.size(win, w, h)
+  return win
+end
+
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
 --- `col` on the screen, as their float group pane was resized to. `cur` is
 --- where they are now: row, col, width, height. Returns whether it moved
