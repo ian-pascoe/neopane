@@ -348,7 +348,8 @@ quietly.
   show in panes, as with `<C-w>H`, still does nothing.
 - A picker or other float group in a Rex floating pane shows over whichever
   tab page is current, and closes with the tab page it opened in: closing
-  the tab page it shows over sends it back to its own first.
+  the tab page it shows over sends it back to its own first, but for the
+  float you're in, which closes, as Neovim closes the current float first.
 - Neovim's tab-page queries don't match neorex's tab pages (#67). Every
   window shown in a pane sits in Neovim's current tab page, so
   `tabpagebuflist()`, `tabpagewinnr()` and `nvim_tabpage_list_wins()` see all

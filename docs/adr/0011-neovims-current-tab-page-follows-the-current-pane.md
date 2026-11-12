@@ -57,20 +57,25 @@ moves into whichever tab page is current (#90).
   page, as plain Neovim does for a window in another tab page. `<C-w>w`,
   `<C-w>W` and `<C-w>p` step only through windows panes are showing, so a
   lone pane cycles its own tab page, and Rex still steps into a tab page's
-  Rex floating pane: they are mapped, in Normal and Visual mode. `:wincmd w`,
-  `:wincmd W` and `:wincmd p`, which no mapping sees, step in Neovim's own
-  order; one that lands on an anchor moves on to a window a pane shows.
+  Rex floating pane: they are mapped, in Normal and Visual mode, which a
+  step ends as entering another window does, and keeps with nowhere to go.
+  `:wincmd w`, `:wincmd W` and `:wincmd p`, which no mapping sees, step in
+  Neovim's own order; one that lands on an anchor moves on to a window a
+  pane shows.
 - A float group with a float group pane is moved, every float of it, into
   the tab page being entered (`nvim_win_set_config` naming a window of that
   tab page, such as its anchor; Neovim 0.12), before anything is drawn. Its
   float group pane never blanks and works from any tab page: a key or click
   in it makes its float current with no switch. It still belongs to the tab
-  page it opened in: the tabline counts it there, it closes when that tab
-  page closes, and it is moved back before the tab page it sits in closes.
-  Neovim allows no move as a tab page starts to close (TabClosedPre gives
-  E1312), so it's moved back as the first of that tab page's windows
-  closes, before the rest of its floats do; a close that then fails brings
-  it back.
+  page it opened in, and so does a float that joins it away from home, as a
+  preview opens beside a picker's list: the tabline counts it there, it
+  closes when that tab page closes, and it is moved back before the tab
+  page it sits in closes. Neovim allows no move as a tab page starts to
+  close (TabClosedPre gives E1312), so it's moved back as the first of that
+  tab page's windows closes, before the rest of its floats do; a close that
+  then fails brings it back. The exception is a float of it that is the
+  current window: Neovim closes that one first, as it closes the current
+  float of any tab page that closes, and the rest of the group goes home.
   Where Neovim can't move floats between tab pages, its float group pane
   keeps its last frame until its tab page is current again, and a key or
   click in it makes it current.

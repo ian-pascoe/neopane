@@ -169,12 +169,16 @@ fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
     }
 }
 
-/// Tells Neovim the screen floats of the float groups with float group panes:
-/// each, with the floats hanging from it, moves into whichever tab page is
-/// current, and still belongs to the one it opened in.
-pub(crate) fn carry(nvim: &mut Nvim, tops: &[i64]) {
+/// Tells Neovim the screen floats of the float groups with float group
+/// panes, a list per group: each, with the floats hanging from it, moves into
+/// whichever tab page is current, and still belongs to the one its group
+/// opened in.
+pub(crate) fn carry(nvim: &mut Nvim, groups: &[Vec<i64>]) {
     nvim.exec_lua(&format!("{NAME}.carry(...)"), 1);
-    write_wins(nvim, tops);
+    msgpack::write_array_header(nvim.writer(), groups.len() as u32);
+    for g in groups {
+        write_wins(nvim, g);
+    }
 }
 
 /// Asks for our channel id: the response to the returned id starts with it.
@@ -3896,9 +3900,16 @@ mod tests {
         /// The tab page number each of `wins` sits in, space-separated; 0 for
         /// one that closed.
         fn tab_numbers(&mut self, wins: &[i64]) -> String {
+            self.tab_numbers_after("", wins)
+        }
+
+        /// `tab_numbers`, read in the same call as Lua `code` runs, before
+        /// anything it schedules.
+        fn tab_numbers_after(&mut self, code: &str, wins: &[i64]) -> String {
             let list: Vec<String> = wins.iter().map(i64::to_string).collect();
             self.eval_str(&format!(
-                "local out = {{}}\n\
+                "{code}\n\
+                 local out = {{}}\n\
                  for _, w in ipairs({{ {} }}) do\n\
                  \x20 out[#out + 1] = vim.api.nvim_win_is_valid(w) and vim.api.nvim_tabpage_get_number(vim.api.nvim_win_get_tabpage(w)) or 0\n\
                  end\n\
@@ -3917,7 +3928,7 @@ mod tests {
         h.sync("vim.o.showtabline = 2");
         h.focus_pane(a);
         let [top, kid, other] = h.open_picker();
-        carry(&mut h.nvim, &[top]);
+        carry(&mut h.nvim, &[vec![top]]);
         h.record(&["WinClosed", "WinNew"]);
 
         // the picker's floats come along, still drawn; the other float stays
@@ -3951,7 +3962,7 @@ mod tests {
         h.sync("vim.o.showtabline = 2");
         h.focus_pane(a);
         let floats = h.open_picker();
-        carry(&mut h.nvim, &[floats[0]]);
+        carry(&mut h.nvim, &[vec![floats[0]]]);
         h.focus_pane(c);
         assert_eq!("2 2 1", h.tab_numbers(&floats));
         Some((h, floats))
@@ -3998,23 +4009,72 @@ mod tests {
         };
         h.sync(&format!("vim.cmd('tabnew')\n{}", adopt_all()));
         assert_eq!("3 3 1", h.tab_numbers(&floats));
-        h.input(":tabclose 2<CR>");
-        h.barrier();
-        h.sync("");
-        assert_eq!("2 2 1", h.tab_numbers(&floats));
+        assert_eq!(
+            "2 2 1",
+            h.tab_numbers_after("vim.cmd('tabclose 2')", &floats)
+        );
     }
 
     #[test]
-    fn a_carried_float_current_as_its_tab_page_closes_goes_home_too() {
+    fn a_carried_float_current_as_its_tab_page_closes_closes_and_the_rest_go_home() {
         let Some((mut h, [top, kid, _])) = picker_carried_into_the_second() else {
             return;
         };
+        // a prompt whose buffer goes with its window
         h.sync(&format!(
-            "vim.api.nvim_set_current_win({kid})\nvim.cmd.tabclose()"
+            "_G.prompt = vim.api.nvim_create_buf(false, true)\n\
+             vim.bo[prompt].bufhidden = 'wipe'\n\
+             vim.api.nvim_win_set_buf({kid}, prompt)\n\
+             vim.api.nvim_set_current_win({kid})\n\
+             vim.cmd.tabclose()"
         ));
         h.barrier();
         h.sync("");
-        assert_eq!("1 1", h.tab_numbers(&[top, kid]));
+        assert_eq!("1 0", h.tab_numbers(&[top, kid]));
+        assert_eq!(
+            "false",
+            h.eval_str("return tostring(vim.api.nvim_buf_is_valid(prompt))")
+        );
+        assert_eq!(None, h.kind(kid));
+    }
+
+    #[test]
+    fn a_screen_float_joining_a_carried_group_away_from_home_belongs_to_its_home() {
+        let Some((mut h, [top, _, _])) = picker_carried_into_the_second() else {
+            return;
+        };
+        // beside the picker, as a preview opens beside telescope's list
+        let joined: i64 = h
+            .eval_str(
+                "return tostring(vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, \
+                 { relative = 'editor', row = 1, col = 12, width = 6, height = 3 }))",
+            )
+            .parse()
+            .unwrap();
+        carry(&mut h.nvim, &[vec![top, joined]]);
+        h.nvim.flush().unwrap();
+        // the first tab page's label counts it: two windows, three floats
+        h.sync("vim.cmd.redrawtabline()");
+        h.barrier();
+        h.until_tabline_starts_with(" 5 ");
+        h.sync("vim.cmd.tabclose()");
+        h.barrier();
+        assert_eq!("1", h.tab_numbers(&[joined]));
+    }
+
+    #[test]
+    fn stepping_with_nowhere_else_to_go_keeps_the_visual_selection() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // typed, then read as the keys are done with
+        assert_eq!(
+            "v",
+            h.eval_str(
+                "vim.api.nvim_feedkeys(vim.keycode('v<C-w>w'), 'mx!', false)\n\
+                 return vim.fn.mode()"
+            )
+        );
     }
 
     #[test]
@@ -4094,7 +4154,7 @@ mod tests {
         };
         let [a, _, _] = two_tab_pages(&mut h);
         let [top, kid, _] = h.open_picker();
-        carry(&mut h.nvim, &[top]);
+        carry(&mut h.nvim, &[vec![top]]);
         h.focus_pane(a);
         assert_eq!("1 1", h.tab_numbers(&[top, kid]));
         h.input(":tabclose 2<CR>");

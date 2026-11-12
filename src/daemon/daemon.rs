@@ -1766,14 +1766,18 @@ impl Daemon {
             self.act(ask);
         }
         // their floats move into whichever tab page is current
-        let mut tops = Vec::new();
+        let mut groups = Vec::new();
         for p in &self.panes.list {
             if let Some(l) = &p.layer {
                 let wins = l.group.top_grids().iter();
-                tops.extend(wins.filter_map(|&g| self.grids.win_on(g)).map(|w| w.win));
+                groups.push(
+                    wins.filter_map(|&g| self.grids.win_on(g))
+                        .map(|w| w.win)
+                        .collect(),
+                );
             }
         }
-        self.nvim.tell_carried(tops);
+        self.nvim.tell_carried(groups);
     }
 
     fn on_provider(&mut self, token: usize) -> Result<()> {

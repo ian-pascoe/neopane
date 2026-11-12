@@ -41,9 +41,10 @@ pub(crate) struct NvimSession {
     /// off. Neovim never reuses a handle, so closed ones do no harm.
     pub entered_floats: [i64; MAX_ENTERED],
     pub entered_len: u8,
-    /// The screen floats of the float group panes' groups, as Neovim was
-    /// last told: they move into whichever tab page is current.
-    pub carried: Vec<i64>,
+    /// The screen floats of the float group panes' groups, a list per
+    /// group, as Neovim was last told: they move into whichever tab page is
+    /// current.
+    pub carried: Vec<Vec<i64>>,
     /// The windows panes show, sorted, as Neovim was last told, and room for
     /// the next list.
     pub shown: Vec<i64>,
@@ -263,15 +264,15 @@ impl NvimSession {
         self.client.ui_try_resize(size[0], size[1])
     }
 
-    /// Tells Neovim `tops`, the screen floats of the float group panes'
-    /// groups, if they changed: each, with the floats hanging from it, moves
+    /// Tells Neovim `groups`, the screen floats of each float group pane's
+    /// group, if they changed: each, with the floats hanging from it, moves
     /// into whichever tab page is current. The caller flushes.
-    pub(crate) fn tell_carried(&mut self, tops: Vec<i64>) {
-        if !self.ready || tops == self.carried {
+    pub(crate) fn tell_carried(&mut self, groups: Vec<Vec<i64>>) {
+        if !self.ready || groups == self.carried {
             return;
         }
-        windows::carry(&mut self.client, &tops);
-        self.carried = tops;
+        windows::carry(&mut self.client, &groups);
+        self.carried = groups;
     }
 
     /// Tells Neovim the windows panes show, which `fill` adds to a list, if
