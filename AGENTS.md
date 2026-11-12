@@ -39,7 +39,7 @@ Install with `just install`. On macOS, a binary overwritten in place is killed a
 
 ### Issue tracker
 
-Issues live in Linear (team SPI, project ian-pascoe/neopane); GitHub Issues on `ian-pascoe/neorex` are the public intake and sync one-way into it. Reach Linear through Executor's Linear app, falling back to the `linear` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in Linear (team SPI, project `195685cc-087f-4ec9-9bc8-0a0606dd056d`, named by its id since its name may change); GitHub Issues on `ian-pascoe/neorex` are the public intake and sync one-way into it. Reach Linear through Executor's Linear app, falling back to the `linear` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
