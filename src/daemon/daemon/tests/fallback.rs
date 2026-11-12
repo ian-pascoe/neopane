@@ -459,27 +459,29 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
 }
 
 #[test]
-fn with_a_pane_provider_windows_opened_with_o_open_as_before_beside_the_first_pane() {
-    let mut f = FakeProvider::opening();
-    f.caps.insert(Capability::Focus);
-    let Some((mut d, live, reader)) = started_with("-o3", Some(Held::Fake(f))) else {
-        return;
-    };
-    let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });
-    pump(&mut d, |d| match &d.provider {
-        Some(Held::Fake(f)) => f.asked().iter().any(open),
-        _ => false,
-    });
-    // the first asked, the next waiting their turn: to the right of t0, as
-    // any window Neovim didn't say the place of, not below it
-    let asked = fake(&mut d).asked();
-    let Some(Ask::OpenBeside { origin, dir, .. }) = asked.iter().find(|a| open(a)) else {
-        unreachable!()
-    };
-    assert_eq!(("t0", Direction::Right), (origin.as_str(), *dir));
-    drop(d);
-    drop(live);
-    reader.join().unwrap();
+fn with_a_pane_provider_windows_opened_with_o_or_capital_o_open_where_neovims_layout_has_them() {
+    for (flag, want) in [("-o3", Direction::Down), ("-O3", Direction::Right)] {
+        let mut f = FakeProvider::opening();
+        f.caps.insert(Capability::Focus);
+        let Some((mut d, live, reader)) = started_with(flag, Some(Held::Fake(f))) else {
+            return;
+        };
+        let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });
+        pump(&mut d, |d| match &d.provider {
+            Some(Held::Fake(f)) => f.asked().iter().any(open),
+            _ => false,
+        });
+        // the first asked, the next waiting their turn, beside the first
+        // pane the way Neovim split them (ADR 0009)
+        let asked = fake(&mut d).asked();
+        let Some(Ask::OpenBeside { origin, dir, .. }) = asked.iter().find(|a| open(a)) else {
+            unreachable!()
+        };
+        assert_eq!(("t0", want), (origin.as_str(), *dir), "{flag}");
+        drop(d);
+        drop(live);
+        reader.join().unwrap();
+    }
 }
 
 /// A self-attached pane in terminal `terminal`, with no window yet. Its id,

@@ -1148,13 +1148,6 @@ impl Daemon {
             }
             windows::Note::Reopened { old, new } => self.on_reopened(old, new),
             windows::Note::Split(sp) => {
-                // noted as setup runs, before Neovim answers it: a window
-                // Neovim started with, as `-o` and `-O` open. Only with no
-                // pane provider is it laid out as Neovim had it (#88
-                // decision 13); one opens it as any other window.
-                if !self.nvim.ready && self.provider.is_some() {
-                    return Ok(());
-                }
                 if self.panes.by_win(sp.win).is_none() {
                     self.changes.note_split(sp);
                 }
