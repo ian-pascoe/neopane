@@ -202,6 +202,7 @@ impl Daemon {
             }
         }
         self.size_window(id);
+        self.place_opened(id);
         if self.panes.by_id(id).unwrap().layer.is_some()
             && let Some(req) = self.floating().follow_layer(id)
             && let Some(l) = &mut self.panes.by_id_mut(id).unwrap().layer

@@ -11,6 +11,7 @@
 //! and `focus_direction` are asked through it.
 
 use std::fmt;
+use std::time::Duration;
 
 use super::live_layout::LiveLayout;
 use crate::attach::PaneId;
@@ -60,8 +61,8 @@ impl Capability {
 
     /// How long an ask of it may take before it counts as failed: ADR 0006's
     /// defaults (#93 decision 10), Rex's the same.
-    pub(crate) fn timeout_ms(self) -> u32 {
-        match self {
+    pub(crate) fn default_timeout(self) -> Duration {
+        Duration::from_millis(match self {
             Capability::Open
             | Capability::OpenBeside
             | Capability::OpenFloat
@@ -74,7 +75,7 @@ impl Capability {
             | Capability::Focus
             | Capability::FocusDirection
             | Capability::Events => 2000,
-        }
+        })
     }
 
     /// Whether its acts wait their turn in the layout queue, one at a time:
@@ -328,6 +329,11 @@ pub(crate) trait PaneProvider {
 
     /// What it can be asked.
     fn capabilities(&self) -> CapabilitySet;
+
+    /// How long an ask of `cap` may take before it counts as failed.
+    fn timeout(&self, cap: Capability) -> Duration {
+        cap.default_timeout()
+    }
 
     /// Starts `ask`, whose answer comes from `next` as
     /// `ProviderEvent::Answered` with `id`. Never blocks, never answers inline.

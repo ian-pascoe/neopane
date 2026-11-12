@@ -16,6 +16,7 @@ use mlua::{Lua, Table, Value};
 
 use super::wire::Request;
 use crate::name::NAME;
+use crate::util::seconds;
 
 /// What `run` keeps of each output.
 const MAX_OUTPUT: usize = 1 << 20;
@@ -281,12 +282,6 @@ fn shown(v: &Value) -> String {
     }
 }
 
-/// Seconds as Lua would show them, to two places at most: `1`, `0.75`.
-pub(super) fn seconds(d: Duration) -> String {
-    let s = format!("{:.2}", d.as_secs_f64());
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
 /// What running a command came to.
 struct RunResult {
     code: Option<i32>,
@@ -470,14 +465,6 @@ fn stop(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn seconds_are_shown_short() {
-        assert_eq!(seconds(Duration::from_secs(1)), "1");
-        assert_eq!(seconds(Duration::from_millis(750)), "0.75");
-        assert_eq!(seconds(Duration::from_millis(2500)), "2.5");
-        assert_eq!(seconds(Duration::from_secs(3)), "3");
-    }
 
     #[test]
     fn which_searches_path() {

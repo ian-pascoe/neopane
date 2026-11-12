@@ -1,8 +1,9 @@
 //! The epoll backend, for Linux. Plain fds go on the epoll as they are, an
 //! fd watched for writing too under one entry with both flags.
-//! Signals arrive through one signalfd and each timer is a timerfd, so the
-//! epoll sees all three as readable fds, and `wait` turns them back into
-//! events.
+//! Signals arrive through one signalfd, each timer is a timerfd, and each
+//! child watched with `add_exit` is a pidfd (`pidfd_open`), readable once
+//! it has ended and closed once that is reported. So the epoll sees every
+//! source as a readable fd, and `wait` turns them back into events.
 //!
 //! A signalfd only gets a signal that is blocked, so `add_signal` blocks it
 //! on the calling thread. Blocked signals queue even while ignored.
@@ -248,7 +249,22 @@ impl Backend {
         Ok(())
     }
 
-    pub(super) fn wait<'a>(&self, buf: &'a mut [Event]) -> Result<&'a [Event]> {
+    pub(super) fn add_exit(&self, pid: libc::pid_t, token: usize) -> Result<()> {
+        // SAFETY: a plain syscall; a pidfd is always close-on-exec.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
+        let watch = Watch {
+            kind: Kind::Exit,
+            token,
+            write_token: None,
+        };
+        self.adopt(fd, watch).map(|_| ())
+    }
+
+    pub(super) fn fd(&self) -> RawFd {
+        self.ep
+    }
+
+    pub(super) fn wait<'a>(&self, buf: &'a mut [Event], block: bool) -> Result<&'a [Event]> {
         if buf.is_empty() {
             return Ok(&buf[..0]);
         }
@@ -259,7 +275,9 @@ impl Backend {
         loop {
             let ready: usize = loop {
                 // SAFETY: `raw` has room for `max` events.
-                let rc = unsafe { libc::epoll_wait(self.ep, raw.as_mut_ptr(), max, -1) };
+                let rc = unsafe {
+                    libc::epoll_wait(self.ep, raw.as_mut_ptr(), max, if block { -1 } else { 0 })
+                };
                 if rc >= 0 {
                     break rc as usize;
                 }
@@ -303,6 +321,17 @@ impl Backend {
                         kind: Kind::Timer,
                         eof: false,
                     }),
+                    // once: the pidfd goes
+                    Kind::Exit => {
+                        let _ = self.remove(fd);
+                        // SAFETY: the pidfd is ours, made by `add_exit`.
+                        unsafe { libc::close(fd) };
+                        Some(Event {
+                            token: watch.token,
+                            kind: Kind::Exit,
+                            eof: false,
+                        })
+                    }
                 };
                 if let Some(event) = event
                     && n < buf.len()
@@ -312,7 +341,7 @@ impl Backend {
                 }
             }
             // every event may have been spent already: wait again
-            if n > 0 {
+            if n > 0 || !block {
                 return Ok(&buf[..n]);
             }
         }
@@ -399,6 +428,11 @@ impl Drop for Backend {
             }
             for fd in self.timers.get_mut().values() {
                 libc::close(*fd);
+            }
+            for (fd, w) in self.watches.get_mut().iter() {
+                if w.kind == Kind::Exit {
+                    libc::close(*fd);
+                }
             }
         }
     }

@@ -12,10 +12,10 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use super::api::seconds;
 use super::child::{ANSWER_FD, REQUEST_FD};
 use super::wire::{Answer, MAX_ANSWER, Request};
 use crate::log::log_info;
+use crate::util::seconds;
 
 /// The most output the config's run logs: 64 KiB.
 pub const MAX_PRINTED: usize = 64 << 10;
@@ -136,10 +136,13 @@ fn start(spawn: Spawn<'_>, request: &Request) -> io::Result<Running> {
         (fds[0].0.as_raw_fd(), fds[0].1),
         (fds[1].0.as_raw_fd(), fds[1].1),
     ];
-    // SAFETY: between fork and exec this only calls fcntl, dup2 and close,
-    // which are async-signal-safe, and allocates nothing.
+    // SAFETY: between fork and exec this only calls fcntl, dup2, close and
+    // what `default_signals` calls, which are async-signal-safe, and
+    // allocates nothing.
     unsafe {
         command.pre_exec(move || {
+            // nor the commands it runs inherit the daemon's ignored signals
+            crate::util::default_signals()?;
             // out of the way of 3 and 4 first, so neither dup2 clobbers the other
             let mut high = [0; 2];
             for (i, (fd, _)) in raw.iter().enumerate() {
