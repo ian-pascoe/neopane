@@ -989,6 +989,7 @@ end
 
 -- the carried floats into the current tab page
 local function bring_carried()
+  if next(carried) == nil then return end
   local tab = api.nvim_get_current_tabpage()
   move_floats(floats_in(tab, true, function(_, root) return carried[root] end), tab)
 end
@@ -1135,6 +1136,7 @@ for _, k in ipairs({ 'p', '<C-p>' }) do
     if previous and steps_to(previous) then M.go(previous) end
   end, { desc = 'Go to the window current before' })
 end
+
 api.nvim_create_autocmd('WinEnter', {
   group = group,
   callback = function()
