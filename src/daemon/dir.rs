@@ -1,5 +1,6 @@
 //! Where a daemon lives (ADR 0004): `$<NAME>_TMPDIR`, else `/tmp`, then
-//! `/<name>-<uid>/<daemon name>/`, holding `sock`, `nvim.sock` and `log`.
+//! `/<name>-<uid>/<daemon name>/`, holding `sock`, `nvim.sock`, `log` and,
+//! while it is unattached with unsaved changes, `unsaved`.
 //! A daemon is live while it holds an exclusive `flock` on its directory.
 //!
 //! The one platform module that knows a daemon's address is a path: outside
@@ -7,7 +8,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -296,16 +297,64 @@ impl Claimed {
     pub fn remove_sockets_on_drop(&self) -> RemoveSockets<'_> {
         RemoveSockets(self)
     }
+
+    /// The `unsaved` file, written while the daemon is unattached with
+    /// unsaved changes.
+    pub(crate) fn unsaved(&self) -> Unsaved {
+        Unsaved(self.dir.join(UNSAVED))
+    }
+}
+
+/// A daemon's `unsaved` file (ADR 0004): `unsaved 1`, then the full name of
+/// each buffer with unsaved changes, one a line, empty for an unnamed one.
+#[derive(Debug, Clone)]
+pub(crate) struct Unsaved(PathBuf);
+
+impl Unsaved {
+    /// Writes `files` whole, mode 0600, by renaming a finished file into
+    /// place, so a reader never sees half of it. A name with a newline in it
+    /// can't be one line, and is left out.
+    pub(crate) fn write(&self, files: &[Vec<u8>]) -> io::Result<()> {
+        let mut text = b"unsaved 1\n".to_vec();
+        for f in files.iter().filter(|f| !f.contains(&b'\n')) {
+            text.extend_from_slice(f);
+            text.push(b'\n');
+        }
+        let mut tmp = self.0.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let _ = fs::remove_file(&tmp);
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(&text));
+        match written.and_then(|()| fs::rename(&tmp, &self.0)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// Removes it, if it's there.
+    pub(crate) fn remove(&self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// Removes a daemon's socket files left over as it drops: Neovim's, then the
-/// daemon's own. A Neovim that was stuck or killed leaves its socket behind.
+/// daemon's own, and its `unsaved`. A Neovim that was stuck or killed leaves
+/// its socket behind.
 pub struct RemoveSockets<'a>(&'a Claimed);
 
 impl Drop for RemoveSockets<'_> {
     fn drop(&mut self) {
-        for sock in [NVIM_SOCK, SOCK] {
-            let _ = fs::remove_file(self.0.dir.join(sock));
+        for file in [NVIM_SOCK, SOCK, UNSAVED] {
+            let _ = fs::remove_file(self.0.dir.join(file));
         }
     }
 }
@@ -609,6 +658,39 @@ mod tests {
         }
         assert_eq!(dir.join(LOG).to_str().unwrap(), claimed.log());
         assert_eq!(dir.join(SOCK).as_os_str(), claimed.address().as_arg());
+    }
+
+    #[test]
+    fn unsaved_lists_one_path_a_line_under_its_version_only_its_user_can_read() {
+        let base = Scratch::new();
+        let claimed = claim(&base.base(), "work").unwrap();
+        let path = base.0.join("work").join(UNSAVED);
+        let unsaved = claimed.unsaved();
+        unsaved
+            .write(&[b"/a/b.txt".to_vec(), Vec::new(), b"/c".to_vec()])
+            .unwrap();
+        assert_eq!(
+            "unsaved 1\n/a/b.txt\n\n/c\n",
+            fs::read_to_string(&path).unwrap()
+        );
+        assert_eq!(
+            0o600,
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777
+        );
+        // written again whole, by a rename: nothing of the last is left
+        unsaved.write(&[b"/d".to_vec()]).unwrap();
+        assert_eq!("unsaved 1\n/d\n", fs::read_to_string(&path).unwrap());
+        let names: Vec<_> = fs::read_dir(base.0.join("work"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(vec![std::ffi::OsString::from(UNSAVED)], names);
+        unsaved.remove();
+        assert!(fs::symlink_metadata(&path).is_err());
+        // and gone with the sockets as the daemon ends
+        unsaved.write(&[b"/d".to_vec()]).unwrap();
+        drop(claimed.remove_sockets_on_drop());
+        assert!(fs::symlink_metadata(&path).is_err());
     }
 
     #[test]
