@@ -444,7 +444,8 @@ fn attach(words: &[OsString]) -> Result<Command, UsageError> {
 }
 
 /// `attach [--address A] [+LINE] [--] [FILE]`, without `--pane`. Without
-/// `--address`, or with `--name` or `--provider`, it isn't built yet.
+/// `--address`, or with `--name` or `--provider`, it isn't built yet (#121);
+/// any other option is a usage error.
 fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
     let (mut address, mut file, mut line) = (None, None, None);
     let mut i = 0;
@@ -462,10 +463,16 @@ fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
             if line.replace(n).is_some() {
                 return Err(UsageError("+LINE is given twice".into()));
             }
-        } else if !files_only && bytes.starts_with(b"-") && bytes.len() > 1 {
-            let option = word.to_string_lossy();
-            let option = option.split('=').next().unwrap_or_default();
+        } else if !files_only
+            && let Some((option, _)) = long_option(word, &["--name", "--provider"])
+        {
             return Ok(Command::NotBuilt(format!("attach {option}")));
+        } else if !files_only && bytes.starts_with(b"-") && bytes.len() > 1 {
+            // ADR 0014: an unknown option is a usage error
+            return Err(UsageError(format!(
+                "attach doesn't take {}",
+                word.to_string_lossy()
+            )));
         } else if file.replace(word.clone()).is_some() {
             return Err(UsageError("attach takes one FILE".into()));
         }

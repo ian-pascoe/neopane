@@ -243,29 +243,34 @@ pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), 
     Ok(())
 }
 
-/// Whether a self-attach whose terminal has environment `env` comes from
-/// the daemon at `address`'s own Neovim: `$<NAME>` there is its address
-/// (#91 decision 31).
-pub(crate) fn is_nested(env: &[(Vec<u8>, Vec<u8>)], address: &std::ffi::OsStr) -> bool {
-    let var = crate::name::upper();
+/// The value of variable `name` in environment `env`, if set.
+fn env_var<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
     env.iter()
-        .any(|(k, v)| k == var.as_bytes() && v.as_slice() == address.as_encoded_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_slice())
+}
+
+/// Whether self-attaching terminal `t` is one of the daemon at `address`'s
+/// own Neovim's, whose terminals' ptys are `ptys`: `$<NAME>` there is the
+/// daemon's address, and its tty is one of them, or it has none (ADR 0013,
+/// #91 decision 31). A tmux started from a `:terminal`, which inherited the
+/// variable, isn't.
+pub(crate) fn is_nested(t: &Terminal, address: &std::ffi::OsStr, ptys: &[Vec<u8>]) -> bool {
+    env_var(&t.env, crate::name::upper().as_bytes()) == Some(address.as_encoded_bytes())
+        && (t.tty.is_empty() || ptys.contains(&t.tty))
 }
 
 /// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
 /// hello carries, when `REX_SESSION` there is `session`, the daemon's Rex
-/// session, or no session is given (#114 finds it instead).
+/// session. A stopgap: #114 has the pane provider find it.
 pub(crate) fn rex_block(
     env: &[(Vec<u8>, Vec<u8>)],
-    session: Option<&str>,
+    session: &str,
 ) -> Option<crate::daemon::provider::TerminalId> {
-    let var = |name: &[u8]| env.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-    if let Some(session) = session
-        && var(b"REX_SESSION").is_none_or(|s| s.as_slice() != session.as_bytes())
-    {
+    if env_var(env, b"REX_SESSION") != Some(session.as_bytes()) {
         return None;
     }
-    let b = String::from_utf8_lossy(var(b"REX_BLOCK")?);
+    let b = String::from_utf8_lossy(env_var(env, b"REX_BLOCK")?);
     match crate::rex::ids::block(b.as_bytes()) {
         Ok(_) => Some(crate::daemon::provider::TerminalId::from(b.as_ref())),
         Err(_) => {
@@ -275,8 +280,9 @@ pub(crate) fn rex_block(
     }
 }
 
-/// `file` from a hello, made absolute against `cwd` if it isn't already.
-pub(crate) fn absolute(file: &[u8], cwd: &[u8]) -> Vec<u8> {
+/// A hello's `file` made absolute against its terminal's `cwd`, if it
+/// isn't already; links aren't resolved.
+pub(crate) fn file_against_cwd(file: &[u8], cwd: &[u8]) -> Vec<u8> {
     if file.starts_with(b"/") || cwd.is_empty() {
         return file.to_vec();
     }
@@ -376,40 +382,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_self_attach_is_nested_when_its_address_variable_is_the_daemons() {
-        let var = crate::name::upper().into_bytes();
-        let env = |v: &[u8]| vec![(b"TERM".to_vec(), b"x".to_vec()), (var.clone(), v.to_vec())];
+    fn a_self_attach_is_nested_from_one_of_the_daemons_own_terminals() {
         let ours = std::ffi::OsStr::new("/tmp/x/d/sock");
-        assert!(is_nested(&env(b"/tmp/x/d/sock"), ours));
-        assert!(!is_nested(&env(b"/tmp/x/other/sock"), ours));
-        assert!(!is_nested(&[], ours));
+        let ptys = [b"/dev/ttys004".to_vec()];
+        let from = |address: &[u8], tty: &[u8]| {
+            let mut t = test_terminal(80, 24);
+            t.env = vec![
+                (b"TERM".to_vec(), b"x".to_vec()),
+                (crate::name::upper().into_bytes(), address.to_vec()),
+            ];
+            t.tty = tty.to_vec();
+            is_nested(&t, ours, &ptys)
+        };
+        assert!(from(b"/tmp/x/d/sock", b"/dev/ttys004"));
+        // relayed with no tty
+        assert!(from(b"/tmp/x/d/sock", b""));
+        // a tmux started from a :terminal, which inherited the variable
+        assert!(!from(b"/tmp/x/d/sock", b"/dev/ttys009"));
+        assert!(!from(b"/tmp/x/other/sock", b"/dev/ttys004"));
+        assert!(!is_nested(&test_terminal(80, 24), ours, &ptys));
     }
 
     #[test]
     fn a_self_attachs_rex_block_counts_only_in_the_daemons_session() {
-        let block = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+        let block = "block:01a1cfe7-c5b4-7d9c-8e1e-9fd2a65e8a50";
         let env = |session: &str| {
             vec![
                 (b"REX_SESSION".to_vec(), session.as_bytes().to_vec()),
                 (b"REX_BLOCK".to_vec(), block.as_bytes().to_vec()),
             ]
         };
-        let found = |e: &[(Vec<u8>, Vec<u8>)], s| rex_block(e, s).map(|t| t.as_str().to_string());
-        assert_eq!(
-            Some(block.to_string()),
-            found(&env("session:a"), Some("session:a"))
-        );
-        assert_eq!(None, found(&env("session:b"), Some("session:a")));
-        assert_eq!(None, found(&env("session:a")[1..], Some("session:a")));
-        // the launcher's is in the session it started the daemon in
-        assert_eq!(Some(block.to_string()), found(&env("session:b"), None));
+        let found =
+            |e: &[(Vec<u8>, Vec<u8>)]| rex_block(e, "session:a").map(|t| t.as_str().to_string());
+        assert_eq!(Some(block.to_string()), found(&env("session:a")));
+        assert_eq!(None, found(&env("session:b")));
+        assert_eq!(None, found(&env("session:a")[1..]));
     }
 
     #[test]
     fn a_hellos_relative_file_is_made_absolute_against_its_cwd() {
-        assert_eq!(b"/w/notes.md".to_vec(), absolute(b"notes.md", b"/w"));
-        assert_eq!(b"/w/notes.md".to_vec(), absolute(b"notes.md", b"/w/"));
-        assert_eq!(b"/a/b".to_vec(), absolute(b"/a/b", b"/w"));
+        assert_eq!(
+            b"/w/notes.md".to_vec(),
+            file_against_cwd(b"notes.md", b"/w")
+        );
+        assert_eq!(
+            b"/w/notes.md".to_vec(),
+            file_against_cwd(b"notes.md", b"/w/")
+        );
+        assert_eq!(b"/a/b".to_vec(), file_against_cwd(b"/a/b", b"/w"));
     }
     use crate::attach::{PaneId, Purpose, Size};
 

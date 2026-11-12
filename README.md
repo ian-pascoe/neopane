@@ -230,11 +230,12 @@ Usage:
   …
 ```
 
-Not built yet: `attach` without `--address`, or with `--name` or
-`--provider` (`attach --address A [+LINE] [FILE]` and the hidden `attach
---pane` of a Rex pane are built), `list`, `status`, `kill`, `provider`, and the `--name`, `--address`,
-`--detach` and `--no-wait` options exit 1 with `neorex: list isn't built
-yet`. `--provider` is accepted and does nothing.
+Not built yet, each exiting 1 with `neorex: <what> isn't built yet`:
+`attach` without `--address`, and `attach --name` and `attach --provider`;
+`list`, `status`, `kill` and `provider check`; and the bare form's `--name`,
+`--address`, `--detach` and `--no-wait`. The bare form's `--provider` is
+accepted and does nothing. `attach --address A [+LINE] [FILE]` is built, as
+is the hidden `attach --pane` a Rex pane runs.
 
 ### Own options first, then Neovim's
 

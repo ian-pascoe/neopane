@@ -78,6 +78,14 @@ impl Panes {
         })
     }
 
+    /// The first self-attached pane, not a float group pane: the one that
+    /// takes Neovim's first window.
+    pub(crate) fn first_self_attached(&self) -> Option<&Pane> {
+        self.list
+            .iter()
+            .find(|p| p.is_self_attached() && p.layer.is_none())
+    }
+
     /// `self_attached_awaiting_window`, to change.
     pub(crate) fn self_attached_awaiting_window_mut(&mut self) -> Option<&mut Pane> {
         let id = self.self_attached_awaiting_window()?.id;

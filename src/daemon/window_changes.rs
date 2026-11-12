@@ -110,6 +110,11 @@ impl WindowChanges {
         self.taken.insert(win);
     }
 
+    /// `win`, taken but not shown, was given back.
+    pub(crate) fn untake(&mut self, win: i64) {
+        self.taken.swap_remove(&win);
+    }
+
     /// True while `win`'s pane waits for it to be drawn: reopening, or taken
     /// by a self-attached pane.
     pub(crate) fn awaits_drawing(&self, win: i64) -> bool {

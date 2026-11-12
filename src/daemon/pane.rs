@@ -42,8 +42,8 @@ pub(crate) struct Pane {
     pub attach_id: Option<PaneId>,
     /// Its terminal attached of its own accord. Placement never moves it.
     pub self_attached: bool,
-    /// A self-attached pane's window, while it has none: what it asked for.
-    pub taking: Option<Taking>,
+    /// The file a self-attached pane asked to show, until it has a window.
+    pub opening: Option<FileAt>,
     /// Its terminal's id, from the pane provider: Rex's is its block.
     pub terminal: Option<TerminalId>,
     /// None for a floating pane of floats, and a self-attached pane before
@@ -85,17 +85,11 @@ pub(crate) struct Pane {
     pub attach_due: Option<std::time::Instant>,
 }
 
-/// How a self-attached pane gets its window (#105).
+/// A file a self-attach asks for, absolute, and the cursor's line in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Taking {
-    /// A new window on this file, the cursor on this line: not asked yet.
-    File(Vec<u8>, Option<u32>),
-    /// Asked of Neovim, as request `req`: the unshown window `win`, or a new
-    /// window if none.
-    Asked {
-        req: u32,
-        win: Option<NeovimWindowHandle>,
-    },
+pub(crate) struct FileAt {
+    pub file: Vec<u8>,
+    pub line: Option<u32>,
 }
 
 /// Where a pane opened by `open` goes: beside `origin`'s terminal, as
@@ -270,7 +264,7 @@ impl Pane {
             id,
             attach_id: None,
             self_attached: false,
-            taking: None,
+            opening: None,
             terminal: None,
             neovim_window_handle: None,
             layout: None,

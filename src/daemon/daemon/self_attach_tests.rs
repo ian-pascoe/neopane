@@ -1,13 +1,16 @@
-//! Self-attaches at any time (#105), with a real Neovim and Rex closed (no
-//! pane provider), so windows go unshown: which window each takes, in which
-//! order, and what goes when its terminal does.
+//! Self-attaches at any time (#105), with a real Neovim and, but where a
+//! test says otherwise, Rex closed (no pane provider), so windows go
+//! unshown: which window each takes, in which order, and what goes when its
+//! terminal does.
 
 use super::*;
 use crate::attach::{Hello, Message, Purpose};
 use crate::daemon::attach_conn::{self, test_terminal};
 use crate::daemon::fdpass;
+use crate::daemon::provider::fake::FakeProvider;
 use crate::daemon::surface::{cells, open_pty};
 use crate::nvim::nvim::{spawn_for_test_with, wait_response};
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -46,8 +49,8 @@ impl Drop for Term {
     }
 }
 
-/// A daemon over a real Neovim started with `args`, no pane provider, the
-/// launcher's terminal its first pane, and a socket for later attaches.
+/// A daemon over a real Neovim, the launcher's terminal its first pane, and
+/// a socket for later attaches.
 struct Rig {
     d: Daemon,
     server: UnixListener,
@@ -56,18 +59,34 @@ struct Rig {
     listen: String,
     query: crate::nvim::nvim::Nvim,
     terms: Vec<Term>,
+    /// Files the test made, removed as it ends.
+    files: Vec<String>,
 }
 
 impl Drop for Rig {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.sock);
         let _ = std::fs::remove_file(&self.listen);
+        for f in &self.files {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
 impl Rig {
-    /// None when Neovim isn't installed.
+    /// Neovim started with `args`, and no pane provider. None when Neovim
+    /// isn't installed.
     fn start(args: &[&str]) -> Option<Rig> {
+        Rig::start_with(args, None, None)
+    }
+
+    /// Neovim started with `args`, `provider` the pane provider and
+    /// `terminal` its id for the first pane.
+    fn start_with(
+        args: &[&str],
+        provider: Option<Held>,
+        terminal: Option<TerminalId>,
+    ) -> Option<Rig> {
         static RIGS: AtomicU32 = AtomicU32::new(0);
         let n = RIGS.fetch_add(1, Ordering::SeqCst);
         let tmp = |what: &str| {
@@ -113,7 +132,7 @@ impl Rig {
         let mut d = Daemon::new(
             event_loop,
             NvimSession::new(nvim),
-            None,
+            provider,
             String::new(),
             crate::daemon::dir::Address::from_arg(sock.clone().into()),
         );
@@ -121,11 +140,8 @@ impl Rig {
         let (socket, helper) = UnixStream::pair().unwrap();
         term.helper = Some(helper);
         let surface = Surface::create(socket, slave, cells(80, 24));
-        d.start(&mut Some(SelfAttach {
-            surface,
-            terminal: None,
-        }))
-        .unwrap();
+        d.start(&mut Some(SelfAttach { surface, terminal }))
+            .unwrap();
         Some(Rig {
             d,
             server,
@@ -133,7 +149,23 @@ impl Rig {
             listen,
             query,
             terms: vec![term],
+            files: Vec::new(),
         })
+    }
+
+    /// `-p` with three files, named for test `tag`, holding one line each:
+    /// `alpha`, `bravo`, `charlie`; and the files.
+    fn three_tabs(tag: &str) -> Option<(Rig, Vec<String>)> {
+        let files = three_files(tag);
+        let mut args = vec!["-p"];
+        args.extend(files.iter().map(String::as_str));
+        let started = Rig::start(&args);
+        if started.is_none() {
+            remove(&files);
+        }
+        let mut rig = started?;
+        rig.files = files.clone();
+        Some((rig, files))
     }
 
     /// Self-attaches a new terminal, asking for `file` at `line`, through
@@ -213,7 +245,6 @@ impl Rig {
 
 /// The first frame `helper` is sent, within a second.
 fn first_frame(helper: &UnixStream) -> Message {
-    use std::io::Read;
     helper
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
@@ -274,11 +305,7 @@ const CURRENT: &str = "return { vim.api.nvim_get_current_win(), vim.fn.tabpagenr
 
 #[test]
 fn a_second_self_attach_takes_the_next_tab_pages_window_and_makes_it_current() {
-    let files = three_files("order");
-    let mut args = vec!["-p"];
-    args.extend(files.iter().map(String::as_str));
-    let Some(mut rig) = Rig::start(&args) else {
-        remove(&files);
+    let Some((mut rig, files)) = Rig::three_tabs("order") else {
         return;
     };
     let wins = rig.wins_on(&files);
@@ -289,9 +316,7 @@ fn a_second_self_attach_takes_the_next_tab_pages_window_and_makes_it_current() {
     assert_eq!(wins[2], rig.win_of(third));
     // the last becomes current, with its home tab page
     rig.pump(|r| r.d.nvim.current_win == wins[2]);
-    let current = rig.ints(CURRENT);
-    remove(&files);
-    assert_eq!(vec![wins[2], 3], current);
+    assert_eq!(vec![wins[2], 3], rig.ints(CURRENT));
 }
 
 #[test]
@@ -301,6 +326,7 @@ fn the_current_window_is_taken_first_when_unshown() {
         remove(&files);
         return;
     };
+    rig.files = files.clone();
     let wins = rig.wins_on(&files[..2]);
     rig.win_of(1);
     // a tab page made after setup: with Rex closed, its window is unshown
@@ -313,7 +339,6 @@ fn the_current_window_is_taken_first_when_unshown() {
     assert_eq!(new, rig.win_of(second));
     // then the next in tab page order
     let third = rig.attach(None, None);
-    remove(&files);
     assert_eq!(wins[1], rig.win_of(third));
 }
 
@@ -336,17 +361,24 @@ fn with_no_unshown_window_a_self_attach_opens_a_new_one() {
     assert_eq!(1, bufs[2]);
 }
 
-#[test]
-fn a_file_with_a_line_opens_in_a_new_window_with_the_cursor_there() {
+/// A file of nine numbered lines, for test `tag`.
+fn nine_lines(tag: &str) -> String {
     let file = std::env::temp_dir()
-        .join(format!("{NAME}-line-{}", std::process::id()))
+        .join(format!("{NAME}-{tag}-{}", std::process::id()))
         .to_string_lossy()
         .into_owned();
     std::fs::write(&file, "1\n2\n3\n4\n5\n6\n7\n8\n9\n").unwrap();
+    file
+}
+
+#[test]
+fn a_file_with_a_line_opens_in_a_new_window_with_the_cursor_there() {
+    let file = nine_lines("line");
     let Some(mut rig) = Rig::start(&[]) else {
         let _ = std::fs::remove_file(&file);
         return;
     };
+    rig.files.push(file.clone());
     rig.pump(|r| r.d.nvim.ready);
     let first = rig.win_of(1);
     let second = rig.attach(Some(&file), Some(7));
@@ -357,18 +389,13 @@ fn a_file_with_a_line_opens_in_a_new_window_with_the_cursor_there() {
         "return {{ vim.fn.bufnr({file:?}), vim.api.nvim_win_get_buf({win}), \
          vim.api.nvim_win_get_cursor({win})[1] }}"
     ));
-    let _ = std::fs::remove_file(&file);
     assert_eq!(at[0], at[1], "not on the file");
     assert_eq!(7, at[2]);
 }
 
 #[test]
 fn attaches_before_neovim_is_ready_get_windows_in_the_order_they_came() {
-    let files = three_files("early");
-    let mut args = vec!["-p"];
-    args.extend(files.iter().map(String::as_str));
-    let Some(mut rig) = Rig::start(&args) else {
-        remove(&files);
+    let Some((mut rig, files)) = Rig::three_tabs("early") else {
         return;
     };
     // setup hasn't been answered yet
@@ -376,38 +403,57 @@ fn attaches_before_neovim_is_ready_get_windows_in_the_order_they_came() {
     let second = rig.attach(None, None);
     let third = rig.attach(None, None);
     let got = [rig.win_of(1), rig.win_of(second), rig.win_of(third)];
+    assert_eq!(rig.wins_on(&files), got);
+    // the last to come is current
+    rig.pump(|r| r.d.nvim.current_win == got[2]);
+}
+
+#[test]
+fn a_file_attach_after_an_unshown_one_before_neovim_is_ready_waits_its_turn() {
+    let file = nine_lines("turn");
+    let Some((mut rig, files)) = Rig::three_tabs("turn") else {
+        let _ = std::fs::remove_file(&file);
+        return;
+    };
+    rig.files.push(file.clone());
+    assert!(!rig.d.nvim.ready);
+    let second = rig.attach(None, None);
+    let third = rig.attach(Some(&file), None);
+    let (shown, opened) = (rig.win_of(second), rig.win_of(third));
     let wins = rig.wins_on(&files);
-    remove(&files);
-    assert_eq!(wins, got);
+    assert_eq!(wins[1], shown);
+    assert_eq!(rig.win_on(&file), opened);
+    // each was made current in turn: the file's last
+    rig.pump(|r| r.d.nvim.current_win == opened);
+    assert_eq!(opened, rig.ints(CURRENT)[0]);
 }
 
 #[test]
 fn a_window_whose_requested_pane_is_on_its_way_isnt_taken() {
-    let files = three_files("on-its-way");
-    let mut args = vec!["-p"];
-    args.extend(files.iter().map(String::as_str));
-    let Some(mut rig) = Rig::start(&args) else {
-        remove(&files);
+    // a pane provider that never answers its opens
+    let fake = Held::Fake(FakeProvider::opening());
+    let Some(mut rig) = Rig::start_with(&[], Some(fake), Some(TerminalId::from("t0"))) else {
         return;
     };
-    let wins = rig.wins_on(&files);
-    rig.win_of(1);
-    // the second tab page's window waits for its terminal; undrawn in a tab
-    // page not current, its pane is kept as one taken is
-    rig.d.panes.add_for_window(wins[1]);
-    rig.d.changes.mark_taken(wins[1]);
+    rig.pump(|r| r.d.nvim.ready);
+    let first = rig.win_of(1);
+    let _ = rig.d.nvim.client.exec_lua("vim.cmd('vsplit')", 0);
+    rig.d.nvim.client.flush().unwrap();
+    rig.pump(|r| r.d.panes.list.iter().any(|p| !p.is_self_attached()));
+    let requested = rig.d.panes.list.iter().find(|p| !p.is_self_attached());
+    let split = requested.unwrap().neovim_window_handle.unwrap();
+    assert!(matches!(
+        rig.d.provider.as_mut().unwrap().fake().asked()[..],
+        [Ask::OpenBeside { .. }]
+    ));
     let second = rig.attach(None, None);
-    remove(&files);
-    assert_eq!(wins[2], rig.win_of(second));
+    let win = rig.win_of(second);
+    assert!(win != split && win != first, "{win}");
 }
 
 #[test]
 fn closing_a_self_attached_terminal_closes_only_its_windows() {
-    let files = three_files("close");
-    let mut args = vec!["-p"];
-    args.extend(files.iter().map(String::as_str));
-    let Some(mut rig) = Rig::start(&args) else {
-        remove(&files);
+    let Some((mut rig, files)) = Rig::three_tabs("close") else {
         return;
     };
     let wins = rig.wins_on(&files);
@@ -425,8 +471,31 @@ fn closing_a_self_attached_terminal_closes_only_its_windows() {
          {{ {}, {}, {} }})",
         wins[0], wins[1], wins[2]
     ));
-    remove(&files);
     assert_eq!(vec![1, 0, 1], valid);
     assert!(rig.d.panes.by_id(1).is_some() && rig.d.panes.by_id(third).is_some());
     assert_eq!(None, rig.d.stopped);
+}
+
+#[test]
+fn the_daemon_knows_its_neovims_terminals_ptys() {
+    let Some(mut rig) = Rig::start(&[]) else {
+        return;
+    };
+    rig.pump(|r| r.d.nvim.ready);
+    let _ = rig.d.nvim.client.exec_lua("vim.cmd('terminal')", 0);
+    rig.d.nvim.client.flush().unwrap();
+    rig.pump(|r| !r.d.nvim.terminals.is_empty());
+    let id = rig.query.exec_lua(
+        "for _, c in ipairs(vim.api.nvim_list_chans()) do \
+           if c.pty and c.pty ~= '' then return c.pty end \
+         end",
+        0,
+    );
+    rig.query.flush().unwrap();
+    let frame = wait_response(&mut rig.query, id);
+    let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
+        unreachable!()
+    };
+    let pty = rpc::expect_str(&mut result).unwrap().to_vec();
+    assert_eq!(vec![pty], rig.d.nvim.terminals);
 }

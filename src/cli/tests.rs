@@ -607,6 +607,8 @@ fn attach_with_an_address_self_attaches_with_an_optional_file_and_line() {
             "--address is given twice",
         ),
         ("attach --address", "--address needs a value"),
+        ("attach --address /a -x f", "attach doesn't take -x"),
+        ("attach --address /a --nope f", "attach doesn't take --nope"),
     ] {
         assert_eq!(refused(line), why, "{line}");
     }

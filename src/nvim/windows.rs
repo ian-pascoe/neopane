@@ -110,17 +110,21 @@ pub(crate) fn show(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) -> u32 {
 }
 
 /// Opens a self-attached pane's new window at `cols` x `rows`, current, in
-/// the current tab page: on `file` with the cursor on `line`, else as
-/// `:split` would. The response is the window.
+/// the current tab page: on `file`, with the cursor on its line if given,
+/// else as `:split` would. It notes the window (`Note::Opened`) as it makes
+/// it; the response is the window too.
 pub(crate) fn open(
     nvim: &mut Nvim,
-    file: Option<&[u8]>,
-    line: Option<u32>,
+    file: Option<(&[u8], Option<u32>)>,
     cols: u32,
     rows: u32,
 ) -> u32 {
     let id = nvim.exec_lua(&format!("return {NAME}.open(...)"), 4);
     let w = nvim.writer();
+    let (file, line) = match file {
+        Some((f, l)) => (Some(f), l),
+        None => (None, None),
+    };
     match file {
         Some(f) => msgpack::write_str(w, f),
         None => msgpack::write_nil(w),
@@ -171,6 +175,9 @@ pub enum Note {
     Split(Split),
     /// The current window is now this float.
     Float(i64),
+    /// The window `open` made, sent before anything can flush a redraw that
+    /// shows it: the self-attached pane that asked shows it.
+    Opened(i64),
     /// This float was just entered; sent before the redraw that shows it.
     Entered(i64),
     /// The tabline's rows at the top of the screen.
@@ -387,6 +394,36 @@ pub struct Split {
     pub(crate) tab: i64,
 }
 
+/// The ptys of Neovim's terminals, from a `<name>_terminals` note; None for
+/// any other notification.
+pub(crate) fn parse_terminals(
+    method: &[u8],
+    params: &mut Decoder<'_>,
+) -> rpc::Result<Option<Vec<Vec<u8>>>> {
+    if method.strip_prefix(NAME.as_bytes()) != Some(b"_terminals") {
+        return Ok(None);
+    }
+    if rpc::expect_array(params)? < 1 {
+        return Err(rpc::Error::BadMessage);
+    }
+    // an empty Lua table may come as a map
+    let mut probe = *params;
+    let n = match rpc::expect_array(&mut probe) {
+        Ok(n) => n,
+        Err(_) => {
+            if rpc::expect_map(params)? != 0 {
+                return Err(rpc::Error::BadMessage);
+            }
+            return Ok(Some(Vec::new()));
+        }
+    };
+    *params = probe;
+    (0..n)
+        .map(|_| rpc::expect_str(params).map(<[u8]>::to_vec))
+        .collect::<rpc::Result<_>>()
+        .map(Some)
+}
+
 /// A notification from the Lua, or None for any other.
 #[doc(hidden)]
 pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option<Note>> {
@@ -397,6 +434,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         Reopened,
         Split,
         Float,
+        Opened,
         Entered,
         Tabline,
         Cmdheight,
@@ -422,6 +460,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         b"reopened" => Tag::Reopened,
         b"split" => Tag::Split,
         b"float" => Tag::Float,
+        b"opened" => Tag::Opened,
         b"entered" => Tag::Entered,
         b"tabline" => Tag::Tabline,
         b"cmdheight" => Tag::Cmdheight,
@@ -447,6 +486,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             new: rpc::expect_handle(params)?,
         },
         Tag::Float => Note::Float(win),
+        Tag::Opened => Note::Opened(win),
         Tag::Entered => Note::Entered(win),
         Tag::Tabline => Note::Tabline(win),
         Tag::Cmdheight => {
@@ -558,6 +598,52 @@ mod tests {
     use crate::screen::grid::Grid;
     use crate::screen::grids::{Grids, WinKind};
     use crate::screen::style::Attr;
+
+    #[test]
+    fn a_window_list_is_the_current_window_then_the_rest_and_never_empty() {
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 3);
+        for w in [1001, 1000, 1001] {
+            msgpack::write_int(&mut buf, w);
+        }
+        assert_eq!(
+            Ok((1001, vec![1000, 1001])),
+            parse_windows(&mut Decoder::of(&buf))
+        );
+        let mut empty = Vec::new();
+        msgpack::write_array_header(&mut empty, 0);
+        assert!(parse_windows(&mut Decoder::of(&empty)).is_err());
+    }
+
+    #[test]
+    fn a_terminals_note_lists_ptys_and_may_be_empty() {
+        let method = format!("{NAME}_terminals");
+        let mut buf = Vec::new();
+        msgpack::write_array_header(&mut buf, 1);
+        msgpack::write_array_header(&mut buf, 2);
+        msgpack::write_str(&mut buf, "/dev/ttys001");
+        msgpack::write_str(&mut buf, "/dev/ttys002");
+        assert_eq!(
+            Ok(Some(vec![
+                b"/dev/ttys001".to_vec(),
+                b"/dev/ttys002".to_vec()
+            ])),
+            parse_terminals(method.as_bytes(), &mut Decoder::of(&buf))
+        );
+        // an empty Lua table, as a map
+        let mut empty = Vec::new();
+        msgpack::write_array_header(&mut empty, 1);
+        msgpack::write_map_header(&mut empty, 0);
+        assert_eq!(
+            Ok(Some(Vec::new())),
+            parse_terminals(method.as_bytes(), &mut Decoder::of(&empty))
+        );
+        let other = format!("{NAME}_win");
+        assert_eq!(
+            Ok(None),
+            parse_terminals(other.as_bytes(), &mut Decoder::of(&buf))
+        );
+    }
 
     /// Made-up reports the tests wait for: a real window handle is never this big.
     const PING_BASE: i64 = 4000;

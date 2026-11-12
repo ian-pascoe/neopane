@@ -9,7 +9,7 @@ use std::time::Instant;
 use super::*;
 use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size, Transport};
 use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Pending, Step};
-use crate::daemon::pane::Taking;
+use crate::daemon::pane::FileAt;
 use crate::nvim::msgpack;
 
 /// Loop tokens of connections waiting for their hello start here, far above
@@ -158,7 +158,7 @@ impl Daemon {
             "{NAME} daemon: hello: {}",
             attach_conn::describe("self", None, &terminal, &build)
         );
-        if attach_conn::is_nested(&terminal.env, self.sock.as_arg()) {
+        if attach_conn::is_nested(&terminal, self.sock.as_arg(), &self.nvim.terminals) {
             let z = End::refusal(
                 Refusal::Nested,
                 format!(
@@ -175,9 +175,11 @@ impl Daemon {
             attach_conn::refuse(stream, z);
             return Ok(());
         }
-        let session = self.rex_ref_session();
-        let block = attach_conn::rex_block(&terminal.env, session.as_deref());
-        let file = file.map(|f| attach_conn::absolute(&f, &terminal.cwd));
+        let block = self.rex_block_of(&terminal.env);
+        let opening = file.map(|f| FileAt {
+            file: attach_conn::file_against_cwd(&f, &terminal.cwd),
+            line,
+        });
         let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: a self-attach's helper went: {e}");
@@ -191,7 +193,7 @@ impl Daemon {
             terminal: block,
         });
         let id = pane.id;
-        pane.taking = file.map(|f| Taking::File(f, line));
+        pane.opening = opening;
         log::trace_at(Point::Hello, u64::from(id), at);
         log::trace(Point::Accepted, u64::from(id));
         pane.register_with(&self.event_loop)?;
@@ -205,12 +207,14 @@ impl Daemon {
         Ok(())
     }
 
-    /// The Rex session the daemon's pane provider is in, if it's Rex's.
-    fn rex_ref_session(&self) -> Option<String> {
-        match &self.provider {
-            Some(crate::providers::Held::Rex(r)) => Some(r.session.session_id.clone()),
-            _ => None,
-        }
+    /// The Rex block of a self-attached terminal with environment `env`:
+    /// its `REX_BLOCK`, only while the pane provider is Rex's and `REX_SESSION`
+    /// is its session. A stopgap: #114 has the pane provider find it.
+    fn rex_block_of(&self, env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
+        let Some(crate::providers::Held::Rex(r)) = &self.provider else {
+            return None;
+        };
+        attach_conn::rex_block(env, &r.session.session_id)
     }
 
     /// The pane still waiting for the terminal `pane` names: its id is good,

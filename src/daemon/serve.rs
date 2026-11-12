@@ -576,7 +576,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     // the first attach is answered before Neovim starts, which is sized to it
     let name = dir.name().to_string();
-    let mut first = Some(first_attach(&server, &name, &log)?);
+    let mut first = Some(first_attach(&server, &name, &log, config.session_id)?);
     // declared in this order so that, on a return, the panes hang up and
     // the channel closes before Neovim is waited for
     let mut child;
@@ -728,9 +728,15 @@ fn env(name: &str) -> Option<String> {
 }
 
 /// Waits up to 5 s for the first attach, the launcher's, and accepts it:
-/// a self-attach; later ones come through the loop. Its hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running
-/// yet.
-fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
+/// a self-attach; later ones come through the loop. Its hello gets
+/// `HELLO_TIMEOUT`, blocking: the loop isn't running yet. Its Rex block is
+/// its `REX_BLOCK` in `rex_session`.
+fn first_attach(
+    server: &UnixListener,
+    name: &str,
+    log: &str,
+    rex_session: &str,
+) -> Result<SelfAttach> {
     let mut fds = [libc::pollfd {
         fd: server.as_raw_fd(),
         events: libc::POLLIN,
@@ -773,8 +779,7 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    // the launcher's: in the daemon's Rex session, which it started it in
-    let block = attach_conn::rex_block(&terminal.env, None);
+    let block = attach_conn::rex_block(&terminal.env, rex_session);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after
