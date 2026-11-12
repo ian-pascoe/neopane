@@ -394,34 +394,28 @@ pub struct Split {
     pub(crate) tab: i64,
 }
 
-/// The ptys of Neovim's terminals, from a `<name>_terminals` note; None for
-/// any other notification.
-pub(crate) fn parse_terminals(
-    method: &[u8],
-    params: &mut Decoder<'_>,
-) -> rpc::Result<Option<Vec<Vec<u8>>>> {
-    if method.strip_prefix(NAME.as_bytes()) != Some(b"_terminals") {
-        return Ok(None);
-    }
-    if rpc::expect_array(params)? < 1 {
-        return Err(rpc::Error::BadMessage);
-    }
-    // an empty Lua table may come as a map
-    let mut probe = *params;
-    let n = match rpc::expect_array(&mut probe) {
-        Ok(n) => n,
-        Err(_) => {
-            if rpc::expect_map(params)? != 0 {
-                return Err(rpc::Error::BadMessage);
+/// Asks for Neovim's channels; `parse_chan_ptys` reads the response.
+pub(crate) fn list_chans(nvim: &mut Nvim) -> u32 {
+    nvim.request("nvim_list_chans", 0)
+}
+
+/// The ptys of the channels in `nvim_list_chans`' response: its terminals,
+/// `:terminal` and any other job on a pty.
+pub(crate) fn parse_chan_ptys(result: &mut Decoder<'_>) -> rpc::Result<Vec<Vec<u8>>> {
+    let mut ptys = Vec::new();
+    for _ in 0..rpc::expect_array(result)? {
+        for _ in 0..rpc::expect_map(result)? {
+            if rpc::expect_str(result)? != b"pty" {
+                rpc::skip(result)?;
+                continue;
             }
-            return Ok(Some(Vec::new()));
+            let pty = rpc::expect_str(result)?;
+            if !pty.is_empty() {
+                ptys.push(pty.to_vec());
+            }
         }
-    };
-    *params = probe;
-    (0..n)
-        .map(|_| rpc::expect_str(params).map(<[u8]>::to_vec))
-        .collect::<rpc::Result<_>>()
-        .map(Some)
+    }
+    Ok(ptys)
 }
 
 /// A notification from the Lua, or None for any other.
@@ -616,32 +610,26 @@ mod tests {
     }
 
     #[test]
-    fn a_terminals_note_lists_ptys_and_may_be_empty() {
-        let method = format!("{NAME}_terminals");
+    fn a_channel_list_gives_the_ptys_of_its_terminals() {
         let mut buf = Vec::new();
-        msgpack::write_array_header(&mut buf, 1);
-        msgpack::write_array_header(&mut buf, 2);
-        msgpack::write_str(&mut buf, "/dev/ttys001");
-        msgpack::write_str(&mut buf, "/dev/ttys002");
+        msgpack::write_array_header(&mut buf, 3);
+        // stdio, a :terminal, and a job without a pty
+        msgpack::write_map_header(&mut buf, 2);
+        msgpack::write_str(&mut buf, "id");
+        msgpack::write_int(&mut buf, 1);
+        msgpack::write_str(&mut buf, "mode");
+        msgpack::write_str(&mut buf, "rpc");
+        msgpack::write_map_header(&mut buf, 2);
+        msgpack::write_str(&mut buf, "id");
+        msgpack::write_int(&mut buf, 3);
+        msgpack::write_str(&mut buf, "pty");
+        msgpack::write_str(&mut buf, "/dev/ttys004");
+        msgpack::write_map_header(&mut buf, 1);
+        msgpack::write_str(&mut buf, "pty");
+        msgpack::write_str(&mut buf, "");
         assert_eq!(
-            Ok(Some(vec![
-                b"/dev/ttys001".to_vec(),
-                b"/dev/ttys002".to_vec()
-            ])),
-            parse_terminals(method.as_bytes(), &mut Decoder::of(&buf))
-        );
-        // an empty Lua table, as a map
-        let mut empty = Vec::new();
-        msgpack::write_array_header(&mut empty, 1);
-        msgpack::write_map_header(&mut empty, 0);
-        assert_eq!(
-            Ok(Some(Vec::new())),
-            parse_terminals(method.as_bytes(), &mut Decoder::of(&empty))
-        );
-        let other = format!("{NAME}_win");
-        assert_eq!(
-            Ok(None),
-            parse_terminals(other.as_bytes(), &mut Decoder::of(&buf))
+            Ok(vec![b"/dev/ttys004".to_vec()]),
+            parse_chan_ptys(&mut Decoder::of(&buf))
         );
     }
 

@@ -30,9 +30,6 @@ pub(crate) struct NvimSession {
     pub ready: bool,
     /// Whether some pane's terminal has focus, as Neovim was last told.
     pub ui_focused: bool,
-    /// The ptys of Neovim's terminals, as the Lua last said: an attach from
-    /// one is `nested`.
-    pub terminals: Vec<Vec<u8>>,
     /// Neovim's current window when it's a float, else 0.
     pub current_float: i64,
     /// The editor size last asked for.
@@ -58,7 +55,6 @@ impl NvimSession {
             setup_req: 0,
             ready: false,
             ui_focused: true,
-            terminals: Vec::new(),
             current_float: 0,
             editor_size: [0, 0],
             tabline_width: None,

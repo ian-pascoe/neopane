@@ -675,11 +675,14 @@ function M.open(file, line, w, h)
   if not shown(cur) and last and shown(last) then cur = last end
   local buf = shown(cur) and api.nvim_win_get_buf(cur) or api.nvim_create_buf(true, false)
   local view = shown(cur) and api.nvim_win_call(cur, vim.fn.winsaveview)
-  local config = { external = true, width = w, height = math.max(h - 1, 1) }
-  local win = api.nvim_open_win(buf, true, config)
-  -- before anything below can flush a redraw that shows it: its pane is
-  -- the one that asked
+  -- made with no autocommands, so it's noted before one can flush a redraw
+  -- that shows it: its pane is the one that asked. WinNew, then entering
+  -- it, follow as they would have.
+  local config = { external = true, width = w, height = math.max(h - 1, 1), noautocmd = true }
+  local win = api.nvim_open_win(buf, false, config)
   note('opened', win)
+  api.nvim_win_call(win, function() api.nvim_exec_autocmds('WinNew', { modeline = false }) end)
+  api.nvim_set_current_win(win)
   keep_edgy_out(win)
   home[win] = api.nvim_get_current_tabpage()
   if file then
@@ -1604,28 +1607,11 @@ local function note_startup_splits(node, dir, from)
 end
 note_startup_splits(vim.fn.winlayout())
 
--- The ptys of Neovim's terminals, `:terminal` and other jobs on a pty, for
--- the daemon to tell an attach from one of them (`nested`).
-local function report_terminals()
-  local ptys = {}
-  for _, c in ipairs(api.nvim_list_chans()) do
-    if c.pty and c.pty ~= '' then ptys[#ptys + 1] = c.pty end
-  end
-  note('terminals', ptys)
-end
-api.nvim_create_autocmd('TermOpen', { group = group, callback = report_terminals })
--- once its channel is gone
-api.nvim_create_autocmd('TermClose', {
-  group = group,
-  callback = function() vim.schedule(report_terminals) end,
-})
-
 local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)
 schedule_report()
 note_focus(first)
 report_tabline()
 report_cmdheight()
-report_terminals()
 fit_tabline()
 return { first, anchor_of(api.nvim_get_current_tabpage()) }

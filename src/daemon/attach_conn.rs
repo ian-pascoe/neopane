@@ -250,14 +250,28 @@ fn env_var<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
         .map(|(_, v)| v.as_slice())
 }
 
-/// Whether self-attaching terminal `t` is one of the daemon at `address`'s
-/// own Neovim's, whose terminals' ptys are `ptys`: `$<NAME>` there is the
-/// daemon's address, and its tty is one of them, or it has none (ADR 0013,
-/// #91 decision 31). A tmux started from a `:terminal`, which inherited the
+/// Whether self-attaching terminal `t` comes from the daemon at
+/// `address`'s own Neovim (`nested`, ADR 0013, #91 decision 31): `$<NAME>`
+/// there is that address, and its tty is one of Neovim's terminals, or it
+/// has none. A tmux started from a `:terminal`, which inherited the
 /// variable, isn't.
-pub(crate) fn is_nested(t: &Terminal, address: &std::ffi::OsStr, ptys: &[Vec<u8>]) -> bool {
-    env_var(&t.env, crate::name::upper().as_bytes()) == Some(address.as_encoded_bytes())
-        && (t.tty.is_empty() || ptys.contains(&t.tty))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nesting {
+    No,
+    Yes,
+    /// Its tty decides: whether it's one of Neovim's terminals' ptys.
+    IfNeovims,
+}
+
+/// How `nested` goes for self-attaching terminal `t` (see `Nesting`).
+pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
+    if env_var(&t.env, crate::name::upper().as_bytes()) != Some(address.as_encoded_bytes()) {
+        Nesting::No
+    } else if t.tty.is_empty() {
+        Nesting::Yes
+    } else {
+        Nesting::IfNeovims
+    }
 }
 
 /// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
@@ -382,9 +396,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_self_attach_is_nested_from_one_of_the_daemons_own_terminals() {
+    fn a_self_attach_with_the_daemons_address_is_nested_by_its_tty() {
         let ours = std::ffi::OsStr::new("/tmp/x/d/sock");
-        let ptys = [b"/dev/ttys004".to_vec()];
         let from = |address: &[u8], tty: &[u8]| {
             let mut t = test_terminal(80, 24);
             t.env = vec![
@@ -392,15 +405,13 @@ mod tests {
                 (crate::name::upper().into_bytes(), address.to_vec()),
             ];
             t.tty = tty.to_vec();
-            is_nested(&t, ours, &ptys)
+            nesting(&t, ours)
         };
-        assert!(from(b"/tmp/x/d/sock", b"/dev/ttys004"));
+        assert_eq!(Nesting::IfNeovims, from(b"/tmp/x/d/sock", b"/dev/ttys004"));
         // relayed with no tty
-        assert!(from(b"/tmp/x/d/sock", b""));
-        // a tmux started from a :terminal, which inherited the variable
-        assert!(!from(b"/tmp/x/d/sock", b"/dev/ttys009"));
-        assert!(!from(b"/tmp/x/other/sock", b"/dev/ttys004"));
-        assert!(!is_nested(&test_terminal(80, 24), ours, &ptys));
+        assert_eq!(Nesting::Yes, from(b"/tmp/x/d/sock", b""));
+        assert_eq!(Nesting::No, from(b"/tmp/x/other/sock", b"/dev/ttys004"));
+        assert_eq!(Nesting::No, nesting(&test_terminal(80, 24), ours));
     }
 
     #[test]

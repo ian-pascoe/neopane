@@ -245,9 +245,8 @@ impl Rig {
 
 /// The first frame `helper` is sent, within a second.
 fn first_frame(helper: &UnixStream) -> Message {
-    helper
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
+    // fails on macOS once the daemon has hung up, its answer read below
+    let _ = helper.set_read_timeout(Some(Duration::from_secs(1)));
     let mut got = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -476,26 +475,85 @@ fn closing_a_self_attached_terminal_closes_only_its_windows() {
     assert_eq!(None, rig.d.stopped);
 }
 
+/// A self-attach's hello from a terminal on `tty` that inherited the
+/// daemon's address, as one started in its `:terminal` does.
+fn hello_with_address(rig: &Rig, tty: &[u8]) -> Vec<u8> {
+    let mut terminal = test_terminal(80, 24);
+    terminal.env = vec![(
+        crate::name::upper().into_bytes(),
+        rig.sock.as_bytes().to_vec(),
+    )];
+    terminal.tty = tty.to_vec();
+    let purpose = Purpose::SelfAttach {
+        terminal,
+        provider: None,
+        file: None,
+        line: None,
+    };
+    Message::Hello(Hello::new(purpose)).encode().unwrap()
+}
+
 #[test]
-fn the_daemon_knows_its_neovims_terminals_ptys() {
+fn an_attach_from_neovims_own_terminal_is_refused_and_one_from_a_pty_inside_it_isnt() {
     let Some(mut rig) = Rig::start(&[]) else {
         return;
     };
     rig.pump(|r| r.d.nvim.ready);
+    rig.win_of(1);
     let _ = rig.d.nvim.client.exec_lua("vim.cmd('terminal')", 0);
     rig.d.nvim.client.flush().unwrap();
-    rig.pump(|r| !r.d.nvim.terminals.is_empty());
-    let id = rig.query.exec_lua(
-        "for _, c in ipairs(vim.api.nvim_list_chans()) do \
-           if c.pty and c.pty ~= '' then return c.pty end \
-         end",
-        0,
-    );
-    rig.query.flush().unwrap();
-    let frame = wait_response(&mut rig.query, id);
-    let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
-        unreachable!()
+    // its pty, once it's running
+    let pty = loop {
+        let id = rig.query.exec_lua(
+            "for _, c in ipairs(vim.api.nvim_list_chans()) do \
+               if c.pty and c.pty ~= '' then return c.pty end \
+             end \
+             return ''",
+            0,
+        );
+        rig.query.flush().unwrap();
+        let frame = wait_response(&mut rig.query, id);
+        let rpc::Message::Response { mut result, .. } = frame.message().unwrap() else {
+            unreachable!()
+        };
+        let pty = rpc::expect_str(&mut result).unwrap().to_vec();
+        if !pty.is_empty() {
+            break pty;
+        }
+        rig.pump(|_| true);
     };
-    let pty = rpc::expect_str(&mut result).unwrap().to_vec();
-    assert_eq!(vec![pty], rig.d.nvim.terminals);
+    // from the terminal itself, and from a pty a tmux in it would make
+    for (tty, nested) in [(pty, true), (b"/dev/ttys999".to_vec(), false)] {
+        let (_term, slave) = Term::open();
+        let helper = UnixStream::connect(&rig.sock).unwrap();
+        fdpass::send(&helper, &hello_with_address(&rig, &tty), slave).unwrap();
+        // SAFETY: the daemon has its own copy now.
+        unsafe { libc::close(slave) };
+        rig.d.accept(&rig.server).unwrap();
+        rig.pump(|r| r.d.nested_checks.is_empty());
+        match first_frame(&helper) {
+            Message::End(z) if nested => {
+                assert_eq!(Some(crate::attach::Refusal::Nested), z.as_refusal())
+            }
+            Message::Accept(_) if !nested => {}
+            other => panic!("{nested}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_new_windows_pane_holds_it_before_an_autocommand_can_redraw() {
+    // a config that redraws as windows are made and entered
+    let redraw = "autocmd WinNew,WinEnter,BufEnter,BufWinEnter * redraw";
+    let Some(mut rig) = Rig::start(&["--cmd", redraw]) else {
+        return;
+    };
+    rig.pump(|r| r.d.nvim.ready);
+    rig.win_of(1);
+    let second = rig.attach(None, None);
+    let win = rig.win_of(second);
+    // never drawn in the first pane's layout, nor given a pane of its own
+    assert_eq!(2, rig.d.panes.list.len());
+    assert!(rig.d.panes.by_id(1).unwrap().layout.is_none());
+    assert_eq!(Some(second), rig.d.panes.by_win(win).map(|p| p.id));
 }

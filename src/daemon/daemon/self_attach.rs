@@ -61,14 +61,14 @@ impl Daemon {
 
     /// Neovim made window `win` for the pane being served a new one: the
     /// pane holds it from now on, before any flush shows it.
-    pub(super) fn on_window_opened(&mut self, win: i64) {
+    pub(super) fn on_window_opened(&mut self, win: i64) -> Result<()> {
         let Some(WindowAsk {
             pane,
             kind: AskKind::Open,
             ..
         }) = self.window_ask
         else {
-            return;
+            return Ok(());
         };
         match self.panes.by_id_mut(pane) {
             Some(p) => {
@@ -76,9 +76,15 @@ impl Daemon {
                 p.opening = None;
                 self.changes.mark_taken(win);
             }
-            // gone while it was asked: nothing will show it
-            None => windows::close(&mut self.nvim.client, win),
+            // gone while it was asked: nothing will show it, and no other
+            // pane takes it as it closes
+            None => {
+                self.changes.mark_closing(win);
+                windows::close(&mut self.nvim.client, win);
+                self.nvim.client.flush()?;
+            }
         }
+        Ok(())
     }
 
     /// Neovim answered request `id`: true if it was the pane being served's.
@@ -99,10 +105,7 @@ impl Daemon {
                 self.untake(ask.pane, win);
             }
             // its attach ends rather than keep the rest waiting
-            if let Some(i) = self.panes.index_of(ask.pane) {
-                self.panes.list[i].closing = Some(Close::WindowClosed);
-                self.panes.remove(i, &self.event_loop);
-            }
+            self.end_unserved(ask.pane);
         } else {
             match ask.kind {
                 AskKind::List => {
@@ -123,6 +126,31 @@ impl Daemon {
         self.give_windows()?;
         self.nvim.client.flush()?;
         Ok(true)
+    }
+
+    /// Pane `id` couldn't be given its window: its attach ends, as its pane
+    /// closes, and any window it took, a new one opened before the failure,
+    /// closes with it. The last pane gone ends the daemon, as `pane_gone`
+    /// does.
+    fn end_unserved(&mut self, id: u32) {
+        let Some(i) = self.panes.index_of(id) else {
+            return;
+        };
+        let others =
+            self.panes.list.iter().any(|q| {
+                q.id != id && q.closing != Some(Close::RequestFailed) && q.layer.is_none()
+            });
+        let wins = self.panes.list[i].windows();
+        self.panes.list[i].closing = Some(Close::WindowClosed);
+        self.panes.remove(i, &self.event_loop);
+        for win in wins {
+            self.changes.untake(win);
+            self.changes.mark_closing(win);
+            windows::close(&mut self.nvim.client, win);
+        }
+        if !others {
+            self.stop(StopReason::PaneGone);
+        }
     }
 
     /// Pane `id` gave window `win` back, unshown: it gets another.
