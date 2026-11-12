@@ -14,6 +14,7 @@ use super::provider::{Ask, Direction, TerminalId};
 use super::surface::Surface;
 use crate::attach::{self, End, Ending, PaneId, Transport};
 use crate::name::NAME;
+use crate::nvim::windows::Split;
 use crate::screen::float_groups::Group;
 
 /// Never 0: Neovim's API reads 0 as the current window.
@@ -73,6 +74,12 @@ pub(crate) struct Pane {
     /// attached (ADR 0006).
     pub placing: Option<Placing>,
     pub last_asked_win_size: LastAskedWinSize,
+    /// Where Neovim split a requested pane's window off: where it is drawn
+    /// if its terminal never comes (#112).
+    pub split: Option<Split>,
+    /// When a requested pane whose terminal is open stops waiting for it to
+    /// attach (#88 decision 15).
+    pub attach_due: Option<std::time::Instant>,
 }
 
 /// Where a pane opened by `open` goes: beside `origin`'s terminal, as
@@ -259,6 +266,8 @@ impl Pane {
             awaiting_size: false,
             placing: None,
             last_asked_win_size: LastAskedWinSize::default(),
+            split: None,
+            attach_due: None,
         }
     }
 

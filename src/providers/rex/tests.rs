@@ -233,6 +233,25 @@ fn close_is_always_block_close() {
 }
 
 #[test]
+fn closing_a_block_already_gone_is_done_and_any_other_refusal_fails() {
+    let (mut p, mut theirs) = rex();
+    let close = |t: &str| Ask::Close {
+        terminal: TerminalId::from(t),
+    };
+    p.ask(AskId(4), close("block:gone"));
+    p.ask(AskId(5), close("block:f"));
+    refuse(&mut p, &mut theirs, 1, "not_found");
+    refuse(&mut p, &mut theirs, 2, "forbidden");
+    assert_eq!(
+        vec![
+            answered(4, Outcome::Done(Answer::Nothing)),
+            answered(5, Outcome::Failed("forbidden: no".into())),
+        ],
+        events(&mut p)
+    );
+}
+
+#[test]
 fn a_layer_made_with_no_block_is_closed_and_its_open_fails() {
     let (mut p, mut theirs) = rex();
     p.ask(

@@ -25,6 +25,7 @@ fn runner(
                 protocol: 1,
             })
             .collect(),
+        attach_timeout: config::check::ATTACH_TIMEOUT,
     };
     let env: Vec<(Vec<u8>, Vec<u8>)> = env
         .iter()
@@ -605,6 +606,7 @@ fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Ce
             timeout: Duration::from_secs(2),
             protocol: 1,
         }],
+        attach_timeout: config::check::ATTACH_TIMEOUT,
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
     let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
@@ -788,4 +790,46 @@ fn a_command_doesnt_inherit_the_daemons_ignored_signals() {
         );
         assert_eq!(None, answer(&mut p, Duration::from_millis(50)));
     }
+}
+
+/// A checked table named `name` with attach timeout `secs`.
+fn table(name: &str, secs: u64) -> config::Provider {
+    config::Provider {
+        name: name.into(),
+        path: format!("provider().{name}"),
+        capabilities: Vec::new(),
+        attach_timeout: Duration::from_secs(secs),
+        protocol: 1,
+        context_vars: Vec::new(),
+        find_vars: Vec::new(),
+    }
+}
+
+#[test]
+fn the_attach_timeout_is_the_terminal_halfs_or_the_tables_else_the_default() {
+    let pair = |terminal: Option<config::Provider>| {
+        config::Choice::Pair(config::Pair {
+            name: "pair".into(),
+            terminal,
+            layout: Some(table("aerospace", 2)),
+        })
+    };
+    let nine = Duration::from_secs(9);
+    assert_eq!(nine, attach_timeout_of(&pair(Some(table("ghostty", 9)))));
+    let default = config::check::ATTACH_TIMEOUT;
+    assert_eq!(default, attach_timeout_of(&pair(None)));
+    let whole = config::Choice::Whole(table("tmux", 9));
+    assert_eq!(nine, attach_timeout_of(&whole));
+    assert_eq!(default, attach_timeout_of(&config::Choice::None));
+}
+
+#[test]
+fn a_runner_has_its_specs_attach_timeout() {
+    let spec = Spec {
+        name: "test".into(),
+        commands: Vec::new(),
+        attach_timeout: Duration::from_secs(9),
+    };
+    let p = CommandProvider::new(spec, &[], b"/").unwrap();
+    assert_eq!(Duration::from_secs(9), p.attach_timeout());
 }

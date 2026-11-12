@@ -44,6 +44,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::config;
 use crate::daemon::event_loop::{Event, Loop};
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
@@ -93,6 +94,20 @@ const RUN_TOKEN: usize = 1;
 pub(crate) struct Spec {
     pub name: String,
     pub commands: Vec<CapCommand>,
+    /// Its terminal half's attach timeout (#88 decision 15).
+    pub attach_timeout: Duration,
+}
+
+/// The attach timeout of the pane provider the config chose, for its
+/// `Spec`: its terminal half's, or a whole table's; the default without one
+/// (#88 decision 15).
+pub(crate) fn attach_timeout_of(choice: &config::Choice) -> Duration {
+    let terminal = match choice {
+        config::Choice::Whole(p) => Some(p),
+        config::Choice::Pair(pair) => pair.terminal.as_ref(),
+        config::Choice::None | config::Choice::Builtin(_) => None,
+    };
+    terminal.map_or(config::check::ATTACH_TIMEOUT, |t| t.attach_timeout)
 }
 
 /// One capability's command.
@@ -134,6 +149,7 @@ type Clock = Box<dyn Fn() -> Instant>;
 
 pub(crate) struct CommandProvider {
     name: String,
+    attach_timeout: Duration,
     commands: Vec<CapCommand>,
     /// `events`, and how long it waits to start again the next time it
     /// ends; None once it has ended for good, or without one.
@@ -176,6 +192,7 @@ impl CommandProvider {
         let inner_loop = Loop::init().map_err(std::io::Error::other)?;
         let mut p = CommandProvider {
             name: spec.name,
+            attach_timeout: spec.attach_timeout,
             // `find` isn't run yet
             commands: spec
                 .commands
@@ -541,6 +558,10 @@ impl PaneProvider for CommandProvider {
     fn context_vars(&self) -> &[&str] {
         // reach is #127's
         &[]
+    }
+
+    fn attach_timeout(&self) -> Duration {
+        self.attach_timeout
     }
 }
 

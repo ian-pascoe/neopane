@@ -2,6 +2,7 @@
 //! records every ask, and answers or tells only what a test hands it.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use super::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
@@ -16,6 +17,8 @@ pub(crate) struct FakeProvider {
     pub unlaid: Option<[u32; 2]>,
     /// Its timeout for every capability, if not the default.
     pub timeout: Option<std::time::Duration>,
+    /// Its attach timeout, if not the default.
+    pub attach_timeout: Option<Duration>,
     events: VecDeque<ProviderEvent>,
 }
 
@@ -102,5 +105,10 @@ impl PaneProvider for FakeProvider {
 
     fn context_vars(&self) -> &[&str] {
         &[]
+    }
+
+    fn attach_timeout(&self) -> Duration {
+        self.attach_timeout
+            .unwrap_or_else(super::default_attach_timeout)
     }
 }

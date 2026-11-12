@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use super::asks::{self, Asks, Step};
 use super::attach_conn::Pending;
 use super::event_loop::{Event, Kind, Loop};
+use super::exe_stamp::VersionRefused;
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
@@ -110,6 +111,15 @@ pub(crate) struct Daemon {
     pub asks: Asks,
     /// When the ask timer is set to fire, if it is.
     ask_timer_due: Option<Instant>,
+    /// When the attach timer is set to fire, if it is.
+    attach_timer_due: Option<Instant>,
+    /// Set once a requested pane's terminal was refused for its version:
+    /// while it holds, new windows are drawn in their origin panes (#91
+    /// decision 24).
+    version_refused: Option<VersionRefused>,
+    /// Unshown windows of the first tab page whose terminal won't come,
+    /// each waiting for a pane that can draw it, and how it was split off.
+    unshown_awaiting_origin: Vec<(i64, windows::Split)>,
     /// Which terminal the pane provider has focused, as last said or asked.
     pub focus: ProviderFocus,
     /// A pane with no terminal id whose terminal reported a focus-in, and
@@ -161,6 +171,7 @@ pub(crate) enum Token {
     AskTimer,
     AreaTimer,
     FocusInTimer,
+    AttachTimer,
 }
 
 impl Token {
@@ -179,13 +190,14 @@ impl Token {
             9 => Token::AskTimer,
             10 => Token::AreaTimer,
             11 => Token::FocusInTimer,
+            12 => Token::AttachTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::FocusInTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::AttachTimer as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -312,6 +324,9 @@ impl Daemon {
             quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
+            attach_timer_due: None,
+            version_refused: None,
+            unshown_awaiting_origin: Vec::new(),
             focus: ProviderFocus::default(),
             focus_in: None,
             just_opened: Vec::new(),
@@ -430,6 +445,7 @@ impl Daemon {
             Some(Token::AskTimer) => self.time_out_asks()?,
             Some(Token::AreaTimer) => self.time_out_reports(Instant::now())?,
             Some(Token::FocusInTimer) => self.focus_in_stood(Instant::now())?,
+            Some(Token::AttachTimer) => self.time_out_attaches(Instant::now())?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -793,12 +809,12 @@ impl Daemon {
             .iter()
             .position(|&(w, ..)| w == win)
             .map(|i| self.pending_sizes.swap_remove(i));
-        if self.provider.is_none() {
-            // no pane provider: the window is drawn in its origin pane
-            self.lay_out_in_origin(win, size);
+        let sp = self.changes.split_of(win);
+        if self.provider.is_none() || (sp.tab == 0 && !self.opens_terminal(sp)) {
+            // drawn in its origin pane (#112)
+            self.lay_out_in_origin(win, sp, size);
             return Ok(());
         }
-        let sp = self.changes.split_of(win);
         // a window opens beside its origin pane's terminal: the pane it came
         // from, else any with a terminal. A tab page's first window opens its
         // Rex floating pane (`open_tab_page`) from the pane it came from.
@@ -837,6 +853,7 @@ impl Daemon {
             .map(|s| [s.view.cols, s.view.rows]);
         let pane = self.panes.add_for_window(win);
         pane.tab = sp.tab;
+        pane.split = Some(sp);
         let (pane_id, id) = (pane.id, pane.attach_id.expect("a requested pane"));
         let attach = pane::attach_words(&self.exe, &self.sock, self.transport, pane);
         let title = pane::title(&id);
@@ -900,28 +917,102 @@ impl Daemon {
         Ok(())
     }
 
-    /// Window `win` had no pane of its own: it joins its origin pane's layout,
-    /// else the current pane's, beside its origin window as Neovim put it,
-    /// at `size` if Neovim gave it one. A window of a tab page made after
-    /// setup stays unshown (#118).
-    fn lay_out_in_origin(&mut self, win: i64, size: Option<(i64, u32, u32)>) {
-        let sp = self.changes.split_of(win);
-        if sp.tab != 0 {
-            return;
+    /// Whether a window of the first tab page, split off as `sp`, gets a
+    /// terminal of its own (#112). It does when:
+    /// - the pane provider can open one, beside its origin pane or to be
+    ///   placed there, and that pane is in reach;
+    /// - opened without being entered, focus can be given back to the
+    ///   current pane's terminal (#86 D5);
+    /// - no version refusal holds (#91 decision 24).
+    fn opens_terminal(&mut self, sp: windows::Split) -> bool {
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        let opens =
+            self.asks.may_ask(p, Capability::OpenBeside) || self.asks.may_ask(p, Capability::Open);
+        if !opens || !self.in_reach(sp) {
+            return false;
         }
-        let from = self
-            .panes
+        if sp.win != self.nvim.current_win && !self.can_give_focus_back() {
+            return false;
+        }
+        let Some(refused) = self.version_refused else {
+            return true;
+        };
+        if refused.holds(&self.exe) {
+            return false;
+        }
+        log_info!(
+            "{NAME} daemon: {} changed: new windows get terminals again",
+            self.exe
+        );
+        self.version_refused = None;
+        true
+    }
+
+    /// Whether `give_focus_back` can have the pane provider focus the
+    /// current pane's terminal: it can focus, and has an id for it, or will
+    /// have. A current window made in the same flush, as `:vsplit | vsplit`
+    /// or a session load make them, may have no pane yet, or one whose open
+    /// is still on its way: its id comes with the open.
+    fn can_give_focus_back(&self) -> bool {
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        if !self.asks.may_ask(p, Capability::Focus) {
+            return false;
+        }
+        match self.current_pane() {
+            Some(q) => q.terminal.is_some() || (q.attach_id.is_some() && q.closing.is_none()),
+            None => true,
+        }
+    }
+
+    /// Whether the origin pane of a window split off as `sp` is in the pane
+    /// provider's reach (#86 D9): until #114 and #127 decide reach, every
+    /// pane is.
+    fn in_reach(&self, _sp: windows::Split) -> bool {
+        true
+    }
+
+    /// The pane a window split off as `sp` is drawn in when it has no
+    /// terminal of its own: its origin window's, else the current one's, else
+    /// the first that can take it. Only a pane of the first tab page, with no
+    /// floats, already showing a window to split, and not one still waiting
+    /// for a terminal of its own.
+    fn origin_pane(&self, sp: windows::Split) -> Option<u32> {
+        let takes = |p: &&Pane| {
+            p.layer.is_none()
+                && p.tab == 0
+                && p.closing.is_none()
+                && p.neovim_window_handle.is_some()
+                && (p.attach_id.is_none() || p.terminal_surface.is_some())
+        };
+        self.panes
             .by_win(sp.from)
-            .or_else(|| self.current_pane())
-            .filter(|p| p.layer.is_none() && p.tab == 0);
-        let Some(id) = from.map(|p| p.id) else {
-            return;
+            .filter(takes)
+            .or_else(|| self.current_pane().filter(takes))
+            .or_else(|| self.panes.list.iter().find(takes))
+            .map(|p| p.id)
+    }
+
+    /// Window `win` had no pane of its own: it joins its origin pane's layout,
+    /// beside its origin window as Neovim put it (`sp`), at `size` if Neovim
+    /// gave it one. A window of a tab page made after setup stays unshown
+    /// (#118), as does one with no pane to join. Whether it joined one.
+    fn lay_out_in_origin(
+        &mut self,
+        win: i64,
+        sp: windows::Split,
+        size: Option<(i64, u32, u32)>,
+    ) -> bool {
+        if sp.tab != 0 {
+            return false;
+        }
+        let Some(id) = self.origin_pane(sp) else {
+            return false;
         };
         let equalalways = self.split_options.equalalways;
         let p = self.panes.by_id_mut(id).unwrap();
-        let Some(shown) = p.neovim_window_handle else {
-            return; // before setup: no window to split
-        };
+        let shown = p
+            .neovim_window_handle
+            .expect("an origin pane shows a window");
         let origin = if p.holds(sp.from) { sp.from } else { shown };
         p.layout
             .get_or_insert_with(|| PaneLayout::new(shown))
@@ -934,6 +1025,7 @@ impl Daemon {
         if let Some((_, cols, rows)) = size {
             self.resize_in_layout(id, win, cols, rows);
         }
+        true
     }
 
     /// The origin pane's terminal for a window of a tab page with a tab page
@@ -1301,8 +1393,9 @@ impl Daemon {
                 continue;
             }
             p.closing = Some(Close::WindowClosed);
-            // hanging up closes the terminal only once its helper has connected
-            if p.terminal_surface.is_none()
+            // a requested terminal is closed, whether or not its helper
+            // connected; a self-attached one goes back to its shell (#86 D10)
+            if p.attach_id.is_some()
                 && let Some(t) = p.terminal.clone()
             {
                 self.act(asks::close(t));
@@ -1317,6 +1410,7 @@ impl Daemon {
         let grids = &self.grids;
         self.pending_sizes
             .retain(|&(w, ..)| grids.grid_of(w).is_some());
+        self.home_unshown()?;
 
         // a copy: making panes below doesn't touch the grids, but borrows all of `self`
         let wins: Vec<_> = self.grids.wins.values().copied().collect();
@@ -1334,7 +1428,13 @@ impl Daemon {
                 }
                 WinKind::External => {
                     self.changes.became_external(w.win);
-                    if self.panes.by_win(w.win).is_some() || self.changes.is_closing(w.win) {
+                    if self.panes.by_win(w.win).is_some()
+                        || self.changes.is_closing(w.win)
+                        || self
+                            .unshown_awaiting_origin
+                            .iter()
+                            .any(|&(a, _)| a == w.win)
+                    {
                         continue;
                     }
                     self.new_pane(w.win)?;
@@ -1743,10 +1843,18 @@ impl Daemon {
             self.act(asks::close(t));
             return Ok(());
         };
+        let wait = self.attach_timeout();
         let p = self.panes.by_id_mut(pane_id).unwrap();
         p.terminal = Some(t.clone());
         let handle = p.neovim_window_handle;
+        let attaching = p.terminal_surface.is_none();
+        if attaching {
+            p.attach_due = Some(Instant::now() + wait);
+        }
         self.place_opened(pane_id);
+        if attaching {
+            self.arm_attach_timer()?;
+        }
         // a layout that came before the terminal's id placed it already
         if let Some(l) = self.live_layout.clone() {
             self.on_live_layout(l)?;
@@ -1795,10 +1903,7 @@ impl Daemon {
         }
     }
 
-    /// An act that couldn't be done. A pane whose open failed is given up,
-    /// as before the seam: a float group pane's floats stay drawn in the pane,
-    /// and a tab page's other windows ask for their own (#112 draws a window
-    /// in its origin pane instead).
+    /// An act that couldn't be done. A pane whose open failed is given up.
     fn fall_back(&mut self, ask: Ask) -> Result<()> {
         if ask == Ask::ReportLayout {
             return self.report_failed();
@@ -1809,9 +1914,129 @@ impl Daemon {
         let Some(pane_id) = self.panes.by_attach_id(&attach_id).map(|p| p.id) else {
             return Ok(());
         };
-        self.panes.by_id_mut(pane_id).unwrap().closing = Some(Close::RequestFailed);
+        self.give_up(pane_id)
+    }
+
+    /// Gives up requested pane `id`, whose terminal won't come: its id
+    /// expires, and a terminal it has is closed. The pane of a window of the
+    /// first tab page goes, and its window is drawn in its origin pane, or
+    /// once a pane can take it (#112). Any other pane stays given up: a float
+    /// group pane's floats are drawn in the pane, and a tab page's other
+    /// windows ask for their own.
+    pub(super) fn give_up(&mut self, id: u32) -> Result<()> {
+        let p = self.panes.by_id_mut(id).unwrap();
+        p.closing = Some(Close::RequestFailed);
+        p.attach_due = None;
+        let (attach_id, terminal) = (p.attach_id, p.terminal.clone());
+        if let Some(a) = attach_id {
+            self.panes.ids.expire(&a);
+        }
+        if let Some(t) = terminal {
+            self.act(asks::close(t));
+        }
+        let p = self.panes.by_id(id).unwrap();
+        let alone = p.layer.is_none() && p.tab == 0 && p.layout.is_none();
+        if let Some(win) = p.neovim_window_handle.filter(|_| alone) {
+            let sp = p.split.unwrap_or_else(|| self.changes.split_of(win));
+            let i = self.panes.index_of(id).unwrap();
+            self.panes.remove(i, &self.event_loop);
+            if self.lay_out_in_origin(win, sp, None) {
+                self.show_current_in_origin(win)?;
+            } else {
+                // no pane can take it yet: unshown, it waits for one, unasked
+                self.unshown_awaiting_origin.push((win, sp));
+            }
+        }
         self.reconcile()?;
         self.draw()
+    }
+
+    /// Draws each unshown window waiting for a pane to join in one that can
+    /// take it now, and forgets those that closed.
+    fn home_unshown(&mut self) -> Result<()> {
+        let grids = &self.grids;
+        self.unshown_awaiting_origin
+            .retain(|&(w, _)| grids.grid_of(w).is_some());
+        for (win, sp) in std::mem::take(&mut self.unshown_awaiting_origin) {
+            if self.lay_out_in_origin(win, sp, None) {
+                self.show_current_in_origin(win)?;
+            } else {
+                self.unshown_awaiting_origin.push((win, sp));
+            }
+        }
+        Ok(())
+    }
+
+    /// Window `win` was just drawn in its origin pane: if it's current, Neovim's
+    /// screen fits that pane, and the pane provider focuses its terminal.
+    fn show_current_in_origin(&mut self, win: i64) -> Result<()> {
+        if !self.is_current_win(win) {
+            return Ok(());
+        }
+        let Some(p) = self.panes.by_win_mut(win) else {
+            return Ok(());
+        };
+        p.neovim_window_handle = Some(win);
+        let (id, terminal) = (p.id, p.terminal.clone());
+        self.size_window(id);
+        self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
+        self.focus_terminal(terminal.as_ref());
+        Ok(())
+    }
+
+    /// How long a terminal just opened has to attach.
+    fn attach_timeout(&self) -> Duration {
+        let wait = self
+            .provider
+            .as_ref()
+            .map_or(super::provider::default_attach_timeout(), |p| {
+                p.seam_ref().attach_timeout()
+            });
+        wait.min(crate::config::check::MAX_TIMEOUT)
+    }
+
+    /// The attach timer fired, at `now`: a requested pane whose terminal is
+    /// open and hasn't attached in time is given up, with a warning. Its id
+    /// expires, so a helper that attaches later is refused `pane-expired`.
+    pub(super) fn time_out_attaches(&mut self, now: Instant) -> Result<()> {
+        self.attach_timer_due = None;
+        let late: Vec<u32> = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| p.terminal_surface.is_none() && p.attach_due.is_some_and(|d| d <= now))
+            .map(|p| p.id)
+            .collect();
+        for id in late {
+            let Some(p) = self.panes.by_id(id) else {
+                continue;
+            };
+            let t = p.terminal.as_ref().map_or("?", TerminalId::as_str);
+            let line = format!("terminal {t} didn't attach in time");
+            log_warn!("{NAME} daemon: {line}");
+            self.warn_in_nvim(&format!("{NAME}: {line}"));
+            self.give_up(id)?;
+        }
+        self.nvim.client.flush()?;
+        self.arm_attach_timer()
+    }
+
+    /// Starts the attach timer for the soonest wait for an attach, unless it
+    /// already runs for one that soon.
+    fn arm_attach_timer(&mut self) -> Result<()> {
+        let Some(due) = self.panes.list.iter().filter_map(|p| p.attach_due).min() else {
+            return Ok(());
+        };
+        if self.attach_timer_due.is_some_and(|armed| armed <= due) {
+            return Ok(());
+        }
+        // round up, so the timer doesn't fire before the deadline
+        let ms = due
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1000);
+        self.attach_timer_due = Some(due);
+        self.add_timer(Token::AttachTimer, u32::try_from(ms).unwrap_or(u32::MAX))
     }
 
     /// The pane provider says it has focused `t`, at `now`. The user's move
@@ -2556,6 +2781,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
+    mod fallback;
+
     /// A daemon with no Neovim behind it, only a socket that nothing
     /// answers, and a fake pane provider that can open and close.
     struct Fixture {
@@ -2892,10 +3119,7 @@ mod tests {
             assert!(z.message.contains(&part), "{}", z.message);
         }
         // its pane, named in the hello, is given up, and Neovim warned
-        assert_eq!(
-            Some(Close::RequestFailed),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert_given_up(&fx.d, id);
         assert_eq!(Err(Refusal::PaneExpired), fx.d.panes.ids.check(&pane));
         let sent = sent_to_nvim(&mut fx);
         assert!(
@@ -2933,10 +3157,7 @@ mod tests {
             (Some(Refusal::Hello), "missing field transport"),
             (z.as_refusal(), z.message.as_str())
         );
-        assert_eq!(
-            Some(Close::RequestFailed),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert_given_up(&fx.d, id);
         assert!(sent_to_nvim(&mut fx).contains("missing field transport"));
     }
 
@@ -3087,10 +3308,7 @@ mod tests {
                 refusal(&helper).as_refusal(),
                 "{tty}"
             );
-            assert_eq!(
-                Some(Close::RequestFailed),
-                fx.d.panes.by_id(id).unwrap().closing
-            );
+            assert_given_up(&fx.d, id);
             unsafe {
                 libc::close(pipe[0]);
                 libc::close(pipe[1]);
@@ -4844,11 +5062,11 @@ mod tests {
         id
     }
 
+    /// Pane `pane`, of a window of the first tab page, was given up: it's
+    /// gone, and with no pane to draw its window in, the window waits for one.
     fn assert_given_up(d: &Daemon, pane: u32) {
-        assert_eq!(
-            Some(Close::RequestFailed),
-            d.panes.by_id(pane).unwrap().closing
-        );
+        assert!(d.panes.by_id(pane).is_none());
+        assert!(!d.unshown_awaiting_origin.is_empty());
     }
 
     #[test]
@@ -5120,6 +5338,7 @@ mod tests {
                     protocol: 1,
                 })
                 .collect(),
+            attach_timeout: crate::config::check::ATTACH_TIMEOUT,
         };
         let path = std::env::var_os("PATH").unwrap_or_default();
         let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];
@@ -5741,6 +5960,8 @@ mod tests {
             let first = pane_in_block(&mut fx.d, 1, 0, 1);
             let from = pane_in_block(&mut fx.d, 2, 0, 2);
             note_split_from(&mut fx.d, 3, 2, side_by_side, before);
+            // entered: the fake can't give focus back
+            fx.d.nvim.current_win = 3;
             fx.d.new_pane(3).unwrap();
 
             let new = fx.d.panes.by_win(3).unwrap();
@@ -5768,6 +5989,8 @@ mod tests {
             fake(&mut fx.d).unlaid = Some([80, 24]);
             pane_in_block(&mut fx.d, 2, 0, 2);
             note_split_from(&mut fx.d, 3, 2, true, false);
+            // entered: the fake can't give focus back
+            fx.d.nvim.current_win = 3;
             fx.d.new_pane(3).unwrap();
             let new = fx.d.panes.by_win(3).unwrap();
             // it waits for its layout, as one opened beside its origin does
@@ -5823,6 +6046,7 @@ mod tests {
         let mut fx = with_provider(Some(Held::Fake(f)));
         pane_in_block(&mut fx.d, 2, 0, 2);
         note_split_from(&mut fx.d, 3, 2, true, false);
+        fx.d.nvim.current_win = 3;
         fx.d.new_pane(3).unwrap();
         let p = fx.d.panes.by_win(3).unwrap();
         assert_eq!(None, p.placing);
@@ -5834,6 +6058,7 @@ mod tests {
         let mut fx = fixture();
         let placed = pane_in_block(&mut fx.d, 1, 0, 1);
         note_split_from(&mut fx.d, 3, 99, true, false);
+        fx.d.nvim.current_win = 3;
         fx.d.new_pane(3).unwrap();
         let new = fx.d.panes.by_win(3).unwrap().id;
         assert_eq!(vec![placed, new], pane_ids(&fx.d));

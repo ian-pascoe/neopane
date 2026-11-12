@@ -1514,6 +1514,22 @@ api.nvim_create_autocmd('TabClosed', {
 for _, win in ipairs(api.nvim_list_wins()) do
   if api.nvim_win_get_config(win).relative == '' then home[win] = api.nvim_win_get_tabpage(win) end
 end
+-- The windows Neovim started with, as `-o` and `-O` open them: each is
+-- noted split off the one before it, the way the layout has them, so they
+-- are laid out as Neovim had them. Returns the last window of `node`.
+local function note_startup_splits(node, dir, from)
+  if node[1] == 'leaf' then
+    if from then note('split', node[2], dir == 'row', false, from, 0) end
+    return node[2]
+  end
+  local last = from
+  for i, child in ipairs(node[2]) do
+    last = note_startup_splits(child, i == 1 and dir or node[1], last)
+  end
+  return last
+end
+note_startup_splits(vim.fn.winlayout())
+
 local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)
 schedule_report()

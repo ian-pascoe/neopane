@@ -302,6 +302,10 @@ impl RexProvider {
                 ResponseResult::Ok(_),
             ) => self.answer(tag, Outcome::Done(Answer::Nothing)),
             (Request::FocusDirection(tag), result) => self.on_direction_answer(tag, result),
+            // a block already gone is closed (#86 D10)
+            (Request::CloseBlock(tag), ResponseResult::Err(e)) if e.code == "not_found" => {
+                self.answer(tag, Outcome::Done(Answer::Nothing))
+            }
             (
                 Request::NewSplit(tag)
                 | Request::NewLayer(tag)
