@@ -809,8 +809,9 @@ api.nvim_create_autocmd('WinEnter', {
 })
 
 -- <C-w>h/j/k/l: Neovim can't tell where the panes sit, so it lands on the
--- hidden anchor, and we'd move on as if cycling. Rex knows: say which way and
--- let it move focus (nowhere at an edge); Neovim's current window follows. The
+-- hidden anchor, and we'd move on as if cycling. The daemon knows: say which
+-- way, and it steps across the windows of the pane first, then has the pane
+-- provider move focus (nowhere at an edge); Neovim's current window follows. The
 -- maps catch the keys typed and mappings that remap them, in Normal and Visual
 -- mode; not a `noremap` mapping to <C-w>h, which skips them, nor `:wincmd`.
 -- Not from a float, which Neovim moves out of itself.

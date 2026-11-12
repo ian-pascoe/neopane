@@ -47,7 +47,7 @@ use crate::providers::rex::RexProvider;
 use crate::screen::float_groups;
 use crate::screen::grid::Cell;
 use crate::screen::grids::{Grids, WinKind};
-use crate::screen::pane_view::{LaidOut, Opts, Rect, Separator, Shown, tabline_slice};
+use crate::screen::pane_view::{self, LaidOut, Opts, Rect, Separator, Shown, tabline_slice};
 use crate::term::input;
 use indexmap::IndexMap;
 
@@ -1225,14 +1225,8 @@ impl Daemon {
             return Ok(());
         };
         let id = p.id;
-        // of several in a pane: it keeps a row, and isn't cut
-        if p.layout.is_some() && p.neovim_window_handle != Some(win) {
-            p.neovim_window_handle = Some(win);
-            self.size_window(id);
-        }
         self.trace_tab_move(from_tab, id);
-        let p = self.panes.by_id(id).unwrap();
-        self.nvim.fit_ui_to(p)?;
+        self.show_in_pane(id, win)?;
         self.draw()?;
         // (looked up again: drawing can remove a pane whose terminal is gone)
         let terminal = self.panes.by_id(id).and_then(|p| p.terminal.clone());
@@ -1314,9 +1308,11 @@ impl Daemon {
         p.layout_asked.clear();
     }
 
-    /// `<C-w>h/j/k/l`: the pane provider moves focus to the pane that way, if
-    /// any. It tells the new focus as the user's, and Neovim's current window
-    /// follows. Without `focus_direction`, nothing moves.
+    /// `<C-w>h/j/k/l`: in a pane laying out several windows, the move steps
+    /// across them first. The pane provider moves focus the rest of the way,
+    /// to the pane that way, if any. It tells the new focus as the user's, and
+    /// Neovim's current window follows. Without `focus_direction`, a move
+    /// stops at the pane's edge.
     fn on_direction(&mut self, m: windows::Move) -> Result<()> {
         let dir = match m.dir {
             windows::Direction::Left => Direction::Left,
@@ -1324,15 +1320,50 @@ impl Daemon {
             windows::Direction::Up => Direction::Up,
             windows::Direction::Right => Direction::Right,
         };
+        let count = self.step_in_layout(dir, m.count.max(1))?;
         let p = self.provider.as_ref().map(Held::seam_ref);
-        if !self.asks.may_ask(p, Capability::FocusDirection) {
+        if count == 0 || !self.asks.may_ask(p, Capability::FocusDirection) {
             return Ok(());
         }
         self.act(Ask::FocusDirection {
             dir,
-            count: m.count.clamp(1, MAX_DIRECTION_COUNT),
+            count: count.min(MAX_DIRECTION_COUNT),
         });
         Ok(())
+    }
+
+    /// Moves Neovim's current window `count` windows `dir` across its pane's
+    /// layout, as far as it goes. The moves left at the pane's edge.
+    fn step_in_layout(&mut self, dir: Direction, count: u32) -> Result<u32> {
+        let win = self.nvim.current_win;
+        let Some(p) = self.panes.by_win(win) else {
+            return Ok(count);
+        };
+        let Some(layout) = &p.layout else {
+            return Ok(count);
+        };
+        let area = self.geometry().window_size(p);
+        // the cursor's cell in the pane, where Neovim last put it in the
+        // window, on a row it shows
+        let grid = self.grids.grid_of(win);
+        let (shown, _) = self.laid_out_view(p);
+        let at = match (shown.iter().find(|s| Some(s.grid) == grid), grid) {
+            (Some(s), Some(grid)) => {
+                let g = self.grids.get(grid).unwrap();
+                let row = pane_view::rect_row(g, s, g.cursor_row);
+                [s.col + g.cursor_col.min(s.cols), s.row + row]
+            }
+            _ => [0, 0],
+        };
+        let (to, left) = layout.step(win, dir, count, area, at);
+        if to != win {
+            let id = p.id;
+            self.nvim.make_current(id, to)?;
+            self.show_in_pane(id, to)?;
+            self.nvim.client.flush()?;
+            self.draw()?;
+        }
+        Ok(left)
     }
 
     /// A float became current: if it's in a floating pane, focus that.
@@ -1973,14 +2004,25 @@ impl Daemon {
         if !self.is_current_win(win) {
             return Ok(());
         }
-        let Some(p) = self.panes.by_win_mut(win) else {
+        let Some(p) = self.panes.by_win(win) else {
             return Ok(());
         };
-        p.neovim_window_handle = Some(win);
         let (id, terminal) = (p.id, p.terminal.clone());
-        self.size_window(id);
-        self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
+        self.show_in_pane(id, win)?;
         self.focus_terminal(terminal.as_ref());
+        Ok(())
+    }
+
+    /// Window `win`, current, is the one pane `id` shows: of several there,
+    /// it keeps a row and isn't cut. Neovim's screen fits the pane.
+    fn show_in_pane(&mut self, id: u32, win: i64) -> Result<()> {
+        let p = self.panes.by_id_mut(id).unwrap();
+        p.neovim_window_handle = Some(win);
+        // asks only what changed
+        if p.layout.is_some() {
+            self.size_window(id);
+        }
+        self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         Ok(())
     }
 
@@ -2424,6 +2466,7 @@ impl Daemon {
             // the floats of the frame last drawn: unchanged while frames are
             // held back, as no frame is built
             set_targets(&mut s.forwarder, s.view.drawn_floats());
+            set_windows(&mut s.forwarder, &self.grids, s.view.drawn_windows());
             if !drawn {
                 continue;
             }
@@ -2755,9 +2798,29 @@ fn set_targets(f: &mut Forwarder, rects: &[Rect]) {
             col: r.col,
             width: r.width,
             height: r.height,
+            grid_row: 0,
         })
         .collect();
     f.set_targets(&targets);
+}
+
+/// Mouse events on the windows of a pane layout drawn go to the rows of
+/// their grids they show there, a statusline neorex draws no grid's.
+fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
+    f.set_windows(shown.iter().flat_map(|s| {
+        let runs = grids
+            .get(s.grid)
+            .into_iter()
+            .flat_map(|g| pane_view::runs(g, s));
+        runs.map(|r| forwarder::Target {
+            grid: s.grid,
+            row: (s.row + r.row) as i32,
+            col: s.col as i32,
+            width: s.cols,
+            height: r.rows,
+            grid_row: r.grid_row,
+        })
+    }));
 }
 
 #[cfg(test)]
@@ -2782,6 +2845,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     mod fallback;
+    mod in_layout;
 
     /// A daemon with no Neovim behind it, only a socket that nothing
     /// answers, and a fake pane provider that can open and close.
