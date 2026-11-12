@@ -25,6 +25,8 @@ pub(crate) enum Request {
     CloseLayer(u64),
     MoveBlock(u64),
     ResizePane(u64),
+    /// `com.superlogical.terminal.process`, for a `find`.
+    Process(u64),
 }
 
 impl Request {
@@ -42,6 +44,7 @@ impl Request {
             Request::CloseLayer(_) => "close_layer",
             Request::MoveBlock(_) => "move_block",
             Request::ResizePane(_) => "resize_pane",
+            Request::Process(_) => "terminal.process",
         }
     }
 }
@@ -366,6 +369,15 @@ impl Session {
         )
     }
 
+    /// Asks for the processes of `block`'s terminal.
+    pub(crate) fn process(&mut self, tag: u64, block: &str) -> Result<(), ClientError> {
+        self.request(
+            Request::Process(tag),
+            "com.superlogical.terminal.process",
+            json!({ "session_id": self.session_id, "block_id": block }),
+        )
+    }
+
     /// Closes a floating layer we made.
     pub(crate) fn close_layer(&mut self, tag: u64, layer: &str) -> Result<(), ClientError> {
         self.request(
@@ -432,7 +444,10 @@ impl Session {
         let Some(req) = self.take_pending_request(res.id) else {
             return Ok(None);
         };
-        if let client::ResponseResult::Err(e) = &res.result {
+        // a `find`'s answer is its verdict, logged as one
+        if let client::ResponseResult::Err(e) = &res.result
+            && !matches!(req, Request::Process(_))
+        {
             log_request_error(req, e);
         }
         match req {
@@ -450,7 +465,8 @@ impl Session {
             | Request::CloseLayer(_)
             | Request::MoveBlock(_)
             | Request::ResizePane(_)
-            | Request::FocusDirection(_) => {
+            | Request::FocusDirection(_)
+            | Request::Process(_) => {
                 return Ok(Some(Update::Answered {
                     req,
                     result: res.result,

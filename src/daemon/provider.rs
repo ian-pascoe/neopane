@@ -175,7 +175,8 @@ impl Direction {
 /// One ask of a pane provider: a variant per capability, its fields named
 /// after ADR 0006's inputs (#92 decision 2).
 #[derive(Debug, Clone, PartialEq)]
-// `open` and `find` are asked from #112–#114
+// `open` is asked by the command runner (#125), and some of `find`'s
+// fields only by it
 #[allow(dead_code)]
 pub(crate) enum Ask {
     Open {
@@ -231,6 +232,9 @@ pub(crate) enum Ask {
         pane: PaneId,
         pid: u32,
         tty: String,
+        /// The attaching terminal's device (`st_rdev`), as the daemon read it
+        /// from the terminal handed over, or from `tty` when relayed.
+        device: Option<u64>,
         title: String,
         /// The `find` variables' values, as the attach's environment has them.
         env: Vec<(Vec<u8>, Vec<u8>)>,
@@ -323,8 +327,6 @@ pub(crate) enum ProviderEvent {
 
 /// A pane provider: Rex's, built in, and later the command runner; in
 /// tests, `FakeProvider` (#92 decision 1).
-// `context_vars` is read from #114
-#[allow(dead_code)]
 pub(crate) trait PaneProvider {
     /// Its name, as warnings and the log show it.
     fn name(&self) -> &str;
@@ -354,6 +356,11 @@ pub(crate) trait PaneProvider {
     /// The variables a self-attached terminal must share with the choosing
     /// attach to be in its reach.
     fn context_vars(&self) -> &[&str];
+
+    /// The variables `find` is given, as the attach's environment has them.
+    fn find_vars(&self) -> &[&str] {
+        &[]
+    }
 
     /// How long a terminal it opened has to attach, from its open being
     /// done, before its window is drawn in its origin pane (#88 decision
