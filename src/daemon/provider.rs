@@ -61,8 +61,8 @@ impl Capability {
 
     /// How long an ask of it may take before it counts as failed: ADR 0006's
     /// defaults (#93 decision 10), Rex's the same.
-    pub(crate) fn timeout_ms(self) -> u32 {
-        match self {
+    pub(crate) fn default_timeout(self) -> Duration {
+        Duration::from_millis(match self {
             Capability::Open
             | Capability::OpenBeside
             | Capability::OpenFloat
@@ -75,7 +75,7 @@ impl Capability {
             | Capability::Focus
             | Capability::FocusDirection
             | Capability::Events => 2000,
-        }
+        })
     }
 
     /// Whether its acts wait their turn in the layout queue, one at a time:
@@ -332,7 +332,7 @@ pub(crate) trait PaneProvider {
 
     /// How long an ask of `cap` may take before it counts as failed.
     fn timeout(&self, cap: Capability) -> Duration {
-        Duration::from_millis(u64::from(cap.timeout_ms()))
+        cap.default_timeout()
     }
 
     /// Starts `ask`, whose answer comes from `next` as

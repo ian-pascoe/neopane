@@ -46,7 +46,7 @@ struct Sent {
     ask: Ask,
     due: Instant,
     /// The time it had.
-    time: Duration,
+    timeout: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -135,13 +135,13 @@ impl Asks {
     }
 
     fn send(&mut self, p: &mut dyn PaneProvider, id: AskId, ask: Ask, now: Instant) {
-        let time = p.timeout(ask.capability());
+        let timeout = p.timeout(ask.capability());
         p.ask(id, ask.clone());
         self.sent.push(Sent {
             id,
             ask,
-            due: now + time,
-            time,
+            due: now + timeout,
+            timeout,
         });
     }
 
@@ -187,9 +187,9 @@ impl Asks {
                 i += 1;
                 continue;
             }
-            let Sent { ask, time, .. } = self.sent.remove(i);
+            let Sent { ask, timeout, .. } = self.sent.remove(i);
             let cap = ask.capability();
-            let secs = seconds(time);
+            let secs = seconds(timeout);
             self.failed(p.name(), cap, &format!("timed out after {secs} s"), None);
             self.steps.push_back(Step::FallBack(ask));
         }
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn an_act_has_the_time_its_pane_provider_gives_it() {
         let (mut asks, mut fake, now) = (Asks::default(), FakeProvider::opening(), Instant::now());
-        fake.time = Some(Duration::from_millis(1500));
+        fake.timeout = Some(Duration::from_millis(1500));
         asks.act(Some(&mut fake), open(1), now);
         assert_eq!(Some(now + Duration::from_millis(1500)), asks.deadline());
         asks.time_out(&mut fake, now + Duration::from_millis(1500));

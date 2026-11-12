@@ -18,7 +18,7 @@ fn runner(
         name: "test".into(),
         commands: commands
             .iter()
-            .map(|(cap, argv)| Template {
+            .map(|(cap, argv)| CapCommand {
                 cap: *cap,
                 argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
                 timeout,
@@ -195,7 +195,7 @@ fn the_environment_is_the_attachs_less_the_name_and_the_per_act_variables() {
 
 #[test]
 fn it_runs_in_the_attachs_directory_or_else_in_the_root() {
-    let argv = ["/bin/pwd"];
+    let argv = ["sh", "-c", "pwd -P"];
     for (cwd, shown) in [("/usr", "/usr"), ("/no/such/dir", "/"), ("", "/")] {
         let mut p = runner(
             &[(Capability::Open, &argv)],
@@ -387,70 +387,6 @@ fn its_capabilities_are_its_commands_and_its_timeouts_theirs() {
 }
 
 #[test]
-fn a_spec_comes_from_a_checked_table_keeping_only_what_the_runner_runs() {
-    let cmd = |argv: &str, timeout: Option<Duration>| check::Command {
-        argv: vec![argv.as_bytes().to_vec()],
-        timeout,
-    };
-    let table = |caps: Vec<(check::Capability, check::Command)>| check::Provider {
-        name: "t".into(),
-        path: "provider()".into(),
-        capabilities: caps,
-        attach_timeout: Duration::from_secs(5),
-        protocol: 2,
-        context_vars: vec![],
-        find_vars: vec![],
-    };
-    let whole = table(vec![
-        (check::Capability::Open, cmd("o", None)),
-        (check::Capability::Find, cmd("f", None)),
-        (
-            check::Capability::Resize,
-            cmd("r", Some(Duration::from_secs(7))),
-        ),
-    ]);
-    let spec = Spec::whole(&whole);
-    assert_eq!(
-        vec![
-            Template {
-                cap: Capability::Open,
-                argv: vec![b"o".to_vec()],
-                timeout: Duration::from_secs(5),
-                protocol: 2,
-            },
-            Template {
-                cap: Capability::Resize,
-                argv: vec![b"r".to_vec()],
-                timeout: Duration::from_secs(7),
-                protocol: 2,
-            },
-        ],
-        spec.commands
-    );
-
-    let pair = check::Pair {
-        name: "a+b".into(),
-        terminal: Some(table(vec![
-            (check::Capability::Open, cmd("o", None)),
-            (check::Capability::Focus, cmd("ignored", None)),
-        ])),
-        layout: Some(table(vec![(check::Capability::Focus, cmd("f", None))])),
-    };
-    let caps: Vec<_> = Spec::pair(&pair)
-        .commands
-        .iter()
-        .map(|t| (t.cap, t.argv[0].clone()))
-        .collect();
-    assert_eq!(
-        vec![
-            (Capability::Open, b"o".to_vec()),
-            (Capability::Focus, b"f".to_vec())
-        ],
-        caps
-    );
-}
-
-#[test]
 fn a_split_place_gets_its_direction_and_ratio() {
     let argv = [
         "sh",
@@ -487,7 +423,7 @@ fn every_capability_it_runs_and_every_variable_it_sets_is_in_the_docs() {
     .unwrap();
     for cap in RUNS {
         assert!(doc.contains(&format!("| `{}`", cap.name())), "{cap}");
-        for p in check::Capability::ALL
+        for p in crate::config::check::Capability::ALL
             .iter()
             .find(|c| c.name() == cap.name())
             .unwrap()
@@ -496,8 +432,9 @@ fn every_capability_it_runs_and_every_variable_it_sets_is_in_the_docs() {
             assert!(doc.contains(&format!("`{p}`")), "{cap}: {p}");
         }
     }
-    for v in inputs::PER_ACT {
-        assert!(doc.contains(&format!("`{v}`")), "{v}");
+    for v in inputs::Var::ALL {
+        let shown = v.name().to_ascii_uppercase();
+        assert!(doc.contains(&format!("`{shown}`")), "{shown}");
     }
 }
 

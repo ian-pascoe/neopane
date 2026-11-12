@@ -55,9 +55,9 @@ pub(crate) struct Ended {
 }
 
 impl Run {
-    /// Starts `start`, watching its pipes and its exit on `lp` under
+    /// Starts `start`, watching its pipes and its exit on `event_loop` under
     /// `token`. Fails if it can't start.
-    pub(crate) fn start(start: &Start<'_>, lp: &Loop, token: usize) -> io::Result<Run> {
+    pub(crate) fn start(start: &Start<'_>, event_loop: &Loop, token: usize) -> io::Result<Run> {
         let (program, args) = start
             .argv
             .split_first()
@@ -93,10 +93,10 @@ impl Run {
         drop(command);
         for r in stdout_r.iter().chain([&stderr_r]) {
             set_nonblocking(r.as_raw_fd());
-            let _ = lp.add_read(r.as_raw_fd(), token);
+            let _ = event_loop.add_read(r.as_raw_fd(), token);
         }
         // one that ended before it was watched is found by `ended`
-        let _ = lp.add_exit(child.id() as libc::pid_t, token);
+        let _ = event_loop.add_exit(child.id() as libc::pid_t, token);
         Ok(Run {
             child,
             stdout: stdout_r,
@@ -114,8 +114,8 @@ impl Run {
         self.child.id() as libc::pid_t
     }
 
-    /// Reads what its pipes have now. A pipe that ended leaves `lp`.
-    pub(crate) fn read(&mut self, lp: &Loop) {
+    /// Reads what its pipes have now. A pipe that ended leaves `event_loop`.
+    pub(crate) fn read(&mut self, event_loop: &Loop) {
         let Run {
             stdout,
             stderr,
@@ -126,7 +126,7 @@ impl Run {
             stderr_cut,
             ..
         } = self;
-        drain(stdout, lp, |bytes| {
+        drain(stdout, event_loop, |bytes| {
             if *line_ended || *line_over {
                 return;
             }
@@ -141,7 +141,7 @@ impl Run {
                 line.clear();
             }
         });
-        drain(stderr, lp, |bytes| {
+        drain(stderr, event_loop, |bytes| {
             let room = MAX_STDERR - stderr_kept.len();
             if bytes.len() > room {
                 *stderr_cut = true;
@@ -152,14 +152,14 @@ impl Run {
 
     /// How it ended, if it has: what its pipes held by then is read, and
     /// they close, though something it started may still hold them.
-    pub(crate) fn ended(&mut self, lp: &Loop) -> Option<Ended> {
+    pub(crate) fn ended(&mut self, event_loop: &Loop) -> Option<Ended> {
         let status = self.child.try_wait().ok()??;
-        self.read(lp);
+        self.read(event_loop);
         for pipe in [self.stdout.take(), self.stderr.take()]
             .into_iter()
             .flatten()
         {
-            let _ = lp.remove(pipe.as_raw_fd());
+            let _ = event_loop.remove(pipe.as_raw_fd());
         }
         Some(Ended {
             status,
@@ -170,14 +170,14 @@ impl Run {
     }
 
     /// Ends it at once, with its group, and reaps it: the daemon is going.
-    pub(crate) fn kill(mut self, lp: &Loop) {
+    pub(crate) fn kill(mut self, event_loop: &Loop) {
         signal_group(self.group(), libc::SIGKILL);
         let _ = self.child.wait();
         for pipe in [self.stdout.take(), self.stderr.take()]
             .into_iter()
             .flatten()
         {
-            let _ = lp.remove(pipe.as_raw_fd());
+            let _ = event_loop.remove(pipe.as_raw_fd());
         }
     }
 }
@@ -198,8 +198,8 @@ pub(crate) fn status_text(status: ExitStatus) -> String {
 }
 
 /// Reads what `pipe` has now into `to`; once it has ended, takes it off
-/// `lp` and drops it.
-fn drain(pipe: &mut Option<PipeReader>, lp: &Loop, mut to: impl FnMut(&[u8])) {
+/// `event_loop` and drops it.
+fn drain(pipe: &mut Option<PipeReader>, event_loop: &Loop, mut to: impl FnMut(&[u8])) {
     let Some(r) = pipe else {
         return;
     };
@@ -214,7 +214,7 @@ fn drain(pipe: &mut Option<PipeReader>, lp: &Loop, mut to: impl FnMut(&[u8])) {
         }
     };
     if !open {
-        let _ = lp.remove(r.as_raw_fd());
+        let _ = event_loop.remove(r.as_raw_fd());
         *pipe = None;
     }
 }
@@ -224,5 +224,35 @@ fn set_nonblocking(fd: std::os::fd::RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_is_found_ended_without_its_exit_event() {
+        let event_loop = Loop::init().unwrap();
+        let argv = [b"sh".to_vec(), b"-c".to_vec(), b"echo id; exit 3".to_vec()];
+        let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
+        let start = Start {
+            argv: &argv,
+            env: &env,
+            cwd: Path::new("/"),
+            reads_id: true,
+        };
+        let mut run = Run::start(&start, &event_loop, 1).unwrap();
+        // the loop is never waited on: `ended` reaps it by itself
+        let started = std::time::Instant::now();
+        let ended = loop {
+            if let Some(ended) = run.ended(&event_loop) {
+                break ended;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(Some(3), ended.status.code());
+        assert_eq!(Some(b"id".to_vec()), ended.line);
     }
 }

@@ -474,12 +474,16 @@ mod tests {
         let loop_ = Loop::init().unwrap();
         let mut child = std::process::Command::new("true").spawn().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        // a zombie: ended, not reaped
-        if loop_.add_exit(child.id() as libc::pid_t, 5).is_ok() {
-            let mut buf = [Event::default(); 4];
-            assert_eq!(Kind::Exit, loop_.wait(&mut buf).unwrap()[0].kind);
+        // a zombie: ended, not reaped. Some kernels refuse to watch one; its
+        // watcher then finds it ended by trying to reap it.
+        match loop_.add_exit(child.id() as libc::pid_t, 5) {
+            Ok(()) => {
+                let mut buf = [Event::default(); 4];
+                assert_eq!(Kind::Exit, loop_.wait(&mut buf).unwrap()[0].kind);
+                child.wait().unwrap();
+            }
+            Err(_) => assert!(child.try_wait().unwrap().is_some(), "refused, yet running"),
         }
-        child.wait().unwrap();
     }
 
     #[test]

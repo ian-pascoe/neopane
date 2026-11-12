@@ -5,32 +5,93 @@
 use crate::daemon::provider::{Ask, Direction};
 use crate::name;
 
-/// Every variable the daemon sets for some capability, without the
-/// `<NAME>_` prefix, besides the `ENV_*` ones: none of them is passed on
-/// from the choosing attach (#93 decision 22).
-pub(super) const PER_ACT: &[&str] = &[
-    "CAPABILITY",
-    "PROTOCOL",
-    "ATTACH",
-    "ATTACH_JSON",
-    "TITLE",
-    "PANE",
-    "TERMINAL",
-    "ORIGIN",
-    "DIRECTION",
-    "SIZE",
-    "RATIO",
-    "COLS",
-    "ROWS",
-    "X",
-    "Y",
-    "ORIGIN_COLS",
-    "ORIGIN_ROWS",
-    "AREA_BOUNDS",
-    "COUNT",
-    "PID",
-    "TTY",
-];
+/// Every variable the daemon sets for some capability, besides the `ENV_*`
+/// ones: the one list both what an act is given and what is stripped from
+/// the choosing attach's environment come from (#93 decisions 14 and 22),
+/// so a variable can't be set without being stripped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Var {
+    Capability,
+    Protocol,
+    Attach,
+    AttachJson,
+    Title,
+    Pane,
+    Terminal,
+    Origin,
+    Direction,
+    Size,
+    Ratio,
+    Cols,
+    Rows,
+    X,
+    Y,
+    OriginCols,
+    OriginRows,
+    AreaBounds,
+    Count,
+    Pid,
+    Tty,
+}
+
+impl Var {
+    pub(super) const ALL: [Var; 21] = [
+        Var::Capability,
+        Var::Protocol,
+        Var::Attach,
+        Var::AttachJson,
+        Var::Title,
+        Var::Pane,
+        Var::Terminal,
+        Var::Origin,
+        Var::Direction,
+        Var::Size,
+        Var::Ratio,
+        Var::Cols,
+        Var::Rows,
+        Var::X,
+        Var::Y,
+        Var::OriginCols,
+        Var::OriginRows,
+        Var::AreaBounds,
+        Var::Count,
+        Var::Pid,
+        Var::Tty,
+    ];
+
+    /// Its placeholder name: the variable's name after `<NAME>_`, in lower
+    /// case.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Var::Capability => "capability",
+            Var::Protocol => "protocol",
+            Var::Attach => "attach",
+            Var::AttachJson => "attach_json",
+            Var::Title => "title",
+            Var::Pane => "pane",
+            Var::Terminal => "terminal",
+            Var::Origin => "origin",
+            Var::Direction => "direction",
+            Var::Size => "size",
+            Var::Ratio => "ratio",
+            Var::Cols => "cols",
+            Var::Rows => "rows",
+            Var::X => "x",
+            Var::Y => "y",
+            Var::OriginCols => "origin_cols",
+            Var::OriginRows => "origin_rows",
+            Var::AreaBounds => "area_bounds",
+            Var::Count => "count",
+            Var::Pid => "pid",
+            Var::Tty => "tty",
+        }
+    }
+
+    /// The variable: `<NAME>_` and its name in upper case.
+    fn var(self) -> String {
+        format!("{}_{}", name::upper(), self.name().to_ascii_uppercase())
+    }
+}
 
 /// One act's inputs.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,25 +100,25 @@ pub(crate) struct Inputs {
     attach: Option<Vec<String>>,
     /// Each input by its placeholder name; None for one this act doesn't
     /// have, such as `area_bounds` outside a live layout.
-    vars: Vec<(&'static str, Option<String>)>,
+    vars: Vec<(Var, Option<String>)>,
 }
 
 impl Inputs {
     /// The inputs of `ask`, run under protocol number `protocol`.
     pub(crate) fn of(ask: &Ask, protocol: i64) -> Inputs {
         let cap = ask.capability();
-        let mut vars: Vec<(&'static str, Option<String>)> = vec![
-            ("capability", Some(cap.name().to_string())),
-            ("protocol", Some(protocol.to_string())),
+        let mut vars: Vec<(Var, Option<String>)> = vec![
+            (Var::Capability, Some(cap.name().to_string())),
+            (Var::Protocol, Some(protocol.to_string())),
         ];
         let mut attach = None;
         let mut opened = |words: &[String], title: &str, pane: String| {
             attach = Some(words.to_vec());
             [
-                ("attach", Some(quoted(words))),
-                ("attach_json", Some(json(words))),
-                ("title", Some(title.to_string())),
-                ("pane", Some(pane)),
+                (Var::Attach, Some(quoted(words))),
+                (Var::AttachJson, Some(json(words))),
+                (Var::Title, Some(title.to_string())),
+                (Var::Pane, Some(pane)),
             ]
         };
         let n = |v: u32| Some(v.to_string());
@@ -70,7 +131,7 @@ impl Inputs {
                 rows,
             } => {
                 vars.extend(opened(attach, title, pane.to_string()));
-                vars.extend([("cols", n(*cols)), ("rows", n(*rows))]);
+                vars.extend([(Var::Cols, n(*cols)), (Var::Rows, n(*rows))]);
             }
             Ask::OpenBeside {
                 pane,
@@ -85,12 +146,12 @@ impl Inputs {
             } => {
                 vars.extend(opened(attach, title, pane.to_string()));
                 vars.extend([
-                    ("origin", Some(origin.to_string())),
-                    ("direction", Some(direction(*dir).into())),
-                    ("size", n(*size)),
-                    ("ratio", Some(fraction(*ratio))),
-                    ("cols", n(*cols)),
-                    ("rows", n(*rows)),
+                    (Var::Origin, Some(origin.to_string())),
+                    (Var::Direction, Some(direction(*dir).into())),
+                    (Var::Size, n(*size)),
+                    (Var::Ratio, Some(fraction(*ratio))),
+                    (Var::Cols, n(*cols)),
+                    (Var::Rows, n(*rows)),
                 ]);
             }
             Ask::OpenFloat {
@@ -110,14 +171,14 @@ impl Inputs {
                 let bounds = area_bounds
                     .map(|b| b.iter().map(|&f| fraction(f)).collect::<Vec<_>>().join(","));
                 vars.extend([
-                    ("origin", Some(origin.to_string())),
-                    ("x", Some(x.to_string())),
-                    ("y", Some(y.to_string())),
-                    ("cols", n(*cols)),
-                    ("rows", n(*rows)),
-                    ("origin_cols", n(*origin_cols)),
-                    ("origin_rows", n(*origin_rows)),
-                    ("area_bounds", bounds),
+                    (Var::Origin, Some(origin.to_string())),
+                    (Var::X, Some(x.to_string())),
+                    (Var::Y, Some(y.to_string())),
+                    (Var::Cols, n(*cols)),
+                    (Var::Rows, n(*rows)),
+                    (Var::OriginCols, n(*origin_cols)),
+                    (Var::OriginRows, n(*origin_rows)),
+                    (Var::AreaBounds, bounds),
                 ]);
             }
             Ask::OpenTabPage {
@@ -130,13 +191,13 @@ impl Inputs {
             } => {
                 vars.extend(opened(attach, title, pane.to_string()));
                 vars.extend([
-                    ("origin", Some(origin.to_string())),
-                    ("cols", n(*cols)),
-                    ("rows", n(*rows)),
+                    (Var::Origin, Some(origin.to_string())),
+                    (Var::Cols, n(*cols)),
+                    (Var::Rows, n(*rows)),
                 ]);
             }
             Ask::Close { terminal } | Ask::Focus { terminal } => {
-                vars.push(("terminal", Some(terminal.to_string())));
+                vars.push((Var::Terminal, Some(terminal.to_string())));
             }
             Ask::PlaceBeside {
                 terminal,
@@ -152,15 +213,15 @@ impl Inputs {
                 size,
                 ratio,
             } => vars.extend([
-                ("terminal", Some(terminal.to_string())),
-                ("origin", Some(origin.to_string())),
-                ("direction", Some(direction(*dir).into())),
-                ("size", n(*size)),
-                ("ratio", Some(fraction(*ratio))),
+                (Var::Terminal, Some(terminal.to_string())),
+                (Var::Origin, Some(origin.to_string())),
+                (Var::Direction, Some(direction(*dir).into())),
+                (Var::Size, n(*size)),
+                (Var::Ratio, Some(fraction(*ratio))),
             ]),
             Ask::FocusDirection { dir, count } => vars.extend([
-                ("direction", Some(direction(*dir).into())),
-                ("count", n(*count)),
+                (Var::Direction, Some(direction(*dir).into())),
+                (Var::Count, n(*count)),
             ]),
             // `find`'s and `report_layout`'s are #126's and #127's
             Ask::Find { .. } | Ask::ReportLayout => {}
@@ -168,13 +229,13 @@ impl Inputs {
         Inputs { attach, vars }
     }
 
-    /// `template` with its whole-word placeholders replaced: `{attach}` by
+    /// `written`, an argv as the config wrote it, with its whole-word placeholders replaced: `{attach}` by
     /// its words, `{{x}}` by `{x}`, any other by its value, or one empty
     /// word if this act has none. A word that only holds a placeholder
     /// passes as written, and other braces are never looked at.
-    pub(crate) fn argv(&self, template: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        let mut argv = Vec::with_capacity(template.len());
-        for word in template {
+    pub(crate) fn argv(&self, written: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut argv = Vec::with_capacity(written.len());
+        for word in written {
             if let Some(name) = crate::placeholder::whole_placeholder(word) {
                 match (name, &self.attach) {
                     ("attach", Some(words)) => {
@@ -195,19 +256,17 @@ impl Inputs {
     fn value(&self, name: &str) -> Option<&str> {
         self.vars
             .iter()
-            .find(|(n, _)| *n == name)
-            .and_then(|(_, v)| v.as_deref())
+            .find(|(v, _)| v.name() == name)
+            .and_then(|(_, value)| value.as_deref())
     }
 
     /// The command's environment: `base`, the choosing attach's already
     /// stripped by `commands_env`, plus this act's variables.
     pub(crate) fn env(&self, base: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let prefix = name::upper();
         let mut env = base.to_vec();
-        for (n, v) in &self.vars {
-            if let Some(v) = v {
-                let var = format!("{prefix}_{}", n.to_ascii_uppercase());
-                env.push((var.into_bytes(), v.as_bytes().to_vec()));
+        for (var, value) in &self.vars {
+            if let Some(value) = value {
+                env.push((var.var().into_bytes(), value.as_bytes().to_vec()));
             }
         }
         env
@@ -230,7 +289,10 @@ pub(crate) fn commands_env(attach_env: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, V
         else {
             return false;
         };
-        rest.starts_with(b"ENV_") || PER_ACT.iter().any(|v| v.as_bytes() == rest)
+        rest.starts_with(b"ENV_")
+            || Var::ALL
+                .iter()
+                .any(|v| v.name().to_ascii_uppercase().as_bytes() == rest)
     };
     attach_env
         .iter()
@@ -309,6 +371,20 @@ mod tests {
             origin_cols: 80,
             origin_rows: 24,
             area_bounds,
+        }
+    }
+
+    #[test]
+    fn every_variable_is_listed_once_and_every_placeholder_is_one() {
+        // in order, the last last: a variable left out of `ALL` shifts them
+        for (i, v) in Var::ALL.iter().enumerate() {
+            assert_eq!(i, *v as usize, "{v:?}");
+        }
+        assert_eq!(Var::ALL.len(), Var::Tty as usize + 1);
+        for cap in crate::config::check::Capability::ALL {
+            for p in cap.placeholders() {
+                assert!(Var::ALL.iter().any(|v| v.name() == *p), "{p}");
+            }
         }
     }
 

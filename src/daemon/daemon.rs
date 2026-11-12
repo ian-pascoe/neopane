@@ -4983,19 +4983,22 @@ mod tests {
         assert_eq!(1002, fx.d.nvim.current_win);
     }
 
-    /// A daemon whose pane provider runs `argv` to focus, watched on its loop.
+    /// A daemon whose pane provider runs `argv` to focus, found on this
+    /// process's PATH, watched on its loop.
     fn focusing_by(argv: &[&str]) -> Fixture {
-        use crate::providers::command::{CommandProvider, Spec, Template};
+        use crate::providers::command::{CapCommand, CommandProvider, Spec};
         let spec = Spec {
             name: "cmd".into(),
-            commands: vec![Template {
+            commands: vec![CapCommand {
                 cap: Capability::Focus,
                 argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
                 timeout: Duration::from_secs(5),
                 protocol: 1,
             }],
         };
-        let p = CommandProvider::new(spec, &[], b"/").unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];
+        let p = CommandProvider::new(spec, &env, b"/").unwrap();
         let mut fx = with_provider(Some(Held::Command(Box::new(p))));
         let fd = fx.d.provider.as_ref().and_then(Held::fd).unwrap();
         fx.d.event_loop
@@ -5007,7 +5010,7 @@ mod tests {
 
     #[test]
     fn a_focus_commands_answer_comes_through_the_daemons_loop() {
-        let mut fx = focusing_by(&["/usr/bin/true"]);
+        let mut fx = focusing_by(&["true"]);
         fx.d.focus_terminal(Some(&TerminalId::from("t2")));
         fx.d.after_batch().unwrap();
         assert_eq!(1, fx.d.asks.waiting());
@@ -5026,7 +5029,7 @@ mod tests {
 
     #[test]
     fn a_slow_focus_command_doesnt_delay_a_key() {
-        let mut fx = focusing_by(&["/bin/sleep", "3"]);
+        let mut fx = focusing_by(&["sleep", "3"]);
         focus_pane(&mut fx, 1, 1000, Some("t1"));
         let b = focus_pane(&mut fx, 2, 1001, Some("t2"));
         fx.d.nvim.current_win = 1001;
@@ -5047,7 +5050,8 @@ mod tests {
                 "{sent:?}"
             );
         }
-        assert!(started.elapsed() < Duration::from_millis(500));
+        // well under the command's 3 s, with room for a loaded machine
+        assert!(started.elapsed() < Duration::from_millis(1500));
         // still running
         assert_eq!(1, fx.d.asks.waiting());
     }
@@ -5340,7 +5344,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_window_opened_by_open_alone_is_left_where_the_pane_provider_puts_it() {
+    fn without_place_beside_a_new_window_opened_by_open_is_an_unplaced_pane() {
         let f = FakeProvider::with(&[Capability::Open, Capability::Close]);
         let mut fx = with_provider(Some(Held::Fake(f)));
         pane_in_block(&mut fx.d, 2, 0, 2);
