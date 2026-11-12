@@ -156,8 +156,13 @@ impl PaneLayout {
     /// Its windows, top left first.
     pub(crate) fn windows(&self) -> Vec<i64> {
         let mut out = Vec::new();
-        collect(&self.root, &mut out);
+        self.add_windows(&mut out);
         out
+    }
+
+    /// Adds its windows to `out`, top left first.
+    pub(crate) fn add_windows(&self, out: &mut Vec<i64>) {
+        collect(&self.root, out);
     }
 
     pub(crate) fn contains(&self, win: i64) -> bool {

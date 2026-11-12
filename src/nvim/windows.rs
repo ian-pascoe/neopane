@@ -86,9 +86,10 @@ pub(crate) fn close(nvim: &mut Nvim, win: i64) {
     msgpack::write_int(nvim.writer(), win);
 }
 
-/// Returns the request's id.
-pub(crate) fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
-    let id = nvim.request("nvim_set_current_win", 1);
+/// Makes `win` Neovim's current window, its home tab page first if that
+/// isn't current, in one request. Returns the request's id.
+pub(crate) fn go_to(nvim: &mut Nvim, win: i64) -> u32 {
+    let id = nvim.exec_lua(&format!("{NAME}.go(...)"), 1);
     msgpack::write_int(nvim.writer(), win);
     id
 }
@@ -151,6 +152,33 @@ pub(crate) fn parse_windows(result: &mut Decoder<'_>) -> rpc::Result<(i64, Vec<i
         wins.push(rpc::expect_int(result)?);
     }
     Ok((current, wins))
+}
+
+/// Tells Neovim the windows panes show: `<C-w>w`, `<C-w>W` and `<C-w>p`
+/// step only through those, and floats.
+pub(crate) fn panes_show(nvim: &mut Nvim, wins: &[i64]) {
+    nvim.exec_lua(&format!("{NAME}.panes_show(...)"), 1);
+    write_wins(nvim, wins);
+}
+
+fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
+    let wr = nvim.writer();
+    msgpack::write_array_header(wr, wins.len() as u32);
+    for &w in wins {
+        msgpack::write_int(wr, w);
+    }
+}
+
+/// Tells Neovim the screen floats of the float groups with float group
+/// panes, a list per group: each, with the floats hanging from it, moves into
+/// whichever tab page is current, and still belongs to the one its group
+/// opened in.
+pub(crate) fn carry(nvim: &mut Nvim, groups: &[Vec<i64>]) {
+    nvim.exec_lua(&format!("{NAME}.carry(...)"), 1);
+    msgpack::write_array_header(nvim.writer(), groups.len() as u32);
+    for g in groups {
+        write_wins(nvim, g);
+    }
 }
 
 /// Asks for our channel id: the response to the returned id starts with it.
@@ -1110,8 +1138,8 @@ mod tests {
         assert!(h.until(|x| x.kind(x.gone).is_none()));
         // back to `split`, wherever Neovim went
         h.notes.clear();
-        set_current(&mut h.nvim, first);
-        set_current(&mut h.nvim, split);
+        go_to(&mut h.nvim, first);
+        go_to(&mut h.nvim, split);
         h.nvim.flush().unwrap();
         h.want = split;
         assert!(h.until(Harness::is_current));
@@ -2525,15 +2553,17 @@ mod tests {
     }
 
     #[test]
-    fn the_current_tab_page_is_neovims_even_with_focus_in_another_tab_pages_window() {
+    fn focus_in_another_tab_pages_window_makes_its_label_the_highlighted_one() {
         let Some(mut p) = Pair::new(60, None) else {
             return;
         };
         p.steps(TWO_TABS);
         // two.txt's window, whose home is the first tab page, sits in the
-        // current one, as every pane's window does
-        p.h.sync("vim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))\nassert(vim.fn.tabpagenr() == 2)");
+        // current one, as every pane's window does, until it's current
+        p.h.sync("vim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))");
+        p.r.sync("vim.cmd('tabnext 1')\nvim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))");
         p.expect_same();
+        assert_eq!("1", p.h.tabpagenr());
     }
 
     #[test]
@@ -3736,5 +3766,501 @@ mod tests {
         ));
         assert!(h.until(|x| x.last_tabline() >= 1000));
         assert!(h.last_tabline() - 1000 < 20);
+    }
+
+    /// Two tab pages, every window in a pane: the first holds `a` and `b`,
+    /// the second `c`, current. Returns them.
+    fn two_tab_pages(h: &mut Harness) -> [i64; 3] {
+        let a = h.wins[0];
+        h.sync(&format!("vim.cmd('vsplit')\n{}", adopt_all()));
+        let b = h.eval_str("return tostring(vim.api.nvim_get_current_win())");
+        h.sync(&format!("vim.cmd('tabnew')\n{}", adopt_all()));
+        let c = h.eval_str("return tostring(vim.api.nvim_get_current_win())");
+        [a, b.parse().unwrap(), c.parse().unwrap()]
+    }
+
+    impl Harness {
+        /// Records every autocommand of `events` as it fires, in
+        /// `_G.fired`, from now on.
+        fn record(&mut self, events: &[&str]) {
+            let list: Vec<String> = events.iter().map(|e| format!("'{e}'")).collect();
+            self.sync(&format!(
+                "_G.fired = {{}}\n\
+                 vim.api.nvim_create_autocmd({{ {} }}, {{ callback = function(ev) table.insert(_G.fired, ev.event) end }})",
+                list.join(", ")
+            ));
+        }
+
+        /// What `record` recorded since it was last asked, space-separated.
+        fn fired(&mut self) -> String {
+            self.eval_str("local s = table.concat(_G.fired, ' ')\n_G.fired = {}\nreturn s")
+        }
+
+        /// Makes `win` current as the daemon does when its pane is focused,
+        /// and waits until it's reported.
+        fn focus_pane(&mut self, win: i64) {
+            go_to(&mut self.nvim, win);
+            self.nvim.flush().unwrap();
+            self.want = win;
+            assert!(self.until(Harness::is_current));
+        }
+
+        fn tabpagenr(&mut self) -> String {
+            self.eval_str("return tostring(vim.fn.tabpagenr())")
+        }
+    }
+
+    #[test]
+    fn focusing_a_pane_of_another_tab_page_makes_that_tab_page_current() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        // the second tab page has a directory of its own
+        h.sync("vim.cmd('tcd /')");
+        h.record(&["TabLeave", "TabEnter", "DirChanged"]);
+
+        h.focus_pane(b);
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("TabLeave DirChanged TabEnter", h.fired());
+
+        h.focus_pane(a);
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("", h.fired());
+
+        h.focus_pane(c);
+        assert_eq!("2", h.tabpagenr());
+        assert_eq!("TabLeave DirChanged TabEnter", h.fired());
+    }
+
+    #[test]
+    fn c_w_w_and_c_w_p_step_only_through_windows_panes_show() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let first = h.wins[0];
+        let anchor = h.wins[1];
+        let split = h.adopt_split();
+        // external, as the daemon makes every window, but in no pane yet
+        h.sync(&format!("vim.cmd('split')\n{}", adopt_all()));
+        let unshown: i64 = h
+            .eval_str("return tostring(vim.api.nvim_get_current_win())")
+            .parse()
+            .unwrap();
+        panes_show(&mut h.nvim, &[first, split]);
+        h.focus_pane(split);
+        h.notes.clear();
+
+        // each goes straight to its window, as `<C-w>w` typed fast does
+        for (keys, want) in [
+            ("<C-w>w", first),
+            ("<C-w><C-w>", split),
+            ("<C-w>W", first),
+            ("<C-w>W", split),
+            ("<C-w>p", first),
+            ("<C-w><C-p>", split),
+        ] {
+            h.input(keys);
+            h.want = want;
+            assert!(h.until(Harness::is_current), "{keys}");
+        }
+        // from Visual mode too, which it ends
+        h.input("v<C-w>w");
+        h.want = first;
+        assert!(h.until(Harness::is_current));
+        assert_eq!("n", h.eval_str("return vim.fn.mode()"));
+        h.input("v<C-w>p");
+        h.want = split;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        for n in &h.notes {
+            assert!(
+                *n != Note::Current(unshown) && *n != Note::Current(anchor),
+                "{n:?}"
+            );
+        }
+    }
+
+    impl Harness {
+        /// Opens a picker in the current tab page, a screen float with one
+        /// hanging from it, and one more float that takes no focus. Returns
+        /// them.
+        fn open_picker(&mut self) -> [i64; 3] {
+            let ids = self.eval_str(
+                "local buf = vim.api.nvim_create_buf(false, true)\n\
+                 local top = vim.api.nvim_open_win(buf, false, { relative = 'editor', row = 1, col = 1, width = 10, height = 3 })\n\
+                 local kid = vim.api.nvim_open_win(buf, false, { relative = 'win', win = top, row = 1, col = 1, width = 4, height = 1 })\n\
+                 local other = vim.api.nvim_open_win(buf, false, { relative = 'editor', row = 6, col = 1, width = 4, height = 1, focusable = false })\n\
+                 return top .. ' ' .. kid .. ' ' .. other",
+            );
+            let ids: Vec<i64> = ids.split(' ').map(|s| s.parse().unwrap()).collect();
+            [ids[0], ids[1], ids[2]]
+        }
+
+        /// The tab page number each of `wins` sits in, space-separated; 0 for
+        /// one that closed.
+        fn tab_numbers(&mut self, wins: &[i64]) -> String {
+            self.tab_numbers_after("", wins)
+        }
+
+        /// `tab_numbers`, read in the same call as Lua `code` runs, before
+        /// anything it schedules.
+        fn tab_numbers_after(&mut self, code: &str, wins: &[i64]) -> String {
+            let list: Vec<String> = wins.iter().map(i64::to_string).collect();
+            self.eval_str(&format!(
+                "{code}\n\
+                 local out = {{}}\n\
+                 for _, w in ipairs({{ {} }}) do\n\
+                 \x20 out[#out + 1] = vim.api.nvim_win_is_valid(w) and vim.api.nvim_tabpage_get_number(vim.api.nvim_win_get_tabpage(w)) or 0\n\
+                 end\n\
+                 return table.concat(out, ' ')",
+                list.join(", ")
+            ))
+        }
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_move_into_the_tab_page_entered_and_belong_to_their_own() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.sync("vim.o.showtabline = 2");
+        h.focus_pane(a);
+        let [top, kid, other] = h.open_picker();
+        carry(&mut h.nvim, &[vec![top]]);
+        h.record(&["WinClosed", "WinNew"]);
+
+        // the picker's floats come along, still drawn; the other float stays
+        // hidden in its tab page
+        h.focus_pane(c);
+        assert_eq!("2 2 1", h.tab_numbers(&[top, kid, other]));
+        assert_eq!("", h.fired());
+        h.barrier();
+        assert_eq!(Some(WinKind::Float), h.kind(top));
+        assert_eq!(Some(WinKind::Float), h.kind(kid));
+        // the first tab page's label still counts them: its two windows and
+        // the picker's two
+        h.until_tabline_starts_with(" 4 ");
+
+        // and back
+        h.focus_pane(a);
+        assert_eq!("1 1 1", h.tab_numbers(&[top, kid, other]));
+
+        // the tab page they sit in closes: they go back to their own first
+        h.focus_pane(c);
+        h.input(":tabclose<CR>");
+        h.barrier();
+        assert_eq!("1 1 1", h.tab_numbers(&[top, kid, other]));
+    }
+
+    /// A picker opened in the first of two tab pages and carried into the
+    /// second, current, which the test closes; and the picker's floats.
+    fn picker_carried_into_the_second() -> Option<(Harness, [i64; 3])> {
+        let mut h = Harness::start_sized(60, 10)?;
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.sync("vim.o.showtabline = 2");
+        h.focus_pane(a);
+        let floats = h.open_picker();
+        carry(&mut h.nvim, &[vec![floats[0]]]);
+        h.focus_pane(c);
+        assert_eq!("2 2 1", h.tab_numbers(&floats));
+        Some((h, floats))
+    }
+
+    /// Something that closes the current tab page.
+    type Close = dyn Fn(&mut Harness);
+
+    #[test]
+    fn a_float_group_panes_floats_go_home_however_the_tab_page_they_sit_in_closes() {
+        let closes: [(&str, &Close); 6] = [
+            ("typed", &|h| h.input(":tabclose<CR>")),
+            ("typed $", &|h| h.input(":tabclose $<CR>")),
+            ("from Lua", &|h| h.sync("vim.cmd.tabclose()")),
+            ("a mapping", &|h| {
+                h.sync("vim.keymap.set('n', 'Q', '<Cmd>tabclose<CR>')");
+                h.input("Q");
+            }),
+            ("a middle click after the labels", &|h| {
+                h.click("middle", 50, 1)
+            }),
+            ("the close button", &|h| h.click("left", 59, 1)),
+        ];
+        for (how, close) in closes {
+            let Some((mut h, floats)) = picker_carried_into_the_second() else {
+                return;
+            };
+            close(&mut h);
+            h.barrier();
+            h.sync("");
+            assert_eq!(
+                "1",
+                h.eval_str("return tostring(vim.fn.tabpagenr('$'))"),
+                "{how}"
+            );
+            assert_eq!("1 1 1", h.tab_numbers(&floats), "{how}");
+        }
+    }
+
+    #[test]
+    fn closing_a_tab_page_the_carried_floats_dont_sit_in_leaves_them_where_they_are() {
+        let Some((mut h, floats)) = picker_carried_into_the_second() else {
+            return;
+        };
+        h.sync(&format!("vim.cmd('tabnew')\n{}", adopt_all()));
+        assert_eq!("3 3 1", h.tab_numbers(&floats));
+        assert_eq!(
+            "2 2 1",
+            h.tab_numbers_after("vim.cmd('tabclose 2')", &floats)
+        );
+    }
+
+    #[test]
+    fn a_carried_float_current_as_its_tab_page_closes_closes_and_the_rest_go_home() {
+        let Some((mut h, [top, kid, _])) = picker_carried_into_the_second() else {
+            return;
+        };
+        // a prompt whose buffer goes with its window
+        h.sync(&format!(
+            "_G.prompt = vim.api.nvim_create_buf(false, true)\n\
+             vim.bo[prompt].bufhidden = 'wipe'\n\
+             vim.api.nvim_win_set_buf({kid}, prompt)\n\
+             vim.api.nvim_set_current_win({kid})\n\
+             vim.cmd.tabclose()"
+        ));
+        h.barrier();
+        h.sync("");
+        assert_eq!("1 0", h.tab_numbers(&[top, kid]));
+        assert_eq!(
+            "false",
+            h.eval_str("return tostring(vim.api.nvim_buf_is_valid(prompt))")
+        );
+        assert_eq!(None, h.kind(kid));
+    }
+
+    #[test]
+    fn a_screen_float_joining_a_carried_group_away_from_home_belongs_to_its_home() {
+        let Some((mut h, [top, _, _])) = picker_carried_into_the_second() else {
+            return;
+        };
+        // beside the picker, as a preview opens beside telescope's list
+        let joined: i64 = h
+            .eval_str(
+                "return tostring(vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, \
+                 { relative = 'editor', row = 1, col = 12, width = 6, height = 3 }))",
+            )
+            .parse()
+            .unwrap();
+        carry(&mut h.nvim, &[vec![top, joined]]);
+        h.nvim.flush().unwrap();
+        // the first tab page's label counts it: two windows, three floats
+        h.sync("vim.cmd.redrawtabline()");
+        h.barrier();
+        h.until_tabline_starts_with(" 5 ");
+        h.sync("vim.cmd.tabclose()");
+        h.barrier();
+        assert_eq!("1", h.tab_numbers(&[joined]));
+    }
+
+    #[test]
+    fn stepping_with_nowhere_else_to_go_keeps_the_visual_selection() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // typed, then read as the keys are done with
+        assert_eq!(
+            "v",
+            h.eval_str(
+                "vim.api.nvim_feedkeys(vim.keycode('v<C-w>w'), 'mx!', false)\n\
+                 return vim.fn.mode()"
+            )
+        );
+    }
+
+    #[test]
+    fn a_float_opened_on_a_carried_float_away_from_home_belongs_to_its_home() {
+        let Some((mut h, [top, _, _])) = picker_carried_into_the_second() else {
+            return;
+        };
+        let new: i64 = h
+            .eval_str(&format!(
+                "return tostring(vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, \
+                 {{ relative = 'win', win = {top}, row = 2, col = 1, width = 3, height = 1 }}))"
+            ))
+            .parse()
+            .unwrap();
+        // the first tab page's label counts it: two windows, three floats
+        h.sync("vim.cmd.redrawtabline()");
+        h.until_tabline_starts_with(" 5 ");
+        h.sync("vim.cmd.tabclose()");
+        h.barrier();
+        h.sync("");
+        assert_eq!("1", h.tab_numbers(&[new]));
+    }
+
+    #[test]
+    fn going_to_a_float_that_takes_no_focus_in_the_current_tab_page_goes_to_its_float_that_does() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [top, kid, _] = h.open_picker();
+        h.sync(&format!(
+            "vim.api.nvim_win_set_config({top}, {{ focusable = false }})"
+        ));
+        go_to(&mut h.nvim, top);
+        h.nvim.flush().unwrap();
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            kid.to_string(),
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+        );
+    }
+
+    #[test]
+    fn a_buffer_opened_in_an_anchor_as_its_tab_page_is_entered_goes_to_its_pane() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.focus_pane(a);
+        // as a picker might: the second tab page's anchor takes a file, and
+        // is entered with its tab page
+        h.lua(
+            "_G.picked = vim.api.nvim_create_buf(true, false)\n\
+             local tab = vim.api.nvim_list_tabpages()[2]\n\
+             _G.anchor = vim.api.nvim_tabpage_list_wins(tab)[1]\n\
+             vim.api.nvim_win_set_buf(anchor, picked)\n\
+             vim.api.nvim_set_current_tabpage(tab)\n\
+             vim.api.nvim_set_current_win(anchor)",
+        );
+        h.want = c;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("2", h.tabpagenr());
+        assert_eq!(
+            "true true",
+            h.eval_str(&format!(
+                "return tostring(vim.api.nvim_win_get_buf({c}) == picked) .. ' ' .. \
+                 tostring(vim.b[vim.api.nvim_win_get_buf(anchor)].{NAME}_anchor)"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_close_with_their_tab_page_wherever_they_sit() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        let [top, kid, _] = h.open_picker();
+        carry(&mut h.nvim, &[vec![top]]);
+        h.focus_pane(a);
+        assert_eq!("1 1", h.tab_numbers(&[top, kid]));
+        h.input(":tabclose 2<CR>");
+        h.barrier();
+        h.sync("");
+        assert_eq!("0 0", h.tab_numbers(&[top, kid]));
+    }
+
+    #[test]
+    fn a_tab_page_whose_label_counts_no_window_doesnt_end_neovim() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        h.sync("vim.o.showtabline = 2");
+        h.focus_pane(a);
+        h.focus_pane(c);
+        // the first tab page's windows take no focus: its label counts none,
+        // and Neovim's last current window of it, `a`, sits in the second
+        h.sync(&format!(
+            "for _, w in ipairs({{ {a}, {b} }}) do vim.api.nvim_win_set_config(w, {{ focusable = false }}) end\n\
+             vim.cmd.redrawtabline()"
+        ));
+        h.barrier();
+        // named by its own window, as Neovim names it by the one it remembers
+        h.until_tabline_starts_with(" [No Name]  [No Name] ");
+    }
+
+    #[test]
+    fn going_to_a_float_group_left_in_another_tab_page_goes_there_to_its_float_that_takes_focus() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.focus_pane(a);
+        // a picker whose box takes no focus, its input does; never carried
+        let [top, kid, _] = h.open_picker();
+        h.sync(&format!(
+            "vim.api.nvim_win_set_config({top}, {{ focusable = false }})"
+        ));
+        h.focus_pane(c);
+        assert_eq!("1 1", h.tab_numbers(&[top, kid]));
+
+        // as a click in its float group pane, which kept its last frame
+        go_to(&mut h.nvim, top);
+        h.nvim.flush().unwrap();
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            kid,
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn gt_goes_to_the_tab_pages_last_current_window_its_own_even_if_that_closed() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        h.focus_pane(a);
+        h.focus_pane(c);
+        h.notes.clear();
+        h.input("gt");
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        assert_eq!("1", h.tabpagenr());
+
+        // the first tab page's last current window closes while it's left:
+        // Neovim would go to its hidden anchor, and on to the window current
+        // before, the second's
+        h.focus_pane(b);
+        h.focus_pane(c);
+        close(&mut h.nvim, b);
+        h.nvim.flush().unwrap();
+        h.gone = b;
+        assert!(h.until(|x| x.kind(x.gone).is_none()));
+        h.notes.clear();
+        h.input("gt");
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            a,
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_window_of_another_tab_page_made_current_inside_neovim_takes_its_tab_page_along() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.record(&["TabLeave", "TabEnter"]);
+        // as a plugin would
+        h.sync(&format!("vim.api.nvim_set_current_win({a})"));
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("TabLeave TabEnter", h.fired());
     }
 }

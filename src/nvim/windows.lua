@@ -28,6 +28,9 @@ local layouts = {}
 -- origin's for a split. External windows follow the current tab page, so
 -- that's the only way to tell whose they are.
 local home = {}
+-- float -> the tab page it opened in, once it has been carried out of it
+-- (see `M.carry`)
+local float_home = {}
 -- tab page -> its own window focused last, which names its tabline label
 local focused = {}
 -- closing a window because its pane went away
@@ -63,7 +66,7 @@ local function tab_of(win)
   local c = api.nvim_win_get_config(win)
   if c.external then return home[win] end
   if c.relative == 'win' and c.win and api.nvim_win_is_valid(c.win) then return tab_of(c.win) end
-  if c.relative ~= '' then return api.nvim_win_get_tabpage(win) end
+  if c.relative ~= '' then return float_home[win] or api.nvim_win_get_tabpage(win) end
   return home[win] or api.nvim_win_get_tabpage(win)
 end
 
@@ -84,10 +87,29 @@ local function note_focus(win)
   if tab then focused[tab] = win end
 end
 
+-- Tab page `tab`'s own window focused last, if `keep` keeps it, else the
+-- first of `wins`, its own windows in Neovim's order, that a pane shows.
+local function own_focused(tab, wins, keep)
+  local f = focused[tab]
+  if f and api.nvim_win_is_valid(f) and keep(f) and counts_for(f) == tab then return f end
+  for _, win in ipairs(wins) do
+    if shown(win) then return win end
+  end
+end
+
+-- a window of tab page `tab`'s own, its label counting it or not; not an anchor
+local function any_own(tab)
+  for _, win in ipairs(api.nvim_list_wins()) do
+    if not is_anchor(win) and tab_of(win) == tab then return win end
+  end
+end
+
 -- Each tab page's own windows: tab page -> { wins = the windows its label
 -- counts, in Neovim's order, label = the one it names }. That's its own
--- window focused last, else its first shown one, else the one Neovim
--- remembers for it.
+-- window focused last, else its first shown one, else any of its own, else
+-- the first Neovim keeps in it. Not the one Neovim remembers for it: that
+-- may be an external window sitting in another tab page, and
+-- nvim_tabpage_get_win() ends Neovim then (0.12.6).
 local function own_windows()
   local by_tab = {}
   for _, tab in ipairs(api.nvim_list_tabpages()) do by_tab[tab] = { wins = {} } end
@@ -96,17 +118,7 @@ local function own_windows()
     if mine then mine.wins[#mine.wins + 1] = win end
   end
   for tab, mine in pairs(by_tab) do
-    local label = focused[tab]
-    if not (label and counts_for(label) == tab) then
-      label = nil
-      for _, win in ipairs(mine.wins) do
-        if shown(win) then
-          label = win
-          break
-        end
-      end
-    end
-    mine.label = label or api.nvim_tabpage_get_win(tab)
+    mine.label = own_focused(tab, mine.wins, counts_for) or any_own(tab) or api.nvim_tabpage_list_wins(tab)[1]
   end
   return by_tab
 end
@@ -642,21 +654,13 @@ function M.windows()
   return out
 end
 
--- `win` and its home tab page become current
-local function enter(win)
-  local tab = home[win]
-  if api.nvim_win_get_config(win).external and tab and api.nvim_tabpage_is_valid(tab) then
-    api.nvim_set_current_tabpage(tab)
-  end
-  api.nvim_set_current_win(win)
-end
-
 --- A self-attached pane takes `win`, an unshown window, at `w` x `h`: it
 --- becomes external and current, its home tab page too. Returns it, or 0 if
 --- it's gone.
 function M.show(win, w, h)
   if not shown(win) then return 0 end
-  enter(win)
+  -- `win` and its home tab page become current, carried floats moving in
+  M.go(win)
   if api.nvim_win_get_config(win).external then
     M.size(win, w, h)
   else
@@ -836,13 +840,47 @@ api.nvim_create_autocmd('BufWinEnter', {
   end,
 })
 
+-- The window of tab page `tab` to go to: its own a pane shows focused last,
+-- else its first a pane shows.
+-- #118: in the current pane first, once a pane shows several tab pages.
+local function own_window(tab)
+  local mine = own_windows()[tab]
+  return mine and own_focused(tab, mine.wins, shown)
+end
+
+-- a tab page was entered since the last report
+local tab_entered = false
+-- the windows last reported as current before `seen`, the last one: where
+-- <C-w>p goes
+local seen, previous
+local function saw(win)
+  if win ~= seen then previous, seen = seen, win end
+end
+api.nvim_create_autocmd('TabEnter', {
+  group = group,
+  callback = function() tab_entered = true end,
+})
+
 local pending = false
 local function report()
   pending = false
   local cur = api.nvim_get_current_win()
+  local tab = api.nvim_get_current_tabpage()
+  local entered = tab_entered
+  tab_entered = false
+  -- a buffer opened in an anchor: on to the pane it went to
+  if is_anchor(cur) and evict(api.nvim_win_get_tabpage(cur)) then return end
+  -- :tabnext, gt, a tabline click or a tab page closing went to the tab
+  -- page's last current window, which may have closed or be another tab
+  -- page's that only sat in it: its own instead
+  if entered and (is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)) then
+    local to = own_window(tab)
+    if to and to ~= cur then
+      api.nvim_set_current_win(to)
+      return
+    end
+  end
   if is_anchor(cur) then
-    -- a buffer opened in it: on to the pane it went to
-    if evict(api.nvim_win_get_tabpage(cur)) then return end
     -- never shown: move on the way <C-w>w or <C-w>W was going
     local wins = vim.tbl_filter(shown, api.nvim_tabpage_list_wins(0))
     if #wins == 0 then return end
@@ -859,10 +897,19 @@ local function report()
   -- a float shows in the pane it floats over, which stays focused, unless
   -- it's in a float group pane: the daemon decides
   if api.nvim_win_get_config(cur).relative ~= '' then
+    saw(cur)
     note('float', cur)
     return
   end
+  -- another tab page's window, made current inside Neovim, as a plugin's
+  -- nvim_set_current_win does: its tab page comes along
+  local mine = home[cur]
+  if not entered and mine and mine ~= tab and api.nvim_tabpage_is_valid(mine) then
+    M.go(cur)
+    return
+  end
   last = cur
+  saw(cur)
   note('win', cur)
 end
 
@@ -872,6 +919,243 @@ local function schedule_report()
   pending = true
   vim.schedule(report)
 end
+
+-- The screen floats of the float groups with float group panes, as the
+-- daemon last said. Each, with the floats hanging from it, moves into
+-- whichever tab page is current, so its pane never blanks, and still belongs
+-- to the one it opened in (`float_home`): the tabline counts it there, it
+-- closes with it, and goes back to it before the tab page it sits in closes.
+-- Every other float stays in its tab page, hidden while that isn't current.
+local carried = {}
+
+-- The screen float `win` hangs from, through floats on floats, else
+-- itself; and how many floats down from it `win` is.
+local function float_root(win)
+  local depth = 0
+  local c = api.nvim_win_get_config(win)
+  while depth < 50 and c.relative == 'win' and c.win and api.nvim_win_is_valid(c.win) do
+    local up = api.nvim_win_get_config(c.win)
+    if up.relative == '' then break end
+    win, c, depth = c.win, up, depth + 1
+  end
+  return win, depth
+end
+
+-- The tab page float `f` belongs to, if it was carried out of it: its own
+-- record, else that of the float it hangs from, so one opened on a carried
+-- float away from home belongs where that does at once.
+local function float_home_of(f)
+  return float_home[f] or float_home[(float_root(f))]
+end
+
+-- The floats sitting in tab page `tab` (every tab page but it, with `others`)
+-- that `pick(float, its root)` picks, the ones they hang from first.
+local function floats_in(tab, others, pick)
+  local found = {}
+  for _, w in ipairs(api.nvim_list_wins()) do
+    local c = api.nvim_win_get_config(w)
+    if c.relative ~= '' and not c.external and (api.nvim_win_get_tabpage(w) == tab) ~= others then
+      local root, depth = float_root(w)
+      if pick(w, root) then found[#found + 1] = { w, depth } end
+    end
+  end
+  table.sort(found, function(x, y) return x[2] < y[2] end)
+  return vim.tbl_map(function(f) return f[1] end, found)
+end
+
+-- a window of tab page `tab` to name, to move floats into it
+local function window_of(tab)
+  local a = anchor_of(tab)
+  if a then return a end
+  for _, w in ipairs(api.nvim_tabpage_list_wins(tab)) do
+    if api.nvim_win_get_config(w).relative == '' then return w end
+  end
+end
+
+-- Moves `floats` into tab page `tab`, each where it floats, keeping its id.
+-- One Neovim can't move stays where it is.
+local function move_floats(floats, tab)
+  local to = window_of(tab)
+  if not to then return end
+  for _, f in ipairs(floats) do
+    local from = api.nvim_win_get_tabpage(f)
+    if from ~= tab then
+      local c = api.nvim_win_get_config(f)
+      local moved = pcall(api.nvim_win_set_config, f, {
+        relative = c.relative,
+        win = c.relative == 'win' and c.win or to,
+        anchor = c.anchor,
+        row = c.row,
+        col = c.col,
+        bufpos = c.bufpos,
+      })
+      if moved then float_home[f] = float_home_of(f) or from end
+    end
+  end
+end
+
+-- the carried floats into the current tab page
+local function bring_carried()
+  if next(carried) == nil then return end
+  local tab = api.nvim_get_current_tabpage()
+  move_floats(floats_in(tab, true, function(_, root) return carried[root] end), tab)
+end
+
+--- `groups`, a list per float group with a float group pane, are their
+--- screen floats. One that joined its group away from home, as a
+--- telescope preview does, belongs where the group does.
+function M.carry(groups)
+  carried = {}
+  for _, g in ipairs(groups) do
+    local home
+    for _, w in ipairs(g) do
+      if api.nvim_win_is_valid(w) then
+        carried[w] = true
+        home = home or float_home_of(w)
+      end
+    end
+    for _, w in ipairs(g) do
+      if home and api.nvim_win_is_valid(w) and not float_home[w] and api.nvim_win_get_tabpage(w) ~= home then
+        float_home[w] = home
+      end
+    end
+  end
+  bring_carried()
+end
+
+-- before anything is drawn
+api.nvim_create_autocmd('TabEnter', { group = group, callback = bring_carried })
+
+--- Makes `win` the current window, as when its pane is focused: its home
+--- tab page first, if that isn't current, as `gt` would go there, so
+--- TabLeave and TabEnter fire. A float stays where Neovim keeps it; one that
+--- takes no focus, as a picker's box, stands for the float hanging from it
+--- that does, its input.
+function M.go(win)
+  local c = api.nvim_win_is_valid(win) and api.nvim_win_get_config(win)
+  if c and c.relative ~= '' and not c.external and c.focusable == false then
+    local takes = floats_in(api.nvim_win_get_tabpage(win), false, function(f, root)
+      return root == win and api.nvim_win_get_config(f).focusable ~= false
+    end)
+    win = takes[#takes] or win
+  end
+  local tab = home[win]
+  if tab and tab ~= api.nvim_get_current_tabpage() and api.nvim_tabpage_is_valid(tab) and api.nvim_win_is_valid(win) then
+    api.nvim_set_current_tabpage(tab)
+  end
+  if api.nvim_get_current_win() ~= win then api.nvim_set_current_win(win) end
+end
+
+-- Tab page `closing` is closing: the floats of other tab pages that sit in
+-- it go back to theirs first, as Neovim would close them with it. Neovim
+-- allows no move in TabClosedPre (E1312), so it's done as the first of its
+-- windows closes, before the rest of its floats do.
+local function send_floats_home(closing, gone)
+  local back = floats_in(closing, false, function(f)
+    local h = float_home_of(f)
+    return f ~= gone and h ~= nil and h ~= closing and api.nvim_tabpage_is_valid(h)
+  end)
+  for _, f in ipairs(back) do move_floats({ f }, float_home_of(f)) end
+  -- a close that fails partway leaves them home: back they come
+  if #back > 0 then vim.schedule(bring_carried) end
+end
+
+-- A window closing: first, if its tab page closes, the floats there that
+-- belong elsewhere go home, but not this one, which closes as Neovim means
+-- it to, as the current float does first as its tab page closes; then its
+-- own record goes.
+api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  callback = function(ev)
+    local win = tonumber(ev.match)
+    if closing_tab and api.nvim_tabpage_is_valid(closing_tab) then send_floats_home(closing_tab, win) end
+    float_home[win] = nil
+  end,
+})
+-- Closed: floats that belonged to it close too, wherever they sit
+api.nvim_create_autocmd('TabClosed', {
+  group = group,
+  callback = function()
+    for _, f in ipairs(api.nvim_list_wins()) do
+      local h = float_home_of(f)
+      if h and not api.nvim_tabpage_is_valid(h) then pcall(api.nvim_win_close, f, true) end
+    end
+    for f, h in pairs(float_home) do
+      if not api.nvim_tabpage_is_valid(h) then float_home[f] = nil end
+    end
+  end,
+})
+
+-- the windows panes show, as the daemon last said; until it says, those
+-- fitted to panes
+local in_panes
+
+--- Panes show the windows `wins` now.
+function M.panes_show(wins)
+  in_panes = {}
+  for _, w in ipairs(wins) do in_panes[w] = true end
+end
+
+-- Where <C-w>w, <C-w>W and <C-w>p may go: a window a pane shows, or a float
+-- that takes focus showing in the current tab page.
+local function steps_to(win)
+  if not api.nvim_win_is_valid(win) then return false end
+  local c = api.nvim_win_get_config(win)
+  if c.relative == '' or c.external then
+    if in_panes then return in_panes[win] == true end
+    return panes[win] ~= nil and not is_anchor(win)
+  end
+  return c.focusable ~= false and not c.hide and api.nvim_win_get_tabpage(win) == api.nvim_get_current_tabpage()
+end
+
+-- Where <C-w>w and <C-w>W go: on in Neovim's order of windows, but only
+-- through those `steps_to` allows, so never onto an anchor; with a count, to
+-- that one.
+local function cycle(forward, count)
+  local all = api.nvim_tabpage_list_wins(0)
+  local to
+  if count > 0 then
+    local list = vim.tbl_filter(steps_to, all)
+    to = list[math.min(count, #list)]
+  else
+    local cur = api.nvim_get_current_win()
+    local at = 1
+    for i, w in ipairs(all) do
+      if w == cur then at = i end
+    end
+    for i = 1, #all do
+      local j = (forward and at - 1 + i or at - 1 - i) % #all + 1
+      if steps_to(all[j]) then
+        to = all[j]
+        break
+      end
+    end
+  end
+  return to
+end
+
+-- Goes to the window `find(count)` gives, if it's another, its tab page
+-- coming along. From Visual mode too: that ends first, as entering another
+-- window ends it; with nowhere to go the selection stays.
+local function stepping(find)
+  return function()
+    local to = find(vim.v.count)
+    if not to or to == api.nvim_get_current_win() then return end
+    if vim.fn.mode():match('^[vV\22]') then vim.cmd('normal! \27') end
+    M.go(to)
+  end
+end
+local modes = { 'n', 'x' }
+for _, k in ipairs({ 'w', '<C-w>' }) do
+  vim.keymap.set(modes, '<C-w>' .. k, stepping(function(count) return cycle(true, count) end), { desc = 'Go to the next window a pane shows' })
+end
+vim.keymap.set(modes, '<C-w>W', stepping(function(count) return cycle(false, count) end), { desc = 'Go to the previous window a pane shows' })
+for _, k in ipairs({ 'p', '<C-p>' }) do
+  vim.keymap.set(modes, '<C-w>' .. k, stepping(function()
+    if previous and steps_to(previous) then return previous end
+  end), { desc = 'Go to the window current before' })
+end
+
 api.nvim_create_autocmd('WinEnter', {
   group = group,
   callback = function()

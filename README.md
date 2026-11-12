@@ -346,12 +346,10 @@ quietly.
   left. They follow the layout as windows come and go, and a window Neovim
   resizes, such as with `<C-w>|`, resizes its pane. Moving windows once they
   show in panes, as with `<C-w>H`, still does nothing.
-- Neovim's current tab page doesn't follow focus. It stays put when you focus
-  the pane of another tab page's window, and changes only when something
-  changes it in Neovim, such as `:tabnext`, a click on the tabline, or a tab
-  page closing. So `tabpagenr()`, the tabline's highlighted label, `:tcd` and
-  `t:` variables belong to the current tab page, not to the focused window's
-  home tab page.
+- A picker or other float group in a Rex floating pane shows over whichever
+  tab page is current, and closes with the tab page it opened in: closing
+  the tab page it shows over sends it back to its own first, but for the
+  float you're in, which closes, as Neovim closes the current float first.
 - Neovim's tab-page queries don't match neorex's tab pages (#67). Every
   window shown in a pane sits in Neovim's current tab page, so
   `tabpagebuflist()`, `tabpagewinnr()` and `nvim_tabpage_list_wins()` see all

@@ -326,7 +326,7 @@ impl FocusGate {
     /// a key sent just before may not be read, which would show as waiting.
     fn start(&mut self, nvim: &mut Nvim, win: i64, pane: u32) -> io::Result<()> {
         self.pending = Some(Switch {
-            req: windows::set_current(nvim, win),
+            req: windows::go_to(nvim, win),
             pane,
         });
         self.probe = None;
