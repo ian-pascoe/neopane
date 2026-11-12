@@ -318,3 +318,16 @@ fn a_self_attach_from_the_same_context_is_found_and_in_reach() {
         (p.reach, p.terminal.clone())
     );
 }
+
+#[test]
+fn a_warning_before_neovim_is_set_up_waits_for_it() {
+    // at a hit-enter prompt it would hide the first window until a key
+    let mut fx = with_provider(None);
+    fx.d.connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
+    attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    assert!(!sent_to_nvim(&mut fx).contains("can't reach Rex"));
+    fx.d.nvim.ready = true;
+    fx.d.warn_held();
+    fx.d.nvim.client.flush().unwrap();
+    assert!(sent_to_nvim(&mut fx).contains("can't reach Rex"));
+}

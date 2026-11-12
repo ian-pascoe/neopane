@@ -42,7 +42,7 @@ impl Daemon {
             Chosen::None { why, warn: true } => {
                 let line = format!("{why}; no pane provider");
                 log_warn!("{NAME} daemon: {line}");
-                self.warn_in_nvim(&format!("{NAME}: {line}"));
+                self.warn_when_ready(format!("{NAME}: {line}"));
                 return Ok(());
             }
         };
@@ -198,7 +198,7 @@ impl Daemon {
             "{}: find didn't confirm this terminal: {why}; no pane provider",
             name.unwrap_or_default()
         );
-        self.warn_in_nvim(&format!("{NAME}: {line}"));
+        self.warn_when_ready(format!("{NAME}: {line}"));
         self.provider_gone(&line)?;
         self.reach_decided()
     }
@@ -236,6 +236,23 @@ impl Daemon {
             || self
                 .split_from(sp)
                 .is_some_and(|f| f.reach == Reach::Finding)
+    }
+
+    /// Shows `message` in Neovim as a warning once it is set up: before, at
+    /// a hit-enter prompt, it would hide the first window until a key.
+    pub(super) fn warn_when_ready(&mut self, message: String) {
+        if self.nvim.ready {
+            self.warn_in_nvim(&message);
+        } else {
+            self.held_warnings.push(message);
+        }
+    }
+
+    /// Shows the warnings held until Neovim was set up.
+    pub(super) fn warn_held(&mut self) {
+        for w in std::mem::take(&mut self.held_warnings) {
+            self.warn_in_nvim(&w);
+        }
     }
 
     /// Keeps the loop watching the pane provider's fd for room to write

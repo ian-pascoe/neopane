@@ -325,11 +325,16 @@ mod tests {
             eprintln!("skipping: not in a Rex pane");
             return;
         };
-        let Ok(tty) = std::fs::File::open("/dev/tty") else {
-            eprintln!("skipping: no controlling terminal");
+        // stdin, the block's terminal: as a helper hands it over (/dev/tty
+        // is a device of its own)
+        use std::os::fd::AsFd;
+        // SAFETY: isatty only inspects the fd.
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } == 0 {
+            eprintln!("skipping: stdin isn't a terminal");
             return;
-        };
-        let device = crate::daemon::attach_conn::tty_device(Some(&tty.into()), b"");
+        }
+        let tty = std::io::stdin().as_fd().try_clone_to_owned().unwrap();
+        let device = crate::daemon::attach_conn::tty_device(Some(&tty), b"");
         assert!(device.is_some());
         let stream = crate::rex::client::connect_to(&url).unwrap();
         let mut p = RexProvider::connecting(stream, &session).unwrap();

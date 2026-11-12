@@ -149,6 +149,8 @@ pub(crate) struct Daemon {
     pub connect: crate::providers::choose::Connect,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
+    /// Warnings for Neovim held until it is set up (`warn_when_ready`).
+    held_warnings: Vec<String>,
     // Dropped last, in this order: the loop, then the pane provider, then
     // Neovim.
     pub event_loop: Loop,
@@ -358,6 +360,7 @@ impl Daemon {
             provider_writes: false,
             connect: crate::providers::choose::connect(),
             first_choice: None,
+            held_warnings: Vec::new(),
             event_loop,
             provider,
             nvim,
@@ -1259,6 +1262,7 @@ impl Daemon {
                 first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
+            self.warn_held();
             // its window is in its pane now: the editor can span the Rex window
             if let Some(f) = self.current_pane_id() {
                 self.nvim.fit_ui_to(self.panes.by_id(f).unwrap())?;
@@ -1844,7 +1848,7 @@ impl Daemon {
         // gone before it was confirmed: none was chosen after all
         if let Some(id) = self.choosing.take() {
             log_info!("{NAME} daemon: pane {id} chose no pane provider after all");
-            self.warn_in_nvim(&format!("{NAME}: {reason}; no pane provider"));
+            self.warn_when_ready(format!("{NAME}: {reason}; no pane provider"));
             self.nvim.client.flush()?;
         }
         self.focus = ProviderFocus::default();
