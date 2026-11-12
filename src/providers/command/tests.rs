@@ -415,6 +415,249 @@ fn a_split_place_gets_its_direction_and_ratio() {
     );
 }
 
+/// A runner whose `report_layout` runs `script` under `sh -c`.
+fn reporting(script: &str) -> CommandProvider {
+    runner(
+        &[(Capability::ReportLayout, &["sh", "-c", script])],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+#[test]
+fn a_report_is_read_into_a_live_layout() {
+    let mut p = reporting(
+        r#"echo '{"areas":[{"id":"w1","terminals":[{"terminal":"%1","rect":[0,0,1,1]}]}],'
+           echo '"focus":"%1"}'"#,
+    );
+    assert!(p.capabilities().has(Capability::ReportLayout));
+    let Outcome::Done(Answer::Layout(l)) = outcome(&mut p, Ask::ReportLayout) else {
+        panic!("no layout");
+    };
+    assert_eq!(Some(TerminalId::from("%1")), l.current);
+    assert_eq!(
+        Some([0.0, 0.0, 1.0, 1.0]),
+        l.area_of(&TerminalId::from("%1")).and_then(|a| a.rect())
+    );
+}
+
+#[test]
+fn a_malformed_or_too_long_report_fails_and_exit_69_is_unsupported() {
+    let mut p = reporting("echo '{\"areas\":'");
+    let Outcome::Failed(why) = outcome(&mut p, Ask::ReportLayout) else {
+        panic!("not failed");
+    };
+    assert!(why.contains("isn't JSON"), "{why}");
+
+    // valid JSON, but past 1 MiB
+    let mut p = reporting(
+        r#"printf '{"areas":[],"pad":"'; head -c 1048576 /dev/zero | tr '\0' x; echo '"}'"#,
+    );
+    assert_eq!(
+        Outcome::Failed("its report is over 1024 KiB".into()),
+        outcome(&mut p, Ask::ReportLayout)
+    );
+
+    let mut p = reporting("exit 69");
+    assert_eq!(Outcome::Unsupported, outcome(&mut p, Ask::ReportLayout));
+}
+
+/// A layout report naming terminal `x` alone.
+const REPORT_X: &str =
+    r#"echo '{"areas":[{"id":"w","terminals":[{"terminal":"x","rect":[0,0,1,1]}]}]}'"#;
+
+/// A runner whose `events` runs `script` under `sh -c`, and whose
+/// `report_layout` prints `REPORT_X`.
+fn telling(script: &str) -> CommandProvider {
+    runner(
+        &[
+            (Capability::Events, &["sh", "-c", script]),
+            (Capability::ReportLayout, &["sh", "-c", REPORT_X]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+/// What `p` tells, other than answers, until `enough` says it's enough,
+/// handing it its loop's readiness as the daemon would; at most 5 s.
+fn told(p: &mut CommandProvider, enough: impl Fn(&[ProviderEvent]) -> bool) -> Vec<ProviderEvent> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut told = Vec::new();
+    while !enough(&told) {
+        assert!(Instant::now() < deadline, "only told {told:?}");
+        while let Some(e) = p.next() {
+            told.push(e);
+        }
+        wait_ready(p, Duration::from_millis(100));
+    }
+    told
+}
+
+/// Waits up to `most` for `p`'s loop to be ready, then hands it on.
+fn wait_ready(p: &mut CommandProvider, most: Duration) {
+    let mut fds = [libc::pollfd {
+        fd: p.fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    // SAFETY: one valid pollfd.
+    unsafe { libc::poll(fds.as_mut_ptr(), 1, most.as_millis() as libc::c_int) };
+    p.on_ready(RUN_TOKEN);
+}
+
+fn focused(t: &str) -> ProviderEvent {
+    ProviderEvent::Focused(TerminalId::from(t))
+}
+
+fn layouts(told: &[ProviderEvent]) -> usize {
+    told.iter()
+        .filter(|e| matches!(e, ProviderEvent::Layout(_)))
+        .count()
+}
+
+#[test]
+fn each_events_line_reads_the_layout_again_and_tells_focus_and_closed() {
+    let mut p = telling(
+        r#"sleep 0.2; echo '{"focus":"x","closed":"y","other":1}'; echo again; exec sleep 30"#,
+    );
+    assert!(p.capabilities().has(Capability::Events));
+    // read once at its start, then again for the lines
+    let told = told(&mut p, |t| layouts(t) >= 2);
+    let rest: Vec<_> = told
+        .iter()
+        .filter(|e| !matches!(e, ProviderEvent::Layout(_)))
+        .cloned()
+        .collect();
+    assert_eq!(
+        vec![focused("x"), ProviderEvent::Closed(TerminalId::from("y"))],
+        rest
+    );
+    let Some(ProviderEvent::Layout(l)) = told.last() else {
+        panic!("{told:?}");
+    };
+    assert!(l.area_of(&TerminalId::from("x")).is_some());
+}
+
+#[test]
+fn an_events_line_over_64_kib_is_dropped() {
+    let mut p = telling(
+        r#"printf '{"focus":"'; head -c 65536 /dev/zero | tr '\0' x; echo '"}'
+           echo '{"focus":"z"}'; exec sleep 30"#,
+    );
+    let told = told(&mut p, |t| t.contains(&focused("z")));
+    assert!(
+        !told
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::Focused(t) if t.as_str() != "z")),
+        "{told:?}"
+    );
+}
+
+#[test]
+fn a_crashing_events_starts_again_after_1_s_then_2_s_and_1_s_after_a_minute_running() {
+    let dir = std::env::temp_dir().join(format!("{}-events-{}", name::NAME, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let starts = dir.join("starts");
+    let script = format!("echo >> {}; exit 1", starts.display());
+    let argv = ["sh", "-c", script.as_str()];
+    let started = Instant::now();
+    let now = std::rc::Rc::new(std::cell::Cell::new(started));
+    let clock = {
+        let now = now.clone();
+        Box::new(move || now.get())
+    };
+    let spec = Spec {
+        name: "test".into(),
+        commands: vec![CapCommand {
+            cap: Capability::Events,
+            argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+            timeout: Duration::from_secs(2),
+            protocol: 1,
+        }],
+    };
+    let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
+    let mut p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
+    let count = || {
+        std::fs::read_to_string(&starts)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    // its end is seen at `at`: when it starts again
+    let ended_at = |p: &mut CommandProvider, at: Instant| {
+        now.set(at);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.events_running() {
+            assert!(Instant::now() < deadline, "it doesn't end");
+            wait_ready(p, Duration::from_millis(100));
+        }
+    };
+    let at = |p: &mut CommandProvider, t: Instant| {
+        now.set(t);
+        p.on_ready(RUN_TOKEN);
+        p.events_running()
+    };
+    ended_at(&mut p, started);
+    assert_eq!(1, count());
+    let s = Duration::from_secs(1);
+    let ms = Duration::from_millis(1);
+    assert!(!at(&mut p, started + s - ms));
+    assert!(at(&mut p, started + s));
+    ended_at(&mut p, started + s);
+    assert_eq!(2, count());
+    assert!(!at(&mut p, started + 3 * s - ms));
+    assert!(at(&mut p, started + 3 * s));
+    // a minute running: the wait is 1 s again
+    ended_at(&mut p, started + 63 * s);
+    assert_eq!(3, count());
+    assert!(!at(&mut p, started + 64 * s - ms));
+    assert!(at(&mut p, started + 64 * s));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn events_exiting_69_is_unsupported_and_never_starts_again() {
+    let mut p = telling("exit 69");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while p.capabilities().has(Capability::Events) {
+        assert!(Instant::now() < deadline, "still has events");
+        wait_ready(&mut p, Duration::from_millis(100));
+    }
+    assert!(p.events_run.is_none());
+}
+
+#[test]
+fn events_dies_with_the_pane_provider() {
+    let dir =
+        std::env::temp_dir().join(format!("{}-events-die-{}", name::NAME, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("pid");
+    // a grandchild in its group, as well as itself
+    let script = format!("sleep 30 & echo $$ $! > {}; wait", pid_file.display());
+    let p = telling(&script);
+    let started = Instant::now();
+    let pids: Vec<libc::pid_t> = loop {
+        if let Ok(s) = std::fs::read_to_string(&pid_file)
+            && s.ends_with('\n')
+        {
+            break s.split_whitespace().map(|w| w.parse().unwrap()).collect();
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "no pids");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(pids.iter().all(|&pid| alive(pid)));
+    drop(p);
+    let gone = Instant::now();
+    while pids.iter().any(|&pid| alive(pid)) {
+        // an orphan that died is reaped by init soon after
+        assert!(gone.elapsed() < Duration::from_secs(3), "events lives");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn every_capability_it_runs_and_every_variable_it_sets_is_in_the_docs() {
     let doc = std::fs::read_to_string(

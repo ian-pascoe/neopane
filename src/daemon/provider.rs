@@ -36,7 +36,7 @@ pub(crate) enum Capability {
     FocusDirection,
     ReportLayout,
     /// It tells live layouts and focus unasked, as Rex's views and the
-    /// command runner's `events` (#125) do.
+    /// command runner's `events` do.
     Events,
 }
 
@@ -299,8 +299,6 @@ pub(crate) enum Outcome {
 
 /// What a pane provider tells the daemon, from `next`.
 #[derive(Debug, Clone, PartialEq)]
-// `Closed` is told by the command runner's `events` (#125)
-#[allow(dead_code)]
 pub(crate) enum ProviderEvent {
     Answered {
         id: AskId,
@@ -310,7 +308,7 @@ pub(crate) enum ProviderEvent {
     Layout(LiveLayout),
     /// The user focused this terminal.
     Focused(TerminalId),
-    /// This terminal closed.
+    /// This terminal closed: only logged for now.
     Closed(TerminalId),
     /// The pane provider failed as a whole: nothing it was asked will be
     /// answered.

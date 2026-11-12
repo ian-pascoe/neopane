@@ -10,6 +10,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
+use super::layout::MAX_REPORT;
 use crate::daemon::event_loop::Loop;
 
 /// The longest terminal id (#93 decision 19).
@@ -17,16 +18,29 @@ pub(crate) const MAX_ID: usize = 4 << 10;
 /// The most of a run's stderr that is kept, for the log.
 pub(crate) const MAX_STDERR: usize = 64 << 10;
 /// The most of stdout's first line kept: past it, the id is too long
-/// whatever its spaces.
-const MAX_LINE: usize = 64 << 10;
+/// whatever its spaces. Also the longest `events` line (#93 decision 19).
+pub(crate) const MAX_LINE: usize = 64 << 10;
+
+/// What becomes of a command's stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stdout {
+    /// `/dev/null`.
+    Null,
+    /// Its first line is kept, up to `MAX_LINE`: the opens'.
+    FirstLine,
+    /// All of it is kept, up to `MAX_REPORT`: `report_layout`'s.
+    Whole,
+    /// Each line is taken as it comes (`take_lines`); longer ones than
+    /// `MAX_LINE` are dropped: `events`'.
+    Lines,
+}
 
 /// What a command is run with.
 pub(crate) struct Start<'a> {
     pub argv: &'a [Vec<u8>],
     pub env: &'a [(Vec<u8>, Vec<u8>)],
     pub cwd: &'a Path,
-    /// Whether its stdout's first line is read: the opens'.
-    pub reads_id: bool,
+    pub stdout: Stdout,
 }
 
 /// A command running, or ended and not yet finished with.
@@ -34,10 +48,19 @@ pub(crate) struct Run {
     child: Child,
     stdout: Option<PipeReader>,
     stderr: Option<PipeReader>,
-    /// Stdout's first line so far, up to `MAX_LINE`.
-    line: Vec<u8>,
-    line_ended: bool,
-    line_over: bool,
+    mode: Stdout,
+    /// What is kept of stdout so far: its first line, all of it, or the
+    /// line not yet ended.
+    out: Vec<u8>,
+    /// No more is kept: the first line ended.
+    out_ended: bool,
+    /// Past its limit: the first line or all of it, or the current line,
+    /// which is dropped.
+    out_over: bool,
+    /// Lines ended, not yet taken.
+    lines: Vec<Vec<u8>>,
+    /// Lines dropped as too long, not yet told.
+    lines_dropped: usize,
     /// Stderr's first `MAX_STDERR` bytes.
     stderr_kept: Vec<u8>,
     stderr_cut: bool,
@@ -47,8 +70,9 @@ pub(crate) struct Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ended {
     pub status: ExitStatus,
-    /// Stdout's first line, untrimmed, or None if it was too long to keep.
-    pub line: Option<Vec<u8>>,
+    /// Stdout's first line, untrimmed, or all of it, as `Stdout` says; None
+    /// if it was too long to keep.
+    pub out: Option<Vec<u8>>,
     pub stderr: Vec<u8>,
     /// Whether stderr went past `MAX_STDERR`.
     pub stderr_cut: bool,
@@ -63,11 +87,11 @@ impl Run {
             .split_first()
             .ok_or_else(|| io::Error::other("an empty argv"))?;
         let (stderr_r, stderr_w) = io::pipe()?;
-        let (stdout_r, stdout) = if start.reads_id {
+        let (stdout_r, stdout) = if start.stdout == Stdout::Null {
+            (None, Stdio::null())
+        } else {
             let (r, w) = io::pipe()?;
             (Some(r), Stdio::from(w))
-        } else {
-            (None, Stdio::null())
         };
         let mut command = Command::new(OsStr::from_bytes(program));
         command
@@ -101,9 +125,12 @@ impl Run {
             child,
             stdout: stdout_r,
             stderr: Some(stderr_r),
-            line: Vec::new(),
-            line_ended: false,
-            line_over: false,
+            mode: start.stdout,
+            out: Vec::new(),
+            out_ended: false,
+            out_over: false,
+            lines: Vec::new(),
+            lines_dropped: 0,
             stderr_kept: Vec::new(),
             stderr_cut: false,
         })
@@ -116,31 +143,19 @@ impl Run {
 
     /// Reads what its pipes have now. A pipe that ended leaves `event_loop`.
     pub(crate) fn read(&mut self, event_loop: &Loop) {
+        let mut stdout = self.stdout.take();
+        let open = stdout.is_some();
+        drain(&mut stdout, event_loop, |bytes| self.keep(bytes));
+        self.stdout = stdout;
+        if open && self.stdout.is_none() {
+            self.stdout_ended();
+        }
         let Run {
-            stdout,
             stderr,
-            line,
-            line_ended,
-            line_over,
             stderr_kept,
             stderr_cut,
             ..
         } = self;
-        drain(stdout, event_loop, |bytes| {
-            if *line_ended || *line_over {
-                return;
-            }
-            let (part, ended) = match bytes.iter().position(|&b| b == b'\n') {
-                Some(i) => (&bytes[..i], true),
-                None => (bytes, false),
-            };
-            line.extend_from_slice(part);
-            *line_ended = ended;
-            if line.len() > MAX_LINE {
-                *line_over = true;
-                line.clear();
-            }
-        });
         drain(stderr, event_loop, |bytes| {
             let room = MAX_STDERR - stderr_kept.len();
             if bytes.len() > room {
@@ -150,11 +165,80 @@ impl Run {
         });
     }
 
+    /// Keeps what `bytes`, read from stdout, add, as its mode says.
+    fn keep(&mut self, bytes: &[u8]) {
+        match self.mode {
+            Stdout::Null => {}
+            Stdout::FirstLine => {
+                if self.out_ended || self.out_over {
+                    return;
+                }
+                let (part, ended) = match bytes.iter().position(|&b| b == b'\n') {
+                    Some(i) => (&bytes[..i], true),
+                    None => (bytes, false),
+                };
+                self.keep_upto(part, MAX_LINE);
+                self.out_ended = ended;
+            }
+            Stdout::Whole => self.keep_upto(bytes, MAX_REPORT),
+            Stdout::Lines => {
+                let mut rest = bytes;
+                while let Some(i) = rest.iter().position(|&b| b == b'\n') {
+                    self.keep_upto(&rest[..i], MAX_LINE);
+                    self.end_line();
+                    rest = &rest[i + 1..];
+                }
+                self.keep_upto(rest, MAX_LINE);
+            }
+        }
+    }
+
+    /// Keeps `bytes` unless what is kept goes past `max`, which drops it.
+    fn keep_upto(&mut self, bytes: &[u8], max: usize) {
+        if self.out_over {
+            return;
+        }
+        if self.out.len() + bytes.len() > max {
+            self.out_over = true;
+            self.out = Vec::new();
+            return;
+        }
+        self.out.extend_from_slice(bytes);
+    }
+
+    /// The line being read ended: it is taken, or dropped if too long.
+    fn end_line(&mut self) {
+        if std::mem::take(&mut self.out_over) {
+            self.lines_dropped += 1;
+        } else {
+            self.lines.push(std::mem::take(&mut self.out));
+        }
+    }
+
+    /// Stdout closed: a last line with no end is a line all the same.
+    fn stdout_ended(&mut self) {
+        if self.mode == Stdout::Lines && (!self.out.is_empty() || self.out_over) {
+            self.end_line();
+        }
+    }
+
+    /// The lines read since last taken, and how many were dropped as too
+    /// long: `Stdout::Lines`'.
+    pub(crate) fn take_lines(&mut self) -> (Vec<Vec<u8>>, usize) {
+        (
+            std::mem::take(&mut self.lines),
+            std::mem::take(&mut self.lines_dropped),
+        )
+    }
+
     /// How it ended, if it has: what its pipes held by then is read, and
     /// they close, though something it started may still hold them.
     pub(crate) fn ended(&mut self, event_loop: &Loop) -> Option<Ended> {
         let status = self.child.try_wait().ok()??;
         self.read(event_loop);
+        if self.stdout.is_some() {
+            self.stdout_ended();
+        }
         for pipe in [self.stdout.take(), self.stderr.take()]
             .into_iter()
             .flatten()
@@ -163,7 +247,7 @@ impl Run {
         }
         Some(Ended {
             status,
-            line: (!self.line_over).then(|| std::mem::take(&mut self.line)),
+            out: (!self.out_over).then(|| std::mem::take(&mut self.out)),
             stderr: std::mem::take(&mut self.stderr_kept),
             stderr_cut: self.stderr_cut,
         })
@@ -240,7 +324,7 @@ mod tests {
             argv: &argv,
             env: &env,
             cwd: Path::new("/"),
-            reads_id: true,
+            stdout: Stdout::FirstLine,
         };
         let mut run = Run::start(&start, &event_loop, 1).unwrap();
         // the loop is never waited on: `ended` reaps it by itself
@@ -253,6 +337,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert_eq!(Some(3), ended.status.code());
-        assert_eq!(Some(b"id".to_vec()), ended.line);
+        assert_eq!(Some(b"id".to_vec()), ended.out);
     }
 }

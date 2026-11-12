@@ -11,18 +11,27 @@
 //!   loop of its own, which the daemon watches under `Token::Provider`
 //!   (`fd`).
 //! - Exit 0 is done, and an open's first stdout line, trimmed, the terminal
-//!   id: at most 4 KiB, no NUL. Exit 69, or a command that can't start, is
-//!   unsupported; anything else fails. The first 64 KiB of stderr goes to
-//!   the log.
+//!   id: at most 4 KiB, no NUL; `report_layout`'s stdout, at most 1 MiB,
+//!   the live layout (`layout.rs`). Exit 69, or a command that can't start,
+//!   is unsupported; anything else fails. The first 64 KiB of stderr goes
+//!   to the log.
 //! - At its timeout its group gets SIGTERM, and SIGKILL 1 s later. The act
 //!   itself is timed out by `asks.rs`, at the same deadline: a run past it
 //!   answers nothing.
+//! - `events` runs from the start, for as long as the runner lives (#86
+//!   decision D7, #93 decision 18). Each line it prints has the layout read
+//!   again, by a `report_layout` run of the runner's own, told as
+//!   `ProviderEvent::Layout`; a JSON object line's `focus` and `closed` are
+//!   told as `Focused` and `Closed`. Lines over 64 KiB are dropped. Once it
+//!   ends it starts again after 1 s, then 2 s, doubling up to 60 s; one that
+//!   ran 60 s waits 1 s again. Exit 69, or one that can't start, ends it for
+//!   good.
 //!
-//! `find`, `report_layout` and `events` are #126's and #127's: a spec's are
-//! kept out of its capabilities. Building a spec from the config's choice
-//! is #129's.
+//! `find` is #127's: a spec's is kept out of its capabilities. Building a
+//! spec from the config's choice is #129's.
 
 mod inputs;
+mod layout;
 mod run;
 
 pub(crate) use inputs::commands_env;
@@ -41,7 +50,8 @@ use crate::daemon::provider::{
 use crate::log::{log_info, log_warn};
 use crate::name::NAME;
 use inputs::Inputs;
-use run::{Ended, MAX_ID, Run, Start, signal_group, status_text};
+use layout::{MAX_REPORT, parse_report_layout};
+use run::{Ended, MAX_ID, Run, Start, Stdout, signal_group, status_text};
 
 /// The exit status that says a capability is unsupported (EX_UNAVAILABLE).
 const UNSUPPORTED: i32 = 69;
@@ -49,8 +59,14 @@ const UNSUPPORTED: i32 = 69;
 /// How long after SIGTERM a timed-out run's group gets SIGKILL.
 const KILL_AFTER: Duration = Duration::from_secs(1);
 
+/// How long `events` waits to start again after it ended at first, and at
+/// most; and how long it must have run for the wait to be the first again.
+const EVENTS_FIRST_WAIT: Duration = Duration::from_secs(1);
+const EVENTS_MOST_WAIT: Duration = Duration::from_secs(60);
+const EVENTS_STEADY: Duration = Duration::from_secs(60);
+
 /// The capabilities this runner runs, so far.
-const RUNS: [Capability; 9] = [
+const RUNS: [Capability; 11] = [
     Capability::Open,
     Capability::OpenBeside,
     Capability::OpenFloat,
@@ -60,6 +76,8 @@ const RUNS: [Capability; 9] = [
     Capability::Resize,
     Capability::Focus,
     Capability::FocusDirection,
+    Capability::ReportLayout,
+    Capability::Events,
 ];
 
 /// The id of the inner loop's one timer, set for the soonest deadline, kill
@@ -87,9 +105,19 @@ pub(crate) struct CapCommand {
     pub protocol: i64,
 }
 
-/// A command running for an ask.
+/// What a run is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// An ask, which its end answers.
+    Ask(AskId),
+    /// A read of the layout of the runner's own, as `events` has it: its
+    /// end tells the layout.
+    Read,
+}
+
+/// A command running for an ask, or a read of the layout.
 struct Running {
-    id: AskId,
+    purpose: Purpose,
     cap: Capability,
     run: Run,
     due: Instant,
@@ -98,9 +126,31 @@ struct Running {
     timed_out: bool,
 }
 
+/// `events`, while the runner has it.
+enum Events {
+    Running {
+        run: Run,
+        since: Instant,
+    },
+    /// Ended: it starts again at `until`.
+    Waiting {
+        until: Instant,
+    },
+}
+
+/// The time, as the runner sees it: `Instant::now`, but in tests.
+type Clock = Box<dyn Fn() -> Instant>;
+
 pub(crate) struct CommandProvider {
     name: String,
     commands: Vec<CapCommand>,
+    /// `events`, and how long it waits to start again the next time it
+    /// ends; None once it has ended for good, or without one.
+    events_run: Option<Events>,
+    events_wait: Duration,
+    /// A read of the layout is wanted once the one running ends.
+    read_again: bool,
+    clock: Clock,
     /// The choosing attach's environment, stripped.
     env: Vec<(Vec<u8>, Vec<u8>)>,
     /// The choosing attach's working directory.
@@ -124,15 +174,29 @@ impl CommandProvider {
         env: &[(Vec<u8>, Vec<u8>)],
         cwd: &[u8],
     ) -> std::io::Result<CommandProvider> {
+        CommandProvider::with_clock(spec, env, cwd, Box::new(Instant::now))
+    }
+
+    /// The same, its time told by `clock`. `events` starts at once.
+    fn with_clock(
+        spec: Spec,
+        env: &[(Vec<u8>, Vec<u8>)],
+        cwd: &[u8],
+        clock: Clock,
+    ) -> std::io::Result<CommandProvider> {
         let inner_loop = Loop::init().map_err(std::io::Error::other)?;
-        Ok(CommandProvider {
+        let mut p = CommandProvider {
             name: spec.name,
-            // `find`, `report_layout` and `events` aren't run yet
+            // `find` isn't run yet
             commands: spec
                 .commands
                 .into_iter()
                 .filter(|c| RUNS.contains(&c.cap))
                 .collect(),
+            events_run: None,
+            events_wait: EVENTS_FIRST_WAIT,
+            read_again: false,
+            clock,
             env: commands_env(env),
             cwd: PathBuf::from(OsStr::from_bytes(cwd)),
             inner_loop,
@@ -140,7 +204,11 @@ impl CommandProvider {
             kills: Vec::new(),
             events: VecDeque::new(),
             answers_due: Vec::new(),
-        })
+        };
+        if p.command(Capability::Events).is_some() {
+            p.start_events();
+        }
+        Ok(p)
     }
 
     /// The fd the daemon watches under `Token::Provider`.
@@ -156,16 +224,23 @@ impl CommandProvider {
     fn answer_at_next_ready(&mut self, id: AskId, outcome: Outcome) {
         self.answers_due
             .push(ProviderEvent::Answered { id, outcome });
-        self.arm_timer(Instant::now());
+        self.arm_timer((self.clock)());
     }
 
     /// The outcome of a run of `cap` that ended as `ended`.
     fn outcome(&self, cap: Capability, ended: &Ended) -> Outcome {
         self.log_stderr(cap, ended);
         match ended.status.code() {
-            Some(0) if is_open(cap) => match &ended.line {
+            Some(0) if is_open(cap) => match &ended.out {
                 Some(line) => terminal_id(line),
                 None => Outcome::Failed(too_long()),
+            },
+            Some(0) if cap == Capability::ReportLayout => match &ended.out {
+                Some(out) => match parse_report_layout(out) {
+                    Ok(l) => Outcome::Done(Answer::Layout(l)),
+                    Err(why) => Outcome::Failed(why),
+                },
+                None => Outcome::Failed(format!("its report is over {} KiB", MAX_REPORT >> 10)),
             },
             Some(0) => Outcome::Done(Answer::Nothing),
             Some(UNSUPPORTED) => Outcome::Unsupported,
@@ -197,10 +272,209 @@ impl CommandProvider {
         }
     }
 
+    /// Starts a run of `cap` for `purpose`, with `inputs`. Fails if it
+    /// can't start, which is logged.
+    fn start(&mut self, purpose: Purpose, cap: Capability, inputs: &Inputs) -> Result<(), ()> {
+        let t = self.command(cap).expect("a capability it has");
+        let timeout = t.timeout;
+        let argv = inputs.argv(&t.argv);
+        let env = inputs.env(&self.env);
+        let start = Start {
+            argv: &argv,
+            env: &env,
+            cwd: self.cwd(),
+            stdout: stdout_of(cap),
+        };
+        match Run::start(&start, &self.inner_loop, RUN_TOKEN) {
+            Ok(run) => {
+                let now = (self.clock)();
+                self.running.push(Running {
+                    purpose,
+                    cap,
+                    run,
+                    due: now + timeout,
+                    timed_out: false,
+                });
+                self.arm_timer(now);
+                Ok(())
+            }
+            Err(e) => {
+                self.cant_run(cap, &argv, &e);
+                Err(())
+            }
+        }
+    }
+
+    fn cant_run(&self, cap: Capability, argv: &[Vec<u8>], e: &std::io::Error) {
+        let program = String::from_utf8_lossy(&argv[0]).into_owned();
+        log_warn!(
+            "{NAME} daemon: {}: {cap}: can't run {program}: {e}",
+            self.name
+        );
+    }
+
+    /// The attach's working directory, if it's still there, else `/`.
+    fn cwd(&self) -> &Path {
+        if self.cwd.is_absolute() && self.cwd.is_dir() {
+            self.cwd.as_path()
+        } else {
+            Path::new("/")
+        }
+    }
+
+    /// Reads the layout, for `events`, unless a read runs already, after
+    /// which it reads it again.
+    fn read_layout(&mut self) {
+        if self.command(Capability::ReportLayout).is_none() {
+            return;
+        }
+        if self.running.iter().any(|r| r.purpose == Purpose::Read) {
+            self.read_again = true;
+            return;
+        }
+        self.read_again = false;
+        let protocol = self.command(Capability::ReportLayout).unwrap().protocol;
+        let inputs = Inputs::bare(Capability::ReportLayout, protocol);
+        if self
+            .start(Purpose::Read, Capability::ReportLayout, &inputs)
+            .is_err()
+        {
+            self.drop_command(Capability::ReportLayout);
+        }
+    }
+
+    /// A read of the layout of its own ended with `outcome`: a layout is
+    /// told, anything else logged.
+    fn on_read(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Done(Answer::Layout(l)) => self.events.push_back(ProviderEvent::Layout(l)),
+            Outcome::Done(_) => {}
+            Outcome::Unsupported => self.drop_command(Capability::ReportLayout),
+            Outcome::Failed(why) => {
+                log_warn!("{NAME} daemon: {}: report_layout failed: {why}", self.name)
+            }
+        }
+        if self.read_again {
+            self.read_layout();
+        }
+    }
+
+    /// `cap` turned out unsupported: it's run no more.
+    fn drop_command(&mut self, cap: Capability) {
+        log_info!("{NAME} daemon: {}: {cap} is unsupported", self.name);
+        self.commands.retain(|c| c.cap != cap);
+    }
+
+    /// Starts `events`, and reads the layout: what it would have told while
+    /// it wasn't running is missed.
+    fn start_events(&mut self) {
+        let t = self.command(Capability::Events).expect("it has events");
+        let inputs = Inputs::bare(Capability::Events, t.protocol);
+        let argv = inputs.argv(&t.argv);
+        let env = inputs.env(&self.env);
+        let start = Start {
+            argv: &argv,
+            env: &env,
+            cwd: self.cwd(),
+            stdout: Stdout::Lines,
+        };
+        match Run::start(&start, &self.inner_loop, RUN_TOKEN) {
+            Ok(run) => {
+                let since = (self.clock)();
+                self.events_run = Some(Events::Running { run, since });
+                self.read_layout();
+            }
+            Err(e) => {
+                self.cant_run(Capability::Events, &argv, &e);
+                self.events_run = None;
+                self.drop_command(Capability::Events);
+            }
+        }
+    }
+
+    /// Reads what `events` printed, and starts it again once its wait after
+    /// it ended is over, at `now`.
+    fn tend_events(&mut self, now: Instant) {
+        match &mut self.events_run {
+            None => {}
+            Some(Events::Waiting { until }) => {
+                if *until <= now {
+                    self.start_events();
+                }
+            }
+            Some(Events::Running { run, since }) => {
+                let since = *since;
+                run.read(&self.inner_loop);
+                let ended = run.ended(&self.inner_loop);
+                let (lines, dropped) = run.take_lines();
+                if dropped > 0 {
+                    log_warn!(
+                        "{NAME} daemon: {}: events: {dropped} line(s) over {} KiB dropped",
+                        self.name,
+                        run::MAX_LINE >> 10
+                    );
+                }
+                if !lines.is_empty() {
+                    for line in &lines {
+                        self.on_events_line(line);
+                    }
+                    self.read_layout();
+                }
+                if let Some(ended) = ended {
+                    self.events_ended(&ended, now.saturating_duration_since(since), now);
+                }
+            }
+        }
+    }
+
+    /// One line `events` printed: a JSON object's `focus` and `closed` are
+    /// told.
+    fn on_events_line(&mut self, line: &[u8]) {
+        let Ok(serde_json::Value::Object(o)) = serde_json::from_slice(line.trim_ascii()) else {
+            return;
+        };
+        let id = |key: &str| {
+            o.get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(TerminalId::from)
+        };
+        if let Some(t) = id("focus") {
+            self.events.push_back(ProviderEvent::Focused(t));
+        }
+        if let Some(t) = id("closed") {
+            self.events.push_back(ProviderEvent::Closed(t));
+        }
+    }
+
+    /// `events` ended as `ended`, at `now`, having run for `ran`: it starts
+    /// again after its wait, unless it's unsupported.
+    fn events_ended(&mut self, ended: &Ended, ran: Duration, now: Instant) {
+        self.log_stderr(Capability::Events, ended);
+        if ended.status.code() == Some(UNSUPPORTED) {
+            self.events_run = None;
+            self.drop_command(Capability::Events);
+            return;
+        }
+        if ran >= EVENTS_STEADY {
+            self.events_wait = EVENTS_FIRST_WAIT;
+        }
+        let wait = self.events_wait;
+        log_warn!(
+            "{NAME} daemon: {}: events ended ({}): starting it again in {} s",
+            self.name,
+            status_text(ended.status),
+            wait.as_secs()
+        );
+        self.events_run = Some(Events::Waiting { until: now + wait });
+        self.events_wait = (wait * 2).min(EVENTS_MOST_WAIT);
+    }
+
     /// Reads the runs' pipes, finishes the runs that ended, and ends those
-    /// past their time.
+    /// past their time; and tends `events`.
     fn tend(&mut self) {
-        let now = Instant::now();
+        let now = (self.clock)();
+        self.tend_events(now);
         let mut i = 0;
         while i < self.running.len() {
             let r = &mut self.running[i];
@@ -221,9 +495,14 @@ impl CommandProvider {
             };
             let r = self.running.remove(i);
             let outcome = self.outcome(r.cap, &ended);
-            if !r.timed_out {
-                self.events
-                    .push_back(ProviderEvent::Answered { id: r.id, outcome });
+            match r.purpose {
+                Purpose::Ask(id) if !r.timed_out => {
+                    self.events
+                        .push_back(ProviderEvent::Answered { id, outcome });
+                }
+                Purpose::Ask(_) => {}
+                Purpose::Read if r.timed_out => self.on_read(Outcome::Failed("timed out".into())),
+                Purpose::Read => self.on_read(outcome),
             }
         }
         self.kills.retain(|&(group, at)| {
@@ -236,15 +515,20 @@ impl CommandProvider {
         self.arm_timer(now);
     }
 
-    /// Sets the timer for the soonest deadline or kill, or for now while an
-    /// answer waits to be given.
+    /// Sets the timer for the soonest deadline, kill or start of `events`,
+    /// or for now while an answer waits to be given.
     fn arm_timer(&self, now: Instant) {
+        let restart = match &self.events_run {
+            Some(Events::Waiting { until }) => Some(*until),
+            _ => None,
+        };
         let soonest = self
             .running
             .iter()
             .filter(|r| !r.timed_out)
             .map(|r| r.due)
             .chain(self.kills.iter().map(|&(_, at)| at))
+            .chain(restart)
             .chain((!self.answers_due.is_empty()).then_some(now))
             .min();
         if let Some(at) = soonest {
@@ -255,6 +539,12 @@ impl CommandProvider {
                 DUE_TOKEN,
             );
         }
+    }
+
+    /// Whether `events` is running, not waiting to start again.
+    #[cfg(test)]
+    fn events_running(&self) -> bool {
+        matches!(self.events_run, Some(Events::Running { .. }))
     }
 }
 
@@ -279,40 +569,8 @@ impl PaneProvider for CommandProvider {
             return self.answer_at_next_ready(id, Outcome::Unsupported);
         };
         let inputs = Inputs::of(&ask, t.protocol);
-        let argv = inputs.argv(&t.argv);
-        let env = inputs.env(&self.env);
-        let timeout = t.timeout;
-        let cwd = if self.cwd.is_absolute() && self.cwd.is_dir() {
-            self.cwd.as_path()
-        } else {
-            Path::new("/")
-        };
-        let start = Start {
-            argv: &argv,
-            env: &env,
-            cwd,
-            reads_id: is_open(cap),
-        };
-        match Run::start(&start, &self.inner_loop, RUN_TOKEN) {
-            Ok(run) => {
-                let now = Instant::now();
-                self.running.push(Running {
-                    id,
-                    cap,
-                    run,
-                    due: now + timeout,
-                    timed_out: false,
-                });
-                self.arm_timer(now);
-            }
-            Err(e) => {
-                let program = String::from_utf8_lossy(&argv[0]).into_owned();
-                log_warn!(
-                    "{NAME} daemon: {}: {cap}: can't run {program}: {e}",
-                    self.name
-                );
-                self.answer_at_next_ready(id, Outcome::Unsupported);
-            }
+        if self.start(Purpose::Ask(id), cap, &inputs).is_err() {
+            self.answer_at_next_ready(id, Outcome::Unsupported);
         }
     }
 
@@ -342,14 +600,27 @@ impl PaneProvider for CommandProvider {
 
 impl Drop for CommandProvider {
     /// Nothing it started outlives it, but what its commands left behind
-    /// on purpose: their groups are killed.
+    /// on purpose: their groups are killed, `events`' too.
     fn drop(&mut self) {
+        if let Some(Events::Running { run, .. }) = self.events_run.take() {
+            run.kill(&self.inner_loop);
+        }
         for r in self.running.drain(..) {
             r.run.kill(&self.inner_loop);
         }
         for (group, _) in self.kills.drain(..) {
             signal_group(group, libc::SIGKILL);
         }
+    }
+}
+
+/// What becomes of a run of `cap`'s stdout.
+fn stdout_of(cap: Capability) -> Stdout {
+    match cap {
+        _ if is_open(cap) => Stdout::FirstLine,
+        Capability::ReportLayout => Stdout::Whole,
+        Capability::Events => Stdout::Lines,
+        _ => Stdout::Null,
     }
 }
 

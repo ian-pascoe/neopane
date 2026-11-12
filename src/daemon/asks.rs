@@ -238,6 +238,19 @@ impl Asks {
         }
     }
 
+    /// Whether an act of `cap` waits its turn, not asked yet.
+    pub(crate) fn waits(&self, cap: Capability) -> bool {
+        let queued = self.queue.iter().map(|(_, a)| a);
+        queued
+            .chain(self.focus_waiting.as_ref().map(|(_, a)| a))
+            .any(|a| a.capability() == cap)
+    }
+
+    /// Whether an act of `cap` is asked and unanswered.
+    pub(crate) fn asked(&self, cap: Capability) -> bool {
+        self.sent.iter().any(|s| s.ask.capability() == cap)
+    }
+
     /// Whether a `place_beside` or `resize` is asked or waiting.
     pub(crate) fn placing(&self) -> bool {
         let asked = self.sent.iter().map(|s| &s.ask);

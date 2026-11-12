@@ -18,8 +18,9 @@ A capability is an argv, run once, without a shell.
 
 - **Working directory:** the choosing attach's, or `/` if it has gone.
 - **stdin** is `/dev/null`. **stdout** is a pipe the daemon reads for the
-  opens (`open`, `open_beside`, `open_float`, `open_tab_page`), and
-  `/dev/null` for every other capability, whose output is ignored.
+  opens (`open`, `open_beside`, `open_float`, `open_tab_page`),
+  `report_layout` and `events`, and `/dev/null` for every other
+  capability, whose output is ignored.
   **stderr** is always a pipe the daemon reads. No other descriptor is
   inherited.
 - **Process group:** its own. Whatever it starts is in that group, unless it
@@ -46,6 +47,10 @@ A capability is an argv, run once, without a shell.
 |---|---|
 | `open`, `open_beside`, `open_float`, `open_tab_page` | 5 s |
 | `close`, `place_beside`, `resize`, `focus`, `focus_direction` | 2 s |
+| `report_layout` | 1 s |
+
+`events` has no timeout: it runs for as long as the pane provider is
+chosen (see [Events](#events)).
 
 ## Exit statuses
 
@@ -66,7 +71,73 @@ The opens print the new terminal's id as the first line of stdout. It is
 trimmed of ASCII whitespace, and is at most 4 KiB, with no NUL, in UTF-8:
 anything else fails the act. An empty first line, or no output, is no id:
 the terminal opened, but the daemon can't close, place or focus it. The
-rest of stdout is ignored, as is all of every other capability's.
+rest of stdout is ignored, as is all of every other capability's but
+`report_layout`'s and `events`'.
+
+### `report_layout`
+
+`report_layout` prints the live layout as one JSON object, at most 1 MiB:
+anything longer, or malformed, fails the act, and the daemon keeps the
+last layout it read.
+
+```json
+{
+  "areas": [
+    {
+      "id": "@1",
+      "terminals": [
+        {"terminal": "%1", "rect": [0, 0, 0.5, 1]},
+        {"terminal": "%2", "rect": [0.5, 0, 0.5, 1]},
+        {"terminal": "%3", "rect": [0.25, 0.25, 0.5, 0.5], "floating": true, "inset": [1, 1, 1, 1]}
+      ]
+    }
+  ],
+  "focus": "%2"
+}
+```
+
+- `areas`: every layout area, such as a window or a tab of the
+  multiplexer, with an `id` of the pane provider's own (a string) and its
+  `terminals`. Neovim's screen is the size of the current pane's area, and
+  each area has its own tabline panes.
+- `terminal`: the id an open printed. Terminals that aren't the daemon's
+  belong too: they take room in their area.
+- `rect`: `[x, y, w, h]`, as fractions of the area, from its top left.
+- `floating` (default `false`): it floats over the area's tiled terminals.
+- `inset` (default `[0, 0, 0, 0]`): cells at each edge of `rect` that aren't
+  the terminal's, such as a floating pane's frame: left, top, right,
+  bottom.
+- `focus` (optional): the terminal the user types into. Without `events`,
+  a change here is how the daemon learns the user moved focus.
+- Unknown fields are ignored.
+
+Without `events`, the daemon runs `report_layout` after each of its own acts
+that worked, and after a terminal attaches, resizes, hangs up or reports
+focus; never on a timer. With `events`, it runs it when `events` says.
+Exit 69 makes every pane its own layout area.
+
+### Events
+
+`events` is long-running: it starts when the pane provider is chosen, and
+is killed, with its process group, when the daemon drops the pane provider
+or ends. Each line it prints, up to 64 KiB (longer lines are dropped), has
+the daemon run `report_layout` again. A line that is a JSON object may also
+say:
+
+```json
+{"focus": "%2"}
+{"closed": "%3"}
+```
+
+- `focus`: the user moved focus to this terminal.
+- `closed`: this terminal closed; only logged for now.
+
+Any other line, such as an empty one, only has the layout read again.
+
+When `events` ends, it starts again after 1 s, then 2 s, doubling up to
+60 s; once it has run for 60 s, the wait is 1 s again. Exit 69, or a
+command that can't start, ends it for good: the daemon then runs
+`report_layout` as it would without `events`.
 
 ## Placeholders
 
@@ -96,10 +167,12 @@ the lower-cased rest of its name in braces. `{terminal}` is
 | `resize` | `terminal` `origin` `direction` `size` `ratio` | sets the terminal's share of the split it makes with `origin`, the terminal across it |
 | `focus` | `terminal` | makes the terminal the one the user types into, wherever it is |
 | `focus_direction` | `direction` `count` | moves focus `count` steps in `direction` |
+| `report_layout` | | prints the live layout (see [`report_layout`](#report_layout)) |
+| `events` | | prints a line whenever the layout or focus changes (see [Events](#events)) |
 
 Without `open_beside`, the daemon runs `open`, then `place_beside` once the
-terminal has printed its id and attached. `find`, `report_layout` and
-`events` are not run yet.
+terminal has printed its id and attached. `find` is not run
+yet.
 
 ## Variables
 

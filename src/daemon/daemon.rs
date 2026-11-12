@@ -625,6 +625,7 @@ impl Daemon {
     /// Pane `id`'s terminal is `size` now, as its helper says.
     fn handle_resize(&mut self, id: u32, size: Size) -> Result<()> {
         log::trace(Point::Resize, u64::from(id));
+        self.read_layout_again();
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.awaiting_size = false;
         let surface = pane.terminal_surface.as_mut().unwrap();
@@ -672,11 +673,16 @@ impl Daemon {
     fn on_read(&mut self, id: u32, bytes: &[u8], at: Instant) -> Result<()> {
         let pane = self.panes.by_id(id).unwrap();
         let (win, terminal) = (pane.neovim_window_handle, pane.terminal.clone());
+        // looked for only where it's used: not on every key Rex's panes read
+        let report = pane
+            .terminal_surface
+            .as_ref()
+            .filter(|_| terminal.is_none() || self.reads_layouts_again())
+            .and_then(|s| s.forwarder.focus_report(bytes));
+        if report == Some(FocusReport::In) {
+            self.read_layout_again();
+        }
         if terminal.is_none() {
-            let report = pane
-                .terminal_surface
-                .as_ref()
-                .and_then(|s| s.forwarder.focus_report(bytes));
             self.watch_focus_in(id, report, at)?;
         }
         let focused_there = terminal.as_ref().is_some_and(|t| self.focus.has_focused(t));
@@ -965,6 +971,7 @@ impl Daemon {
     /// The helper or terminal went away: its terminal hung up. Close its
     /// window, or end if it was the last pane.
     fn pane_gone(&mut self, id: u32) -> Result<()> {
+        self.read_layout_again();
         let i = self.panes.index_of(id).unwrap();
         let p = &mut self.panes.list[i];
         p.closing = Some(Close::TerminalHungUp);
@@ -1615,11 +1622,9 @@ impl Daemon {
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
                 ProviderEvent::Focused(t) => self.on_focused(&t, Instant::now())?,
-                ProviderEvent::Closed(t) => {
-                    if let Some(id) = self.panes.by_terminal(t.as_str()).map(|p| p.id) {
-                        self.pane_gone(id)?;
-                    }
-                }
+                // its pane hangs up by itself; ending a requested pane's
+                // wait on it is for later
+                ProviderEvent::Closed(t) => log_info!("{NAME} daemon: {t} closed"),
                 ProviderEvent::Gone { reason } => self.provider_gone(&reason)?,
             }
         }
@@ -1679,9 +1684,17 @@ impl Daemon {
             if self.asks.settles_placement(&step) {
                 log::trace(Point::Placed, 0);
             }
+            // what an act of its own did is read back; a report asked once a
+            // layout act ended, as they go one at a time, sees it already
+            if let Step::Done(ask, _) = &step
+                && *ask != Ask::ReportLayout
+                && !(ask.capability().is_layout() && self.asks.asked(Capability::ReportLayout))
+            {
+                self.read_layout_again();
+            }
             match step {
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
-                Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_live_layout(l)?,
+                Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_reported(l)?,
                 Step::Done(Ask::Focus { .. }, _) => self.focus.ended(true, Instant::now()),
                 Step::Done(..) => {}
                 Step::FallBack(Ask::Focus { .. }) | Step::Replaced(Ask::Focus { .. }) => {
@@ -1937,11 +1950,45 @@ impl Daemon {
         self.asks.may_ask(p, Capability::ReportLayout)
     }
 
+    /// Whether the pane provider tells its live layouts and focus unasked.
+    fn tells_layouts(&self) -> bool {
+        self.provider
+            .as_ref()
+            .is_some_and(|p| p.seam_ref().capabilities().has(Capability::Events))
+    }
+
+    /// Something may have moved the terminals or focus: a pane provider
+    /// that reports layouts but doesn't tell them is asked for one, unless
+    /// one waits its turn already, which will see it (#86 decision D5).
+    /// Never on a timer.
+    fn read_layout_again(&mut self) {
+        if self.reads_layouts_again() && !self.asks.waits(Capability::ReportLayout) {
+            self.act(Ask::ReportLayout);
+        }
+    }
+
+    /// Whether the pane provider reports layouts but doesn't tell them: it is
+    /// asked again after what may move terminals or focus.
+    fn reads_layouts_again(&self) -> bool {
+        self.reports_layouts() && !self.tells_layouts()
+    }
+
+    /// A report came: the live layout, and, from a pane provider that
+    /// doesn't tell focus unasked, where focus is.
+    fn on_reported(&mut self, l: LiveLayout) -> Result<()> {
+        let current = l.current.clone().filter(|_| !self.tells_layouts());
+        self.on_live_layout(l)?;
+        match current {
+            Some(t) => self.on_focused(&t, Instant::now()),
+            None => Ok(()),
+        }
+    }
+
     /// Pane `id` may have just got the last of its terminal and its terminal
     /// id: an `Unreported` one then waits a second for the live layout to
-    /// report it, and asks for a report of a pane provider that doesn't tell
-    /// them unasked. With no live layout to come, or no id to be found by,
-    /// it is its own layout area at once.
+    /// report it. (What got it there, its attach or its open, has the
+    /// layout read again.) With no live layout to come, or no id to be found
+    /// by, it is its own layout area at once.
     fn wait_for_report(&mut self, id: u32, now: Instant) -> Result<()> {
         let reports = self.reports_layouts();
         let Some(p) = self.panes.by_id_mut(id) else {
@@ -1963,15 +2010,7 @@ impl Daemon {
             return self.refit_to_areas();
         }
         p.report_due = Some(now + Duration::from_millis(u64::from(LAYOUT_WAIT_MS)));
-        self.arm_area_timer()?;
-        let told = self
-            .provider
-            .as_ref()
-            .is_some_and(|p| p.seam_ref().capabilities().has(Capability::Events));
-        if !told {
-            self.act(Ask::ReportLayout);
-        }
-        Ok(())
+        self.arm_area_timer()
     }
 
     /// The area timer fired: a pane still unreported a second after its
@@ -5050,15 +5089,24 @@ mod tests {
     /// A daemon whose pane provider runs `argv` to focus, found on this
     /// process's PATH, watched on its loop.
     fn focusing_by(argv: &[&str]) -> Fixture {
+        commanded_by(&[(Capability::Focus, argv)])
+    }
+
+    /// A daemon whose pane provider runs a command per `(capability, argv)`,
+    /// found on this process's PATH, watched on its loop.
+    fn commanded_by(commands: &[(Capability, &[&str])]) -> Fixture {
         use crate::providers::command::{CapCommand, CommandProvider, Spec};
         let spec = Spec {
             name: "cmd".into(),
-            commands: vec![CapCommand {
-                cap: Capability::Focus,
-                argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
-                timeout: Duration::from_secs(5),
-                protocol: 1,
-            }],
+            commands: commands
+                .iter()
+                .map(|(cap, argv)| CapCommand {
+                    cap: *cap,
+                    argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+                    timeout: Duration::from_secs(5),
+                    protocol: 1,
+                })
+                .collect(),
         };
         let path = std::env::var_os("PATH").unwrap_or_default();
         let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];
@@ -5070,6 +5118,269 @@ mod tests {
             .unwrap();
         fx.d.nvim.ready = true;
         fx
+    }
+
+    /// Runs `fx`'s loop until `done`, for at most 5 s.
+    fn pump_until(fx: &mut Fixture, done: impl Fn(&Daemon) -> bool) {
+        let mut events = [Event::default(); 16];
+        let started = Instant::now();
+        fx.d.after_batch().unwrap();
+        while !done(&fx.d) {
+            assert!(started.elapsed() < Duration::from_secs(5), "not done");
+            // a timer of the test's own, so it looks again
+            fx.d.event_loop.add_timer(999, 100, usize::MAX).unwrap();
+            let n = fx.d.event_loop.wait(&mut events).unwrap().len();
+            for &e in events[..n].iter().filter(|e| e.token != usize::MAX) {
+                fx.d.handle(e).unwrap();
+            }
+            fx.d.after_batch().unwrap();
+        }
+    }
+
+    /// A file of `sh` a test's command runs, rewritten between its acts.
+    struct Script(std::path::PathBuf);
+
+    impl Script {
+        fn new(tag: &str) -> Script {
+            let dir = std::env::temp_dir().join(format!(
+                "{NAME}-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Script(dir.join("script"))
+        }
+
+        fn set(&self, text: &str) {
+            std::fs::write(&self.0, text).unwrap();
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for Script {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
+
+    /// Asks `fx`'s pane provider for a report, and runs the loop until it
+    /// is done with it.
+    fn report(fx: &mut Fixture) {
+        fx.d.act(Ask::ReportLayout);
+        pump_until(fx, |d| d.asks.waiting() == 0);
+    }
+
+    #[test]
+    fn a_report_commands_two_areas_set_the_panes_areas_and_tabline_panes() {
+        let script = Script::new("two-areas");
+        script.set(
+            r#"echo '{"areas":[
+                {"id":"w1","terminals":[
+                    {"terminal":"t1","rect":[0,0,0.5,1]},{"terminal":"t2","rect":[0.5,0,0.5,1]}]},
+                {"id":"w2","terminals":[
+                    {"terminal":"t3","rect":[0,0,0.5,0.5]},{"terminal":"t9","rect":[0,0.5,1,0.5]}]}]}'"#,
+        );
+        let fx = commanded_by(&[(Capability::ReportLayout, &["sh", script.path()])]);
+        let mut fx = TablineFixture::on(fx);
+        fx.d().nvim.ready = true;
+        let ids: Vec<u32> = [(0, 100), (1, 100), (2, 60)]
+            .into_iter()
+            .map(|(slot, cols)| fx.add(slot, cols, Area::Unreported))
+            .collect();
+        for (n, &id) in ids.iter().enumerate() {
+            fx.d().panes.by_id_mut(id).unwrap().terminal =
+                Some(TerminalId::from(format!("t{}", n + 1).as_str()));
+        }
+        fx.d().nvim.current_win = 1000;
+        report(&mut fx.fx);
+        let area = |fx: &mut TablineFixture, id: u32| fx.d().panes.by_id(id).unwrap().area.clone();
+        assert_eq!(live("w1", [0.5, 0.0, 0.5, 1.0]), area(&mut fx, ids[1]));
+        assert_eq!(live("w2", [0.0, 0.0, 0.5, 0.5]), area(&mut fx, ids[2]));
+        // each area's tabline starts at its left
+        let starts: Vec<Option<u32>> = (0..3).map(|i| fx.start(i)).collect();
+        assert_eq!(vec![Some(0), Some(100), Some(0)], starts);
+    }
+
+    #[test]
+    fn a_malformed_report_keeps_the_last_layout_and_exit_69_makes_every_pane_its_own_area() {
+        let script = Script::new("malformed");
+        let mut fx = commanded_by(&[(Capability::ReportLayout, &["sh", script.path()])]);
+        fx.d.nvim.ready = true;
+        let id = focus_pane(&mut fx, 1, 1000, Some("t1"));
+        fx.d.panes.by_id_mut(id).unwrap().area = Area::Unreported;
+        let rect = [0.0, 0.0, 0.5, 1.0];
+        script.set(
+            r#"echo '{"areas":[{"id":"w","terminals":[{"terminal":"t1","rect":[0,0,0.5,1]}]}]}'"#,
+        );
+        report(&mut fx);
+        assert_eq!(live("w", rect), area_of(&fx, id));
+
+        script.set(r#"echo '{"areas":[{"id":"w","terminals":'"#);
+        report(&mut fx);
+        assert_eq!(live("w", rect), area_of(&fx, id));
+        assert!(fx.d.live_layout.is_some());
+
+        script.set("exit 69");
+        report(&mut fx);
+        assert_eq!(Area::Own, area_of(&fx, id));
+        assert!(fx.d.live_layout.is_none());
+    }
+
+    #[test]
+    fn an_events_focus_line_makes_its_terminals_pane_current() {
+        let script = Script::new("events-focus");
+        // the first only tells where focus starts
+        script.set(r#"echo '{"focus":"t1"}'; echo '{"focus":"t2"}'; exec sleep 30"#);
+        let mut fx = commanded_by(&[(Capability::Events, &["sh", script.path()])]);
+        focus_pane(&mut fx, 1, 1000, Some("t1"));
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
+        fx.d.nvim.current_win = 1000;
+        pump_until(&mut fx, |d| d.nvim.current_win == 1001);
+    }
+
+    /// A daemon whose fake pane provider can focus and report layouts, but
+    /// doesn't tell them: two panes, of windows 1000 and 1001, show `t1`
+    /// and `t2`, the first current. The second's id.
+    fn reporting_fixture() -> (TablineFixture, u32) {
+        let mut f = FakeProvider::opening();
+        f.caps.insert(Capability::ReportLayout);
+        f.caps.insert(Capability::Focus);
+        let mut fx = TablineFixture::on(with_provider(Some(Held::Fake(f))));
+        fx.d().nvim.ready = true;
+        let mut b = 0;
+        for slot in 0..2 {
+            draw_external(fx.d(), slot + 2, 1000 + i64::from(slot), 80, 23);
+            b = fx.add(slot, 80, Area::Own);
+            fx.d().panes.by_id_mut(b).unwrap().terminal =
+                Some(TerminalId::from(format!("t{}", slot + 1).as_str()));
+        }
+        fx.d().nvim.current_win = 1000;
+        (fx, b)
+    }
+
+    /// How many reports the fake was asked for.
+    fn reports_asked(fx: &mut TablineFixture) -> usize {
+        fake(fx.d())
+            .asked()
+            .iter()
+            .filter(|a| **a == Ask::ReportLayout)
+            .count()
+    }
+
+    /// The last ask running is answered with `outcome`.
+    fn answer_last(fx: &mut TablineFixture, outcome: Outcome) {
+        let f = fake(fx.d());
+        f.answer(f.last_id(), outcome);
+        fx.d().drain_provider().unwrap();
+    }
+
+    #[test]
+    fn without_events_the_layout_is_read_again_after_an_act_that_worked_one_waiting_at_most() {
+        let (mut fx, _) = reporting_fixture();
+        fx.d().act(Ask::Close {
+            terminal: TerminalId::from("t9"),
+        });
+        assert_eq!(0, reports_asked(&mut fx));
+        answer_last(&mut fx, Outcome::Done(Answer::Nothing));
+        assert_eq!(1, reports_asked(&mut fx));
+        // more while it runs: one more report waits, for them all
+        for _ in 0..3 {
+            fx.d().act(Ask::Close {
+                terminal: TerminalId::from("t9"),
+            });
+        }
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        for _ in 0..3 {
+            answer_last(&mut fx, Outcome::Done(Answer::Nothing));
+        }
+        assert_eq!(2, reports_asked(&mut fx));
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        // a report read is no act to read again after
+        assert_eq!(2, reports_asked(&mut fx));
+        assert_eq!(0, fx.d().asks.waiting());
+    }
+
+    #[test]
+    fn without_events_a_resize_a_focus_in_or_a_hang_up_reads_the_layout_again() {
+        let (mut fx, b) = reporting_fixture();
+        fx.d()
+            .handle_resize(
+                b,
+                crate::attach::Size {
+                    cols: 70,
+                    rows: 20,
+                    px: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(1, reports_asked(&mut fx));
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        fx.d().on_read(b, b"\x1b[I", Instant::now()).unwrap();
+        assert_eq!(2, reports_asked(&mut fx));
+        answer_last(
+            &mut fx,
+            Outcome::Done(Answer::Layout(LiveLayout::default())),
+        );
+        fx.d().pane_gone(b).unwrap();
+        assert_eq!(3, reports_asked(&mut fx));
+    }
+
+    #[test]
+    fn with_events_no_act_resize_or_focus_in_asks_for_a_report() {
+        let (mut fx, b) = reporting_fixture();
+        fake(fx.d()).caps.insert(Capability::Events);
+        fx.d().act(Ask::Close {
+            terminal: TerminalId::from("t9"),
+        });
+        answer_last(&mut fx, Outcome::Done(Answer::Nothing));
+        fx.d()
+            .handle_resize(
+                b,
+                crate::attach::Size {
+                    cols: 70,
+                    rows: 20,
+                    px: None,
+                },
+            )
+            .unwrap();
+        fx.d().on_read(b, b"\x1b[I", Instant::now()).unwrap();
+        assert_eq!(0, reports_asked(&mut fx));
+    }
+
+    #[test]
+    fn without_events_a_reports_focus_moves_the_current_pane() {
+        let (mut fx, _) = reporting_fixture();
+        let with_focus = |t: &str| LiveLayout {
+            current: Some(TerminalId::from(t)),
+            ..LiveLayout::default()
+        };
+        // the first only tells where focus starts
+        fx.d().act(Ask::ReportLayout);
+        answer_last(&mut fx, Outcome::Done(Answer::Layout(with_focus("t1"))));
+        assert_eq!(1000, fx.d().nvim.current_win);
+        fx.d().act(Ask::ReportLayout);
+        answer_last(&mut fx, Outcome::Done(Answer::Layout(with_focus("t2"))));
+        assert_eq!(1001, fx.d().nvim.current_win);
+    }
+
+    #[test]
+    fn a_closed_terminal_is_only_logged_for_now() {
+        let (mut fx, _) = reporting_fixture();
+        fake(fx.d()).push(ProviderEvent::Closed(TerminalId::from("t2")));
+        fx.d().drain_provider().unwrap();
+        assert!(fx.d().panes.by_terminal("t2").is_some());
     }
 
     #[test]
