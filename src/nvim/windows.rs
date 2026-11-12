@@ -154,6 +154,29 @@ pub(crate) fn parse_windows(result: &mut Decoder<'_>) -> rpc::Result<(i64, Vec<i
     Ok((current, wins))
 }
 
+/// Tells Neovim the windows panes show: `<C-w>w`, `<C-w>W` and `<C-w>p`
+/// step only through those, and floats.
+pub(crate) fn panes_show(nvim: &mut Nvim, wins: &[i64]) {
+    nvim.exec_lua(&format!("{NAME}.panes_show(...)"), 1);
+    write_wins(nvim, wins);
+}
+
+fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
+    let wr = nvim.writer();
+    msgpack::write_array_header(wr, wins.len() as u32);
+    for &w in wins {
+        msgpack::write_int(wr, w);
+    }
+}
+
+/// Tells Neovim the editor floats of the float groups with float group panes:
+/// each, with the floats hanging from it, moves into whichever tab page is
+/// current, and still belongs to the one it opened in.
+pub(crate) fn carry(nvim: &mut Nvim, tops: &[i64]) {
+    nvim.exec_lua(&format!("{NAME}.carry(...)"), 1);
+    write_wins(nvim, tops);
+}
+
 /// Asks for our channel id: the response to the returned id starts with it.
 #[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {
@@ -3804,6 +3827,128 @@ mod tests {
         h.focus_pane(c);
         assert_eq!("2", h.tabpagenr());
         assert_eq!("TabLeave DirChanged TabEnter", h.fired());
+    }
+
+    #[test]
+    fn c_w_w_and_c_w_p_step_only_through_windows_panes_show() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let first = h.wins[0];
+        let anchor = h.wins[1];
+        let split = h.adopt_split();
+        // external, as the daemon makes every window, but in no pane yet
+        h.sync(&format!("vim.cmd('split')\n{}", adopt_all()));
+        let unshown: i64 = h
+            .eval_str("return tostring(vim.api.nvim_get_current_win())")
+            .parse()
+            .unwrap();
+        panes_show(&mut h.nvim, &[first, split]);
+        h.focus_pane(split);
+        h.notes.clear();
+
+        // each goes straight to its window, as `<C-w>w` typed fast does
+        for (keys, want) in [
+            ("<C-w>w", first),
+            ("<C-w><C-w>", split),
+            ("<C-w>W", first),
+            ("<C-w>W", split),
+            ("<C-w>p", first),
+            ("<C-w><C-p>", split),
+        ] {
+            h.input(keys);
+            h.want = want;
+            assert!(h.until(Harness::is_current), "{keys}");
+        }
+        h.barrier();
+        for n in &h.notes {
+            assert!(
+                *n != Note::Current(unshown) && *n != Note::Current(anchor),
+                "{n:?}"
+            );
+        }
+    }
+
+    impl Harness {
+        /// Opens a picker in the current tab page, an editor float with one
+        /// hanging from it, and one more float that takes no focus. Returns
+        /// them.
+        fn open_picker(&mut self) -> [i64; 3] {
+            let ids = self.eval_str(
+                "local buf = vim.api.nvim_create_buf(false, true)\n\
+                 local top = vim.api.nvim_open_win(buf, false, { relative = 'editor', row = 1, col = 1, width = 10, height = 3 })\n\
+                 local kid = vim.api.nvim_open_win(buf, false, { relative = 'win', win = top, row = 1, col = 1, width = 4, height = 1 })\n\
+                 local other = vim.api.nvim_open_win(buf, false, { relative = 'editor', row = 6, col = 1, width = 4, height = 1, focusable = false })\n\
+                 return top .. ' ' .. kid .. ' ' .. other",
+            );
+            let ids: Vec<i64> = ids.split(' ').map(|s| s.parse().unwrap()).collect();
+            [ids[0], ids[1], ids[2]]
+        }
+
+        /// The tab page number each of `wins` sits in, space-separated; 0 for
+        /// one that closed.
+        fn tab_numbers(&mut self, wins: &[i64]) -> String {
+            let list: Vec<String> = wins.iter().map(i64::to_string).collect();
+            self.eval_str(&format!(
+                "local out = {{}}\n\
+                 for _, w in ipairs({{ {} }}) do\n\
+                 \x20 out[#out + 1] = vim.api.nvim_win_is_valid(w) and vim.api.nvim_tabpage_get_number(vim.api.nvim_win_get_tabpage(w)) or 0\n\
+                 end\n\
+                 return table.concat(out, ' ')",
+                list.join(", ")
+            ))
+        }
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_move_into_the_tab_page_entered_and_belong_to_their_own() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.sync("vim.o.showtabline = 2");
+        h.focus_pane(a);
+        let [top, kid, other] = h.open_picker();
+        carry(&mut h.nvim, &[top]);
+        h.record(&["WinClosed", "WinNew"]);
+
+        // the picker's floats come along, still drawn; the other float stays
+        // hidden in its tab page
+        h.focus_pane(c);
+        assert_eq!("2 2 1", h.tab_numbers(&[top, kid, other]));
+        assert_eq!("", h.fired());
+        h.barrier();
+        assert_eq!(Some(WinKind::Float), h.kind(top));
+        assert_eq!(Some(WinKind::Float), h.kind(kid));
+        // the first tab page's label still counts them: its two windows and
+        // the picker's two
+        h.until_tabline_starts_with(" 4 ");
+
+        // and back
+        h.focus_pane(a);
+        assert_eq!("1 1 1", h.tab_numbers(&[top, kid, other]));
+
+        // the tab page they sit in closes: they go back to their own first
+        h.focus_pane(c);
+        h.input(":tabclose<CR>");
+        h.barrier();
+        assert_eq!("1 1 1", h.tab_numbers(&[top, kid, other]));
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_close_with_their_tab_page_wherever_they_sit() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        let [top, kid, _] = h.open_picker();
+        carry(&mut h.nvim, &[top]);
+        h.focus_pane(a);
+        assert_eq!("1 1", h.tab_numbers(&[top, kid]));
+        h.input(":tabclose 2<CR>");
+        h.barrier();
+        h.sync("");
+        assert_eq!("0 0", h.tab_numbers(&[top, kid]));
     }
 
     #[test]
