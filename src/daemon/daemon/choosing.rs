@@ -93,9 +93,11 @@ impl Daemon {
         }
         self.provider = Some(held);
         // #115: a newly chosen pane provider checks reach for every attached
-        // pane, so these rejoin; until then their windows stay theirs
+        // pane, so these rejoin (ADR 0007); until then they are out of
+        // reach, and their windows stay theirs
         for q in self.panes.list.iter_mut() {
-            if q.is_self_attached() && q.id != id {
+            // those waiting their turn are checked as it comes
+            if q.is_self_attached() && q.id != id && !self.waiting_choice.contains(&q.id) {
                 q.reach = Reach::Out;
             }
         }
@@ -127,8 +129,10 @@ impl Daemon {
         if let Some(p) = self.panes.by_id_mut(c.id) {
             p.reach = Reach::Out;
         }
+        // stalled anywhere: connecting, `session.attach` or `find`
         let secs = crate::util::seconds(crate::config::TIME);
-        self.refuse_choice(&format!("timed out after {secs} s"))
+        let what = format!("no answer within {secs} s");
+        self.refuse_choice(&what)
     }
 
     /// Self-attached pane `id` came with a pane provider there: out of reach
@@ -222,10 +226,7 @@ impl Daemon {
     /// dropped, with a warning.
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
         self.choosing = None;
-        let line = format!(
-            "{}: find didn't confirm this terminal: {why}; no pane provider",
-            self.provider_name()
-        );
+        let line = format!("{}: {why}; no pane provider", self.provider_name());
         self.warn_when_ready(format!("{NAME}: {line}"));
         self.provider_gone(&line)?;
         self.reach_decided()
@@ -267,7 +268,7 @@ impl Daemon {
             log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
         }
         if self.is_choosing(pane) {
-            return self.refuse_choice(why);
+            return self.refuse_choice(&format!("find didn't confirm this terminal: {why}"));
         }
         self.reach_decided()
     }

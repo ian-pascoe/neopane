@@ -422,22 +422,24 @@ fn a_self_attach_during_a_refused_choice_chooses_again() {
 #[test]
 fn a_choice_rex_answers_too_slowly_for_is_refused_three_seconds_from_its_start() {
     let (mut fx, mut rex) = fixture_with_rex();
-    let started = Instant::now();
+    // the choice starts between these
+    let before = Instant::now();
     attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    let after = Instant::now();
     let _ = sent_to_nvim(&mut fx);
     // Rex upgrades the connection, then says nothing more
     answer_upgrade(&mut rex.theirs);
     ready(&mut fx.d);
-    fx.d.time_out_choice(started + Duration::from_millis(2900))
+    fx.d.time_out_choice(before + Duration::from_millis(2900))
         .unwrap();
     assert!(fx.d.provider.is_some());
-    fx.d.time_out_choice(started + Duration::from_secs(3) + Duration::from_millis(50))
+    fx.d.time_out_choice(after + Duration::from_secs(4))
         .unwrap();
     assert!(fx.d.provider.is_none());
     assert_eq!(None, choosing_id(&fx.d));
     let warned = sent_to_nvim(&mut fx);
     assert!(
-        warned.contains("timed out after 3 s; no pane provider"),
+        warned.contains("rex: no answer within 3 s; no pane provider"),
         "{warned:?}"
     );
 }
@@ -475,4 +477,59 @@ fn connecting_counts_against_the_choice_and_a_find_queued_behind_a_layout_act_do
         .unwrap();
     assert!(fx.d.provider.is_none());
     assert_eq!(Reach::Out, fx.d.panes.by_id(id).unwrap().reach);
+}
+
+#[test]
+fn a_waiting_self_attach_that_hangs_up_is_never_asked_about() {
+    let (mut fx, mut rexes) = fixture_with_rexes(1);
+    let (_first, _h1, _p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    fake_ttys(&mut fx.d);
+    let (second, _h2, _p2) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    fx.d.pane_gone(second).unwrap();
+    let rex = &mut rexes[0];
+    let find = rex.attach(&mut fx.d);
+    rex.reply(&mut fx.d, &find["id"], child());
+    assert_eq!(None, choosing_id(&fx.d));
+    assert!(fx.d.waiting_choice.is_empty());
+    // no find for it, of whatever else Rex is sent
+    drop(fx);
+    let mut rest = Vec::new();
+    rex.theirs.read_to_end(&mut rest).unwrap();
+    let sent = client_frames(&rest);
+    assert!(
+        sent.iter().all(|f| !f.contains("terminal.process")),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn rex_gone_mid_choice_lets_the_waiting_self_attach_choose() {
+    let (mut fx, mut rexes) = fixture_with_rexes(2);
+    let (_first, _h1, _p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    let (second, _h2, _p2) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    let _ = sent_to_nvim(&mut fx);
+    // Rex hangs up before it upgrades the connection
+    let first_rex = rexes.remove(0);
+    drop(first_rex);
+    ready(&mut fx.d);
+    assert_eq!(Some(second), choosing_id(&fx.d));
+    assert!(sent_to_nvim(&mut fx).contains("no pane provider"));
+    let find = rexes[0].attach(&mut fx.d);
+    assert_eq!(BLOCK, find["payload"]["block_id"]);
+}
+
+#[test]
+fn self_attaches_waiting_for_a_refused_choice_take_their_turns_in_order() {
+    let (mut fx, mut rexes) = fixture_with_rexes(2);
+    let (_first, _h1, _p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    fake_ttys(&mut fx.d);
+    TTY.set(u64::MAX);
+    let (second, _h2, _p2) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    let (third, _h3, _p3) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    let find = rexes[0].attach(&mut fx.d);
+    rexes[0].reply(&mut fx.d, &find["id"], child());
+    // the second chooses; the third waits for that choice
+    assert_eq!(Some(second), choosing_id(&fx.d));
+    assert_eq!(vec![third], fx.d.waiting_choice);
+    assert_eq!(Reach::Finding, fx.d.panes.by_id(third).unwrap().reach);
 }
