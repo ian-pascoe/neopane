@@ -647,21 +647,13 @@ function M.windows()
   return out
 end
 
--- `win` and its home tab page become current
-local function enter(win)
-  local tab = home[win]
-  if api.nvim_win_get_config(win).external and tab and api.nvim_tabpage_is_valid(tab) then
-    api.nvim_set_current_tabpage(tab)
-  end
-  api.nvim_set_current_win(win)
-end
-
 --- A self-attached pane takes `win`, an unshown window, at `w` x `h`: it
 --- becomes external and current, its home tab page too. Returns it, or 0 if
 --- it's gone.
 function M.show(win, w, h)
   if not shown(win) then return 0 end
-  enter(win)
+  -- `win` and its home tab page become current, carried floats moving in
+  M.go(win)
   if api.nvim_win_get_config(win).external then
     M.size(win, w, h)
   else
