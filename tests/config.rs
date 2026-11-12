@@ -16,10 +16,10 @@ use neorex::config::{
 };
 use neorex::name::NAME;
 
-/// The binary Cargo built beside this test.
+/// The binary Cargo built for this test. Cargo names it, as Rust 1.100's
+/// build directory no longer has it beside the test's own binary.
 fn exe() -> PathBuf {
-    let test = std::env::current_exe().unwrap();
-    test.parent().unwrap().parent().unwrap().join(NAME)
+    PathBuf::from(env!("CARGO_BIN_EXE_neorex"))
 }
 
 /// A fresh directory for one fixture.
