@@ -52,6 +52,8 @@ moves into whichever tab page is current (#90).
   (tmux's is `switch-client`: `select-pane` doesn't change window). Without
   `focus`, the next key from the old terminal takes the current pane back
   (ADR 0006). An anchor, or another tab page's window, never stays current.
+  Preferring a window in the current pane comes with a pane showing several
+  tab pages (#118); until then it is the last current window anywhere.
 - A window made current inside Neovim (`<C-w>w`, `:wincmd p`, a plugin's
   `nvim_set_current_win`) whose home tab page isn't current switches tab
   page, as plain Neovim does for a window in another tab page. `<C-w>w`,
@@ -73,9 +75,13 @@ moves into whichever tab page is current (#90).
   page it sits in closes. Neovim allows no move as a tab page starts to
   close (TabClosedPre gives E1312), so it's moved back as the first of that
   tab page's windows closes, before the rest of its floats do; a close that
-  then fails brings it back. The exception is a float of it that is the
-  current window: Neovim closes that one first, as it closes the current
-  float of any tab page that closes, and the rest of the group goes home.
+  then fails should bring it back (untested: a failing `:tabclose` of a
+  tab page holding a modified external window hangs Neovim). The
+  exception is a float of it that is the current window: Neovim closes
+  that one first, as it closes the current float of any tab page that
+  closes, and the rest of the group goes home. A close that fires no
+  WinClosed or TabClosedPre, as `:noautocmd tabclose` or an
+  `'eventignore'` holding them, closes the whole group with the tab page.
   Where Neovim can't move floats between tab pages, its float group pane
   keeps its last frame until its tab page is current again, and a key or
   click in it makes it current.
