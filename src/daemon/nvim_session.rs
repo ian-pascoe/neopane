@@ -41,6 +41,13 @@ pub(crate) struct NvimSession {
     /// off. Neovim never reuses a handle, so closed ones do no harm.
     pub entered_floats: [i64; MAX_ENTERED],
     pub entered_len: u8,
+    /// The editor floats of the float group panes' groups, as Neovim was
+    /// last told: they move into whichever tab page is current.
+    pub carried: Vec<i64>,
+    /// The windows panes show, sorted, as Neovim was last told, and room for
+    /// the next list.
+    pub shown: Vec<i64>,
+    shown_next: Vec<i64>,
 }
 
 impl NvimSession {
@@ -60,6 +67,9 @@ impl NvimSession {
             tabline_width: None,
             entered_floats: [0; MAX_ENTERED],
             entered_len: 0,
+            carried: Vec::new(),
+            shown: Vec::new(),
+            shown_next: Vec::new(),
         }
     }
 
@@ -253,6 +263,33 @@ impl NvimSession {
         self.client.ui_try_resize(size[0], size[1])
     }
 
+    /// Tells Neovim `tops`, the editor floats of the float group panes'
+    /// groups, if they changed: each, with the floats hanging from it, moves
+    /// into whichever tab page is current. The caller flushes.
+    pub(crate) fn tell_carried(&mut self, tops: Vec<i64>) {
+        if !self.ready || tops == self.carried {
+            return;
+        }
+        windows::carry(&mut self.client, &tops);
+        self.carried = tops;
+    }
+
+    /// Tells Neovim the windows panes show, which `fill` adds to a list, if
+    /// they changed: `<C-w>w` steps only through those. The caller flushes.
+    pub(crate) fn tell_panes_show(&mut self, fill: impl FnOnce(&mut Vec<i64>)) {
+        let mut next = std::mem::take(&mut self.shown_next);
+        next.clear();
+        fill(&mut next);
+        next.sort_unstable();
+        next.dedup();
+        if !self.ready || next == self.shown {
+            self.shown_next = next;
+            return;
+        }
+        windows::panes_show(&mut self.client, &next);
+        self.shown_next = std::mem::replace(&mut self.shown, next);
+    }
+
     /// Tells Neovim the tabline width `cols` if it changed, so its tabline
     /// fits the tabline panes. The caller flushes.
     pub(crate) fn tell_tabline_width(&mut self, cols: Option<u32>) {
@@ -268,6 +305,7 @@ impl NvimSession {
 mod tests {
     use super::*;
     use crate::daemon::focus_gate::{Item, is_blocking};
+    use crate::name::NAME;
     use crate::nvim::forwarder::Forwarder;
     use crate::nvim::msgpack;
     use crate::nvim::nvim::{for_test_on, spawn_for_test_with};
@@ -342,6 +380,11 @@ mod tests {
                 .client
                 .ui_attach(40, 10, UiOptions::default())
                 .unwrap();
+            // windows.lua's go, which the session's switches call: these
+            // windows have no tab pages to switch
+            let _ = r.lua(&format!(
+                "_G.{NAME} = {{ go = vim.api.nvim_set_current_win }} return ''"
+            ));
             let ids = r.lua(
                 "vim.bo.swapfile = false -- killed with changes, Neovim leaves swap files behind\n\
                  vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'one' })\n\

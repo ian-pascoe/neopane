@@ -467,6 +467,7 @@ impl Daemon {
     fn after_batch(&mut self) -> Result<()> {
         self.send_focus(false)?;
         self.sync_tabline_width()?;
+        self.tell_panes_show()?;
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
         if self.nvim.watch_switch() {
@@ -537,6 +538,23 @@ impl Daemon {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
         Ok(())
+    }
+
+    /// Tells Neovim the windows panes show, when they changed.
+    fn tell_panes_show(&mut self) -> Result<()> {
+        let panes = &self.panes;
+        self.nvim.tell_panes_show(|wins| {
+            for p in &panes.list {
+                if p.layer.is_some() || p.closing.is_some() {
+                    continue;
+                }
+                match &p.layout {
+                    Some(l) => l.add_windows(wins),
+                    None => wins.extend(p.neovim_window_handle),
+                }
+            }
+        });
+        Ok(self.nvim.client.flush()?)
     }
 
     /// Tells Neovim the tabline width when it changed. While the current
@@ -1747,6 +1765,15 @@ impl Daemon {
         for ask in self.floating().reconcile_layers(open_float, origin) {
             self.act(ask);
         }
+        // their floats move into whichever tab page is current
+        let mut tops = Vec::new();
+        for p in &self.panes.list {
+            if let Some(l) = &p.layer {
+                let wins = l.group.top_grids().iter();
+                tops.extend(wins.filter_map(|&g| self.grids.win_on(g)).map(|w| w.win));
+            }
+        }
+        self.nvim.tell_carried(tops);
     }
 
     fn on_provider(&mut self, token: usize) -> Result<()> {
@@ -2863,6 +2890,7 @@ mod tests {
 
     mod fallback;
     mod in_layout;
+    mod tabs;
 
     /// A daemon with no Neovim behind it, only a socket that nothing
     /// answers, and a fake pane provider that can open and close.
@@ -6125,12 +6153,12 @@ mod tests {
             sent.contains("nvim_input") && sent.contains('x'),
             "{sent:?}"
         );
-        assert!(!sent.contains("nvim_set_current_win"), "{sent:?}");
+        assert!(!sent.contains(&format!("{NAME}.go")), "{sent:?}");
         assert_eq!(1001, fx.d.nvim.current_win);
         assert_eq!(vec![focus_ask("t2")], fake(&mut fx.d).asked());
         // a click is no echo: it moves at once
         fx.d.on_read(a, b"\x1b[<0;5;5M", now).unwrap();
-        assert!(sent_to_nvim(&mut fx).contains("nvim_set_current_win"));
+        assert!(sent_to_nvim(&mut fx).contains(&format!("{NAME}.go")));
         assert_eq!(1000, fx.d.nvim.current_win);
         focus_done(&mut fx);
         assert_eq!(
