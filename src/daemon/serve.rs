@@ -823,6 +823,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
 
+    mod unattached;
+
     /// For `the_daemon_reads_the_transport_variable_as_it_starts`, in a
     /// process of its own, whose environment that test sets: prints the
     /// transport the daemon's config takes.

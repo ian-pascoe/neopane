@@ -170,7 +170,9 @@ impl Daemon {
         self.unshown_awaiting_origin.retain(|&(w, _)| w != win);
         self.wait_for_report(id, Instant::now())?;
         self.size_window(id);
-        Ok(())
+        // a window already that size, as one an unattached daemon kept,
+        // brings no redraw: it's drawn now
+        self.draw()
     }
 
     /// Neovim's current window is `current` and `wins` the windows a pane

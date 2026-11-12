@@ -271,6 +271,12 @@ impl Claimed {
         self.dir.join(LOG).to_string_lossy().into_owned()
     }
 
+    /// The `unsaved` file's path, for tests that check it.
+    #[cfg(test)]
+    pub(crate) fn unsaved_path(&self) -> PathBuf {
+        self.dir.join(UNSAVED)
+    }
+
     /// The daemon's socket file, for tests that check it.
     #[cfg(test)]
     pub(crate) fn sock_path(&self) -> PathBuf {
