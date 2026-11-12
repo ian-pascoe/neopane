@@ -102,6 +102,9 @@ pub(crate) struct RexProvider {
     pub(crate) tty_of_pid: find::TtyOfPid,
     /// A `find` trusted `REX_BLOCK` unproved, which is logged once.
     trusted: bool,
+    /// What was asked before Rex attached us to its session, asked once it
+    /// has: Rex runs some requests out of order.
+    deferred: Vec<(AskId, Ask)>,
 }
 
 impl RexProvider {
@@ -118,7 +121,31 @@ impl RexProvider {
             finding: Vec::new(),
             tty_of_pid: find::tty_of_pid,
             trusted: false,
+            deferred: Vec::new(),
         }
+    }
+
+    /// Rex's pane provider on `stream`, a new connection to the Rex server,
+    /// for session `session_id`: connecting, then attaching to the session,
+    /// as Rex answers, without blocking. What is asked meanwhile waits.
+    pub(crate) fn connecting(
+        stream: std::os::unix::net::UnixStream,
+        session_id: &str,
+    ) -> Result<RexProvider, client::ClientError> {
+        let client = client::Client::start(stream, NAME)?;
+        let mut session = Session::new(client, session_id.to_string());
+        session.attach()?;
+        Ok(RexProvider::new(session))
+    }
+
+    /// Whether bytes wait for room on Rex's socket.
+    pub(crate) fn wants_write(&self) -> bool {
+        self.session.client.wants_write()
+    }
+
+    /// Whether asks wait for Rex to attach us, and it has.
+    fn may_ask_deferred(&self) -> bool {
+        !self.deferred.is_empty() && self.session.conn == Conn::Attached
     }
 
     /// Sends what `ask` asks of Rex. False if it can't be asked of Rex.
@@ -407,6 +434,7 @@ impl RexProvider {
             return;
         }
         self.gone = true;
+        self.deferred.clear();
         self.session.conn = Conn::Closed;
         let reason = self
             .session
@@ -430,6 +458,10 @@ impl PaneProvider for RexProvider {
         if self.gone {
             return;
         }
+        if self.session.conn == Conn::Attaching {
+            self.deferred.push((id, ask));
+            return;
+        }
         match self.send(id.0, ask) {
             Ok(true) => {}
             // not built in
@@ -439,6 +471,7 @@ impl PaneProvider for RexProvider {
     }
 
     fn on_ready(&mut self, _token: usize) {
+        self.session.flush();
         self.session.read();
     }
 
@@ -450,12 +483,19 @@ impl PaneProvider for RexProvider {
             if self.gone {
                 return None;
             }
+            if self.may_ask_deferred() {
+                for (id, ask) in std::mem::take(&mut self.deferred) {
+                    self.ask(id, ask);
+                }
+                continue;
+            }
             match self.session.next() {
                 Ok(Some(u)) => {
                     if self.on_update(u).is_err() {
                         self.go();
                     }
                 }
+                Ok(None) if self.may_ask_deferred() => {}
                 Ok(None) => return None,
                 Err(_) => self.go(),
             }

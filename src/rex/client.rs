@@ -64,6 +64,11 @@ impl From<std::io::Error> for ClientError {
 }
 
 /// A Rex control connection.
+///
+/// It connects without blocking (`start`): the upgrade, hello and welcome
+/// are steps taken as Rex answers, in `read`. Every write goes through an
+/// outgoing buffer, sent as the socket takes it (`flush`); requests made
+/// before the welcome are held until it comes.
 pub(crate) struct Client {
     pub stream: UnixStream,
     pub ws: WebSocket,
@@ -77,6 +82,24 @@ pub(crate) struct Client {
     pub frame: Vec<u8>,
     /// Upgraded, and no close frame sent yet.
     pub open: bool,
+    /// Bytes the socket hasn't taken yet.
+    outgoing: Vec<u8>,
+    /// Frames made before the welcome, sent once it comes.
+    held: Vec<u8>,
+    greeting: Greeting,
+}
+
+/// How far the handshake has come.
+enum Greeting {
+    /// The upgrade request is sent: the response's head so far.
+    Upgrading {
+        key: web_socket::Key,
+        head: Vec<u8>,
+        client_name: String,
+    },
+    /// The hello is sent.
+    Hello,
+    Welcomed,
 }
 
 /// A message from the server. (Owned, not slices of the parsed JSON, so the
@@ -139,25 +162,6 @@ fn read_fd(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-/// Writes one frame to the server, building it in `frame`.
-fn send_frame(
-    mut stream: &UnixStream,
-    frame: &mut Vec<u8>,
-    opcode: Opcode,
-    payload: &[u8],
-) -> std::io::Result<()> {
-    frame.clear();
-    web_socket::write_frame(frame, opcode, payload);
-    stream.write_all(frame)
-}
-
-/// Sends a close frame with `code`.
-fn send_close(mut stream: &UnixStream, frame: &mut Vec<u8>, code: u16) -> std::io::Result<()> {
-    frame.clear();
-    web_socket::write_close(frame, code);
-    stream.write_all(frame)
-}
-
 impl Client {
     /// A client on a stream that has already been upgraded, welcomed
     /// with the default limits. (For tests, which talk over a socket pair.)
@@ -170,76 +174,64 @@ impl Client {
             out: Vec::new(),
             frame: Vec::new(),
             open: true,
+            outgoing: Vec::new(),
+            held: Vec::new(),
+            greeting: Greeting::Welcomed,
         }
     }
 
     /// Connects to `server_url` (`REX_SERVER`), then exchanges hello and welcome,
     /// as the client `client_name`. Blocks until welcomed.
     pub(crate) fn connect(server_url: &str, client_name: &str) -> Result<Client, ClientError> {
-        let mut path_buf = [0u8; 256];
-        let path = socket_path(server_url, &mut path_buf)?;
-        let stream = UnixStream::connect(Path::new(std::ffi::OsStr::from_bytes(path)))?;
-        Client::upgrade_and_greet(stream, client_name)
+        Client::upgrade_and_greet(connect_to(server_url)?, client_name)
     }
 
     /// Upgrades `stream`, a new connection to Rex, then exchanges hello and
     /// welcome as the client `client_name`. Blocks until welcomed.
     fn upgrade_and_greet(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
-        let mut me = Client::from_stream(stream);
-        // not upgraded yet: nothing to close
-        me.open = false;
-        // (a failure below drops `me`, which closes the socket)
-
-        let key = web_socket::new_key();
-        // any host works on the Unix socket
-        let mut request = Vec::new();
-        web_socket::write_request(&mut request, "localhost", "/api/control", PROTOCOL, &key);
-        (&me.stream).write_all(&request)?;
-
-        let mut head = [0u8; 4096];
-        let mut len = 0;
-        let end = loop {
-            if len == head.len() {
-                return Err(ClientError::ResponseTooLarge);
-            }
-            let n = read_fd(&me.stream, &mut head[len..])?;
-            if n == 0 {
-                return Err(ClientError::ConnectionClosed);
-            }
-            len += n;
-            if let Some(e) = web_socket::head_end(&head[..len]) {
-                break e;
-            }
-        };
-        web_socket::check_response(&head[..end], &key, PROTOCOL)?;
-        me.open = true;
-        me.ws.feed(&head[end..len]);
-
-        let hello = serde_json::to_vec(&json!({
-            "type": "hello",
-            "api_revision": API_REVISION,
-            "client": { "kind": "other", "name": client_name },
-        }))?;
-        send_frame(&me.stream, &mut me.frame, Opcode::Text, &hello)?;
-
-        let welcome = loop {
-            if let Some(m) = me.ws.next()? {
-                match m {
-                    web_socket::Message::Text(t) => {
-                        let root: Value = serde_json::from_str(t)?;
-                        break parse_welcome(&root)?;
-                    }
-                    web_socket::Message::Close(_) => return Err(ClientError::ConnectionClosed),
-                    _ => {}
-                }
-            }
+        let mut me = Client::greet(stream, client_name)?;
+        while !me.welcomed() {
             if !me.read()? {
                 return Err(ClientError::ConnectionClosed);
             }
-        };
-        me.max_message = welcome.max_message_bytes;
-        me.ws.max_message = welcome.max_message_bytes;
+        }
         Ok(me)
+    }
+
+    /// Starts upgrading `stream`, a new connection to Rex, as the client
+    /// `client_name`, without blocking: `read` takes the next steps as Rex
+    /// answers, and requests wait for the welcome.
+    pub(crate) fn start(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
+        stream.set_nonblocking(true)?;
+        Client::greet(stream, client_name)
+    }
+
+    /// Sends the upgrade request on `stream`.
+    fn greet(stream: UnixStream, client_name: &str) -> Result<Client, ClientError> {
+        let key = web_socket::new_key();
+        let mut me = Client::from_stream(stream);
+        // not upgraded yet: nothing to close
+        me.open = false;
+        // any host works on the Unix socket
+        web_socket::write_request(
+            &mut me.outgoing,
+            "localhost",
+            "/api/control",
+            PROTOCOL,
+            &key,
+        );
+        me.greeting = Greeting::Upgrading {
+            key,
+            head: Vec::new(),
+            client_name: client_name.to_string(),
+        };
+        me.flush()?;
+        Ok(me)
+    }
+
+    /// Whether the welcome has come: requests go out as they're made.
+    pub(crate) fn welcomed(&self) -> bool {
+        matches!(self.greeting, Greeting::Welcomed)
     }
 
     /// The socket, for the caller's loop to watch.
@@ -272,60 +264,177 @@ impl Client {
         if self.out.len() > self.max_message {
             return Err(ClientError::MessageTooLarge);
         }
-        send_frame(&self.stream, &mut self.frame, Opcode::Text, &self.out)?;
+        self.frame.clear();
+        web_socket::write_frame(&mut self.frame, Opcode::Text, &self.out);
+        if self.welcomed() {
+            self.outgoing.extend_from_slice(&self.frame);
+            self.flush()?;
+        } else {
+            self.held.extend_from_slice(&self.frame);
+        }
         Ok(id)
     }
 
-    /// One read from the socket. False when the server hung up.
+    /// Queues a frame ahead of anything held for the welcome, and sends
+    /// what the socket takes.
+    fn send_now(&mut self, opcode: Opcode, payload: &[u8]) -> Result<(), ClientError> {
+        self.frame.clear();
+        web_socket::write_frame(&mut self.frame, opcode, payload);
+        self.outgoing.extend_from_slice(&self.frame);
+        self.flush()
+    }
+
+    /// Sends what the socket takes of the outgoing bytes; the rest waits
+    /// for room (`wants_write`).
+    pub(crate) fn flush(&mut self) -> Result<(), ClientError> {
+        while !self.outgoing.is_empty() {
+            match (&self.stream).write(&self.outgoing) {
+                Ok(0) => return Err(ClientError::ConnectionClosed),
+                Ok(n) => {
+                    self.outgoing.drain(..n);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether bytes wait for room on the socket.
+    pub(crate) fn wants_write(&self) -> bool {
+        !self.outgoing.is_empty()
+    }
+
+    /// One read from the socket, and the handshake's next steps, if it's
+    /// still going. False when the server hung up; true, with nothing read,
+    /// when there was nothing to read.
     pub(crate) fn read(&mut self) -> Result<bool, ClientError> {
         let mut buf = [0u8; 16384];
         let n = match read_fd(&self.stream, &mut buf) {
             Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(false),
             Err(e) => return Err(e.into()),
         };
         if n == 0 {
             return Ok(false);
         }
-        self.ws.feed(&buf[..n]);
+        match &mut self.greeting {
+            Greeting::Upgrading { head, .. } => head.extend_from_slice(&buf[..n]),
+            _ => self.ws.feed(&buf[..n]),
+        }
+        self.advance()?;
         Ok(true)
     }
 
-    /// The next message read, or None until more is read. Answers pings and
-    /// skips unknown types.
+    /// Takes the handshake's next steps with what was read: the upgrade's
+    /// response, then the welcome, once each is whole.
+    fn advance(&mut self) -> Result<(), ClientError> {
+        if let Greeting::Upgrading {
+            key,
+            head,
+            client_name,
+        } = &mut self.greeting
+        {
+            let Some(end) = web_socket::head_end(head) else {
+                if head.len() > 4096 {
+                    return Err(ClientError::ResponseTooLarge);
+                }
+                return Ok(());
+            };
+            web_socket::check_response(&head[..end], key, PROTOCOL)?;
+            self.open = true;
+            let rest = head.split_off(end);
+            let hello = serde_json::to_vec(&json!({
+                "type": "hello",
+                "api_revision": API_REVISION,
+                "client": { "kind": "other", "name": client_name },
+            }))?;
+            self.ws.feed(&rest);
+            self.greeting = Greeting::Hello;
+            self.send_now(Opcode::Text, &hello)?;
+        }
+        if !matches!(self.greeting, Greeting::Hello) {
+            return Ok(());
+        }
+        let welcome = loop {
+            match self.ws.next()? {
+                None => return Ok(()),
+                Some(web_socket::Message::Text(t)) => {
+                    let root: Value = serde_json::from_str(t)?;
+                    break parse_welcome(&root)?;
+                }
+                Some(web_socket::Message::Close(_)) => return Err(ClientError::ConnectionClosed),
+                Some(_) => {}
+            }
+        };
+        self.max_message = welcome.max_message_bytes;
+        self.ws.max_message = welcome.max_message_bytes;
+        self.greeting = Greeting::Welcomed;
+        let held = std::mem::take(&mut self.held);
+        self.outgoing.extend_from_slice(&held);
+        self.flush()
+    }
+
+    /// The next message read, or None until more is read, or before the
+    /// welcome. Answers pings and skips unknown types.
     #[allow(clippy::should_implement_trait)]
     pub(crate) fn next(&mut self) -> Result<Option<Message>, ClientError> {
-        while let Some(m) = self.ws.next()? {
-            match m {
-                web_socket::Message::Ping(p) => {
-                    send_frame(&self.stream, &mut self.frame, Opcode::Pong, p)?;
-                }
-                web_socket::Message::Pong(_) => {}
+        if !self.welcomed() {
+            return Ok(None);
+        }
+        loop {
+            let Some(m) = self.ws.next()? else {
+                return Ok(None);
+            };
+            let pong = match m {
+                web_socket::Message::Ping(p) => p.to_vec(),
+                web_socket::Message::Pong(_) => continue,
                 web_socket::Message::Close(c) => {
+                    let c = c.clone();
                     if self.open {
                         // echo the code, as RFC 6455 asks
-                        let _ = send_close(&self.stream, &mut self.frame, c.code.unwrap_or(1000));
-                        self.open = false;
+                        self.close_with(c.code.unwrap_or(1000));
                     }
                     return Ok(Some(Message::Closed(c)));
                 }
                 web_socket::Message::Text(t) => {
                     let root: Value = serde_json::from_str(t)?;
-                    if let Some(msg) = parse_message(&root)? {
-                        return Ok(Some(msg));
+                    match parse_message(&root)? {
+                        Some(msg) => return Ok(Some(msg)),
+                        None => continue,
                     }
                 }
-            }
+            };
+            self.send_now(Opcode::Pong, &pong)?;
         }
-        Ok(None)
     }
+
+    /// Sends a close frame with `code`, as far as the socket takes it now.
+    fn close_with(&mut self, code: u16) {
+        self.open = false;
+        self.frame.clear();
+        web_socket::write_close(&mut self.frame, code);
+        self.outgoing.extend_from_slice(&self.frame);
+        let _ = self.flush();
+    }
+}
+
+/// A new connection to the server at `server_url`, a `unix://` URL.
+pub(crate) fn connect_to(server_url: &str) -> Result<UnixStream, ClientError> {
+    let mut path_buf = [0u8; 256];
+    let path = socket_path(server_url, &mut path_buf)?;
+    Ok(UnixStream::connect(Path::new(
+        std::ffi::OsStr::from_bytes(path),
+    ))?)
 }
 
 /// Sends a close frame, then closes the socket (as the stream drops).
 impl Drop for Client {
     fn drop(&mut self) {
         if self.open {
-            let _ = send_close(&self.stream, &mut self.frame, 1000);
+            self.close_with(1000);
         }
     }
 }
@@ -478,7 +587,7 @@ fn eql(a: Option<&str>, b: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::name::NAME;
 
@@ -638,7 +747,7 @@ mod tests {
     }
 
     /// Reads one masked frame from `stream` and returns its payload.
-    fn read_client_frame(stream: &mut UnixStream) -> Vec<u8> {
+    pub(crate) fn read_client_frame(stream: &mut UnixStream) -> Vec<u8> {
         let mut head = [0u8; 2];
         stream.read_exact(&mut head).unwrap();
         let len = match head[1] & 0x7f {
@@ -660,44 +769,56 @@ mod tests {
             .collect()
     }
 
+    /// Rex's side of the upgrade: reads the request's head from `theirs`,
+    /// and accepts it.
+    pub(crate) fn answer_upgrade(theirs: &mut UnixStream) {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while web_socket::head_end(&head).is_none() {
+            theirs.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let key = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let accept = web_socket::accept_for(key.as_bytes().try_into().unwrap());
+        let accept = std::str::from_utf8(&accept).unwrap();
+        write!(
+            theirs,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
+             Sec-WebSocket-Protocol: {PROTOCOL}\r\n\r\n"
+        )
+        .unwrap();
+    }
+
+    /// Rex's side of the greeting: reads the hello from `theirs`, and
+    /// welcomes it. The hello.
+    pub(crate) fn answer_hello(theirs: &mut UnixStream) -> Value {
+        let hello: Value = serde_json::from_slice(&read_client_frame(theirs)).unwrap();
+        let welcome = json!({
+            "type": "welcome",
+            "protocol": PROTOCOL,
+            "limits": { "max_message_bytes": 65536 },
+        })
+        .to_string();
+        // a server frame is unmasked
+        let mut frame = vec![0x81, 126];
+        frame.extend_from_slice(&(welcome.len() as u16).to_be_bytes());
+        frame.extend_from_slice(welcome.as_bytes());
+        theirs.write_all(&frame).unwrap();
+        hello
+    }
+
     // The hello names the client as the caller asked: Rex shows it.
     #[test]
     fn hello_names_the_client() {
         let (ours, mut theirs) = UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while web_socket::head_end(&head).is_none() {
-                theirs.read_exact(&mut byte).unwrap();
-                head.push(byte[0]);
-            }
-            let head = String::from_utf8(head).unwrap();
-            let key = head
-                .lines()
-                .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
-                .unwrap();
-            let accept = web_socket::accept_for(key.as_bytes().try_into().unwrap());
-            let accept = std::str::from_utf8(&accept).unwrap();
-            write!(
-                theirs,
-                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
-                 Sec-WebSocket-Protocol: {PROTOCOL}\r\n\r\n"
-            )
-            .unwrap();
-            let hello: Value = serde_json::from_slice(&read_client_frame(&mut theirs)).unwrap();
-            let welcome = json!({
-                "type": "welcome",
-                "protocol": PROTOCOL,
-                "limits": { "max_message_bytes": 65536 },
-            })
-            .to_string();
-            // a server frame is unmasked
-            let mut frame = vec![0x81, 126];
-            frame.extend_from_slice(&(welcome.len() as u16).to_be_bytes());
-            frame.extend_from_slice(welcome.as_bytes());
-            theirs.write_all(&frame).unwrap();
-            hello
+            answer_upgrade(&mut theirs);
+            answer_hello(&mut theirs)
         });
         let c = Client::upgrade_and_greet(ours, "sometool").unwrap();
         let hello = server.join().unwrap();
@@ -707,6 +828,33 @@ mod tests {
             hello["client"]
         );
         assert_eq!(65536, c.max_message);
+    }
+
+    // Connecting is steps taken as Rex answers: nothing waits for it, and a
+    // request made meanwhile goes out once Rex has welcomed us.
+    #[test]
+    fn a_started_client_never_waits_and_holds_requests_for_the_welcome() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut c = Client::start(ours, "sometool").unwrap();
+        // Rex hasn't answered: nothing to read, and nothing waits
+        assert!(c.read().unwrap());
+        assert!(c.next().unwrap().is_none());
+        let id = c.request("server.version", None).unwrap();
+
+        answer_upgrade(&mut theirs);
+        assert!(c.read().unwrap());
+        assert!(!c.welcomed());
+        let hello = answer_hello(&mut theirs);
+        assert_eq!("hello", hello["type"]);
+        assert!(c.read().unwrap());
+        assert!(c.welcomed());
+
+        // the held request, after the hello
+        let request: Value = serde_json::from_slice(&read_client_frame(&mut theirs)).unwrap();
+        assert_eq!(
+            json!({ "type": "request", "id": id.to_string(), "method": "server.version" }),
+            request
+        );
     }
 
     // The bytes a request puts on the wire.

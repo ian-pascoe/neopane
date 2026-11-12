@@ -201,6 +201,14 @@ impl Session {
         )
     }
 
+    /// Sends what the socket takes of what waits to go to Rex. If that
+    /// failed, logs it and closes Rex.
+    pub(crate) fn flush(&mut self) {
+        if let Err(e) = self.client.flush() {
+            self.close_rex(&format!("failed: {e}"));
+        }
+    }
+
     /// One read from Rex. If it hung up or failed, logs it and closes Rex; then
     /// call `next` until None.
     pub(crate) fn read(&mut self) {
@@ -472,10 +480,9 @@ impl Session {
                     result: res.result,
                 }));
             }
-            Request::View => return self.on_view_result(&res.result),
-            Request::Attach => self.on_attach_result(&res.result)?,
+            Request::View => self.on_view_result(&res.result),
+            Request::Attach => self.on_attach_result(&res.result),
         }
-        Ok(None)
     }
 
     /// Only a newer session view matters.
@@ -508,16 +515,27 @@ impl Session {
         Some(self.pending_requests.swap_remove(i).req)
     }
 
-    /// Attached: a view gives the starting focus.
-    fn on_attach_result(&mut self, result: &client::ResponseResult) -> Result<(), ClientError> {
+    /// Attached: the answer's view gives the starting layout and focus, or
+    /// one is fetched. Refused, Rex is closed.
+    fn on_attach_result(
+        &mut self,
+        result: &client::ResponseResult,
+    ) -> Result<Option<Update>, ClientError> {
         match result {
-            client::ResponseResult::Ok(_) => {
+            client::ResponseResult::Ok(ok) => {
                 self.conn = Conn::Attached;
+                if let Some(view) = client::get(ok, "view") {
+                    return Ok(self.apply_view(view));
+                }
                 self.fetch_view()?;
             }
-            client::ResponseResult::Err(_) => self.conn = Conn::Closed,
+            client::ResponseResult::Err(e) => {
+                let why = format!("Rex refused session.attach: {}: {}", e.code, e.message);
+                self.closed.get_or_insert(why);
+                self.conn = Conn::Closed;
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Records the revision our focus change landed at. One refused, with no

@@ -701,3 +701,121 @@ fn a_failed_write_is_gone() {
     p.ask(AskId(1), open_beside());
     assert_gone(&mut p);
 }
+
+/// Rex's side: the next request read from `theirs`, as JSON.
+fn read_request(theirs: &mut UnixStream) -> Value {
+    let frame = crate::rex::client::tests::read_client_frame(theirs);
+    serde_json::from_slice(&frame).unwrap()
+}
+
+/// Whether Rex has been sent nothing more.
+fn nothing_more_sent(theirs: &UnixStream) -> bool {
+    theirs.set_nonblocking(true).unwrap();
+    let mut byte = [0u8; 1];
+    let none =
+        matches!((&*theirs).read(&mut byte), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+    theirs.set_nonblocking(false).unwrap();
+    none
+}
+
+/// A `find` for block `b` of a terminal whose device the system won't say.
+fn find_block(b: &str) -> Ask {
+    Ask::Find {
+        pane: pane(),
+        pid: 7,
+        tty: String::new(),
+        device: None,
+        title: String::new(),
+        env: vec![(b"REX_BLOCK".to_vec(), b.as_bytes().to_vec())],
+    }
+}
+
+use std::io::Read;
+
+// Connecting takes steps as Rex answers: nothing waits for it, and a `find`
+// asked meanwhile goes to Rex only once it has attached us to the session.
+#[test]
+fn a_find_asked_while_connecting_waits_for_the_session_attach() {
+    use crate::rex::client::tests::{answer_hello, answer_upgrade};
+    let block = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+    let (ours, mut theirs) = UnixStream::pair().unwrap();
+    let mut p = RexProvider::connecting(ours, "session:s").unwrap();
+    p.ask(AskId(9), find_block(block));
+    // Rex is slow: nothing to tell, and nothing waits
+    p.on_ready(0);
+    assert!(events(&mut p).is_empty());
+
+    answer_upgrade(&mut theirs);
+    p.on_ready(0);
+    assert_eq!(
+        json!({ "kind": "other", "name": NAME }),
+        answer_hello(&mut theirs)["client"]
+    );
+    p.on_ready(0);
+    assert!(events(&mut p).is_empty());
+    let attach = read_request(&mut theirs);
+    assert_eq!(
+        ("session.attach", json!({ "session_id": "session:s" })),
+        (
+            attach["method"].as_str().unwrap(),
+            attach["payload"].clone()
+        )
+    );
+    // the find waits for the attach's answer
+    assert!(nothing_more_sent(&theirs));
+
+    // its view is the first layout
+    let view = json!({ "revision": 3, "active_window_id": "window:w", "windows": [] });
+    reply(
+        &mut p,
+        &mut theirs,
+        1,
+        json!({ "client_id": "client:c", "view": view }),
+    );
+    assert!(matches!(&events(&mut p)[..], [ProviderEvent::Layout(_)]));
+    let process = read_request(&mut theirs);
+    assert_eq!(
+        (
+            "com.superlogical.terminal.process",
+            json!({ "session_id": "session:s", "block_id": block })
+        ),
+        (
+            process["method"].as_str().unwrap(),
+            process["payload"].clone()
+        )
+    );
+    reply(
+        &mut p,
+        &mut theirs,
+        2,
+        json!({ "child": { "pid": 1, "user_id": 0, "name": "login" } }),
+    );
+    assert_eq!(
+        vec![answered(9, Outcome::Done(Answer::Terminal(block.into())))],
+        events(&mut p)
+    );
+}
+
+// A Rex session that's gone: Rex refuses the attach, and the pane provider
+// is gone, saying why.
+#[test]
+fn a_refused_session_attach_is_gone() {
+    use crate::rex::client::tests::{answer_hello, answer_upgrade};
+    let (ours, mut theirs) = UnixStream::pair().unwrap();
+    let mut p = RexProvider::connecting(ours, "session:gone").unwrap();
+    p.ask(
+        AskId(9),
+        find_block("block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50"),
+    );
+    answer_upgrade(&mut theirs);
+    p.on_ready(0);
+    answer_hello(&mut theirs);
+    p.on_ready(0);
+    read_request(&mut theirs);
+    refuse(&mut p, &mut theirs, 1, "session_not_found");
+    let told = events(&mut p);
+    assert!(
+        matches!(&told[..], [ProviderEvent::Gone { reason }] if reason.contains("session_not_found")),
+        "{told:?}"
+    );
+}
