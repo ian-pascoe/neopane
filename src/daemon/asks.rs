@@ -33,6 +33,9 @@ pub(crate) enum Step {
     Done(Ask, Answer),
     /// It can't be done: do what the daemon does without it.
     FallBack(Ask),
+    /// A `find` that failed or timed out, and why: its terminal is out of
+    /// reach, which is no act's failure, so it warns of nothing itself.
+    NotFound(Ask, String),
     /// A newer focus act took its place before it was asked: it never will be.
     Replaced(Ask),
     /// Show this in Neovim as a warning.
@@ -174,6 +177,10 @@ impl Asks {
                 self.unsupported.insert(cap);
                 self.steps.push_back(Step::FallBack(ask));
             }
+            Outcome::Failed(why) if cap == Capability::Find => {
+                log_info!("{NAME} daemon: {}: {cap} refused: {why}", p.name());
+                self.steps.push_back(Step::NotFound(ask, why));
+            }
             Outcome::Failed(why) => {
                 self.failed(p.name(), cap, "failed", Some(&why));
                 self.steps.push_back(Step::FallBack(ask));
@@ -193,8 +200,13 @@ impl Asks {
             }
             let Sent { ask, timeout, .. } = self.sent.remove(i);
             let cap = ask.capability();
-            let secs = seconds(timeout);
-            self.failed(p.name(), cap, &format!("timed out after {secs} s"), None);
+            let what = format!("timed out after {} s", seconds(timeout));
+            if cap == Capability::Find {
+                log_info!("{NAME} daemon: {}: {cap} {what}", p.name());
+                self.steps.push_back(Step::NotFound(ask, what));
+                continue;
+            }
+            self.failed(p.name(), cap, &what, None);
             self.steps.push_back(Step::FallBack(ask));
         }
         self.next_layout_act(p, now);
@@ -242,6 +254,11 @@ impl Asks {
         }
     }
 
+    /// Whether the pane provider turned out not to support `cap`.
+    pub(crate) fn unsupported(&self, cap: Capability) -> bool {
+        self.unsupported.has(cap)
+    }
+
     /// Whether an act of `cap` waits its turn, not asked yet.
     pub(crate) fn waits(&self, cap: Capability) -> bool {
         let queued = self.queue.iter().map(|(_, a)| a);
@@ -268,7 +285,7 @@ impl Asks {
     pub(crate) fn settles_placement(&self, step: &Step) -> bool {
         let ends_one = match step {
             Step::Done(ask, _) | Step::FallBack(ask) => is_placement(ask),
-            Step::Replaced(_) | Step::Warn(_) => false,
+            Step::NotFound(..) | Step::Replaced(_) | Step::Warn(_) => false,
         };
         ends_one && !self.placing()
     }

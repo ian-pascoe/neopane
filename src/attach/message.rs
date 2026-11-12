@@ -202,6 +202,14 @@ impl Size {
     }
 }
 
+/// The value of variable `name` in `env`, an environment as a hello carries
+/// it, if set.
+pub fn env_value<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+    env.iter()
+        .find(|(k, _)| k == name.as_bytes())
+        .map(|(_, v)| v.as_slice())
+}
+
 /// What an attaching terminal brings: requested and self-attaches alike.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Terminal {

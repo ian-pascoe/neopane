@@ -1,5 +1,7 @@
-//! The pane providers: Rex's, built in, and the command runner.
+//! The pane providers: Rex's, built in, and the command runner; and
+//! choosing one for a self-attach (`choose`).
 
+pub(crate) mod choose;
 // built from a config's `provider` once it is chosen, from #129
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod command;
@@ -44,14 +46,6 @@ impl Held {
         }
     }
 
-    /// Rex's, for its session's attach and connection, not on the seam yet.
-    pub(crate) fn rex(&mut self) -> Option<&mut RexProvider> {
-        match self {
-            Held::Rex(r) => Some(r),
-            _ => None,
-        }
-    }
-
     /// The fd it is watched by under `Token::Provider`.
     pub(crate) fn fd(&self) -> Option<RawFd> {
         match self {
@@ -59,6 +53,17 @@ impl Held {
             Held::Command(c) => Some(c.fd()),
             #[cfg(test)]
             Held::Fake(_) => None,
+        }
+    }
+
+    /// Whether it has bytes waiting for room on its fd: the loop watches
+    /// it for writing too until it has none.
+    pub(crate) fn wants_write(&self) -> bool {
+        match self {
+            Held::Rex(r) => r.wants_write(),
+            Held::Command(_) => false,
+            #[cfg(test)]
+            Held::Fake(_) => false,
         }
     }
 

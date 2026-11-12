@@ -237,7 +237,11 @@ fn a_self_attached_panes_last_window_closing_ends_its_attach_and_closes_no_termi
     let terminal = Some(TerminalId::from("t0"));
     let id =
         fx.d.panes
-            .add_self_attached(SelfAttach { surface, terminal })
+            .add_self_attached(SelfAttach {
+                surface,
+                terminal,
+                hello: None,
+            })
             .id;
     fx.d.panes.by_id_mut(id).unwrap().neovim_window_handle = Some(1001);
 
@@ -421,8 +425,12 @@ pub(super) fn started_with(
         unsafe { libc::close(master) };
     });
     let terminal = Some(TerminalId::from("t0"));
-    d.start(&mut Some(SelfAttach { surface, terminal }))
-        .unwrap();
+    d.start(&mut Some(SelfAttach {
+        surface,
+        terminal,
+        hello: None,
+    }))
+    .unwrap();
     Some((d, live, reader))
 }
 
@@ -492,9 +500,11 @@ fn with_a_pane_provider_windows_opened_with_o_or_capital_o_open_where_neovims_la
 fn windowless_pane(fx: &mut Fixture, terminal: &str) -> (u32, Live) {
     let (surface, live) = attached_surface(80, 24);
     let terminal = Some(TerminalId::from(terminal));
-    let p =
-        fx.d.panes
-            .add_self_attached(SelfAttach { surface, terminal });
+    let p = fx.d.panes.add_self_attached(SelfAttach {
+        surface,
+        terminal,
+        hello: None,
+    });
     p.area = Area::Own;
     (p.id, live)
 }

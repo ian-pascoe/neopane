@@ -11,8 +11,7 @@ use super::fdpass;
 use super::pane_helper;
 use crate::attach::{self, ATTACH_PROTOCOL_VERSION, Accept, End, Frame, Hello, Message, Refusal};
 use crate::attach::{PaneId, Terminal, Transport};
-use crate::log::{self, log_warn};
-use crate::name::NAME;
+use crate::log;
 use crate::term::modes;
 
 /// How long a connected peer has to send its hello.
@@ -243,13 +242,6 @@ pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), 
     Ok(())
 }
 
-/// The value of variable `name` in environment `env`, if set.
-fn env_var<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
-    env.iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_slice())
-}
-
 /// Whether self-attaching terminal `t` comes from the daemon at
 /// `address`'s own Neovim (`nested`, ADR 0013, #91 decision 31): `$<NAME>`
 /// there is that address, and its tty is one of Neovim's terminals, or it
@@ -265,7 +257,7 @@ pub(crate) enum Nesting {
 
 /// How `nested` goes for self-attaching terminal `t` (see `Nesting`).
 pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
-    if env_var(&t.env, crate::name::upper().as_bytes()) != Some(address.as_encoded_bytes()) {
+    if attach::env_value(&t.env, &crate::name::upper()) != Some(address.as_encoded_bytes()) {
         Nesting::No
     } else if t.tty.is_empty() {
         Nesting::Yes
@@ -274,24 +266,47 @@ pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
     }
 }
 
-/// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
-/// hello carries, when `REX_SESSION` there is `session`, the daemon's Rex
-/// session. A stopgap: #114 has the pane provider find it.
-pub(crate) fn rex_block(
-    env: &[(Vec<u8>, Vec<u8>)],
-    session: &str,
-) -> Option<crate::daemon::provider::TerminalId> {
-    if env_var(env, b"REX_SESSION") != Some(session.as_bytes()) {
+/// What a self-attach's hello says of its `terminal`, handed over as `tty`
+/// unless relayed, with `hint`, for choosing and reach.
+pub(crate) fn self_hello_of(
+    terminal: &crate::attach::Terminal,
+    tty: Option<&std::os::fd::OwnedFd>,
+    hint: Option<String>,
+) -> super::pane::SelfHello {
+    super::pane::SelfHello {
+        pid: terminal.pid,
+        tty: terminal.tty.clone(),
+        device: tty_device(tty, &terminal.tty),
+        env: terminal.env.clone(),
+        hint,
+    }
+}
+
+/// The device of an attaching terminal (`st_rdev`): of `tty`, the
+/// terminal handed over, else of the device at `path`, the hello's tty, as
+/// a relayed attach has it. None if neither is a terminal.
+pub(crate) fn tty_device(tty: Option<&OwnedFd>, path: &[u8]) -> Option<u64> {
+    // SAFETY: a zeroed stat is valid for fstat and stat to fill.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let r = match tty {
+        // SAFETY: fstat on an fd we own.
+        Some(fd) => unsafe { libc::fstat(fd.as_raw_fd(), &mut st) },
+        None if !path.is_empty() => {
+            let path = std::ffi::CString::new(path).ok()?;
+            // SAFETY: stat on a NUL-terminated path.
+            unsafe { libc::stat(path.as_ptr(), &mut st) }
+        }
+        None => return None,
+    };
+    if r != 0 || st.st_mode & libc::S_IFMT != libc::S_IFCHR {
         return None;
     }
-    let b = String::from_utf8_lossy(env_var(env, b"REX_BLOCK")?);
-    match crate::rex::ids::block(b.as_bytes()) {
-        Ok(_) => Some(crate::daemon::provider::TerminalId::from(b.as_ref())),
-        Err(_) => {
-            log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
-            None
-        }
-    }
+    // macOS's dev_t is signed; its process table's terminal isn't
+    #[cfg(target_os = "macos")]
+    let dev = u64::from(st.st_rdev as u32);
+    #[cfg(not(target_os = "macos"))]
+    let dev = st.st_rdev as u64;
+    Some(dev)
 }
 
 /// A hello's `file` made absolute against its terminal's `cwd`, if it
@@ -415,19 +430,24 @@ mod tests {
     }
 
     #[test]
-    fn a_self_attachs_rex_block_counts_only_in_the_daemons_session() {
-        let block = "block:01a1cfe7-c5b4-7d9c-8e1e-9fd2a65e8a50";
-        let env = |session: &str| {
-            vec![
-                (b"REX_SESSION".to_vec(), session.as_bytes().to_vec()),
-                (b"REX_BLOCK".to_vec(), block.as_bytes().to_vec()),
-            ]
-        };
-        let found =
-            |e: &[(Vec<u8>, Vec<u8>)]| rex_block(e, "session:a").map(|t| t.as_str().to_string());
-        assert_eq!(Some(block.to_string()), found(&env("session:a")));
-        assert_eq!(None, found(&env("session:b")));
-        assert_eq!(None, found(&env("session:a")[1..]));
+    fn a_terminals_device_is_its_ptys_handed_over_or_by_its_path_relayed() {
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        // SAFETY: the slave is ours, owned from here.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let handed = tty_device(Some(&slave), b"");
+        assert!(handed.is_some());
+        let mut name = [0u8; 256];
+        // SAFETY: `name` is valid for its length.
+        assert_eq!(0, unsafe {
+            libc::ttyname_r(slave.as_raw_fd(), name.as_mut_ptr().cast(), name.len())
+        });
+        let end = name.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(handed, tty_device(None, &name[..end]));
+        // not a terminal
+        assert_eq!(None, tty_device(None, b"/"));
+        assert_eq!(None, tty_device(None, b""));
+        // SAFETY: closing the master we opened.
+        unsafe { libc::close(master) };
     }
 
     #[test]

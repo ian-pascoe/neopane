@@ -253,9 +253,9 @@ impl Daemon {
             purpose:
                 Purpose::SelfAttach {
                     terminal,
+                    provider,
                     file,
                     line,
-                    ..
                 },
             ..
         }) = hello
@@ -267,7 +267,7 @@ impl Daemon {
             attach_conn::refuse(stream, z);
             return Ok(());
         }
-        let block = self.rex_block_of(&terminal.env);
+        let self_hello = attach_conn::self_hello_of(&terminal, tty.as_ref(), provider);
         let opening = file.map(|f| FileAt {
             file: attach_conn::file_against_cwd(&f, &terminal.cwd),
             line,
@@ -282,7 +282,8 @@ impl Daemon {
         surface.helper_in = rest;
         let pane = self.panes.add_self_attached(SelfAttach {
             surface,
-            terminal: block,
+            terminal: None,
+            hello: Some(Box::new(self_hello)),
         });
         let id = pane.id;
         pane.opening = opening;
@@ -292,21 +293,14 @@ impl Daemon {
         self.wait_for_report(id, Instant::now())?;
         self.give_windows()?;
         self.draw()?;
+        // its window is on its way: now the pane provider
+        self.choose_or_reach(id)?;
+        self.nvim.client.flush()?;
         // a size sent right after the hello
         if self.panes.by_id(id).is_some() {
             self.read_helper_frames(id)?;
         }
         Ok(())
-    }
-
-    /// The Rex block of a self-attached terminal with environment `env`:
-    /// its `REX_BLOCK`, only while the pane provider is Rex's and `REX_SESSION`
-    /// is its session. A stopgap: #114 has the pane provider find it.
-    fn rex_block_of(&self, env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
-        let Some(crate::providers::Held::Rex(r)) = &self.provider else {
-            return None;
-        };
-        attach_conn::rex_block(env, &r.session.session_id)
     }
 
     /// The pane still waiting for the terminal `pane` names: its id is good,

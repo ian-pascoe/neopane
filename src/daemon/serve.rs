@@ -1,14 +1,15 @@
 //! `neorex daemon NAME [--dedup] -- [nvim args]`: the background half of
 //! `neorex`. Claims its directory (`dir`), accepts the launcher's attach,
-//! an ordinary self-attach, then runs Neovim under `--embed`, sized to it,
-//! speaking RPC over its stdin and stdout, and shows each of its windows in a
-//! Rex pane (see `Daemon`). Exits when Neovim does or the last pane goes
-//! away; a self-attach then exits with Neovim's status.
+//! an ordinary self-attach, which chooses the pane provider from its hello,
+//! then runs Neovim under `--embed`, sized to it, speaking RPC over its stdin
+//! and stdout, and shows its windows in panes (see `Daemon`). Exits when
+//! Neovim does or the last pane goes away; a self-attach then exits with
+//! Neovim's status.
 //!
 //! Teardown is by values whose `Drop` does it, declared in the order they
-//! must end: the daemon (its panes, then the loop, Rex and Neovim), Neovim's
-//! process, the socket files, the helpers' socket, and last the lock on the
-//! daemon's directory. A start that fails once the first attach is accepted
+//! must end: the daemon (its panes, then the loop, the pane provider and
+//! Neovim), Neovim's process, the socket files, the helpers' socket, and
+//! last the lock on the daemon's directory. A start that fails once the first attach is accepted
 //! ends it as failed, with the reason. The log stays.
 //!
 //! Every file of a daemon is in its own directory, `<base>/NAME/` (`dir`),
@@ -38,10 +39,7 @@ use crate::log::{self, Point, log_info, log_warn};
 use crate::name::{self, NAME};
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
-use crate::providers::Held;
-use crate::providers::rex::RexProvider;
-use crate::rex::client::Client;
-use crate::rex::session::Session as RexSession;
+use crate::providers::choose::{self, Chosen};
 
 /// `serve` is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -51,7 +49,6 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub enum Error {
     /// `--detach`, which comes with #124.
     DetachNotBuilt,
-    NotInRex,
     LauncherGone,
     NoPane,
 }
@@ -60,7 +57,6 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::DetachNotBuilt => write!(f, "--detach isn't built yet"),
-            Error::NotInRex => write!(f, "run it in a Rex pane"),
             Error::LauncherGone => write!(f, "the launcher went away"),
             Error::NoPane => write!(f, "the launcher's terminal didn't attach"),
         }
@@ -84,8 +80,6 @@ pub(crate) fn create_log(path: &str) -> std::io::Result<fs::File> {
 /// What `serve` runs against. `run` uses the defaults (`Config::new`); tests
 /// swap the seams.
 pub(crate) struct Config<'a> {
-    pub(crate) rex_url: &'a str,
-    pub(crate) session_id: &'a str,
     /// Starts Neovim: its arguments follow.
     pub(crate) nvim_command: &'a [&'a str],
     /// How long Neovim has to answer its first request.
@@ -98,11 +92,9 @@ pub(crate) struct Config<'a> {
 }
 
 impl<'a> Config<'a> {
-    /// The config `run` uses, for Rex at `rex_url` and session `session_id`.
-    pub(crate) fn new(rex_url: &'a str, session_id: &'a str) -> Config<'a> {
+    /// The config `run` uses.
+    pub(crate) fn new() -> Config<'a> {
         Config {
-            rex_url,
-            session_id,
             nvim_command: &["nvim"],
             nvim_timeout: NVIM_START_TIMEOUT,
             ready: Box::new(|| Ok(())),
@@ -174,8 +166,6 @@ fn start<S: AsRef<OsStr>>(
     drop(log);
     logging.set(Some((claimed.name().to_string(), claimed.log())));
     log::init_daemon();
-    let rex_url = env("REX_SERVER").ok_or(Error::NotInRex)?;
-    let session_id = env("REX_SESSION").ok_or(Error::NotInRex)?;
     let ready = || {
         if !tell_launcher(&format!("ok {}", claimed.name())) {
             return Err(Error::LauncherGone.into());
@@ -185,7 +175,7 @@ fn start<S: AsRef<OsStr>>(
     };
     let config = Config {
         ready: Box::new(ready),
-        ..Config::new(&rex_url, &session_id)
+        ..Config::new()
     };
     serve(&claimed, nvim_args, config)
 }
@@ -576,12 +566,20 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     // the first attach is answered before Neovim starts, which is sized to it
     let name = dir.name().to_string();
-    let mut first = Some(first_attach(&server, &name, &log, config.session_id)?);
+    let mut first = Some(first_attach(&server, &name, &log)?);
+    // it chooses now: connecting to Rex goes on as Neovim starts
+    let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
+        Some(h) => choose::choose(&h.env, h.hint.as_deref(), &mut choose::connect()),
+        None => Chosen::None {
+            why: "no hello".into(),
+            warn: false,
+        },
+    };
     // declared in this order so that, on a return, the panes hang up and
     // the channel closes before Neovim is waited for
     let mut child;
     let mut d;
-    match start_daemon(dir, nvim_args, config, &server, exe, &mut first) {
+    match start_daemon(dir, nvim_args, config, &server, exe, &mut first, chosen) {
         Ok(started) => (child, d) = started,
         Err(err) => {
             if let Some(first) = first.take() {
@@ -600,9 +598,8 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     Ok(())
 }
 
-/// Starts Neovim, with Rex connected to while it starts, and the daemon
-/// over them, which takes the `first` attach. Neovim's process, and the
-/// daemon.
+/// Starts Neovim, and the daemon over it, which takes the `first` attach
+/// and what it `chosen`. Neovim's process, and the daemon.
 fn start_daemon<S: AsRef<OsStr>>(
     dir: &Claimed,
     nvim_args: &[S],
@@ -610,19 +607,11 @@ fn start_daemon<S: AsRef<OsStr>>(
     server: &UnixListener,
     exe: String,
     first: &mut Option<SelfAttach>,
+    chosen: Chosen,
 ) -> Result<(NvimChild, Daemon)> {
-    let (started, rex) = std::thread::scope(|s| {
-        let rex = s.spawn(|| Client::connect(config.rex_url, NAME));
-        let started = start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout);
-        let rex = rex
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (started, rex)
-    });
     // declared in this order so that, on a return, the channel closes
     // before Neovim is waited for
-    let (child, nvim) = started?;
-    let rex = rex.map_err(|err| StartFailure::Rex(err.to_string()))?;
+    let (child, nvim) = start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout)?;
 
     let mut event_loop = Loop::init()?;
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
@@ -630,22 +619,13 @@ fn start_daemon<S: AsRef<OsStr>>(
     }
     event_loop.add_read(nvim.read_fd(), Token::NvimChannel as usize)?;
     event_loop.add_read(server.as_raw_fd(), Token::HelperListener as usize)?;
-    event_loop.add_read(rex.fd(), Token::Provider as usize)?;
 
-    let mut d = Daemon::new(
-        event_loop,
-        NvimSession::new(nvim),
-        Some(Held::Rex(Box::new(RexProvider::new(RexSession::new(
-            rex,
-            config.session_id.to_string(),
-        ))))),
-        exe,
-        dir.address(),
-    );
+    let mut d = Daemon::new(event_loop, NvimSession::new(nvim), None, exe, dir.address());
     d.name = dir.name().to_string();
     // requested panes' helpers relay too under the diagnostic
     d.transport = config.transport;
     d.log = dir.log();
+    d.first_choice = Some(chosen);
     d.start(first)?;
     Ok((child, d))
 }
@@ -666,7 +646,6 @@ enum StartFailure {
     NoAnswer,
     /// Talking to Neovim went wrong.
     Nvim(String),
-    Rex(String),
 }
 
 impl std::fmt::Display for StartFailure {
@@ -699,7 +678,6 @@ impl std::fmt::Display for StartFailure {
             }
             StartFailure::NoAnswer => write!(f, "Neovim didn't start in time"),
             StartFailure::Nvim(e) => write!(f, "couldn't talk to Neovim: {e}"),
-            StartFailure::Rex(e) => write!(f, "couldn't connect to Rex: {e}"),
         }
     }
 }
@@ -722,21 +700,10 @@ fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
     status.signal().map(|sig| NvimExit::Signal(sig as u32))
 }
 
-/// The environment variable `name`, if set (and Unicode).
-fn env(name: &str) -> Option<String> {
-    std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
-}
-
 /// Waits up to 5 s for the first attach, the launcher's, and accepts it:
 /// a self-attach; later ones come through the loop. Its hello gets
-/// `HELLO_TIMEOUT`, blocking: the loop isn't running yet. Its Rex block is
-/// its `REX_BLOCK` in `rex_session`.
-fn first_attach(
-    server: &UnixListener,
-    name: &str,
-    log: &str,
-    rex_session: &str,
-) -> Result<SelfAttach> {
+/// `HELLO_TIMEOUT`, blocking: the loop isn't running yet.
+fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
     let mut fds = [libc::pollfd {
         fd: server.as_raw_fd(),
         events: libc::POLLIN,
@@ -766,7 +733,10 @@ fn first_attach(
             return Err(e.into());
         }
     };
-    let Purpose::SelfAttach { terminal, .. } = hello.purpose else {
+    let Purpose::SelfAttach {
+        terminal, provider, ..
+    } = hello.purpose
+    else {
         let message = format!("the first attach can't be {}", hello.purpose.name());
         attach_conn::refuse(a.stream, End::refusal(Refusal::Hello, message));
         return Err(Error::NoPane.into());
@@ -779,7 +749,7 @@ fn first_attach(
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let block = attach_conn::rex_block(&terminal.env, rex_session);
+    let self_hello = attach_conn::self_hello_of(&terminal, a.tty.as_ref(), provider);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after
@@ -788,7 +758,8 @@ fn first_attach(
     surface.helper_in = a.rest;
     Ok(SelfAttach {
         surface,
-        terminal: block,
+        terminal: None,
+        hello: Some(Box::new(self_hello)),
     })
 }
 
@@ -807,7 +778,7 @@ mod tests {
     #[test]
     #[ignore = "run by another test, with the variable set"]
     fn print_the_configs_transport() {
-        let config = Config::new("unix:///nowhere", "session:s");
+        let config = Config::new();
         println!("transport={}", config.transport.name());
     }
 
@@ -1039,12 +1010,10 @@ mod tests {
     }
 
     /// How a test's start goes: `nvim_command` for Neovim, answering within
-    /// `nvim_timeout`, and Rex at `rex_url`. `on_ready` runs once the helpers'
-    /// socket listens.
+    /// `nvim_timeout`. `on_ready` runs once the helpers' socket listens.
     struct TestStart<'a> {
         nvim_command: &'a [&'a str],
         nvim_timeout: Duration,
-        rex_url: &'a str,
         on_ready: &'a mut dyn FnMut(),
     }
 
@@ -1085,7 +1054,7 @@ mod tests {
                     launcher = Some(fake_launcher_ready(&address, slave)?);
                     Ok(())
                 }),
-                ..Config::new(start.rex_url, "unused")
+                ..Config::new()
             },
         )
         .unwrap_err();
@@ -1117,7 +1086,6 @@ mod tests {
             TestStart {
                 nvim_command,
                 nvim_timeout,
-                rex_url: "ws://unused",
                 on_ready: &mut || {},
             },
         );
@@ -1140,42 +1108,49 @@ mod tests {
 
     #[test]
     fn a_daemons_sockets_are_only_its_users() {
-        let Some(_nvim) = crate::nvim::nvim::spawn_for_test() else {
-            return;
-        };
         let (_base, dir) = test_dir();
+        let address = dir.address();
         let sock = dir.sock_path();
-        let nvim_sock = dir.nvim_sock();
-
-        // Rex, for this test: once the daemon calls, which it does as Neovim
-        // starts, waits up to 5 s for Neovim's socket to be made 0600, notes
-        // its mode, then hangs up
-        let rex_dir = Scratch::new();
-        let rex_sock = rex_dir.file("rex.sock");
-        let rex = UnixListener::bind(&rex_sock).unwrap();
-        let rex = std::thread::spawn(move || {
-            let (_hung_up, _) = rex.accept().unwrap();
-            eventually(|| exists(&nvim_sock) && mode(&nvim_sock) == 0o600);
-            mode(&nvim_sock)
-        });
-
+        let scratch = Scratch::new();
+        let seen = scratch.file("seen");
+        // a Neovim that makes its socket as Neovim does, answers
+        // nvim_get_api_info, and notes whether its socket became 0600 within
+        // 5 s, then exits: $4 is its --listen socket
+        let answer = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/nvim/testdata/nvim_get_api_info_0.12.6.mpack"
+        );
+        let script = format!(
+            "head -c 1 >/dev/null; : >\"$4\"; cat '{answer}'; \
+             for _ in $(seq 500); do \
+               [ \"$(ls -l \"$4\" | cut -c1-10)\" = -rw------- ] && break; sleep 0.01; \
+             done; ls -l \"$4\" | cut -c1-10 >'{seen}'"
+        );
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        let reader = std::thread::spawn(move || read_screen(master));
+        let mut launcher: Option<UnixStream> = None;
         let mut sock_mode = 0;
-        let rex_url = format!("unix://{rex_sock}");
-        let (err, shown) = failed_start(
+        let _ = serve(
             &dir,
-            TestStart {
-                nvim_command: &["nvim", "--clean"],
-                nvim_timeout: NVIM_START_TIMEOUT,
-                rex_url: &rex_url,
-                on_ready: &mut || sock_mode = mode(&sock),
+            &[] as &[&str],
+            Config {
+                nvim_command: &["sh", "-c", &script, "--"],
+                nvim_timeout: Duration::from_secs(10),
+                ready: Box::new(|| {
+                    sock_mode = mode(&sock);
+                    launcher = Some(fake_launcher_ready(&address, slave)?);
+                    Ok(())
+                }),
+                ..Config::new()
             },
         );
-        assert!(
-            shown.contains("couldn't connect to Rex"),
-            "{err}: {shown:?}"
-        );
+        drop(launcher);
+        // the daemon's copy of the pane closed as it ended
+        reader.join().unwrap();
+        // SAFETY: closing the pty's master.
+        unsafe { libc::close(master) };
         assert_eq!(0o600, sock_mode);
-        assert_eq!(0o600, rex.join().unwrap());
+        assert_eq!("-rw-------\n", fs::read_to_string(&seen).unwrap());
     }
 
     #[test]
@@ -1325,46 +1300,6 @@ mod tests {
         false
     }
 
-    /// Rex, for a test: greets the client at `rex_sock`, then reads all it's
-    /// sent and answers nothing.
-    fn silent_rex(rex_sock: &str) -> std::thread::JoinHandle<()> {
-        use crate::rex::{client::PROTOCOL, web_socket};
-        let listener = UnixListener::bind(rex_sock).unwrap();
-        std::thread::spawn(move || {
-            let (mut rex, _) = listener.accept().unwrap();
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while web_socket::head_end(&head).is_none() {
-                rex.read_exact(&mut byte).unwrap();
-                head.push(byte[0]);
-            }
-            let head = String::from_utf8(head).unwrap();
-            let key = head
-                .lines()
-                .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
-                .unwrap();
-            let accept = web_socket::accept_for(key.as_bytes().try_into().unwrap());
-            let accept = std::str::from_utf8(&accept).unwrap();
-            write!(
-                rex,
-                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
-                 Sec-WebSocket-Protocol: {PROTOCOL}\r\n\r\n"
-            )
-            .unwrap();
-            let welcome = format!(
-                r#"{{"type":"welcome","protocol":"{PROTOCOL}","limits":{{"max_message_bytes":65536}}}}"#
-            );
-            // a server frame is unmasked
-            let mut frame = vec![0x81, 126];
-            frame.extend_from_slice(&(welcome.len() as u16).to_be_bytes());
-            frame.extend_from_slice(welcome.as_bytes());
-            rex.write_all(&frame).unwrap();
-            let mut buf = [0u8; 4096];
-            while matches!(rex.read(&mut buf), Ok(n) if n > 0) {}
-        })
-    }
-
     #[test]
     fn a_plugins_detach_ends_the_daemon_as_neovim_exiting_keeping_its_log() {
         if !have_nvim() {
@@ -1375,9 +1310,6 @@ mod tests {
         let sock = dir.sock_path();
         // as `run` makes it
         fs::write(dir.log(), "logged\n").unwrap();
-        let rex_dir = Scratch::new();
-        let rex_sock = rex_dir.file("rex.sock");
-        let rex = silent_rex(&rex_sock);
         let swap = Scratch::new().keep();
         let file = temp_file("plugin-detach");
 
@@ -1412,7 +1344,6 @@ mod tests {
             "-c",
             &plugin,
         ];
-        let rex_url = format!("unix://{rex_sock}");
         let started = Instant::now();
         let result = serve(
             &dir,
@@ -1423,13 +1354,12 @@ mod tests {
                     launcher = Some(fake_launcher_ready(&address, slave)?);
                     Ok(())
                 }),
-                ..Config::new(&rex_url, "session:s")
+                ..Config::new()
             },
         );
         let took = started.elapsed();
         drop(launcher);
         reader.join().unwrap();
-        rex.join().unwrap();
         // Neovim was sent SIGHUP: its changed buffer's swap is kept
         let swap_files = fs::read_dir(&swap).unwrap().count();
         let _ = fs::remove_dir_all(&swap);
@@ -1448,9 +1378,6 @@ mod tests {
     fn self_attach_running(ex: &str) -> (Result<()>, Vec<Message>) {
         let (_base, dir) = test_dir();
         let address = dir.address();
-        let rex_dir = Scratch::new();
-        let rex_sock = rex_dir.file("rex.sock");
-        let rex = silent_rex(&rex_sock);
         let (master, slave) = crate::daemon::surface::open_pty(80, 24);
         let reader = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -1469,7 +1396,6 @@ mod tests {
              end))"
         );
         let args = ["-n", "-c", &plugin];
-        let rex_url = format!("unix://{rex_sock}");
         let result = serve(
             &dir,
             &args,
@@ -1479,12 +1405,11 @@ mod tests {
                     launcher = Some(fake_launcher_ready(&address, slave)?);
                     Ok(())
                 }),
-                ..Config::new(&rex_url, "session:s")
+                ..Config::new()
             },
         );
         let said = attach_conn::read_all_frames(&launcher.unwrap());
         reader.join().unwrap();
-        rex.join().unwrap();
         (result, said)
     }
 
@@ -1552,7 +1477,7 @@ mod tests {
                     }));
                     Ok(())
                 }),
-                ..Config::new("ws://unused", "unused")
+                ..Config::new()
             },
         );
         let (before_hello, first) = launcher.unwrap().join().unwrap();
@@ -1571,7 +1496,6 @@ mod tests {
             TestStart {
                 nvim_command: &["sh", "-c", "echo 'nvim: it broke' >&2; exit 1", "--"],
                 nvim_timeout: Duration::from_secs(10),
-                rex_url: "ws://unused",
                 on_ready: &mut || {},
             },
         );
@@ -1594,20 +1518,14 @@ mod tests {
         );
         let script = format!("head -c 1 >/dev/null; exec 0<&-; : >\"$4\"; cat '{answer}'");
         let (_base, dir) = test_dir();
-        let rex_dir = Scratch::new();
-        let rex_sock = rex_dir.file("rex.sock");
-        let rex = silent_rex(&rex_sock);
-        let rex_url = format!("unix://{rex_sock}");
         let (_, shown) = failed_start(
             &dir,
             TestStart {
                 nvim_command: &["sh", "-c", &script, "--"],
                 nvim_timeout: Duration::from_secs(10),
-                rex_url: &rex_url,
                 on_ready: &mut || {},
             },
         );
-        rex.join().unwrap();
         assert_eq!(
             format!(
                 "d didn't start: couldn't talk to Neovim: Broken pipe (os error 32) (log: {})",
@@ -1835,11 +1753,14 @@ mod tests {
 
     #[test]
     fn the_launcher_is_told_where_the_log_is_once_there_is_one() {
-        assert_eq!("run it in a Rex pane", start_error(&Error::NotInRex, None));
         assert_eq!(
-            "work-2 didn't start: run it in a Rex pane (log: /tmp/x/work-2/log)",
+            "the launcher went away",
+            start_error(&Error::LauncherGone, None)
+        );
+        assert_eq!(
+            "work-2 didn't start: the launcher went away (log: /tmp/x/work-2/log)",
             start_error(
-                &Error::NotInRex,
+                &Error::LauncherGone,
                 Some(("work-2".into(), "/tmp/x/work-2/log".into()))
             )
         );

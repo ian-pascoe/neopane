@@ -25,9 +25,12 @@
 //! - Each view's focused block is told as `Focused`, unless our own focus
 //!   change is still landing (`Session::landing`): the daemon tells the
 //!   user's moves from what it knew (`ProviderFocus`).
+//! - `find` asks for the processes of the block `REX_BLOCK` names, and
+//!   compares its terminal with the attach's (`find.rs`).
 //!
 
 pub(crate) mod bounds;
+pub(crate) mod find;
 pub(crate) mod layout;
 
 use std::collections::VecDeque;
@@ -39,6 +42,7 @@ use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Direction, Outcome, PaneProvider, ProviderEvent,
     TerminalId,
 };
+use crate::log::log_info;
 use crate::name::NAME;
 use crate::rex::client::{self, ResponseResult};
 use crate::rex::ids;
@@ -52,12 +56,20 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Close,
     Capability::PlaceBeside,
     Capability::Resize,
+    Capability::Find,
     Capability::Focus,
     Capability::FocusDirection,
     Capability::ReportLayout,
     // views come unasked
     Capability::Events,
 ];
+
+/// A `find` asked of Rex: its block, and the attaching terminal's device.
+struct Finding {
+    tag: u64,
+    block: String,
+    device: Option<u64>,
+}
 
 /// A `focus_direction` ask, done once Rex answered its last request.
 struct Directing {
@@ -84,6 +96,15 @@ pub(crate) struct RexProvider {
     events: VecDeque<ProviderEvent>,
     /// Told `Gone`: nothing more comes.
     gone: bool,
+    /// The `find` asks waiting for Rex's `terminal.process`.
+    finding: Vec<Finding>,
+    /// The controlling terminal of a process; a fake in tests.
+    pub(crate) tty_of_pid: find::TtyOfPid,
+    /// A `find` trusted `REX_BLOCK` unproved, which is logged once.
+    pub(crate) trusted: bool,
+    /// What was asked before Rex attached us to its session, asked once it
+    /// has: Rex runs some requests out of order.
+    deferred: Vec<(AskId, Ask)>,
 }
 
 impl RexProvider {
@@ -97,7 +118,34 @@ impl RexProvider {
             layout: None,
             events: VecDeque::new(),
             gone: false,
+            finding: Vec::new(),
+            tty_of_pid: find::tty_of_pid,
+            trusted: false,
+            deferred: Vec::new(),
         }
+    }
+
+    /// Rex's pane provider on `stream`, a new connection to the Rex server,
+    /// for session `session_id`: connecting, then attaching to the session,
+    /// as Rex answers, without blocking. What is asked meanwhile waits.
+    pub(crate) fn connecting(
+        stream: std::os::unix::net::UnixStream,
+        session_id: &str,
+    ) -> Result<RexProvider, client::ClientError> {
+        let client = client::Client::start(stream, NAME)?;
+        let mut session = Session::new(client, session_id.to_string());
+        session.attach()?;
+        Ok(RexProvider::new(session))
+    }
+
+    /// Whether bytes wait for room on Rex's socket.
+    pub(crate) fn wants_write(&self) -> bool {
+        self.session.client.wants_write()
+    }
+
+    /// Whether asks wait for Rex to attach us, and it has.
+    fn may_ask_deferred(&self) -> bool {
+        !self.deferred.is_empty() && self.session.conn == Conn::Attached
     }
 
     /// Sends what `ask` asks of Rex. False if it can't be asked of Rex.
@@ -212,6 +260,13 @@ impl RexProvider {
                     self.session.focus_direction(tag, rex_direction(dir))?;
                 }
             }
+            Ask::Find { env, device, .. } => match find::block_in(&env) {
+                Ok(block) => {
+                    self.session.process(tag, &block)?;
+                    self.finding.push(Finding { tag, block, device });
+                }
+                Err(why) => self.answer(tag, Outcome::Failed(why)),
+            },
             Ask::ReportLayout => {
                 let outcome = match &self.layout {
                     Some(l) => Outcome::Done(Answer::Layout(l.clone())),
@@ -302,6 +357,7 @@ impl RexProvider {
                 ResponseResult::Ok(_),
             ) => self.answer(tag, Outcome::Done(Answer::Nothing)),
             (Request::FocusDirection(tag), result) => self.on_direction_answer(tag, result),
+            (Request::Process(tag), result) => self.on_process_answer(tag, &result),
             // a block already gone is closed (#86 D10)
             (Request::CloseBlock(tag), ResponseResult::Err(e)) if e.code == "not_found" => {
                 self.answer(tag, Outcome::Done(Answer::Nothing))
@@ -344,6 +400,26 @@ impl RexProvider {
         self.answer(tag, outcome);
     }
 
+    /// Rex told the processes of `find` ask `tag`'s block: its verdict.
+    fn on_process_answer(&mut self, tag: u64, result: &ResponseResult) {
+        let Some(i) = self.finding.iter().position(|f| f.tag == tag) else {
+            return;
+        };
+        let Finding { block, device, .. } = self.finding.swap_remove(i);
+        let outcome = match find::verdict(result, device, self.tty_of_pid) {
+            find::Verdict::Proven => Outcome::Done(Answer::Terminal(block.as_str().into())),
+            find::Verdict::Disproved(why) => Outcome::Failed(why),
+            find::Verdict::Unprovable(why) => {
+                if !self.trusted {
+                    self.trusted = true;
+                    log_info!("{NAME} daemon: rex: trusting {}: {why}", find::BLOCK_VAR);
+                }
+                Outcome::Done(Answer::Terminal(block.as_str().into()))
+            }
+        };
+        self.answer(tag, outcome);
+    }
+
     /// Whether ask `tag` was an `open_float` waiting for its block; it no
     /// longer is.
     fn took_float_ask(&mut self, tag: u64) -> bool {
@@ -358,6 +434,7 @@ impl RexProvider {
             return;
         }
         self.gone = true;
+        self.deferred.clear();
         self.session.conn = Conn::Closed;
         let reason = self
             .session
@@ -381,6 +458,10 @@ impl PaneProvider for RexProvider {
         if self.gone {
             return;
         }
+        if self.session.conn == Conn::Attaching {
+            self.deferred.push((id, ask));
+            return;
+        }
         match self.send(id.0, ask) {
             Ok(true) => {}
             // not built in
@@ -390,6 +471,7 @@ impl PaneProvider for RexProvider {
     }
 
     fn on_ready(&mut self, _token: usize) {
+        self.session.flush();
         self.session.read();
     }
 
@@ -401,12 +483,19 @@ impl PaneProvider for RexProvider {
             if self.gone {
                 return None;
             }
+            if self.may_ask_deferred() {
+                for (id, ask) in std::mem::take(&mut self.deferred) {
+                    self.ask(id, ask);
+                }
+                continue;
+            }
             match self.session.next() {
                 Ok(Some(u)) => {
                     if self.on_update(u).is_err() {
                         self.go();
                     }
                 }
+                Ok(None) if self.may_ask_deferred() => {}
                 Ok(None) => return None,
                 Err(_) => self.go(),
             }
@@ -419,6 +508,10 @@ impl PaneProvider for RexProvider {
 
     fn context_vars(&self) -> &[&str] {
         &["REX_SERVER", "REX_SESSION"]
+    }
+
+    fn find_vars(&self) -> &[&str] {
+        &[find::BLOCK_VAR]
     }
 }
 

@@ -43,6 +43,7 @@ use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
 use crate::providers::Held;
+#[cfg(test)]
 use crate::providers::rex::RexProvider;
 use crate::screen::float_groups;
 use crate::screen::grid::Cell;
@@ -52,6 +53,7 @@ use crate::term::input;
 use indexmap::IndexMap;
 
 mod attaches;
+mod choosing;
 mod self_attach;
 use attaches::PENDING_BASE;
 
@@ -135,6 +137,22 @@ pub(crate) struct Daemon {
     /// Terminals just opened whose windows weren't current, until their first
     /// focus report or a deadline: one that took focus gives it back (#86 D8).
     just_opened: Vec<(TerminalId, Instant)>,
+    /// The choice running, while its `find` hasn't confirmed it.
+    choosing: Option<choosing::Choosing>,
+    /// Self-attaches that came while a choice ran, waiting their turn.
+    waiting_choice: Vec<u32>,
+    /// The choosing attach's values of the pane provider's context
+    /// variables, in its order: a later self-attach's must match.
+    context: Vec<Option<Vec<u8>>>,
+    /// Whether the loop watches the pane provider's fd for room to write.
+    provider_writes: bool,
+    /// How tests connect a chosen pane provider to a fake.
+    #[cfg(test)]
+    pub test_connect: Option<crate::providers::choose::Connect>,
+    /// What the first self-attach chose, before Neovim started, for `start`.
+    pub first_choice: Option<crate::providers::choose::Chosen>,
+    /// Warnings for Neovim held until it is set up (`warn_when_ready`).
+    held_warnings: Vec<String>,
     // Dropped last, in this order: the loop, then the pane provider, then
     // Neovim.
     pub event_loop: Loop,
@@ -179,6 +197,7 @@ pub(crate) enum Token {
     AreaTimer,
     FocusInTimer,
     AttachTimer,
+    ChoiceTimer,
 }
 
 impl Token {
@@ -198,13 +217,14 @@ impl Token {
             10 => Token::AreaTimer,
             11 => Token::FocusInTimer,
             12 => Token::AttachTimer,
+            13 => Token::ChoiceTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::AttachTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::ChoiceTimer as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -339,6 +359,14 @@ impl Daemon {
             focus: ProviderFocus::default(),
             focus_in: None,
             just_opened: Vec::new(),
+            choosing: None,
+            waiting_choice: Vec::new(),
+            context: Vec::new(),
+            provider_writes: false,
+            #[cfg(test)]
+            test_connect: None,
+            first_choice: None,
+            held_warnings: Vec::new(),
             event_loop,
             provider,
             nvim,
@@ -346,8 +374,9 @@ impl Daemon {
     }
 
     /// Takes the `first` self-attach, already accepted, as a pane, and
-    /// starts talking to Neovim, sized to it, and the pane provider. On a
-    /// failure, `first` is given back, for its attach to end with why.
+    /// starts talking to Neovim, sized to it. It takes what it chose
+    /// (`first_choice`), or chooses now. On a failure, `first` is given back,
+    /// for its attach to end with why.
     pub(crate) fn start(&mut self, first: &mut Option<SelfAttach>) -> Result<()> {
         // only ever called on startup
         debug_assert!(self.panes.list.is_empty());
@@ -375,9 +404,11 @@ impl Daemon {
         self.nvim
             .attach_ui(cols, rows)
             .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
-        if let Some(r) = self.rex() {
-            r.session.attach()?;
+        match self.first_choice.take() {
+            Some(chosen) => self.take_choice(id, chosen)?,
+            None => self.choose_or_reach(id)?,
         }
+        self.nvim.client.flush()?;
         Ok(())
     }
 
@@ -455,6 +486,7 @@ impl Daemon {
             Some(Token::AreaTimer) => self.time_out_reports(Instant::now())?,
             Some(Token::FocusInTimer) => self.focus_in_stood(Instant::now())?,
             Some(Token::AttachTimer) => self.time_out_attaches(Instant::now())?,
+            Some(Token::ChoiceTimer) => self.time_out_choice(Instant::now())?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -829,6 +861,10 @@ impl Daemon {
     }
 
     fn new_pane(&mut self, win: i64) -> Result<()> {
+        // unshown until there's a pane provider to open it, or none
+        if self.waits_for_reach(self.changes.split_of(win)) {
+            return Ok(());
+        }
         // a size asked of it before it was external counts only in a pane
         // layout; a pane of its own is its size
         let size = self
@@ -992,10 +1028,10 @@ impl Daemon {
     }
 
     /// Whether the origin pane of a window split off as `sp` is in the pane
-    /// provider's reach (#86 D9): until #114 and #127 decide reach, every
-    /// pane is.
-    fn in_reach(&self, _sp: windows::Split) -> bool {
-        true
+    /// provider's reach (#86 D9).
+    fn in_reach(&self, sp: windows::Split) -> bool {
+        self.split_from(sp)
+            .is_none_or(|f| f.reach != pane::Reach::Out)
     }
 
     /// The pane a window split off as `sp` is drawn in when it has no
@@ -1139,6 +1175,12 @@ impl Daemon {
                         if self.grids.apply_redraw(&mut params)? {
                             self.reconcile()?;
                             self.draw()?;
+                            // once Neovim has drawn its start: before, it
+                            // would wait at a hit-enter prompt
+                            if self.nvim.ready && !self.held_warnings.is_empty() {
+                                self.warn_held();
+                                self.nvim.client.flush()?;
+                            }
                         }
                     } else if let Some(note) = parse_note_or_log(method, &mut params) {
                         self.on_note(note)?;
@@ -1717,12 +1759,6 @@ impl Daemon {
 
     // The pane provider
 
-    /// Rex's pane provider, for its session's attach and connection, which
-    /// aren't on the seam until #115.
-    fn rex(&mut self) -> Option<&mut RexProvider> {
-        self.provider.as_mut().and_then(Held::rex)
-    }
-
     #[cfg(test)]
     fn rex_ref(&self) -> Option<&RexProvider> {
         match &self.provider {
@@ -1807,6 +1843,7 @@ impl Daemon {
             }
         }
         self.run_steps()?;
+        self.watch_provider_writes()?;
         self.arm_ask_timer()
     }
 
@@ -1819,6 +1856,16 @@ impl Daemon {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
+        self.provider_writes = false;
+        // gone before it was confirmed: none was chosen after all
+        if let Some(c) = self.choosing.take() {
+            log_info!(
+                "{NAME} daemon: pane {} chose no pane provider after all",
+                c.id
+            );
+            self.warn_when_ready(format!("{NAME}: {reason}; no pane provider"));
+            self.nvim.client.flush()?;
+        }
         self.focus = ProviderFocus::default();
         self.just_opened.clear();
         self.asks.gone();
@@ -1874,6 +1921,9 @@ impl Daemon {
                 log::trace(Point::Placed, 0);
             }
             match step {
+                Step::Done(ask @ Ask::Find { .. }, answer) => self.found(&ask, answer)?,
+                Step::NotFound(ask, why) => self.not_found(&ask, &why)?,
+                Step::FallBack(ask @ Ask::Find { .. }) => self.find_fell_back(&ask)?,
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
                 Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_reported(l)?,
                 Step::Done(Ask::Focus { .. }, _) => self.focus.ended(true, Instant::now()),
@@ -2907,6 +2957,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
+    mod choosing;
     mod fallback;
     mod in_layout;
     mod tabs;
@@ -3607,18 +3658,12 @@ mod tests {
     }
 
     /// A self-attach's hello from a terminal on `tty` whose `$<NAME>` is
-    /// `address`, unset if empty, and, if `rex`, Rex's variables for session
-    /// `session:s`.
-    fn self_hello_from(address: &[u8], tty: &[u8], rex: bool) -> Vec<u8> {
+    /// `address`, unset if empty.
+    fn self_hello_from(address: &[u8], tty: &[u8]) -> Vec<u8> {
         use crate::daemon::attach_conn::{self_hello, test_terminal};
         let mut t = test_terminal(80, 24);
         if !address.is_empty() {
             t.env = vec![(crate::name::upper().into_bytes(), address.to_vec())];
-        }
-        if rex {
-            t.env.push((b"REX_SESSION".to_vec(), b"session:s".to_vec()));
-            t.env
-                .push((b"REX_BLOCK".to_vec(), block_id(7).into_bytes()));
         }
         t.tty = tty.to_vec();
         self_hello(t)
@@ -3645,7 +3690,7 @@ mod tests {
         let mut fx = fixture();
         fx.d.name = "proj".into();
         fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
-        let hello = self_hello_from(b"/tmp/x/proj/sock", tty, false);
+        let hello = self_hello_from(b"/tmp/x/proj/sock", tty);
         let attached = self_attach_with(&mut fx, "nested", &hello);
         (fx, attached)
     }
@@ -3698,7 +3743,7 @@ mod tests {
         // another daemon's terminal: no question asked
         let mut fx = fixture();
         fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
-        let hello = self_hello_from(b"/tmp/x/other/sock", b"/dev/ttys004", false);
+        let hello = self_hello_from(b"/tmp/x/other/sock", b"/dev/ttys004");
         let (helper, _pty) = self_attach_with(&mut fx, "other", &hello);
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
     }
@@ -3712,22 +3757,6 @@ mod tests {
         assert_nested(&fx, &helper);
     }
 
-    #[test]
-    fn a_self_attachs_rex_block_is_its_terminal_only_in_the_rex_session() {
-        // Rex's session is session:s
-        let (mut fx, _rex) = rex_fixture();
-        let (helper, _pty) = self_attach_with(&mut fx, "rex-in", &self_hello_from(b"", b"", true));
-        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
-        let t = fx.d.panes.list[0].terminal.clone();
-        assert_eq!(Some(TerminalId::from(block_id(7).as_str())), t);
-        // with no Rex: no terminal id
-        let mut fx = with_provider(None);
-        let (helper, _pty) =
-            self_attach_with(&mut fx, "rex-none", &self_hello_from(b"", b"", true));
-        assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
-        assert_eq!(None, fx.d.panes.list[0].terminal);
-    }
-
     /// A daemon set up, its first self-attached pane showing window 1000,
     /// and a second self-attached pane waiting for a window: its id.
     fn second_self_attach(provider: Option<Held>) -> (Fixture, u32) {
@@ -3736,6 +3765,7 @@ mod tests {
         let first = fx.d.panes.add_self_attached(SelfAttach {
             surface: Surface::for_test(80, 24),
             terminal: None,
+            hello: None,
         });
         first.neovim_window_handle = Some(1000);
         first.area = Area::Own;
@@ -3744,6 +3774,7 @@ mod tests {
         let second = fx.d.panes.add_self_attached(SelfAttach {
             surface: Surface::for_test(80, 24),
             terminal: None,
+            hello: None,
         });
         second.area = Area::Own;
         let id = second.id;
@@ -4292,6 +4323,7 @@ mod tests {
             .start(&mut Some(SelfAttach {
                 surface: s,
                 terminal: Some(TerminalId::from("t0")),
+                hello: None,
             }))
             .unwrap();
         // no wait for a report: a tabline pane, the screen its size
@@ -4380,6 +4412,7 @@ mod tests {
             .start(&mut Some(SelfAttach {
                 surface: s,
                 terminal: None,
+                hello: None,
             }))
             .unwrap();
         fx.d().nvim.ready = true;

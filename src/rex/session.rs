@@ -25,6 +25,8 @@ pub(crate) enum Request {
     CloseLayer(u64),
     MoveBlock(u64),
     ResizePane(u64),
+    /// `com.superlogical.terminal.process`, for a `find`.
+    Process(u64),
 }
 
 impl Request {
@@ -42,6 +44,7 @@ impl Request {
             Request::CloseLayer(_) => "close_layer",
             Request::MoveBlock(_) => "move_block",
             Request::ResizePane(_) => "resize_pane",
+            Request::Process(_) => "terminal.process",
         }
     }
 }
@@ -196,6 +199,14 @@ impl Session {
             "session.attach",
             json!({ "session_id": self.session_id }),
         )
+    }
+
+    /// Sends what the socket takes of what waits to go to Rex. If that
+    /// failed, logs it and closes Rex.
+    pub(crate) fn flush(&mut self) {
+        if let Err(e) = self.client.flush() {
+            self.close_rex(&format!("failed: {e}"));
+        }
     }
 
     /// One read from Rex. If it hung up or failed, logs it and closes Rex; then
@@ -366,6 +377,15 @@ impl Session {
         )
     }
 
+    /// Asks for the processes of `block`'s terminal.
+    pub(crate) fn process(&mut self, tag: u64, block: &str) -> Result<(), ClientError> {
+        self.request(
+            Request::Process(tag),
+            "com.superlogical.terminal.process",
+            json!({ "session_id": self.session_id, "block_id": block }),
+        )
+    }
+
     /// Closes a floating layer we made.
     pub(crate) fn close_layer(&mut self, tag: u64, layer: &str) -> Result<(), ClientError> {
         self.request(
@@ -432,16 +452,19 @@ impl Session {
         let Some(req) = self.take_pending_request(res.id) else {
             return Ok(None);
         };
-        if let client::ResponseResult::Err(e) = &res.result {
+        // a `find`'s answer is its verdict, logged as one
+        if let client::ResponseResult::Err(e) = &res.result
+            && !matches!(req, Request::Process(_))
+        {
             log_request_error(req, e);
         }
         match req {
             Request::FocusBlock(_) => {
                 self.on_focus_block_result(&res.result)?;
-                return Ok(Some(Update::Answered {
+                Ok(Some(Update::Answered {
                     req,
                     result: res.result,
-                }));
+                }))
             }
             Request::NewSplit(_)
             | Request::NewLayer(_)
@@ -450,16 +473,14 @@ impl Session {
             | Request::CloseLayer(_)
             | Request::MoveBlock(_)
             | Request::ResizePane(_)
-            | Request::FocusDirection(_) => {
-                return Ok(Some(Update::Answered {
-                    req,
-                    result: res.result,
-                }));
-            }
-            Request::View => return self.on_view_result(&res.result),
-            Request::Attach => self.on_attach_result(&res.result)?,
+            | Request::FocusDirection(_)
+            | Request::Process(_) => Ok(Some(Update::Answered {
+                req,
+                result: res.result,
+            })),
+            Request::View => self.on_view_result(&res.result),
+            Request::Attach => self.on_attach_result(&res.result),
         }
-        Ok(None)
     }
 
     /// Only a newer session view matters.
@@ -492,16 +513,27 @@ impl Session {
         Some(self.pending_requests.swap_remove(i).req)
     }
 
-    /// Attached: a view gives the starting focus.
-    fn on_attach_result(&mut self, result: &client::ResponseResult) -> Result<(), ClientError> {
+    /// Attached: the answer's view gives the starting layout and focus, or
+    /// one is fetched. Refused, Rex is closed.
+    fn on_attach_result(
+        &mut self,
+        result: &client::ResponseResult,
+    ) -> Result<Option<Update>, ClientError> {
         match result {
-            client::ResponseResult::Ok(_) => {
+            client::ResponseResult::Ok(ok) => {
                 self.conn = Conn::Attached;
+                if let Some(view) = client::get(ok, "view") {
+                    return Ok(self.apply_view(view));
+                }
                 self.fetch_view()?;
             }
-            client::ResponseResult::Err(_) => self.conn = Conn::Closed,
+            client::ResponseResult::Err(e) => {
+                let why = format!("Rex refused session.attach: {}: {}", e.code, e.message);
+                self.closed.get_or_insert(why);
+                self.conn = Conn::Closed;
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Records the revision our focus change landed at. One refused, with no

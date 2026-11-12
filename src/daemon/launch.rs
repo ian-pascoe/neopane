@@ -20,7 +20,6 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Error {
     NotATerminal,
-    NotInRex,
     /// The daemon said why it didn't start.
     Refused(String),
     /// The daemon ended without a word: the first line it wrote to stderr,
@@ -35,7 +34,6 @@ impl std::fmt::Display for Error {
                 f,
                 "stdin isn't a terminal; to start a daemon without one, use --detach"
             ),
-            Error::NotInRex => write!(f, "run it in a Rex pane"),
             Error::Refused(why) => write!(f, "{why}"),
             Error::DaemonFailed(said, base) => {
                 let said = said.as_deref().unwrap_or("it exited with no message");
@@ -89,10 +87,6 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     // SAFETY: isatty only inspects the fd.
     if unsafe { libc::isatty(libc::STDIN_FILENO) } == 0 {
         return Err(Error::NotATerminal.into());
-    }
-    // each window becomes a Rex pane
-    if std::env::var_os("REX_SERVER").is_none() || std::env::var_os("REX_SESSION").is_none() {
-        return Err(Error::NotInRex.into());
     }
     // warned of before the daemon starts, which warns in its log
     let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));

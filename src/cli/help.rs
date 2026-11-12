@@ -34,11 +34,11 @@ pub fn help() -> String {
         ),
         (
             "REX_SERVER, REX_SESSION".to_string(),
-            "the Rex session to open panes in (needed for now)",
+            "set in a Rex pane: Rex gives each window a pane",
         ),
         (
             "REX_BLOCK".to_string(),
-            "the Rex block it runs in, which shows the first window",
+            "the Rex block a terminal runs in, as Rex checks",
         ),
     ];
     let width = env.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;

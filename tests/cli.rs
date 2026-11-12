@@ -174,8 +174,6 @@ fn daemon(tmpdir: &Path, args: &[&str]) -> Output {
         .arg("daemon")
         .args(args)
         .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
-        .env_remove("REX_SERVER")
-        .env_remove("REX_SESSION")
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -201,33 +199,8 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(text(&out.stdout), "error --detach isn't built yet\n");
 
-    // its directory claimed and its log made, before it finds no Rex
-    let out = daemon(&tmp, &["work", "--dedup", "--"]);
-    assert_eq!(out.status.code(), Some(1));
-    let log = std::fs::read_to_string(base.join("work/log")).unwrap();
-    assert!(log.contains("run it in a Rex pane"), "{log:?}");
-    assert_eq!(
-        text(&out.stdout),
-        format!(
-            "error work didn't start: run it in a Rex pane (log: {})\n",
-            base.join("work/log").display()
-        )
-    );
-    // the next claim keeps it as log.1, and says where its own is
-    let out = daemon(&tmp, &["work", "--"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        text(&out.stdout),
-        format!(
-            "error work didn't start: run it in a Rex pane (log: {})\n",
-            base.join("work/log").display()
-        )
-    );
-    assert_eq!(
-        log,
-        std::fs::read_to_string(base.join("work/log.1")).unwrap()
-    );
-
+    // a base directory others can read
+    std::fs::create_dir(&base).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
     let out = daemon(&tmp, &["work", "--"]);
     assert_eq!(out.status.code(), Some(1));
@@ -243,18 +216,26 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
     std::fs::remove_dir_all(&tmp).unwrap();
 }
 
-/// `daemon` with `args` and Rex's variables set, left running: it says `ok`
-/// once it listens, then waits for the launcher's pane. With the line it
-/// said.
+/// `daemon` with `args`, left running: it says `ok` once it listens, Rex or
+/// not, then waits for the launcher's pane. With the line it said.
 fn listening_daemon(tmpdir: &Path, args: &[&str]) -> (std::process::Child, String) {
+    listening_daemon_with(tmpdir, args, &[])
+}
+
+/// `listening_daemon`, with `env` set too.
+fn listening_daemon_with(
+    tmpdir: &Path,
+    args: &[&str],
+    env: &[(&str, &std::ffi::OsStr)],
+) -> (std::process::Child, String) {
     use std::io::BufRead;
     let mut child = Command::new(exe())
         .arg("daemon")
         .args(args)
+        .envs(env.iter().copied())
         .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
-        .env("REX_SERVER", "ws://unused")
-        .env("REX_SESSION", "unused")
-        .env_remove("REX_BLOCK")
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -265,6 +246,74 @@ fn listening_daemon(tmpdir: &Path, args: &[&str]) -> (std::process::Child, Strin
         .read_line(&mut line)
         .unwrap();
     (child, line)
+}
+
+/// A launcher's first attach to the daemon at `sock`: a self-attach,
+/// relayed, from no terminal. Its connection.
+fn first_attach(sock: &Path) -> std::os::unix::net::UnixStream {
+    use neorex::attach::{Hello, Message, Purpose, Size, Terminal, Transport};
+    use std::io::Write;
+    let terminal = Terminal {
+        transport: Transport::Relay,
+        size: Size {
+            cols: 80,
+            rows: 24,
+            px: None,
+        },
+        pid: std::process::id(),
+        tty: Vec::new(),
+        env: Vec::new(),
+        cwd: b"/".to_vec(),
+    };
+    let purpose = Purpose::SelfAttach {
+        terminal,
+        provider: None,
+        file: None,
+        line: None,
+    };
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    let hello = Message::Hello(Hello::new(purpose)).encode().unwrap();
+    stream.write_all(&hello).unwrap();
+    stream
+}
+
+#[test]
+fn a_start_that_fails_is_logged_and_the_next_claim_keeps_the_log_as_log_1() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = scratch("failed");
+    // SAFETY: getuid can't fail.
+    let base = tmp.join(format!("{NAME}-{}", unsafe { libc::getuid() }));
+    // a Neovim that can't start
+    let bin = tmp.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let nvim = bin.join("nvim");
+    std::fs::write(&nvim, "#!/bin/sh\necho 'nvim: it broke' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&nvim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = std::ffi::OsString::from(&bin);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+
+    let (mut first, said) = listening_daemon_with(&tmp, &["work", "--"], &[("PATH", &path)]);
+    assert_eq!(said, "ok work\n");
+    let attach = first_attach(&base.join("work/sock"));
+    assert_eq!(first.wait().unwrap().code(), Some(1));
+    drop(attach);
+    let log = std::fs::read_to_string(base.join("work/log")).unwrap();
+    assert!(
+        log.contains("Neovim exited at once (status 1): it broke"),
+        "{log:?}"
+    );
+
+    // the next claim keeps it as log.1
+    let (mut next, said) = listening_daemon(&tmp, &["work", "--"]);
+    assert_eq!(said, "ok work\n");
+    assert_eq!(
+        log,
+        std::fs::read_to_string(base.join("work/log.1")).unwrap()
+    );
+    next.kill().unwrap();
+    next.wait().unwrap();
+    std::fs::remove_dir_all(&tmp).unwrap();
 }
 
 #[test]
