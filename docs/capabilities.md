@@ -14,7 +14,8 @@ doesn't know.
 
 ## Running a command
 
-A capability is an argv, run once, without a shell.
+A capability is an argv, run once, without a shell; all but `events`,
+which runs for as long as the pane provider is chosen (see [Events](#events)).
 
 - **Working directory:** the choosing attach's, or `/` if it has gone.
 - **stdin** is `/dev/null`. **stdout** is a pipe the daemon reads for the
@@ -98,10 +99,10 @@ last layout it read.
 
 - `areas`: every layout area, such as a window or a tab of the
   multiplexer, with an `id` of the pane provider's own (a string) and its
-  `terminals`. Neovim's screen is the size of the current pane's area, and
-  each area has its own tabline panes.
-- `terminal`: the id an open printed. Terminals that aren't the daemon's
-  belong too: they take room in their area.
+  `terminals`. Neovim's screen is the size of the current pane's layout
+  area, and each area has its own tabline panes.
+- `terminal`: the id an open printed. Foreign panes, terminals that aren't
+  Neovim panes, belong too: they take room in their area.
 - `rect`: `[x, y, w, h]`, as fractions of the area, from its top left.
 - `floating` (default `false`): it floats over the area's tiled terminals.
 - `inset` (default `[0, 0, 0, 0]`): cells at each edge of `rect` that aren't
@@ -111,10 +112,11 @@ last layout it read.
   a change here is how the daemon learns the user moved focus.
 - Unknown fields are ignored.
 
-Without `events`, the daemon runs `report_layout` after each of its own acts
-that worked, and after a terminal attaches, resizes, hangs up or reports
-focus; never on a timer. With `events`, it runs it when `events` says.
-Exit 69 makes every pane its own layout area.
+Without `events`, the daemon runs `report_layout` after each of its own acts,
+whether it worked or not, and after a terminal attaches, resizes, hangs up or
+reports focus; never on a timer. With `events`, it runs it when `events`
+says. Either way it is a layout act, run one at a time with the others, and
+at most one waits. Exit 69 makes every pane its own layout area.
 
 ### Events
 
@@ -135,9 +137,10 @@ say:
 Any other line, such as an empty one, only has the layout read again.
 
 When `events` ends, it starts again after 1 s, then 2 s, doubling up to
-60 s; once it has run for 60 s, the wait is 1 s again. Exit 69, or a
-command that can't start, ends it for good: the daemon then runs
-`report_layout` as it would without `events`.
+60 s; once it has run for 60 s, the wait is 1 s again. A restart that can't
+start waits the same way. Exit 69, or a command that can't start the first
+time, ends it for good: the daemon then runs `report_layout` as it would
+without `events`.
 
 ## Placeholders
 
