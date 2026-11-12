@@ -6,4 +6,4 @@ pub(crate) mod choose;
 // built from a config's `provider` once it is chosen, from #129
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod command;
-pub mod rex;
+pub(crate) mod rex;

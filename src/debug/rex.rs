@@ -9,11 +9,11 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use super::Result;
+use super::pane_host::PaneHost;
+use super::panes as debug_panes;
 use crate::attach::{Transport, attach_command};
 use crate::daemon::event_loop::{Event, Loop};
-use crate::debug::Result;
-use crate::debug::pane_host::PaneHost;
-use crate::debug::panes as debug_panes;
 use crate::name::NAME;
 use crate::rex::client::{self, Client, Message, ResponseResult};
 

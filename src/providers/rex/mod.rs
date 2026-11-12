@@ -30,7 +30,6 @@
 //!
 
 pub(crate) mod bounds;
-pub mod debug;
 pub(crate) mod find;
 pub(crate) mod layout;
 

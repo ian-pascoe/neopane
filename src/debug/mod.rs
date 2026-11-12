@@ -4,6 +4,7 @@ pub mod latency;
 pub(crate) mod pane_host;
 pub mod panes;
 pub mod relay;
+pub mod rex;
 pub mod tui;
 
 /// The debug commands are a top layer: any error will do.
