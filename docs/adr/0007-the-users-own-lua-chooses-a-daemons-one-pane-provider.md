@@ -152,9 +152,7 @@ the Lua only chooses.
   dropped at once: its pending acts fail and fall back, a warning shows once,
   and the next self-attach chooses again. A pane provider chosen while panes
   are attached checks each of them for reach, so panes Rex made before its
-  connection broke rejoin it. (#114 chooses Rex and marks the panes attached
-  before the choice out of reach; the check and the rejoin arrive with #115.)
-  Choosing Rex never blocks the daemon:
+  connection broke rejoin it. Choosing Rex never blocks the daemon:
   connecting, `session.attach` and `find` are steps of its loop, with the
   config's 3 s deadline.
 - Pane providers come only from the user's file and the built-ins: never from
