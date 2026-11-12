@@ -33,6 +33,37 @@ pub enum Choice {
     Pair(Pair),
 }
 
+/// The only key of the table the config file returns.
+pub const PROVIDER_KEY: &str = "provider";
+
+/// A key of a pair (#93 decision 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairKey {
+    Name,
+    Terminal,
+    Layout,
+}
+
+impl PairKey {
+    pub const ALL: [PairKey; 3] = [PairKey::Name, PairKey::Terminal, PairKey::Layout];
+    /// The keys that make a table a pair, or one side alone.
+    pub const SIDES: [PairKey; 2] = [PairKey::Terminal, PairKey::Layout];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PairKey::Name => "name",
+            PairKey::Terminal => "terminal",
+            PairKey::Layout => "layout",
+        }
+    }
+
+    pub fn from_name(name: &[u8]) -> Option<PairKey> {
+        PairKey::ALL
+            .into_iter()
+            .find(|k| k.name().as_bytes() == name)
+    }
+}
+
 /// The built-in pane providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
@@ -40,6 +71,14 @@ pub enum Builtin {
 }
 
 impl Builtin {
+    pub const ALL: [Builtin; 1] = [Builtin::Rex];
+
+    pub fn from_name(name: &[u8]) -> Option<Builtin> {
+        Builtin::ALL
+            .into_iter()
+            .find(|b| b.name().as_bytes() == name)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Builtin::Rex => "rex",
@@ -81,6 +120,45 @@ impl Provider {
         self.capabilities
             .iter()
             .find_map(|(have, cmd)| (*have == c).then_some(cmd))
+    }
+}
+
+/// A pane provider table's keys besides its capabilities (#93 decision 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Setting {
+    Name,
+    Timeouts,
+    AttachTimeout,
+    Protocols,
+    ContextVars,
+    FindVars,
+}
+
+impl Setting {
+    pub const ALL: [Setting; 6] = [
+        Setting::Name,
+        Setting::Timeouts,
+        Setting::AttachTimeout,
+        Setting::Protocols,
+        Setting::ContextVars,
+        Setting::FindVars,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Setting::Name => "name",
+            Setting::Timeouts => "timeouts",
+            Setting::AttachTimeout => "attach_timeout",
+            Setting::Protocols => "protocols",
+            Setting::ContextVars => "context_vars",
+            Setting::FindVars => "find_vars",
+        }
+    }
+
+    pub fn from_name(name: &[u8]) -> Option<Setting> {
+        Setting::ALL
+            .into_iter()
+            .find(|s| s.name().as_bytes() == name)
     }
 }
 
@@ -406,7 +484,7 @@ impl Checker {
         let mut found = false;
         let mut has_provider = false;
         for (k, v) in pairs {
-            if !is_key(k, "provider") {
+            if !is_key(k, PROVIDER_KEY) {
                 self.warn(format!(
                     "{file} returned an unknown key, {}; only provider is read",
                     key_shown(k)
@@ -452,14 +530,16 @@ impl Checker {
         };
         match tree {
             Tree::Nil | Tree::Bool(false) => Some(Choice::None),
-            Tree::String(s) if s == b"rex" => Some(Choice::Builtin(Builtin::Rex)),
-            Tree::String(s) => {
-                self.error(format!(
-                    "{ROOT} returned {}; the only built-in name is \"rex\"",
-                    quoted(s)
-                ));
-                None
-            }
+            Tree::String(s) => match Builtin::from_name(s) {
+                Some(builtin) => Some(Choice::Builtin(builtin)),
+                None => {
+                    self.error(format!(
+                        "{ROOT} returned {}; the only built-in name is \"rex\"",
+                        quoted(s)
+                    ));
+                    None
+                }
+            },
             Tree::Marker(super::tree::Marker::Function) => {
                 self.error(format!(
                     "{ROOT} returned a function (call it: return f(attach), not f)"
@@ -490,16 +570,16 @@ impl Checker {
                 continue;
             }
             let path = format!("{ROOT}{}", segment(k));
-            let key = key_bytes(k);
-            match key {
-                Some(b"terminal") | Some(b"layout") => {
-                    let (i, role) = if key == Some(b"terminal") {
+            let key = key_bytes(k).unwrap_or(b"");
+            match PairKey::from_name(key) {
+                Some(side @ (PairKey::Terminal | PairKey::Layout)) => {
+                    let (i, role) = if side == PairKey::Terminal {
                         (0, Role::Terminal)
                     } else {
                         (1, Role::Layout)
                     };
                     match v {
-                        Tree::String(s) if s == b"rex" => {
+                        Tree::String(s) if Builtin::from_name(s) == Some(Builtin::Rex) => {
                             self.error(format!("{path}: rex is never half of a pair"));
                             ok = false;
                         }
@@ -520,18 +600,18 @@ impl Checker {
                         }
                     }
                 }
-                Some(b"name") => match self.name(v, &path) {
+                Some(PairKey::Name) => match self.name(v, &path) {
                     Some(n) => name = Some(n),
                     None => ok = false,
                 },
-                Some(k) if Capability::from_name(k).is_some() => {
+                None if Capability::from_name(key).is_some() => {
                     self.error(format!(
                         "{path}: a capability can't sit beside terminal and layout; move it \
                          into one of them"
                     ));
                     ok = false;
                 }
-                _ => self.warn(format!("{path}: unknown field; ignored")),
+                None => self.warn(format!("{path}: unknown field; ignored")),
             }
         }
         if !ok {
@@ -597,22 +677,22 @@ impl Checker {
                 }
                 continue;
             }
-            match key {
-                b"name" => name = self.name(v, &at),
-                b"timeouts" => timeouts = self.timeouts(v, &at),
-                b"attach_timeout" => {
+            match Setting::from_name(key) {
+                Some(Setting::Name) => name = self.name(v, &at),
+                Some(Setting::Timeouts) => timeouts = self.timeouts(v, &at),
+                Some(Setting::AttachTimeout) => {
                     if let Some(t) = self.seconds(v, &at) {
                         attach_timeout = t;
                     }
                 }
-                b"protocols" => {
+                Some(Setting::Protocols) => {
                     if let Some(p) = self.protocols(v, &at) {
                         protocols = p;
                     }
                 }
-                b"context_vars" => context_vars = self.vars(v, &at),
-                b"find_vars" => find_vars = self.vars(v, &at),
-                _ => self.warn(format!("{at}: unknown field; ignored")),
+                Some(Setting::ContextVars) => context_vars = self.vars(v, &at),
+                Some(Setting::FindVars) => find_vars = self.vars(v, &at),
+                None => self.warn(format!("{at}: unknown field; ignored")),
             }
         }
         if self.problems.errors().len() > errors_before {
@@ -891,9 +971,9 @@ impl Checker {
 /// Whether `tree` is a pair or one side alone: it has `terminal` or
 /// `layout`, other than `false`.
 fn is_pair(tree: &Tree) -> bool {
-    ["terminal", "layout"]
+    PairKey::SIDES
         .iter()
-        .any(|k| !matches!(tree.get(k), None | Some(Tree::Bool(false))))
+        .any(|k| !matches!(tree.get(k.name()), None | Some(Tree::Bool(false))))
 }
 
 /// The highest protocol number both the table and the daemon speak.
@@ -966,7 +1046,7 @@ fn quoted(s: &[u8]) -> String {
 }
 
 /// A number as Lua's `tostring` would show it.
-fn number(n: f64) -> String {
+pub(super) fn number(n: f64) -> String {
     if n.is_nan() {
         "nan".into()
     } else if n.is_infinite() {

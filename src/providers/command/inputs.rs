@@ -517,7 +517,7 @@ mod tests {
             pair(format!("{up}_TITLE"), "stale"),
             pair(format!("{up}_ENV_TMUX_PANE"), "%3"),
             pair(format!("{up}_ATTACH_JSON"), "[]"),
-            pair(format!("{up}_CONFIG"), "/cfg/init.lua"),
+            pair(crate::config::config_var(), "/cfg/init.lua"),
             pair(format!("{up}_PROVIDER"), "rex"),
             pair(format!("{up}X"), "kept"),
         ];
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(
             vec![
                 "HOME".to_string(),
-                format!("{up}_CONFIG"),
+                crate::config::config_var(),
                 format!("{up}_PROVIDER"),
                 format!("{up}X"),
             ],

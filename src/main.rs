@@ -47,6 +47,13 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::DebugHelp => Ok(print(&cli::debug_help())),
         Command::Version => Ok(print(&cli::version())),
         Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
+        Command::ProviderShow(name) => {
+            match neorex::config::show::show(name.as_deref(), neorex::attach::build()) {
+                Ok(lua) => Ok(print(&lua)),
+                Err(why) => Ok(fail(&why)),
+            }
+        }
+        Command::ProviderTypes { config } => Ok(write_types(config)),
         // started by the launcher, not by people
         Command::Daemon {
             name,
@@ -80,6 +87,27 @@ fn run(command: Command) -> Result<ExitCode> {
             &Address::from_arg(address),
             pane,
         ))),
+    }
+}
+
+/// `provider types`: the file is `--config`, else where the daemon would
+/// look, made absolute against the working directory.
+fn write_types(config: Option<OsString>) -> ExitCode {
+    use neorex::config::types;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+    let file = match config {
+        Some(file) => Some(cwd.join(file)),
+        None => neorex::config::default_file(|name| std::env::var_os(name), &cwd),
+    };
+    let Some(file) = file else {
+        return fail("can't find the config directory: HOME isn't set");
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let report = types::write(&file, neorex::attach::build(), home.as_deref());
+    let code = print(&report.out);
+    match report.error {
+        Some(why) => fail(&why),
+        None => code,
     }
 }
 

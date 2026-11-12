@@ -6,6 +6,11 @@
 /// The name: lower-case letters only, so no form of it needs escaping.
 pub const NAME: &str = "neorex";
 
+/// The project's home, named after the tool.
+pub fn repo_url() -> String {
+    format!("https://github.com/ian-pascoe/{NAME}")
+}
+
 /// The name in upper case, as in `$<NAME>`.
 pub fn upper() -> String {
     upper_of(NAME)

@@ -253,6 +253,58 @@ fn help_and_version() {
 }
 
 #[test]
+fn provider_show_takes_one_name_at_most() {
+    assert_eq!(parsed("provider show"), Ok(Command::ProviderShow(None)));
+    assert_eq!(
+        parsed("provider show rex"),
+        Ok(Command::ProviderShow(Some("rex".into())))
+    );
+    assert_eq!(
+        refused("provider show --x"),
+        "provider show: unknown option --x"
+    );
+    for line in ["provider show a b", "provider show rex --x"] {
+        assert_eq!(
+            refused(line),
+            "provider show takes at most one NAME",
+            "{line}"
+        );
+    }
+    assert_eq!(parsed("provider show -h"), Ok(Command::Help));
+}
+
+#[test]
+fn provider_types_takes_a_config_file() {
+    let types = |config: Option<&str>| {
+        Ok(Command::ProviderTypes {
+            config: config.map(OsString::from),
+        })
+    };
+    assert_eq!(parsed("provider types"), types(None));
+    assert_eq!(
+        parsed("provider types --config c.lua"),
+        types(Some("c.lua"))
+    );
+    assert_eq!(
+        parsed("provider types --config=c.lua"),
+        types(Some("c.lua"))
+    );
+    assert_eq!(
+        refused("provider types --config a --config b"),
+        "--config is given twice"
+    );
+    assert_eq!(refused("provider types --config"), "--config needs a value");
+    assert_eq!(
+        refused("provider types --config="),
+        "--config needs a value"
+    );
+    assert_eq!(
+        refused("provider types x"),
+        "provider types takes only --config FILE"
+    );
+}
+
+#[test]
 fn command_words_are_only_the_first_argument() {
     for (line, what) in [
         ("attach", "attach"),
@@ -262,8 +314,6 @@ fn command_words_are_only_the_first_argument() {
         ("status", "status"),
         ("kill --all", "kill"),
         ("provider check", "provider check"),
-        ("provider show rex", "provider show"),
-        ("provider types", "provider types"),
     ] {
         assert_eq!(parsed(line), Ok(Command::NotBuilt(what.into())), "{line}");
     }

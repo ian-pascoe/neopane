@@ -410,3 +410,122 @@ fn the_relay_test_tool_relays_stdin_and_stdout() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(text(&out.stdout), "drawn");
 }
+
+#[test]
+fn provider_show_lists_the_builtins_and_refuses_rex() {
+    let out = run(&["provider", "show"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out.stdout),
+        "rex  return \"rex\" from provider() (built in; no Lua table)\n"
+    );
+    assert_eq!(text(&out.stderr), "");
+
+    let out = run(&["provider", "show", "rex"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "{NAME}: rex is built into {NAME} and has no Lua table; return \"rex\" from \
+             provider() to use it\n"
+        )
+    );
+
+    let out = run(&["provider", "show", "foo"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no built-in pane provider named foo (built-ins: rex)\n")
+    );
+
+    let out = run(&["provider", "show", "a", "b"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn provider_types_writes_both_files_then_keeps_luarc() {
+    /// Removed when dropped, even on failure.
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let home = std::env::temp_dir().join(format!("{NAME}-cli-types-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    // as the working directory reads it, symlinks resolved
+    let tmp = Temp(home.canonicalize().unwrap());
+    let home = &tmp.0;
+    let config_var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
+    let types = |args: &[&str], config: Option<&str>| {
+        let mut command = Command::new(exe());
+        command
+            .args(["provider", "types"])
+            .args(args)
+            .current_dir(home)
+            .env("HOME", home)
+            .env_remove("XDG_CONFIG_HOME")
+            .stdin(Stdio::null());
+        match config {
+            Some(c) => command.env(&config_var, c),
+            None => command.env_remove(&config_var),
+        };
+        command.output().unwrap()
+    };
+    let docs = format!("{}/blob/main/docs/config.md", neorex::cli::repo_url());
+
+    // the XDG default, under HOME
+    let out = types(&[], None);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "wrote ~/.config/{NAME}/types/{NAME}.lua\nwrote ~/.config/{NAME}/.luarc.json\n\
+             no init.lua yet: see {docs}\n"
+        )
+    );
+    let dir = home.join(".config").join(NAME);
+    let meta = std::fs::read_to_string(dir.join(format!("types/{NAME}.lua"))).unwrap();
+    assert!(
+        meta.starts_with(&format!("---@meta\n-- {}\n", neorex::attach::build())),
+        "{meta}"
+    );
+    let luarc = std::fs::read_to_string(dir.join(".luarc.json")).unwrap();
+    assert!(
+        luarc.contains("\"runtime.version\": \"Lua 5.1\""),
+        "{luarc}"
+    );
+
+    // a second run keeps the user's .luarc.json
+    std::fs::write(dir.join(".luarc.json"), "{}").unwrap();
+    std::fs::write(dir.join("init.lua"), "return {}").unwrap();
+    let out = types(&[], None);
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "wrote ~/.config/{NAME}/types/{NAME}.lua\nkept ~/.config/{NAME}/.luarc.json \
+             (already there)\n"
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".luarc.json")).unwrap(),
+        "{}"
+    );
+
+    // $<NAME>_CONFIG's directory, relative to here; --config wins over it
+    let out = types(&[], Some("env/my.lua"));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "wrote ~/env/types/{NAME}.lua\nwrote ~/env/.luarc.json\nno my.lua yet: see {docs}\n"
+        )
+    );
+    let out = types(&["--config", "flag/init.lua"], Some("env/my.lua"));
+    assert!(
+        text(&out.stdout).starts_with(&format!("wrote ~/flag/types/{NAME}.lua\n")),
+        "{}",
+        text(&out.stdout)
+    );
+}

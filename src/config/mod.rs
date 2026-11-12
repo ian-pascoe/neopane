@@ -9,14 +9,20 @@ mod api;
 pub mod check;
 pub mod child;
 mod runner;
+pub mod show;
 pub mod tree;
+pub mod types;
 pub mod wire;
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use check::{Builtin, Capability, Choice, Chosen, Pair, Problem, Problems, Provider, check};
 pub use runner::{Failure, MAX_PRINTED, Outcome, Spawn, run};
 pub use wire::{Answer, Attach, Request};
+
+use crate::name::{NAME, upper};
 
 /// The time a config has to answer.
 pub const TIME: Duration = Duration::from_secs(3);
@@ -51,4 +57,29 @@ pub fn default(attach: &Attach) -> Choice {
         Some(_) => Choice::Builtin(Builtin::Rex),
         None => Choice::None,
     }
+}
+
+/// The config file's name, unless `$<NAME>_CONFIG` names another.
+pub const FILE_NAME: &str = "init.lua";
+
+/// `$<NAME>_CONFIG`'s name.
+pub fn config_var() -> String {
+    format!("{}_CONFIG", upper())
+}
+
+/// The config file, as the daemon finds it (#94 decisions 33 and 39):
+/// `$<NAME>_CONFIG`, made absolute against `cwd`, else
+/// `$XDG_CONFIG_HOME/<name>/init.lua`, else `~/.config/<name>/init.lua`.
+/// Empty variables count as unset, and a relative `XDG_CONFIG_HOME` is
+/// ignored. None without `HOME`.
+pub fn default_file(var: impl Fn(&str) -> Option<OsString>, cwd: &Path) -> Option<PathBuf> {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty());
+    if let Some(file) = set(&config_var()) {
+        return Some(cwd.join(file));
+    }
+    let base = match set("XDG_CONFIG_HOME").map(PathBuf::from) {
+        Some(xdg) if xdg.is_absolute() => xdg,
+        _ => PathBuf::from(set("HOME")?).join(".config"),
+    };
+    Some(base.join(NAME).join(FILE_NAME))
 }
