@@ -25,6 +25,7 @@ fn runner(
                 protocol: 1,
             })
             .collect(),
+        attach_timeout: config::check::ATTACH_TIMEOUT,
     };
     let env: Vec<(Vec<u8>, Vec<u8>)> = env
         .iter()
@@ -604,7 +605,7 @@ fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Ce
             argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
             timeout: Duration::from_secs(2),
             protocol: 1,
-        }],
+        }],        attach_timeout: config::check::ATTACH_TIMEOUT,
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
     let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
@@ -788,4 +789,70 @@ fn a_command_doesnt_inherit_the_daemons_ignored_signals() {
         );
         assert_eq!(None, answer(&mut p, Duration::from_millis(50)));
     }
+}
+
+/// A checked table named `name` giving `caps`, each running `name`, with
+/// attach timeout `secs`.
+fn table(name: &str, caps: &[config::Capability], secs: u64) -> config::Provider {
+    config::Provider {
+        name: name.into(),
+        path: format!("provider().{name}"),
+        capabilities: caps
+            .iter()
+            .map(|&c| {
+                let command = config::check::Command {
+                    argv: vec![name.as_bytes().to_vec()],
+                    timeout: Some(Duration::from_secs(3)),
+                };
+                (c, command)
+            })
+            .collect(),
+        attach_timeout: Duration::from_secs(secs),
+        protocol: 1,
+        context_vars: Vec::new(),
+        find_vars: Vec::new(),
+    }
+}
+
+#[test]
+fn a_pairs_spec_runs_its_terminal_halfs_open_and_close_with_its_attach_timeout_and_the_rest_from_its_layout_half()
+ {
+    use config::Capability as C;
+    let terminal = table("ghostty", &[C::Open, C::Close], 9);
+    let layout = table("aerospace", &[C::PlaceBeside, C::Focus], 2);
+    let pair = config::Choice::Pair(config::Pair {
+        name: "ghostty+aerospace".into(),
+        terminal: Some(terminal.clone()),
+        layout: Some(layout.clone()),
+    });
+    let spec = Spec::of(&pair).unwrap();
+    let ran: Vec<(Capability, &[u8])> = spec
+        .commands
+        .iter()
+        .map(|c| (c.cap, &c.argv[0][..]))
+        .collect();
+    assert_eq!(
+        vec![
+            (Capability::Open, &b"ghostty"[..]),
+            (Capability::Close, b"ghostty"),
+            (Capability::PlaceBeside, b"aerospace"),
+            (Capability::Focus, b"aerospace"),
+        ],
+        ran
+    );
+    assert_eq!(Duration::from_secs(9), spec.attach_timeout);
+    let p = CommandProvider::new(spec, &[], b"/").unwrap();
+    assert_eq!(Duration::from_secs(9), p.attach_timeout());
+
+    // a layout half alone has the default; a whole table its own
+    let alone = config::Choice::Pair(config::Pair {
+        name: "aerospace".into(),
+        terminal: None,
+        layout: Some(layout),
+    });
+    let default = config::check::ATTACH_TIMEOUT;
+    assert_eq!(default, Spec::of(&alone).unwrap().attach_timeout);
+    let whole = Spec::of(&config::Choice::Whole(terminal)).unwrap();
+    assert_eq!(Duration::from_secs(9), whole.attach_timeout);
+    assert_eq!(None, Spec::of(&config::Choice::None));
 }

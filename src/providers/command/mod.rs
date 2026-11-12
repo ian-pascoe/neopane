@@ -44,6 +44,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::config;
 use crate::daemon::event_loop::{Event, Loop};
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
@@ -93,6 +94,72 @@ const RUN_TOKEN: usize = 1;
 pub(crate) struct Spec {
     pub name: String,
     pub commands: Vec<CapCommand>,
+    /// Its terminal half's attach timeout (#88 decision 15).
+    pub attach_timeout: Duration,
+}
+
+impl Spec {
+    /// The runner's spec for the pane provider the config chose, or None for
+    /// none or a built-in: a table's every command, or a pair's terminal half's
+    /// `open` and `close` and its layout half's other capabilities, with the
+    /// terminal half's attach timeout.
+    pub(crate) fn of(choice: &config::Choice) -> Option<Spec> {
+        let (name, sides) = match choice {
+            config::Choice::None | config::Choice::Builtin(_) => return None,
+            config::Choice::Whole(p) => (&p.name, [(Some(p), true), (Some(p), false)]),
+            config::Choice::Pair(pair) => (
+                &pair.name,
+                [
+                    (pair.terminal.as_ref(), true),
+                    (pair.layout.as_ref(), false),
+                ],
+            ),
+        };
+        let mut commands = Vec::new();
+        for (side, terminal) in sides {
+            let Some(p) = side else {
+                continue;
+            };
+            for (cap, command) in &p.capabilities {
+                if cap.is_terminal() != terminal {
+                    continue;
+                }
+                let cap = capability_of(*cap);
+                commands.push(CapCommand {
+                    cap,
+                    argv: command.argv.clone(),
+                    timeout: command.timeout.unwrap_or(cap.default_timeout()),
+                    protocol: p.protocol,
+                });
+            }
+        }
+        let attach_timeout = sides[0]
+            .0
+            .map_or(config::check::ATTACH_TIMEOUT, |t| t.attach_timeout);
+        Some(Spec {
+            name: name.clone(),
+            commands,
+            attach_timeout,
+        })
+    }
+}
+
+/// The daemon's capability for one the config names.
+fn capability_of(c: config::Capability) -> Capability {
+    match c {
+        config::Capability::Open => Capability::Open,
+        config::Capability::Close => Capability::Close,
+        config::Capability::Find => Capability::Find,
+        config::Capability::PlaceBeside => Capability::PlaceBeside,
+        config::Capability::Resize => Capability::Resize,
+        config::Capability::Focus => Capability::Focus,
+        config::Capability::FocusDirection => Capability::FocusDirection,
+        config::Capability::ReportLayout => Capability::ReportLayout,
+        config::Capability::Events => Capability::Events,
+        config::Capability::OpenBeside => Capability::OpenBeside,
+        config::Capability::OpenFloat => Capability::OpenFloat,
+        config::Capability::OpenTabPage => Capability::OpenTabPage,
+    }
 }
 
 /// One capability's command.
@@ -134,6 +201,7 @@ type Clock = Box<dyn Fn() -> Instant>;
 
 pub(crate) struct CommandProvider {
     name: String,
+    attach_timeout: Duration,
     commands: Vec<CapCommand>,
     /// `events`, and how long it waits to start again the next time it
     /// ends; None once it has ended for good, or without one.
@@ -176,6 +244,7 @@ impl CommandProvider {
         let inner_loop = Loop::init().map_err(std::io::Error::other)?;
         let mut p = CommandProvider {
             name: spec.name,
+            attach_timeout: spec.attach_timeout,
             // `find` isn't run yet
             commands: spec
                 .commands
@@ -541,6 +610,10 @@ impl PaneProvider for CommandProvider {
     fn context_vars(&self) -> &[&str] {
         // reach is #127's
         &[]
+    }
+
+    fn attach_timeout(&self) -> Duration {
+        self.attach_timeout
     }
 }
 
