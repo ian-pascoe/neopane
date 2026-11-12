@@ -168,6 +168,7 @@ impl Daemon {
             return Ok(());
         };
         self.unshown_awaiting_origin.retain(|&(w, _)| w != win);
+        self.kept_taken(win);
         self.wait_for_report(id, Instant::now())?;
         self.size_window(id);
         // a window already that size, as one an unattached daemon kept,
@@ -183,11 +184,12 @@ impl Daemon {
             return;
         }
         // the window an unattached daemon kept comes first
-        let first = self.kept.filter(|w| wins.contains(w)).unwrap_or(current);
+        let first = self
+            .lifetime
+            .kept
+            .filter(|w| wins.contains(w))
+            .unwrap_or(current);
         let picked = pick_unshown_window(first, wins, |w| self.held(w));
-        if picked.is_some() && picked == self.kept {
-            self.kept = None;
-        }
         let [cols, rows] = self.window_size_of(id);
         let (req, kind) = match picked {
             Some(win) => {

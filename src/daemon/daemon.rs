@@ -116,15 +116,6 @@ pub(crate) struct Daemon {
     pub stopped: Option<StopReason>,
     /// Whether the daemon has a pane, or is past its last (ADR 0003).
     pub(crate) lifetime: lifetime::Lifetime,
-    /// The unsaved changes, as Neovim last told.
-    unsaved: Vec<Vec<u8>>,
-    /// The last answer about them asked of Neovim.
-    unsaved_ask: u32,
-    /// Where the unsaved changes are listed while unattached: None without
-    /// a daemon directory, as in tests.
-    pub(crate) unsaved_file: Option<super::dir::Unsaved>,
-    /// The window an unattached daemon keeps, unshown, for the next attach.
-    kept: Option<i64>,
     /// Neovim's exit status, once it has quit and exited: the self-attached
     /// panes' helpers exit with it.
     pub quit_status: Option<u8>,
@@ -364,11 +355,7 @@ impl Daemon {
             area_timer_due: None,
             escape_timer_due: None,
             stopped: None,
-            lifetime: lifetime::Lifetime::Attached,
-            unsaved: Vec::new(),
-            unsaved_ask: 0,
-            unsaved_file: None,
-            kept: None,
+            lifetime: lifetime::Lifetime::default(),
             quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
@@ -1161,7 +1148,7 @@ impl Daemon {
             self.nvim.client.flush()?;
             return Ok(());
         }
-        if !self.panes_count_but(Some(id)) {
+        if !self.panes_count_but(Some(id)) && self.lifetime.is_attached() {
             return self.go_unattached(Some(id));
         }
         let wins = self.panes.list[i].windows();
@@ -1555,7 +1542,7 @@ impl Daemon {
                 WinKind::External => {
                     self.changes.became_external(w.win);
                     if self.panes.by_win(w.win).is_some()
-                        || self.kept == Some(w.win)
+                        || self.lifetime.kept == Some(w.win)
                         || self.changes.is_closing(w.win)
                         || self
                             .unshown_awaiting_origin
@@ -2959,6 +2946,8 @@ fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
 mod self_attach_tests;
 #[cfg(test)]
 mod slow_terminal_tests;
+#[cfg(test)]
+mod unattached_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6408,7 +6397,7 @@ mod tests {
     /// Whether `d` went unattached, and waits for Neovim's word on its
     /// unsaved changes.
     fn deciding(d: &Daemon) -> bool {
-        d.stopped.is_none() && matches!(d.lifetime, lifetime::Lifetime::Deciding { .. })
+        d.stopped.is_none() && matches!(d.lifetime.stage, lifetime::Stage::Deciding { .. })
     }
 
     fn pane_ids(d: &Daemon) -> Vec<u32> {

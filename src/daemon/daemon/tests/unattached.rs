@@ -9,7 +9,7 @@ use crate::daemon::dir::testing::Scratch;
 use crate::daemon::dir::{self, Claimed};
 use crate::daemon::event_loop::Kind;
 use crate::screen::float_groups::Group;
-use lifetime::Lifetime;
+use lifetime::Stage;
 
 /// A ready daemon whose one pane shows window 1000, current, listing its
 /// unsaved changes in a directory of its own.
@@ -30,7 +30,7 @@ impl Rig {
         fx.d.nvim.current_win = 1000;
         let base = Scratch::new();
         let claimed = dir::claim(&base.base(), "d").unwrap();
-        fx.d.unsaved_file = Some(claimed.unsaved());
+        fx.d.lifetime.unsaved_file = Some(claimed.unsaved());
         Rig {
             fx,
             pane,
@@ -116,10 +116,11 @@ fn with_unsaved_changes_the_daemon_stays_listing_them_until_none_are_left() {
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
     assert_eq!(None, rig.fx.d.stopped);
-    assert_eq!(Lifetime::Unattached, rig.fx.d.lifetime);
+    assert_eq!(Stage::StayingForUnsaved, rig.fx.d.lifetime.stage);
     assert_eq!(Some("unsaved 1\n/a\n".into()), rig.unsaved());
-    rig.told(&["/a", ""], 0);
-    assert_eq!(Some("unsaved 1\n/a\n\n".into()), rig.unsaved());
+    // an unnamed buffer isn't listed: no file has its changes
+    rig.told(&["/a", "", "/b"], 0);
+    assert_eq!(Some("unsaved 1\n/a\n/b\n".into()), rig.unsaved());
     rig.told(&[], 0);
     assert_eq!(Some(StopReason::PaneGone), rig.fx.d.stopped);
 }
@@ -144,20 +145,20 @@ fn an_attach_while_deciding_keeps_the_daemon() {
     let mut rig = Rig::new();
     rig.last_pane_goes();
     let (_helper, _pty) = rig.self_attach(None);
-    assert_eq!(Lifetime::Attached, rig.fx.d.lifetime);
+    assert_eq!(Stage::Attached, rig.fx.d.lifetime.stage);
     rig.told(&[], FIRST_ASK);
     rig.fx.d.unattach_wait_over().unwrap();
     assert_eq!(None, rig.fx.d.stopped);
 }
 
 #[test]
-fn an_attach_to_a_daemon_kept_for_unsaved_changes_removes_its_list() {
+fn an_attach_to_an_unattached_daemon_removes_its_list() {
     let mut rig = Rig::new();
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
     assert!(rig.unsaved().is_some());
     let (_helper, _pty) = rig.self_attach(None);
-    assert_eq!(Lifetime::Attached, rig.fx.d.lifetime);
+    assert_eq!(Stage::Attached, rig.fx.d.lifetime.stage);
     assert_eq!(None, rig.unsaved());
     // attached, nothing unsaved ends nothing
     rig.told(&[], 0);
@@ -185,7 +186,7 @@ fn a_requested_pane_on_its_way_counts_until_its_request_fails() {
     draw_external(&mut rig.fx.d, 3, 1001, 80, 23);
     let asked = rig.fx.d.panes.add_for_window(1001).id;
     rig.fx.d.pane_gone(rig.pane).unwrap();
-    assert_eq!(Lifetime::Attached, rig.fx.d.lifetime);
+    assert_eq!(Stage::Attached, rig.fx.d.lifetime.stage);
     rig.fx.d.give_up(asked).unwrap();
     assert!(deciding(&rig.fx.d));
 }
@@ -229,4 +230,73 @@ fn a_file_attach_closes_the_kept_window_once_its_file_shows() {
         .unwrap();
     assert!(rig.fx.d.changes.is_closing(1000));
     assert!(sent_to_nvim(&mut rig.fx).contains(".close("));
+}
+
+/// The answer to the new window the last self-attach asked for: `win`, or
+/// an error.
+fn opened(rig: &mut Rig, win: Option<i64>) {
+    let ask = rig.fx.d.window_ask.expect("a new window asked");
+    let mut buf = Vec::new();
+    match win {
+        Some(w) => {
+            rig.fx.d.on_window_opened(w).unwrap();
+            msgpack::write_int(&mut buf, w);
+            rig.fx
+                .d
+                .on_window_answer(ask.req, None, Decoder::of(&buf))
+                .unwrap();
+        }
+        None => {
+            msgpack::write_nil(&mut buf);
+            rig.fx
+                .d
+                .on_window_answer(ask.req, Some(b"E1: no"), Decoder::of(&buf))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_failed_file_attach_leaves_the_kept_window_for_the_next() {
+    let mut rig = Rig::new();
+    rig.last_pane_goes();
+    let first = rig.self_attach(Some("/f"));
+    opened(&mut rig, None);
+    // unattached again, still keeping it
+    assert!(deciding(&rig.fx.d));
+    assert!(!rig.fx.d.changes.is_closing(1000));
+    let _ = sent_to_nvim(&mut rig.fx);
+    drop(first);
+    let (_helper, _pty) = rig.self_attach(Some("/f"));
+    opened(&mut rig, Some(1006));
+    assert!(rig.fx.d.changes.is_closing(1000));
+    assert!(sent_to_nvim(&mut rig.fx).contains(".close("));
+}
+
+/// An open of a tab page's terminal beside block 1, for pane `pane`.
+fn open_tab_page(pane: crate::attach::PaneId) -> Ask {
+    Ask::OpenTabPage {
+        pane,
+        attach: Vec::new(),
+        title: String::new(),
+        origin: TerminalId::from(block_id(1).as_str()),
+        cols: 80,
+        rows: 24,
+    }
+}
+
+#[test]
+fn opens_not_yet_asked_are_dropped_as_the_daemon_goes_unattached() {
+    let mut rig = Rig::new();
+    let ids = [rig.fx.d.panes.ids.mint(), rig.fx.d.panes.ids.mint()];
+    for id in ids {
+        rig.fx.d.act(open_tab_page(id));
+    }
+    // one at a time: the second waits
+    assert_eq!(2, rig.fx.d.asks.waiting());
+    rig.last_pane_goes();
+    // the one asked may still be answered, and closed then
+    assert_eq!(1, rig.fx.d.asks.waiting());
+    let asked = fake(&mut rig.fx.d).asked();
+    assert_eq!(vec![open_tab_page(ids[0])], asked);
 }

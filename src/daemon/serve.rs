@@ -239,6 +239,9 @@ struct NvimChild {
     /// Copies Neovim's stderr into ours, the log, until Neovim closes it;
     /// then returns the first bytes.
     stderr: Option<JoinHandle<Vec<u8>>>,
+    /// When it's killed if it hasn't ended, once waiting for its end began:
+    /// one `grace` from then, however the wait goes.
+    ends_by: Option<Instant>,
 }
 
 /// How long Neovim has to exit after its channel closes before it's killed.
@@ -265,6 +268,7 @@ impl NvimChild {
             grace: NVIM_EXIT_GRACE,
             exiting: NVIM_EXITING,
             stderr,
+            ends_by: None,
         }
     }
 
@@ -304,7 +308,7 @@ impl NvimChild {
     /// refusing attaches on `server` meanwhile as `stopping`. Dropping kills
     /// one that hasn't.
     fn wait_refusing(&mut self, server: &UnixListener) {
-        let deadline = Instant::now() + self.grace;
+        let deadline = self.ends_by();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             refuse_stopping(
@@ -322,6 +326,14 @@ impl NvimChild {
             // SAFETY: one valid pollfd.
             unsafe { libc::poll(fds.as_mut_ptr(), 1, 10) };
         }
+    }
+
+    /// When Neovim is killed if it hasn't ended: one grace after waiting
+    /// for its end began, which this begins if it hasn't.
+    fn ends_by(&mut self) -> Instant {
+        *self
+            .ends_by
+            .get_or_insert_with(|| Instant::now() + self.grace)
     }
 
     /// Why a Neovim that closed the channel before it answered failed to
@@ -358,7 +370,8 @@ impl NvimChild {
 
 impl Drop for NvimChild {
     fn drop(&mut self) {
-        if self.wait_for_exit(self.grace) {
+        let left = self.ends_by().saturating_duration_since(Instant::now());
+        if self.wait_for_exit(left) {
             return;
         }
         log_warn!(
@@ -675,7 +688,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     // requested panes' helpers relay too under the diagnostic
     d.transport = config.transport;
     d.log = dir.log();
-    d.unsaved_file = Some(dir.unsaved());
+    d.lifetime.unsaved_file = Some(dir.unsaved());
     d.first_choice = Some(chosen);
     d.start(first)?;
     Ok((child, d))
@@ -887,6 +900,25 @@ mod tests {
         let file = std::env::temp_dir().join(format!("{NAME}-{name}-{}", std::process::id()));
         let _ = fs::remove_file(&file);
         file
+    }
+
+    #[test]
+    fn refusing_attaches_as_neovim_ends_counts_toward_its_one_grace() {
+        let (child, stdin) = sh_child(
+            "trap '' HUP; echo ready; while :; do sleep 0.1; done",
+            Duration::from_millis(500),
+        );
+        let (_base, dir) = test_dir();
+        let server = dir.bind().unwrap();
+        let started = Instant::now();
+        drop(stdin);
+        let mut child = child;
+        child.wait_refusing(&server);
+        drop(child);
+        let took = started.elapsed();
+        // killed one grace after the wait began, not two
+        assert!(took >= Duration::from_millis(500), "{took:?}");
+        assert!(took < Duration::from_millis(950), "{took:?}");
     }
 
     #[test]
