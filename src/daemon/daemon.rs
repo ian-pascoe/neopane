@@ -2166,7 +2166,19 @@ impl Daemon {
             {
                 return Ok(());
             }
-            let Some(win) = floating_panes::focusable_in(&self.grids, &l.group) else {
+            // hidden in another tab page: Neovim goes there, to the float
+            // in it that takes focus
+            let hidden = float_groups::hidden(&self.grids, &l.group);
+            let top = l
+                .group
+                .top_grids()
+                .first()
+                .and_then(|&t| self.grids.win_on(t));
+            let found = match top {
+                Some(w) if hidden => Some(w.win),
+                _ => floating_panes::focusable_in(&self.grids, &l.group),
+            };
+            let Some(win) = found else {
                 return Ok(());
             };
             self.nvim.current_float = win;
@@ -2436,8 +2448,11 @@ impl Daemon {
             // a pane that closes in this loop leaves the panes drawn before it, to its right, on their old columns for this frame: the next draw finds their start moved and redraws the row
             let tabline = self.prepare_tabline(id);
             let p = &self.panes.list[i];
-            // a floating pane waiting on its refit shows nothing yet
-            if p.layer.is_some() && !p.layer_shown() {
+            // a floating pane waiting on its refit shows nothing yet, and one
+            // whose floats hide in another tab page keeps its last frame
+            if let Some(l) = &p.layer
+                && (!p.layer_shown() || float_groups::hidden(&self.grids, &l.group))
+            {
                 continue;
             }
             // frames were dropped for a terminal that wasn't reading: no frame

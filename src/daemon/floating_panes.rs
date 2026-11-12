@@ -84,6 +84,11 @@ impl FloatingPanes<'_> {
                 l.group = *g;
                 continue;
             }
+            // hidden in a tab page Neovim couldn't move them out of: the pane
+            // keeps its last frame until that tab page is current again
+            if float_groups::hidden(self.grids, &l.group) {
+                continue;
+            }
             // without a terminal its open isn't answered yet: the answer closes it
             if let Some(t) = p.terminal.clone() {
                 out.push(asks::close(t));

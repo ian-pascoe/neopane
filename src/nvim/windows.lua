@@ -920,17 +920,6 @@ local function schedule_report()
   vim.schedule(report)
 end
 
---- Makes `win` the current window, as when its pane is focused: its home
---- tab page first, if that isn't current, as `gt` would go there, so
---- TabLeave and TabEnter fire. A float stays where Neovim keeps it.
-function M.go(win)
-  local tab = home[win]
-  if tab and tab ~= api.nvim_get_current_tabpage() and api.nvim_tabpage_is_valid(tab) and api.nvim_win_is_valid(win) then
-    api.nvim_set_current_tabpage(tab)
-  end
-  if api.nvim_get_current_win() ~= win then api.nvim_set_current_win(win) end
-end
-
 -- The editor floats of the float groups with float group panes, as the
 -- daemon last said. Each, with the floats hanging from it, moves into
 -- whichever tab page is current, so its pane never blanks, and still belongs
@@ -1015,6 +1004,26 @@ end
 
 -- before anything is drawn
 api.nvim_create_autocmd('TabEnter', { group = group, callback = bring_carried })
+
+--- Makes `win` the current window, as when its pane is focused: its home
+--- tab page first, if that isn't current, as `gt` would go there, so
+--- TabLeave and TabEnter fire. A float stays where Neovim keeps it; one that
+--- takes no focus, as a picker's box, stands for the float hanging from it
+--- that does, its input.
+function M.go(win)
+  local c = api.nvim_win_is_valid(win) and api.nvim_win_get_config(win)
+  if c and c.relative ~= '' and not c.external and c.focusable == false then
+    local takes = floats_in(api.nvim_win_get_tabpage(win), false, function(f, root)
+      return root == win and api.nvim_win_get_config(f).focusable ~= false
+    end)
+    win = takes[#takes] or win
+  end
+  local tab = home[win]
+  if tab and tab ~= api.nvim_get_current_tabpage() and api.nvim_tabpage_is_valid(tab) and api.nvim_win_is_valid(win) then
+    api.nvim_set_current_tabpage(tab)
+  end
+  if api.nvim_get_current_win() ~= win then api.nvim_set_current_win(win) end
+end
 
 -- The current tab page is about to close: the floats other tab pages' that
 -- sit in it go back to theirs, as Neovim would close them with it. Neovim

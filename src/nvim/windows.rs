@@ -3971,6 +3971,34 @@ mod tests {
     }
 
     #[test]
+    fn going_to_a_float_group_left_in_another_tab_page_goes_there_to_its_float_that_takes_focus() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, c] = two_tab_pages(&mut h);
+        h.focus_pane(a);
+        // a picker whose box takes no focus, its input does; never carried
+        let [top, kid, _] = h.open_picker();
+        h.sync(&format!(
+            "vim.api.nvim_win_set_config({top}, {{ focusable = false }})"
+        ));
+        h.focus_pane(c);
+        assert_eq!("1 1", h.tab_numbers(&[top, kid]));
+
+        // as a click in its float group pane, which kept its last frame
+        set_current(&mut h.nvim, top);
+        h.nvim.flush().unwrap();
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            kid,
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn gt_goes_to_the_tab_pages_last_current_window_its_own_even_if_that_closed() {
         let Some(mut h) = Harness::start() else {
             return;

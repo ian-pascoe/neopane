@@ -79,3 +79,46 @@ fn the_windows_panes_show_are_told_to_neovim_after_a_batch_when_they_change() {
         lists_sent(&sent_bytes(&mut fx), "panes_show")
     );
 }
+
+#[test]
+fn a_float_group_panes_floats_hidden_in_another_tab_page_keep_it_and_a_click_goes_to_them() {
+    let mut fx = fixture();
+    fx.d.nvim.ready = true;
+    show_picker(&mut fx.d);
+    fx.d.reconcile_layers();
+    let id = picker_pane(&fx.d);
+    let f = fake(&mut fx.d);
+    f.opened(f.last_id(), "block:5");
+    fx.d.drain_provider().unwrap();
+    sent_bytes(&mut fx);
+
+    // Neovim couldn't move them into the tab page entered: hidden, they
+    // keep their pane
+    fx.d.grids.wins.get_mut(&3).unwrap().kind = WinKind::Hidden;
+    fx.d.reconcile_layers();
+    assert_eq!(
+        Some(id),
+        fx.d.panes
+            .list
+            .iter()
+            .find(|p| p.layer.is_some())
+            .map(|p| p.id)
+    );
+    // a click in it goes to them, in their tab page
+    fx.d.on_provider_focus(&TerminalId::from("block:5"))
+        .unwrap();
+    let sent = sent_bytes(&mut fx);
+    let call = format!("{NAME}.go(...)");
+    let at = sent
+        .windows(call.len())
+        .position(|w| w == call.as_bytes())
+        .expect("a switch");
+    let mut args = msgpack::Decoder::of(&sent[at + call.len()..]);
+    assert_eq!(Some(msgpack::Token::Array(1)), args.next().unwrap());
+    assert_eq!(Some(msgpack::Token::Int(1002)), args.next().unwrap());
+
+    // closed, they take it with them
+    fx.d.grids.wins.swap_remove(&3);
+    fx.d.reconcile_layers();
+    assert!(fx.d.panes.list.iter().all(|p| p.layer.is_none()));
+}

@@ -176,6 +176,15 @@ pub(crate) fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     all
 }
 
+/// Whether group `g`'s editor floats are all hidden, in a tab page that
+/// isn't current: Neovim couldn't move them into the current one.
+pub(crate) fn hidden(grids: &Grids, g: &Group) -> bool {
+    !g.top_grids().is_empty()
+        && g.top_grids()
+            .iter()
+            .all(|t| grids.wins.get(t).is_some_and(|w| w.kind == WinKind::Hidden))
+}
+
 /// The floats in group `g`, lowest first. At most `MAX_FLOATS`, the top-most.
 pub(crate) fn members(grids: &Grids, g: &Group) -> Vec<Placed> {
     let mut out: Vec<Placed> = Vec::new();
