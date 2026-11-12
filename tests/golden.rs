@@ -671,7 +671,8 @@ impl Multi {
                                 | Note::Direction(_)
                                 | Note::Layout(_)
                                 | Note::Options(_)
-                                | Note::Resized { .. } => {}
+                                | Note::Resized { .. }
+                                | Note::Opened(_) => {}
                             }
                         }
                     }
