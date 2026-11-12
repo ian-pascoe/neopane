@@ -311,18 +311,23 @@ impl Claimed {
     }
 }
 
-/// A daemon's `unsaved` file (ADR 0004): `unsaved 1`, then the full name of
-/// each buffer with unsaved changes, one a line, empty for an unnamed one.
+/// A daemon's `unsaved` file (ADR 0004): `unsaved 1`, then the absolute
+/// path of each file with unsaved changes, one a line.
 #[derive(Debug, Clone)]
 pub(crate) struct Unsaved(PathBuf);
 
 impl Unsaved {
-    /// Writes `files` whole, mode 0600, by renaming a finished file into
-    /// place, so a reader never sees half of it. A name with a newline in it
-    /// can't be one line, and is left out.
-    pub(crate) fn write(&self, files: &[Vec<u8>]) -> io::Result<()> {
+    /// Writes the files among the buffers named `buffers` whole, mode 0600,
+    /// by renaming a finished file into place, so a reader never sees half
+    /// of it. Only absolute paths are files: an unnamed buffer, or one named
+    /// as `oil://…`, is left out, and so is a name with a newline in it,
+    /// which can't be one line.
+    pub(crate) fn write(&self, buffers: &[Vec<u8>]) -> io::Result<()> {
         let mut text = b"unsaved 1\n".to_vec();
-        for f in files.iter().filter(|f| !f.contains(&b'\n')) {
+        let files = buffers
+            .iter()
+            .filter(|f| f.starts_with(b"/") && !f.contains(&b'\n'));
+        for f in files {
             text.extend_from_slice(f);
             text.push(b'\n');
         }
@@ -673,10 +678,18 @@ mod tests {
         let path = base.0.join("work").join(UNSAVED);
         let unsaved = claimed.unsaved();
         unsaved
-            .write(&[b"/a/b.txt".to_vec(), Vec::new(), b"/c".to_vec()])
+            .write(&[
+                b"/a/b.txt".to_vec(),
+                Vec::new(),
+                b"oil:///a/".to_vec(),
+                b"rel/x".to_vec(),
+                b"/new\nline".to_vec(),
+                b"/c".to_vec(),
+            ])
             .unwrap();
+        // files only, by absolute path
         assert_eq!(
-            "unsaved 1\n/a/b.txt\n\n/c\n",
+            "unsaved 1\n/a/b.txt\n/c\n",
             fs::read_to_string(&path).unwrap()
         );
         assert_eq!(

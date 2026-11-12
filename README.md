@@ -213,9 +213,10 @@ a second at most. Then:
 - With nothing unsaved, it ends Neovim, as neorex always has, by closing
   its channel: `VimLeavePre` and `VimLeave` run, and swap files go.
 - With unsaved changes, buffers `:qa` would refuse to quit over, it stays,
-  logs their names, and lists them in `unsaved` in its directory: a first
-  line `unsaved 1`, then each file's full path on a line of its own, an empty
-  line for an unnamed buffer. It keeps one window, the last current one, and
+  logs their names, and lists the files among them in `unsaved` in its
+  directory: a first line `unsaved 1`, then each file's absolute path on a
+  line of its own. An unnamed buffer, or one a plugin names `oil://…`, is
+  logged but not listed. It keeps one window, the last current one, and
   closes the rest. `neorex attach --address …` brings that window back, with
   your changes, and removes `unsaved`; `neorex attach --address … FILE` opens
   FILE and closes the kept window. Saving or throwing away the last change
