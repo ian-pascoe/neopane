@@ -240,7 +240,7 @@ fn a_self_attached_panes_last_window_closing_ends_its_attach_and_closes_no_termi
             .add_self_attached(SelfAttach {
                 surface,
                 terminal,
-                info: None,
+                hello: None,
             })
             .id;
     fx.d.panes.by_id_mut(id).unwrap().neovim_window_handle = Some(1001);
@@ -428,7 +428,7 @@ pub(super) fn started_with(
     d.start(&mut Some(SelfAttach {
         surface,
         terminal,
-        info: None,
+        hello: None,
     }))
     .unwrap();
     Some((d, live, reader))
@@ -503,7 +503,7 @@ fn windowless_pane(fx: &mut Fixture, terminal: &str) -> (u32, Live) {
     let p = fx.d.panes.add_self_attached(SelfAttach {
         surface,
         terminal,
-        info: None,
+        hello: None,
     });
     p.area = Area::Own;
     (p.id, live)

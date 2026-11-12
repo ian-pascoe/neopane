@@ -568,8 +568,8 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let name = dir.name().to_string();
     let mut first = Some(first_attach(&server, &name, &log)?);
     // it chooses now: connecting to Rex goes on as Neovim starts
-    let chosen = match first.as_ref().and_then(|f| f.info.as_deref()) {
-        Some(info) => choose::choose(&info.env, info.hint.as_deref(), &mut choose::connect()),
+    let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
+        Some(h) => choose::choose(&h.env, h.hint.as_deref(), &mut choose::connect()),
         None => Chosen::None {
             why: "no hello".into(),
             warn: false,
@@ -749,7 +749,7 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let info = attach_conn::attach_info(&terminal, a.tty.as_ref(), provider);
+    let self_hello = attach_conn::self_hello_of(&terminal, a.tty.as_ref(), provider);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after
@@ -759,7 +759,7 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
     Ok(SelfAttach {
         surface,
         terminal: None,
-        info: Some(Box::new(info)),
+        hello: Some(Box::new(self_hello)),
     })
 }
 

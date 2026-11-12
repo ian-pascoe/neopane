@@ -32,7 +32,7 @@ pub(crate) enum Verdict {
 /// The block `REX_BLOCK` names in `env`, the `find` variables' values, or
 /// why it names none: out of reach.
 pub(crate) fn block_in(env: &[(Vec<u8>, Vec<u8>)]) -> Result<String, String> {
-    let Some((_, b)) = env.iter().find(|(k, _)| k == BLOCK_VAR.as_bytes()) else {
+    let Some(b) = crate::attach::env_value(env, BLOCK_VAR) else {
         return Err(format!("{BLOCK_VAR} is unset"));
     };
     match ids::block(b) {
@@ -79,24 +79,37 @@ pub(crate) fn verdict(
     }
 }
 
+/// `struct kinfo_proc` (<sys/sysctl.h>), which `libc` doesn't have: 648
+/// bytes on 64-bit macOS, `kp_eproc` at 296 and its `e_tdev` 276 into it.
+#[cfg(any(target_os = "macos", test))]
+const KINFO_PROC_SIZE: usize = 648;
+#[cfg(any(target_os = "macos", test))]
+const E_TDEV: usize = 296 + 276;
+
+/// The controlling terminal in a `kinfo_proc`, `kinfo`, if it is one whole
+/// and has one: `NODEV` is none.
+#[cfg(any(target_os = "macos", test))]
+fn e_tdev_of(kinfo: &[u8]) -> Option<u64> {
+    const NODEV: u32 = u32::MAX;
+    if kinfo.len() != KINFO_PROC_SIZE {
+        return None;
+    }
+    let tdev = u32::from_ne_bytes(kinfo[E_TDEV..E_TDEV + 4].try_into().ok()?);
+    (tdev != NODEV).then_some(u64::from(tdev))
+}
+
 /// Process `pid`'s controlling terminal: `sysctl KERN_PROC_PID`'s
 /// `kp_eproc.e_tdev`, which works for another user's process, as `login` is.
 #[cfg(target_os = "macos")]
 pub(crate) fn tty_of_pid(pid: u32) -> Option<u64> {
-    // `struct kinfo_proc` (<sys/sysctl.h>), which `libc` doesn't have: 648
-    // bytes on 64-bit macOS, `kp_eproc` at 296 and its `e_tdev` 276 into it
-    const SIZE: usize = 648;
-    const E_TDEV: usize = 296 + 276;
-    // NODEV: no controlling terminal
-    const NODEV: u32 = u32::MAX;
     let mut mib = [
         libc::CTL_KERN,
         libc::KERN_PROC,
         libc::KERN_PROC_PID,
         i32::try_from(pid).ok()?,
     ];
-    let mut buf = [0u64; SIZE / 8];
-    let mut len = SIZE;
+    let mut buf = [0u64; KINFO_PROC_SIZE / 8];
+    let mut len = KINFO_PROC_SIZE;
     // SAFETY: `buf` is valid for `len` bytes, and `mib` for its length.
     let r = unsafe {
         libc::sysctl(
@@ -109,13 +122,12 @@ pub(crate) fn tty_of_pid(pid: u32) -> Option<u64> {
         )
     };
     // a pid with no process answers no bytes
-    if r != 0 || len != SIZE {
+    if r != 0 {
         return None;
     }
-    // SAFETY: `buf` holds `SIZE` initialized bytes.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), SIZE) };
-    let tdev = u32::from_ne_bytes(bytes[E_TDEV..E_TDEV + 4].try_into().ok()?);
-    (tdev != NODEV).then_some(u64::from(tdev))
+    // SAFETY: `buf` holds `len` initialized bytes, at most its size.
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), len) };
+    e_tdev_of(bytes)
 }
 
 /// Process `pid`'s controlling terminal: field 7 of `/proc/<pid>/stat`,
@@ -367,6 +379,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_kinfo_procs_terminal_is_its_e_tdev_unless_nodev_or_cut_short() {
+        let mut kinfo = vec![0u8; KINFO_PROC_SIZE];
+        kinfo[E_TDEV..E_TDEV + 4].copy_from_slice(&0x1000_0006u32.to_ne_bytes());
+        assert_eq!(Some(0x1000_0006), e_tdev_of(&kinfo));
+        kinfo[E_TDEV..E_TDEV + 4].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert_eq!(None, e_tdev_of(&kinfo));
+        assert_eq!(None, e_tdev_of(&kinfo[..KINFO_PROC_SIZE - 1]));
+        assert_eq!(None, e_tdev_of(&[]));
     }
 
     #[test]

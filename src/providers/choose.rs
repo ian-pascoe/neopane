@@ -7,9 +7,11 @@
 //! daemon's loop takes the steps, and its `find` confirms the choice.
 
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use super::Held;
 use super::rex::RexProvider;
+use crate::attach::env_value;
 use crate::config::{self, Builtin, Choice};
 use crate::log::log_warn;
 use crate::name::NAME;
@@ -35,8 +37,9 @@ pub(crate) fn connect() -> Connect {
 
 /// What came of choosing.
 pub(crate) enum Chosen {
-    /// A pane provider, which its `find` still has to confirm.
-    Provider(Held),
+    /// A pane provider, which its `find` still has to confirm, and the time
+    /// choosing it took, connecting: the choice's 3 s count it.
+    Provider { held: Held, spent: Duration },
     /// None, and why; shown in Neovim as a warning if `warn`.
     None { why: String, warn: bool },
 }
@@ -54,6 +57,7 @@ pub(crate) fn default_choice(env: &Env) -> Choice {
 /// Chooses for a self-attach with environment `env` and `hint`, connecting
 /// to Rex through `connect` if that's the choice.
 pub(crate) fn choose(env: &Env, hint: Option<&str>, connect: &mut Connect) -> Chosen {
+    let started = Instant::now();
     if hint == Some(HINT_NONE) {
         return Chosen::None {
             why: format!("the hint is {HINT_NONE}"),
@@ -61,7 +65,7 @@ pub(crate) fn choose(env: &Env, hint: Option<&str>, connect: &mut Connect) -> Ch
         };
     }
     match default_choice(env) {
-        Choice::Builtin(Builtin::Rex) => start_rex(env, connect),
+        Choice::Builtin(Builtin::Rex) => start_rex(env, connect, started),
         _ => Chosen::None {
             why: "REX_SERVER and REX_SESSION aren't both set".into(),
             warn: false,
@@ -71,18 +75,18 @@ pub(crate) fn choose(env: &Env, hint: Option<&str>, connect: &mut Connect) -> Ch
 
 /// Starts connecting to the Rex server and session `env` names. One that
 /// can't be reached, as when the variables are stale, means none.
-fn start_rex(env: &Env, connect: &mut Connect) -> Chosen {
-    let var = |name: &str| {
-        let v = env.iter().find(|(k, _)| k == name.as_bytes());
-        v.map(|(_, v)| String::from_utf8_lossy(v).into_owned())
-            .unwrap_or_default()
-    };
+fn start_rex(env: &Env, connect: &mut Connect, since: Instant) -> Chosen {
+    let var =
+        |name: &str| String::from_utf8_lossy(env_value(env, name).unwrap_or_default()).into_owned();
     let (server, session) = (var("REX_SERVER"), var("REX_SESSION"));
     let started = connect(&server).and_then(|stream| {
         RexProvider::connecting(stream, &session).map_err(|e| std::io::Error::other(e.to_string()))
     });
     match started {
-        Ok(rex) => Chosen::Provider(Held::Rex(Box::new(rex))),
+        Ok(rex) => Chosen::Provider {
+            held: Held::Rex(Box::new(rex)),
+            spent: since.elapsed(),
+        },
         Err(e) => {
             // where, for the log: a warning that long would wait at a prompt
             log_warn!("{NAME} daemon: rex: can't reach Rex at {server}: {e}");
@@ -129,7 +133,7 @@ mod tests {
     fn none(c: Chosen) -> (String, bool) {
         match c {
             Chosen::None { why, warn } => (why, warn),
-            Chosen::Provider(_) => panic!("chose a pane provider"),
+            Chosen::Provider { .. } => panic!("chose a pane provider"),
         }
     }
 
@@ -161,9 +165,10 @@ mod tests {
             assert_eq!("unix:///s", url);
             Ok(ours.take().unwrap())
         });
-        let Chosen::Provider(p) = choose(&in_rex, Some("tmux"), &mut connect) else {
+        let Chosen::Provider { held, spent } = choose(&in_rex, Some("tmux"), &mut connect) else {
             panic!("chose none");
         };
-        assert_eq!("rex", p.seam_ref().name());
+        assert_eq!("rex", held.seam_ref().name());
+        assert!(spent < Duration::from_secs(3));
     }
 }

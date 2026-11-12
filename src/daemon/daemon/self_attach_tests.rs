@@ -143,7 +143,7 @@ impl Rig {
         d.start(&mut Some(SelfAttach {
             surface,
             terminal,
-            info: None,
+            hello: None,
         }))
         .unwrap();
         Some(Rig {

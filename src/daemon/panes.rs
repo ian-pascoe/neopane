@@ -289,7 +289,7 @@ mod tests {
         panes.add_self_attached(SelfAttach {
             surface: Surface::for_test(80, 24),
             terminal: None,
-            info: None,
+            hello: None,
         });
         drop(panes);
     }

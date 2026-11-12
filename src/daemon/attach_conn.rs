@@ -242,13 +242,6 @@ pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), 
     Ok(())
 }
 
-/// The value of variable `name` in environment `env`, if set.
-fn env_var<'a>(env: &'a [(Vec<u8>, Vec<u8>)], name: &[u8]) -> Option<&'a [u8]> {
-    env.iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_slice())
-}
-
 /// Whether self-attaching terminal `t` comes from the daemon at
 /// `address`'s own Neovim (`nested`, ADR 0013, #91 decision 31): `$<NAME>`
 /// there is that address, and its tty is one of Neovim's terminals, or it
@@ -264,7 +257,7 @@ pub(crate) enum Nesting {
 
 /// How `nested` goes for self-attaching terminal `t` (see `Nesting`).
 pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
-    if env_var(&t.env, crate::name::upper().as_bytes()) != Some(address.as_encoded_bytes()) {
+    if attach::env_value(&t.env, &crate::name::upper()) != Some(address.as_encoded_bytes()) {
         Nesting::No
     } else if t.tty.is_empty() {
         Nesting::Yes
@@ -275,12 +268,12 @@ pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
 
 /// What a self-attach's hello says of its `terminal`, handed over as `tty`
 /// unless relayed, with `hint`, for choosing and reach.
-pub(crate) fn attach_info(
+pub(crate) fn self_hello_of(
     terminal: &crate::attach::Terminal,
     tty: Option<&std::os::fd::OwnedFd>,
     hint: Option<String>,
-) -> super::pane::AttachInfo {
-    super::pane::AttachInfo {
+) -> super::pane::SelfHello {
+    super::pane::SelfHello {
         pid: terminal.pid,
         tty: terminal.tty.clone(),
         device: tty_device(tty, &terminal.tty),

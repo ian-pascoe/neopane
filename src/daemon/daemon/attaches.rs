@@ -267,7 +267,7 @@ impl Daemon {
             attach_conn::refuse(stream, z);
             return Ok(());
         }
-        let info = attach_conn::attach_info(&terminal, tty.as_ref(), provider);
+        let self_hello = attach_conn::self_hello_of(&terminal, tty.as_ref(), provider);
         let opening = file.map(|f| FileAt {
             file: attach_conn::file_against_cwd(&f, &terminal.cwd),
             line,
@@ -283,7 +283,7 @@ impl Daemon {
         let pane = self.panes.add_self_attached(SelfAttach {
             surface,
             terminal: None,
-            info: Some(Box::new(info)),
+            hello: Some(Box::new(self_hello)),
         });
         let id = pane.id;
         pane.opening = opening;
