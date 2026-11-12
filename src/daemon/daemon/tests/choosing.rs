@@ -284,7 +284,7 @@ fn a_refused_choice_draws_the_waiting_windows_in_the_choosing_pane() {
 }
 
 /// A daemon whose fake pane provider was chosen in Rex session `session:a`
-/// and can `find`.
+/// and can `find`, a pane in its reach.
 fn chosen_in_session_a() -> Fixture {
     let mut fake = FakeProvider::opening();
     fake.caps.insert(Capability::Find);
@@ -292,6 +292,8 @@ fn chosen_in_session_a() -> Fixture {
     let mut fx = with_provider(Some(Box::new(fake)));
     fx.d.context = vec![Some(b"session:a".to_vec())];
     fx.d.nvim.ready = true;
+    // the choosing pane's, in reach, showing a window of its own
+    fx.d.panes.add_for_window(900);
     fx
 }
 
@@ -495,22 +497,8 @@ const BLOCK_3: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a53";
 /// its next choice is a second fake. The two panes' ids, and what keeps
 /// their terminals open.
 fn chosen_with_a_requested_pane() -> (Fixture, [u32; 2], Vec<(UnixStream, Pty)>) {
-    let (mut fx, _) = fixture_choosing(vec![finding(), finding()]);
-    let (first, h1, p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
-    found(&mut fx.d, BLOCK);
-    split_1001_off_1000(&mut fx);
-    let (ask, Ask::OpenBeside { pane, .. }) = last_open_beside(&mut fx.d) else {
-        unreachable!()
-    };
-    fake(&mut fx.d).opened(ask, BLOCK_2);
-    fx.d.drain_provider().unwrap();
-    let at = Address::new(&format!("rejoin-{}", fx.d.panes.list.len()));
-    let pty = Pty::new(40, 23);
-    let h2 = at.send(
-        &requested_rex_hello(pane, "session:s", BLOCK_2),
-        Some(pty.slave),
-    );
-    fx.d.accept(&at.server).unwrap();
+    let (mut fx, first, h1, p1, pane) = chosen_with_a_requested_pane_opened();
+    let h2 = attach_requested(&mut fx, pane);
     let requested = fx.d.panes.by_win(1001).unwrap().id;
     assert!(
         fx.d.panes
@@ -520,7 +508,85 @@ fn chosen_with_a_requested_pane() -> (Fixture, [u32; 2], Vec<(UnixStream, Pty)>)
             .is_some()
     );
     let _ = sent_to_nvim(&mut fx);
-    (fx, [first, requested], vec![(h1, p1), (h2, pty)])
+    (fx, [first, requested], vec![(h1, p1), h2])
+}
+
+/// As `chosen_with_a_requested_pane`, its terminal opened as `BLOCK_2` but
+/// not attached yet: the choosing pane's id, what keeps it open, and the
+/// requested pane's pane id.
+fn chosen_with_a_requested_pane_opened() -> (Fixture, u32, UnixStream, Pty, crate::attach::PaneId) {
+    let (mut fx, _) = fixture_choosing(vec![finding(), finding()]);
+    let (first, h1, p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    found(&mut fx.d, BLOCK);
+    split_1001_off_1000(&mut fx);
+    let (ask, Ask::OpenBeside { pane, .. }) = last_open_beside(&mut fx.d) else {
+        unreachable!()
+    };
+    fake(&mut fx.d).opened(ask, BLOCK_2);
+    fx.d.drain_provider().unwrap();
+    (fx, first, h1, p1, pane)
+}
+
+/// The terminal of requested pane `pane` attaches, from Rex block `BLOCK_2`.
+fn attach_requested(fx: &mut Fixture, pane: crate::attach::PaneId) -> (UnixStream, Pty) {
+    let at = Address::new(&format!("rejoin-{}-{}", fx.d.panes.list.len(), pane));
+    let pty = Pty::new(40, 23);
+    let h = at.send(
+        &requested_rex_hello(pane, "session:s", BLOCK_2),
+        Some(pty.slave),
+    );
+    fx.d.accept(&at.server).unwrap();
+    (h, pty)
+}
+
+#[test]
+fn a_requested_pane_attaching_after_a_new_choice_is_checked_and_rejoins() {
+    let (mut fx, first, _h1, _p1, pane) = chosen_with_a_requested_pane_opened();
+    // gone while the requested pane's terminal is on its way
+    fake(&mut fx.d).push(ProviderEvent::Gone {
+        reason: "Rex hung up".into(),
+    });
+    fx.d.drain_provider().unwrap();
+    let requested = fx.d.panes.by_win(1001).unwrap().id;
+    assert_eq!(Reach::Out, fx.d.panes.by_id(requested).unwrap().reach);
+    // chosen again, and confirmed: the choosing pane rejoins
+    let (_third, _h3, _p3) = attach_later(&mut fx, &rex_hello("session:s", BLOCK_3));
+    found(&mut fx.d, BLOCK_3);
+    assert_eq!(None, choosing_id(&fx.d));
+    found(&mut fx.d, BLOCK);
+    assert_eq!(Reach::In, fx.d.panes.by_id(first).unwrap().reach);
+    // then the requested pane's terminal comes: it is checked as well
+    let finds = finds_asked(&mut fx.d);
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(finds + 1, finds_asked(&mut fx.d));
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    assert_eq!(Reach::Finding, fx.d.panes.by_id(requested).unwrap().reach);
+    found(&mut fx.d, BLOCK_2);
+    let p = fx.d.panes.by_id(requested).unwrap();
+    assert_eq!(
+        (Reach::In, Some(TerminalId::from(BLOCK_2))),
+        (p.reach, p.terminal.clone())
+    );
+}
+
+#[test]
+fn a_self_attach_while_the_pane_provider_has_only_closes_left_chooses_anew() {
+    // a command runner whose close runs on: its act stays unanswered for
+    // its ask timeout, and nothing is in its reach
+    let mut fx = commanded_by(&[(Capability::Close, &["sleep", "30"])]);
+    fx.d.act(Ask::Close {
+        terminal: TerminalId::from("t1"),
+    });
+    assert!(fx.d.asks.busy());
+    fx.d.test_choose = Some(Box::new(|_| Chosen::Provider {
+        held: Box::new(finding()),
+        spent: Duration::ZERO,
+    }));
+    let (id, _h, _p) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    // not checked against the command runner's context: a choice of its own
+    assert_eq!("fake", fx.d.provider.as_ref().unwrap().name());
+    assert_eq!(Some(id), choosing_id(&fx.d));
+    assert_eq!(1, finds_asked(&mut fx.d));
 }
 
 #[test]

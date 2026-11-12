@@ -205,10 +205,7 @@ impl Session {
 
     /// Any Rex error closes Rex.
     fn close_rex(&mut self, reason: &str) {
-        log_warn!(
-            "{} daemon: Rex {reason}, treating it as closed",
-            self.client_name
-        );
+        log_warn!("{}: Rex {reason}, treating it as closed", self.client_name);
         self.conn = Conn::Closed;
         self.closed.get_or_insert_with(|| format!("Rex {reason}"));
     }
@@ -465,7 +462,7 @@ impl Session {
             Some(code) => format!("Rex closed {code} {}", String::from_utf8_lossy(&c.reason)),
             None => format!("Rex closed null {}", String::from_utf8_lossy(&c.reason)),
         };
-        log_info!("{} daemon: {reason}", self.client_name);
+        log_info!("{}: {reason}", self.client_name);
         self.closed.get_or_insert(reason);
         self.conn = Conn::Closed;
     }
@@ -555,7 +552,7 @@ impl Session {
     /// Rex refused a request.
     fn log_request_error(&self, req: Request, e: &client::Error) {
         log_warn!(
-            "{} daemon: Rex {} failed: {}: {}",
+            "{}: Rex {} failed: {}: {}",
             self.client_name,
             req.tag_name(),
             e.code,
@@ -566,7 +563,7 @@ impl Session {
     /// Rex said yes, in a shape we can't read.
     pub(crate) fn log_unexpected_response(&self, req: Request, what: &str) {
         log_warn!(
-            "{} daemon: Rex {} answer has no {what}",
+            "{}: Rex {} answer has no {what}",
             self.client_name,
             req.tag_name()
         );

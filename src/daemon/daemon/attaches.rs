@@ -392,6 +392,7 @@ impl Daemon {
             l.fit = Fit::Asked(req);
         }
         self.wait_for_report(id, Instant::now())?;
+        self.rejoin_requested(id)?;
         self.read_layout_again();
         self.nvim.client.flush()?;
         self.draw()?;

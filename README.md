@@ -4,7 +4,7 @@ A Rex-Native Neovim frontend built in Rust.
 
 One Neovim runs in the background behind all your panes, so buffers,
 registers, undo and language servers are shared. `:split` and `:vsplit` open
-real Rex panes where Neovim would put the window, and closing a pane in Rex
+real Rex blocks where Neovim would put the window, and closing a block in Rex
 closes its window. Focusable floats, such as pickers, open in Rex floating
 panes, along with any floats attached to them. The completion menu,
 unfocusable floats like notifications, and statuslines are drawn inside the
@@ -63,7 +63,7 @@ just prefix=/usr/local install
 It replaces the binary rather than writing over it, which on macOS gets a
 new build killed at launch.
 
-Run it with any Neovim arguments, in a Rex pane to have each window open in a
+Run it with any Neovim arguments, in a Rex block to have each window open in a
 pane of its own:
 
 ```sh
@@ -196,7 +196,7 @@ second terminal shows `b`; with none, a new window, as `:split` opens one.
 instead, and `+12 notes.md` puts the cursor on line 12. The window it shows
 becomes current. Closing that terminal closes its windows, and only those;
 the terminal goes back to its shell. With no pane provider yet, the attach
-chooses one, as the first did. In the pane provider's reach, as in a Rex pane
+chooses one, as the first did. In the pane provider's reach, as in a Rex block
 of the chosen Rex session, `:vsplit` there opens a pane beside it; out of its
 reach, `:vsplit` draws the new window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
 terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
@@ -299,7 +299,7 @@ Not built yet, each exiting 1 with `neorex: <what> isn't built yet`:
 `list`, `status`, `kill` and `provider check`; and the bare form's `--name`,
 `--address`, `--detach` and `--no-wait`. The bare form's `--provider` is
 accepted and does nothing. `attach --address A [+LINE] [FILE]` is built, as
-is the hidden `attach --pane` a Rex pane runs.
+is the hidden `attach --pane` a Rex block runs.
 
 ### Own options first, then Neovim's
 
@@ -360,7 +360,7 @@ quietly.
 
 ## Troubleshooting
 
-- Windows open in the terminal you ran `neorex` in, not in Rex panes: the
+- Windows open in the terminal you ran `neorex` in, not in Rex blocks: the
   daemon chose no pane provider. With a warning in Neovim (`:messages`), Rex
   couldn't be reached or attached, or didn't confirm the terminal is the pane
   `REX_BLOCK` names, as for a terminal started from a Rex shell; without one,
@@ -382,7 +382,7 @@ quietly.
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
   controls instead. The exception is resizing a window in a tab page's
-  floating pane, below: that resizes its Rex pane.
+  floating pane, below: that resizes its Rex block.
 - `<C-w>h/j/k/l` (also `<C-w><C-h>`, `<C-w><BS>` and `<C-w><Left>` and the like,
   in Normal and Visual mode) move to the neighbouring pane in Rex, and stay
   put at an edge. A count repeats the move, up to 20 times. Mappings that

@@ -159,7 +159,8 @@ pub(crate) struct Daemon {
     // Dropped last, in this order: the loop, then the pane provider, then
     // Neovim.
     pub event_loop: Loop,
-    /// None without one, or once it failed as a whole.
+    /// The pane provider, one at a time: None before a self-attach chooses
+    /// one, or once it is dropped, gone or with no terminal in its reach.
     pub provider: Option<Box<dyn PaneProvider>>,
     pub nvim: NvimSession,
 }
@@ -1874,12 +1875,7 @@ impl Daemon {
         if self.provider.is_none() || self.choosing.is_some() || self.asks.busy() || ending {
             return Ok(());
         }
-        let reached = self
-            .panes
-            .list
-            .iter()
-            .any(|p| p.reach != pane::Reach::Out && p.closing.is_none());
-        if reached {
+        if self.reaches(None) {
             return Ok(());
         }
         log_info!(
