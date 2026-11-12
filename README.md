@@ -134,10 +134,9 @@ Running `neorex` in a Rex pane starts a daemon in the background, which runs
 one headless Neovim and gives each of its windows a Rex pane. The pane you ran
 it in attaches to the daemon first: Neovim starts only once the daemon has
 accepted that attach, at that pane's size, and the pane shows its first
-window. When Neovim
-quits, `neorex` exits with Neovim's status: `:q` 0, `:cq` 1, `:cq 3` 3, so
-`:cq` aborts a `git commit` as it does in plain Neovim. It takes its bearings
-from the environment Rex sets in every pane:
+window. When Neovim quits, `neorex` exits with Neovim's status: `:q` 0, `:cq`
+1, `:cq 3` 3, so `:cq` aborts a `git commit` as it does in plain Neovim. It
+takes its bearings from the environment Rex sets in every pane:
 
 - `REX_SERVER`: the URL of the Rex server to connect to. Required.
 - `REX_SESSION`: the Rex session to open panes in. Required.
