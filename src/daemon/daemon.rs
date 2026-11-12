@@ -117,9 +117,9 @@ pub(crate) struct Daemon {
     /// while it holds, new windows are drawn in their origin panes (#91
     /// decision 24).
     version_refused: Option<VersionRefused>,
-    /// Windows of the first tab page whose terminal won't come, waiting for
-    /// a pane to be drawn in, and how they were split off.
-    awaiting_origin: Vec<(i64, windows::Split)>,
+    /// Unshown windows of the first tab page whose terminal won't come,
+    /// each waiting for a pane that can draw it, and how it was split off.
+    unshown_awaiting_origin: Vec<(i64, windows::Split)>,
     /// Which terminal the pane provider has focused, as last said or asked.
     pub focus: ProviderFocus,
     /// A pane with no terminal id whose terminal reported a focus-in, and
@@ -326,7 +326,7 @@ impl Daemon {
             ask_timer_due: None,
             attach_timer_due: None,
             version_refused: None,
-            awaiting_origin: Vec::new(),
+            unshown_awaiting_origin: Vec::new(),
             focus: ProviderFocus::default(),
             focus_in: None,
             just_opened: Vec::new(),
@@ -1010,9 +1010,9 @@ impl Daemon {
         };
         let equalalways = self.split_options.equalalways;
         let p = self.panes.by_id_mut(id).unwrap();
-        let Some(shown) = p.neovim_window_handle else {
-            return false; // before setup: no window to split
-        };
+        let shown = p
+            .neovim_window_handle
+            .expect("an origin pane shows a window");
         let origin = if p.holds(sp.from) { sp.from } else { shown };
         p.layout
             .get_or_insert_with(|| PaneLayout::new(shown))
@@ -1410,7 +1410,7 @@ impl Daemon {
         let grids = &self.grids;
         self.pending_sizes
             .retain(|&(w, ..)| grids.grid_of(w).is_some());
-        self.home_awaiting_origin()?;
+        self.home_unshown()?;
 
         // a copy: making panes below doesn't touch the grids, but borrows all of `self`
         let wins: Vec<_> = self.grids.wins.values().copied().collect();
@@ -1430,7 +1430,10 @@ impl Daemon {
                     self.changes.became_external(w.win);
                     if self.panes.by_win(w.win).is_some()
                         || self.changes.is_closing(w.win)
-                        || self.awaiting_origin.iter().any(|&(a, _)| a == w.win)
+                        || self
+                            .unshown_awaiting_origin
+                            .iter()
+                            .any(|&(a, _)| a == w.win)
                     {
                         continue;
                     }
@@ -1940,25 +1943,25 @@ impl Daemon {
             if self.lay_out_in_origin(win, sp, None) {
                 self.show_current_in_origin(win)?;
             } else {
-                // no pane can take it yet: it waits for one, unasked
-                self.awaiting_origin.push((win, sp));
+                // no pane can take it yet: unshown, it waits for one, unasked
+                self.unshown_awaiting_origin.push((win, sp));
             }
         }
         self.reconcile()?;
         self.draw()
     }
 
-    /// Draws each window waiting for a pane to join in one that can take it
-    /// now, and forgets those that closed.
-    fn home_awaiting_origin(&mut self) -> Result<()> {
+    /// Draws each unshown window waiting for a pane to join in one that can
+    /// take it now, and forgets those that closed.
+    fn home_unshown(&mut self) -> Result<()> {
         let grids = &self.grids;
-        self.awaiting_origin
+        self.unshown_awaiting_origin
             .retain(|&(w, _)| grids.grid_of(w).is_some());
-        for (win, sp) in std::mem::take(&mut self.awaiting_origin) {
+        for (win, sp) in std::mem::take(&mut self.unshown_awaiting_origin) {
             if self.lay_out_in_origin(win, sp, None) {
                 self.show_current_in_origin(win)?;
             } else {
-                self.awaiting_origin.push((win, sp));
+                self.unshown_awaiting_origin.push((win, sp));
             }
         }
         Ok(())
@@ -5063,7 +5066,7 @@ mod tests {
     /// gone, and with no pane to draw its window in, the window waits for one.
     fn assert_given_up(d: &Daemon, pane: u32) {
         assert!(d.panes.by_id(pane).is_none());
-        assert!(!d.awaiting_origin.is_empty());
+        assert!(!d.unshown_awaiting_origin.is_empty());
     }
 
     #[test]
