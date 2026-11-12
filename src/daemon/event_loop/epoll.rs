@@ -1,9 +1,9 @@
 //! The epoll backend, for Linux. Plain fds go on the epoll as they are, an
 //! fd watched for writing too under one entry with both flags.
-//! Signals arrive through one signalfd and each timer is a timerfd, so the
-//! epoll sees all three as readable fds, and `wait` turns them back into
-//! events. A child's exit is watched through its pidfd, readable once it
-//! has ended, and closed once that is reported.
+//! Signals arrive through one signalfd, each timer is a timerfd, and each
+//! child watched with `add_exit` is a pidfd (`pidfd_open`), readable once
+//! it has ended and closed once that is reported. So the epoll sees every
+//! source as a readable fd, and `wait` turns them back into events.
 //!
 //! A signalfd only gets a signal that is blocked, so `add_signal` blocks it
 //! on the calling thread. Blocked signals queue even while ignored.

@@ -17,8 +17,11 @@ doesn't know.
 A capability is an argv, run once, without a shell.
 
 - **Working directory:** the choosing attach's, or `/` if it has gone.
-- **stdin** is `/dev/null`; stdout and stderr are pipes the daemon reads.
-  No other descriptor is inherited.
+- **stdin** is `/dev/null`. **stdout** is a pipe the daemon reads for the
+  opens (`open`, `open_beside`, `open_float`, `open_tab_page`), and
+  `/dev/null` for every other capability, whose output is ignored.
+  **stderr** is always a pipe the daemon reads. No other descriptor is
+  inherited.
 - **Process group:** its own. Whatever it starts is in that group, unless it
   makes a group of its own.
 - **Environment:** the choosing attach's, less `<NAME>` and every variable
@@ -29,6 +32,10 @@ A capability is an argv, run once, without a shell.
 - **Timeout:** each capability has a default, which the table's `timeouts`
   changes, up to 60 s. At its timeout the command's group gets SIGTERM, and
   SIGKILL 1 s later; the act has failed, whatever it does after.
+- **Its end** is watched with the kernel's process-exit notification
+  (kqueue's `EVFILT_PROC` on macOS and the BSDs, a pidfd on Linux), not
+  SIGCHLD: the daemon ignores the signals it watches, and an ignored
+  SIGCHLD reaps children by itself, losing their exit statuses.
 - The daemon never waits on a command: a slow one holds up nothing but the
   acts queued behind it. Layout acts (every capability but `focus` and
   `focus_direction`) run one at a time, in order. `focus` and
