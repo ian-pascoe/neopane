@@ -20,11 +20,50 @@ use crate::screen::float_groups::Group;
 /// Never 0: Neovim's API reads 0 as the current window.
 pub(crate) type NeovimWindowHandle = i64;
 
-/// An accepted self-attach: its terminal, and the pane provider's id for it
-/// if known.
+/// An accepted self-attach: its terminal, the pane provider's id for it if
+/// known, and what its hello says of it, for choosing a pane provider and
+/// its reach.
 pub(crate) struct SelfAttach {
     pub surface: Box<Surface>,
     pub terminal: Option<TerminalId>,
+    pub info: Option<Box<AttachInfo>>,
+}
+
+/// What a self-attach's hello says of its terminal, as choosing a pane
+/// provider, its context variables and its `find` read it (ADRs 0006, 0007).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AttachInfo {
+    /// The helper's.
+    pub pid: u32,
+    pub tty: Vec<u8>,
+    /// Its terminal's device (`st_rdev`), of the terminal handed over, or of
+    /// `tty` when relayed.
+    pub device: Option<u64>,
+    pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The `--provider` hint.
+    pub hint: Option<String>,
+}
+
+impl AttachInfo {
+    /// The value of variable `name`, if set.
+    pub(crate) fn var(&self, name: &str) -> Option<&[u8]> {
+        self.env
+            .iter()
+            .find(|(k, _)| k == name.as_bytes())
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
+/// Whether a pane's terminal is in the pane provider's reach (ADR 0006):
+/// a window opened from a pane out of reach is drawn in that pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// As a requested pane is, which the pane provider made.
+    #[default]
+    In,
+    /// Its `find` is on its way: windows opened from it wait.
+    Finding,
+    Out,
 }
 
 impl SelfAttach {
@@ -80,6 +119,9 @@ pub(crate) struct Pane {
     /// Where Neovim split a requested pane's window off: where it is drawn
     /// if its terminal never comes (#112).
     pub split: Option<Split>,
+    /// A self-attached pane's hello, as choosing and reach read it.
+    pub info: Option<Box<AttachInfo>>,
+    pub reach: Reach,
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).
     pub attach_due: Option<std::time::Instant>,
@@ -280,6 +322,8 @@ impl Pane {
             last_asked_win_size: LastAskedWinSize::default(),
             split: None,
             attach_due: None,
+            info: None,
+            reach: Reach::In,
         }
     }
 
@@ -306,6 +350,7 @@ impl Pane {
         Pane {
             terminal: attach.terminal,
             terminal_surface: Some(attach.surface),
+            info: attach.info,
             self_attached: true,
             ..Pane::blank(id)
         }
@@ -323,6 +368,7 @@ impl Pane {
         Some(SelfAttach {
             surface: self.terminal_surface.take()?,
             terminal: self.terminal.take(),
+            info: self.info.take(),
         })
     }
 
@@ -417,6 +463,7 @@ mod tests {
         SelfAttach {
             surface: Surface::for_test(80, 24),
             terminal,
+            info: None,
         }
     }
 
@@ -472,6 +519,7 @@ mod tests {
             SelfAttach {
                 surface: Surface::create(socket, slave, super::super::surface::cells(80, 24)),
                 terminal: None,
+                info: None,
             },
         );
         let event_loop = Loop::init().unwrap();
@@ -520,6 +568,7 @@ mod tests {
             SelfAttach {
                 surface: Surface::create(socket, slave, super::super::surface::cells(80, 24)),
                 terminal: None,
+                info: None,
             },
         );
         let event_loop = Loop::init().unwrap();

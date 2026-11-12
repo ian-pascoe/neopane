@@ -46,14 +46,6 @@ impl Held {
         }
     }
 
-    /// Rex's, for its session's attach and connection, not on the seam yet.
-    pub(crate) fn rex(&mut self) -> Option<&mut RexProvider> {
-        match self {
-            Held::Rex(r) => Some(r),
-            _ => None,
-        }
-    }
-
     /// The fd it is watched by under `Token::Provider`.
     pub(crate) fn fd(&self) -> Option<RawFd> {
         match self {

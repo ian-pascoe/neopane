@@ -250,6 +250,7 @@ impl Rig {
         d.start(&mut Some(SelfAttach {
             surface: surface0,
             terminal: Some(TerminalId::from(TERMINAL)),
+            info: None,
         }))
         .unwrap();
 

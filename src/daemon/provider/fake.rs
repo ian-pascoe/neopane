@@ -19,6 +19,8 @@ pub(crate) struct FakeProvider {
     pub timeout: Option<std::time::Duration>,
     /// Its attach timeout, if not the default.
     pub attach_timeout: Option<Duration>,
+    /// Its context variables.
+    pub context: &'static [&'static str],
     events: VecDeque<ProviderEvent>,
 }
 
@@ -104,7 +106,7 @@ impl PaneProvider for FakeProvider {
     }
 
     fn context_vars(&self) -> &[&str] {
-        &[]
+        self.context
     }
 
     fn attach_timeout(&self) -> Duration {

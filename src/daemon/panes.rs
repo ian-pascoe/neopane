@@ -133,6 +133,12 @@ impl Panes {
         self.list.iter().find(|p| p.attach_id.as_ref() == Some(id))
     }
 
+    pub(crate) fn by_attach_id_mut(&mut self, id: &PaneId) -> Option<&mut Pane> {
+        self.list
+            .iter_mut()
+            .find(|p| p.attach_id.as_ref() == Some(id))
+    }
+
     pub(crate) fn index_of(&self, id: u32) -> Option<usize> {
         self.list.iter().position(|p| p.id == id)
     }
@@ -283,6 +289,7 @@ mod tests {
         panes.add_self_attached(SelfAttach {
             surface: Surface::for_test(80, 24),
             terminal: None,
+            info: None,
         });
         drop(panes);
     }

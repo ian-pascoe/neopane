@@ -140,8 +140,12 @@ impl Rig {
         let (socket, helper) = UnixStream::pair().unwrap();
         term.helper = Some(helper);
         let surface = Surface::create(socket, slave, cells(80, 24));
-        d.start(&mut Some(SelfAttach { surface, terminal }))
-            .unwrap();
+        d.start(&mut Some(SelfAttach {
+            surface,
+            terminal,
+            info: None,
+        }))
+        .unwrap();
         Some(Rig {
             d,
             server,
