@@ -225,6 +225,14 @@ impl Asks {
         }
     }
 
+    /// Drops the opens waiting their turn, never asked: nothing wants their
+    /// terminals any more. How many it dropped.
+    pub(crate) fn drop_waiting_opens(&mut self) -> usize {
+        let before = self.queue.len();
+        self.queue.retain(|(_, a)| !is_open(a));
+        before - self.queue.len()
+    }
+
     /// Logs a failed act, and `why`; its capability's first failure warns in
     /// Neovim too, as #93 decision 20 words it, with the first line of `why`
     /// cut to 200 characters.
@@ -318,6 +326,14 @@ pub(crate) fn is_placement(ask: &Ask) -> bool {
     matches!(
         ask.capability(),
         Capability::PlaceBeside | Capability::Resize
+    )
+}
+
+/// Whether `ask` opens a terminal.
+fn is_open(ask: &Ask) -> bool {
+    matches!(
+        ask.capability(),
+        Capability::Open | Capability::OpenBeside | Capability::OpenFloat | Capability::OpenTabPage
     )
 }
 

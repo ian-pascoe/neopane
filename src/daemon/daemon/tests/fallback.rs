@@ -547,12 +547,12 @@ fn a_window_whose_open_failed_with_no_pane_to_join_waits_for_one_unasked() {
 }
 
 #[test]
-fn giving_up_the_last_pane_stops_the_daemon_as_its_last_pane_gone() {
+fn giving_up_the_last_pane_goes_unattached_as_its_last_pane_gone() {
     let mut fx = fixture();
     fx.d.nvim.ready = true;
     draw_external(&mut fx.d, 102, 1002, 80, 23);
     let id = fx.d.panes.add_for_window(1002).id;
     fx.d.give_up(id).unwrap();
     assert!(fx.d.panes.list.is_empty());
-    assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+    assert!(deciding(&fx.d));
 }

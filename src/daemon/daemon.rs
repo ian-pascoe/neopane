@@ -54,6 +54,7 @@ use indexmap::IndexMap;
 
 mod attaches;
 mod choosing;
+mod lifetime;
 mod self_attach;
 use attaches::PENDING_BASE;
 
@@ -113,6 +114,8 @@ pub(crate) struct Daemon {
     escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
+    /// Whether the daemon has a pane, or is past its last (ADR 0003).
+    pub(crate) lifetime: lifetime::Lifetime,
     /// Neovim's exit status, once it has quit and exited: the self-attached
     /// panes' helpers exit with it.
     pub quit_status: Option<u8>,
@@ -198,6 +201,7 @@ pub(crate) enum Token {
     FocusInTimer,
     AttachTimer,
     ChoiceTimer,
+    UnattachTimer,
 }
 
 impl Token {
@@ -218,13 +222,14 @@ impl Token {
             11 => Token::FocusInTimer,
             12 => Token::AttachTimer,
             13 => Token::ChoiceTimer,
+            14 => Token::UnattachTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::ChoiceTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::UnattachTimer as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -350,6 +355,7 @@ impl Daemon {
             area_timer_due: None,
             escape_timer_due: None,
             stopped: None,
+            lifetime: lifetime::Lifetime::default(),
             quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
@@ -487,6 +493,7 @@ impl Daemon {
             Some(Token::FocusInTimer) => self.focus_in_stood(Instant::now())?,
             Some(Token::AttachTimer) => self.time_out_attaches(Instant::now())?,
             Some(Token::ChoiceTimer) => self.time_out_choice(Instant::now())?,
+            Some(Token::UnattachTimer) => self.unattach_wait_over()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -1141,13 +1148,8 @@ impl Daemon {
             self.nvim.client.flush()?;
             return Ok(());
         }
-        let others =
-            self.panes.list.iter().any(|q| {
-                q.id != id && q.closing != Some(Close::RequestFailed) && q.layer.is_none()
-            });
-        if !others {
-            self.stop(StopReason::PaneGone);
-            return Ok(());
+        if !self.panes_count_but(Some(id)) && self.lifetime.is_attached() {
+            return self.go_unattached(Some(id));
         }
         let wins = self.panes.list[i].windows();
         self.panes.remove(i, &self.event_loop);
@@ -1225,6 +1227,7 @@ impl Daemon {
             windows::Note::Layout(l) => self.on_tab_layout(l)?,
             windows::Note::Options(o) => self.on_split_options(o)?,
             windows::Note::Resized { win, cols, rows } => self.on_resized(win, cols, rows)?,
+            windows::Note::Unsaved { files, ask } => self.on_unsaved(files, ask)?,
         }
         Ok(())
     }
@@ -1508,9 +1511,13 @@ impl Daemon {
             }
             self.panes.remove(i, &self.event_loop);
         }
-        if self.panes.list.is_empty() {
-            self.stop(StopReason::PaneGone);
-            return Ok(());
+        if self.lifetime.is_attached() && !self.panes_count_but(None) {
+            return self.go_unattached(None);
+        }
+        self.forget_kept_if_gone();
+        if !self.lifetime.is_attached() {
+            // unattached: no window gets a pane until an attach comes
+            return Ok(self.nvim.client.flush()?);
         }
         self.changes.forget_gone(&self.grids);
         let grids = &self.grids;
@@ -1535,6 +1542,7 @@ impl Daemon {
                 WinKind::External => {
                     self.changes.became_external(w.win);
                     if self.panes.by_win(w.win).is_some()
+                        || self.lifetime.kept == Some(w.win)
                         || self.changes.is_closing(w.win)
                         || self
                             .unshown_awaiting_origin
@@ -2938,6 +2946,8 @@ fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
 mod self_attach_tests;
 #[cfg(test)]
 mod slow_terminal_tests;
+#[cfg(test)]
+mod unattached_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2961,6 +2971,7 @@ mod tests {
     mod fallback;
     mod in_layout;
     mod tabs;
+    mod unattached;
 
     /// A daemon with no Neovim behind it, only a socket that nothing
     /// answers, and a fake pane provider that can open and close.
@@ -3860,7 +3871,7 @@ mod tests {
     }
 
     #[test]
-    fn the_last_pane_failing_to_get_a_window_ends_the_daemon() {
+    fn the_last_pane_failing_to_get_a_window_goes_unattached() {
         let (mut fx, id, req) = opening_1002(None);
         let first = fx.d.panes.list[0].id;
         let i = fx.d.panes.index_of(first).unwrap();
@@ -3868,7 +3879,7 @@ mod tests {
         fx.d.on_window_answer(req, Some(b"E1: no"), Decoder::of(&[0xc0]))
             .unwrap();
         assert!(fx.d.panes.by_id(id).is_none());
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        assert!(deciding(&fx.d));
     }
 
     #[test]
@@ -6383,6 +6394,12 @@ mod tests {
         }
     }
 
+    /// Whether `d` went unattached, and waits for Neovim's word on its
+    /// unsaved changes.
+    fn deciding(d: &Daemon) -> bool {
+        d.stopped.is_none() && matches!(d.lifetime.stage, lifetime::Stage::Deciding { .. })
+    }
+
     fn pane_ids(d: &Daemon) -> Vec<u32> {
         d.panes.list.iter().map(|p| p.id).collect()
     }
@@ -6705,7 +6722,7 @@ mod tests {
         fx.d.grids.wins.swap_remove(&2);
         fx.d.reconcile().unwrap();
         assert!(fx.d.panes.list.is_empty());
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        assert!(deciding(&fx.d));
 
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
@@ -6905,17 +6922,12 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_last_non_floating_pane_stops_the_daemon_and_closes_no_window() {
+    fn closing_the_last_non_floating_pane_goes_unattached_and_closes_no_window() {
         let mut fx = fixture();
         let id = pane_in_block(&mut fx.d, 1, 0, 1);
         fx.d.pane_gone(id).unwrap();
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
-        // it stays for the shutdown
-        assert_eq!(vec![id], pane_ids(&fx.d));
-        assert_eq!(
-            Some(Close::TerminalHungUp),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert!(deciding(&fx.d));
+        assert!(fx.d.panes.list.is_empty());
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
         assert_eq!(0, sent.neorex_closes());
@@ -6928,13 +6940,10 @@ mod tests {
         fx.d.panes.by_id_mut(failed).unwrap().closing = Some(Close::RequestFailed);
         let id = pane_in_block(&mut fx.d, 2, 0, 2);
         fx.d.pane_gone(id).unwrap();
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
-        assert_eq!(vec![failed, id], pane_ids(&fx.d));
-        assert_eq!(
-            Some(Close::TerminalHungUp),
-            fx.d.panes.by_id(id).unwrap().closing
-        );
+        assert!(deciding(&fx.d));
+        assert!(fx.d.panes.list.is_empty());
         let sent = sent_by(fx);
+        // its terminal was closed as its request failed
         assert!(sent.asks.is_empty());
         assert_eq!(0, sent.neorex_closes());
     }
@@ -6945,10 +6954,12 @@ mod tests {
         let floating = made_picker_pane(&mut fx.d, 10, 5);
         let id = pane_in_block(&mut fx.d, 1, 0, 1);
         fx.d.pane_gone(id).unwrap();
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
-        assert_eq!(vec![floating, id], pane_ids(&fx.d));
+        assert!(deciding(&fx.d));
+        // it goes too, its terminal closed
+        assert!(fx.d.panes.by_id(floating).is_none());
+        // its close waits its turn behind the open, unanswered
+        assert_eq!(2, fx.d.asks.waiting());
         let sent = sent_by(fx);
-        // only the floating pane's own request, from the setup
         assert_eq!(vec!["open_float"], sent.capabilities());
         assert_eq!(0, sent.neorex_closes());
     }
@@ -7045,13 +7056,13 @@ mod tests {
     }
 
     #[test]
-    fn after_a_flush_with_no_panes_left_the_daemon_stops() {
+    fn after_a_flush_with_no_panes_left_the_daemon_goes_unattached() {
         let mut fx = fixture();
         fx.d.nvim.ready = true;
         pane_in_block(&mut fx.d, 1, 0, 1);
         fx.d.reconcile().unwrap();
         assert!(fx.d.panes.list.is_empty());
-        assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
+        assert!(deciding(&fx.d));
         let sent = sent_by(fx);
         assert_eq!(vec!["close"], sent.capabilities());
         assert_eq!(0, sent.neorex_closes());

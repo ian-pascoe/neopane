@@ -105,7 +105,7 @@ impl Daemon {
                 self.untake(ask.pane, win);
             }
             // its attach ends rather than keep the rest waiting
-            self.end_unserved(ask.pane);
+            self.end_unserved(ask.pane)?;
         } else {
             match ask.kind {
                 AskKind::List => {
@@ -120,7 +120,10 @@ impl Daemon {
                         self.window_taken(ask.pane)?;
                     }
                 }
-                AskKind::Open => self.window_taken(ask.pane)?,
+                AskKind::Open => {
+                    self.window_taken(ask.pane)?;
+                    self.close_kept();
+                }
             }
         }
         self.give_windows()?;
@@ -130,16 +133,13 @@ impl Daemon {
 
     /// Pane `id` couldn't be given its window: its attach ends, as its pane
     /// closes, and any window it took, a new one opened before the failure,
-    /// closes with it. The last pane gone ends the daemon, as `pane_gone`
-    /// does.
-    fn end_unserved(&mut self, id: u32) {
+    /// closes with it. The last pane gone, the daemon goes unattached, as
+    /// `pane_gone` does.
+    fn end_unserved(&mut self, id: u32) -> Result<()> {
         let Some(i) = self.panes.index_of(id) else {
-            return;
+            return Ok(());
         };
-        let others =
-            self.panes.list.iter().any(|q| {
-                q.id != id && q.closing != Some(Close::RequestFailed) && q.layer.is_none()
-            });
+        let others = self.panes_count_but(Some(id));
         let wins = self.panes.list[i].windows();
         self.panes.list[i].closing = Some(Close::WindowClosed);
         self.panes.remove(i, &self.event_loop);
@@ -148,9 +148,10 @@ impl Daemon {
             self.changes.mark_closing(win);
             windows::close(&mut self.nvim.client, win);
         }
-        if !others {
-            self.stop(StopReason::PaneGone);
+        if !others && self.lifetime.is_attached() {
+            return self.go_unattached(None);
         }
+        Ok(())
     }
 
     /// Pane `id` gave window `win` back, unshown: it gets another.
@@ -167,9 +168,12 @@ impl Daemon {
             return Ok(());
         };
         self.unshown_awaiting_origin.retain(|&(w, _)| w != win);
+        self.kept_taken(win);
         self.wait_for_report(id, Instant::now())?;
         self.size_window(id);
-        Ok(())
+        // a window already that size, as one an unattached daemon kept,
+        // brings no redraw: it's drawn now
+        self.draw()
     }
 
     /// Neovim's current window is `current` and `wins` the windows a pane
@@ -179,7 +183,13 @@ impl Daemon {
         if self.panes.by_id(id).is_none() {
             return;
         }
-        let picked = pick_unshown_window(current, wins, |w| self.held(w));
+        // the window an unattached daemon kept comes first
+        let first = self
+            .lifetime
+            .kept
+            .filter(|w| wins.contains(w))
+            .unwrap_or(current);
+        let picked = pick_unshown_window(first, wins, |w| self.held(w));
         let [cols, rows] = self.window_size_of(id);
         let (req, kind) = match picked {
             Some(win) => {

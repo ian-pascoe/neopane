@@ -16,6 +16,9 @@ end
 local anchors = {}
 -- the window last reported as current
 local last
+-- the buffer a window a pane could show showed last, for a new window
+-- once none is left
+local last_buf
 -- tab page made after setup -> { back = the window current before it }.
 -- Its windows show in a tab page area, and it closes with the last.
 -- The record also holds its window layout, as the daemon is told of it, and
@@ -669,6 +672,13 @@ function M.show(win, w, h)
   return win
 end
 
+api.nvim_create_autocmd({ 'BufEnter', 'WinEnter' }, {
+  group = group,
+  callback = function()
+    if shown(api.nvim_get_current_win()) then last_buf = api.nvim_get_current_buf() end
+  end,
+})
+
 --- A self-attached pane's new window, external at `w` x `h` and current, in
 --- the current tab page: on `file`, if given, its cursor on `line`, else on
 --- the buffer the current window shows, as :split opens it. Returns it.
@@ -677,7 +687,13 @@ function M.open(file, line, w, h)
   if line == vim.NIL then line = nil end
   local cur = api.nvim_get_current_win()
   if not shown(cur) and last and shown(last) then cur = last end
-  local buf = shown(cur) and api.nvim_win_get_buf(cur) or api.nvim_create_buf(true, false)
+  local buf = shown(cur) and api.nvim_win_get_buf(cur)
+  -- none left: the buffer last shown, unless it was deleted since; unloaded,
+  -- as 'nohidden' leaves it, it's loaded again
+  if not buf and last_buf and api.nvim_buf_is_valid(last_buf) and vim.bo[last_buf].buflisted then
+    buf = last_buf
+  end
+  buf = buf or api.nvim_create_buf(true, false)
   local view = shown(cur) and api.nvim_win_call(cur, vim.fn.winsaveview)
   -- made with no autocommands, so it's noted before one can flush a redraw
   -- that shows it: its pane is the one that asked. WinNew, then entering
@@ -909,6 +925,7 @@ local function report()
     return
   end
   last = cur
+  last_buf = api.nvim_win_get_buf(cur)
   saw(cur)
   note('win', cur)
 end
@@ -1738,6 +1755,49 @@ api.nvim_create_autocmd('SafeState', {
     if changed then request_refit() end
   end,
 })
+
+-- Unsaved changes: the buffers :qa would refuse to quit over, as the daemon
+-- was last told; whether they may have changed since; and the answer the
+-- daemon asked for at the next SafeState, if any (ADR 0003).
+local unsaved_told
+local unsaved_dirty = true
+local unsaved_ask = 0
+
+-- 'changed' is what :qa goes by: modified, and a buffer it writes
+local function unsaved_now()
+  local files = {}
+  for _, info in ipairs(vim.fn.getbufinfo()) do
+    if info.changed == 1 then files[#files + 1] = info.name end
+  end
+  return files
+end
+
+local function report_unsaved()
+  if not unsaved_dirty and unsaved_ask == 0 then return end
+  local ask = unsaved_ask
+  unsaved_dirty, unsaved_ask = false, 0
+  local files = unsaved_now()
+  if ask == 0 and unsaved_told and vim.deep_equal(files, unsaved_told) then return end
+  unsaved_told = files
+  note('unsaved', files, ask)
+end
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_unsaved })
+api.nvim_create_autocmd({ 'BufModifiedSet', 'BufNew', 'BufFilePost', 'BufWritePost', 'BufUnload', 'BufDelete', 'BufWipeout' }, {
+  group = group,
+  callback = function() unsaved_dirty = true end,
+})
+-- what else 'changed' reads
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'buftype', 'fileformat', 'endofline', 'fixendofline', 'bomb' },
+  callback = function() unsaved_dirty = true end,
+})
+
+--- The daemon is going unattached: at the next SafeState, the unsaved
+--- changes are told as answer `ask`, changed or not.
+function M.unsaved_at_safe_state(ask)
+  unsaved_ask = ask
+end
 
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), `restore` or the daemon

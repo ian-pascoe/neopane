@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// A terminal: its pty's master, read until it closes, and the helper's
 /// end of its socket, kept open while it is attached.
-struct Term {
-    helper: Option<UnixStream>,
+pub(super) struct Term {
+    pub(super) helper: Option<UnixStream>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -51,14 +51,14 @@ impl Drop for Term {
 
 /// A daemon over a real Neovim, the launcher's terminal its first pane, and
 /// a socket for later attaches.
-struct Rig {
-    d: Daemon,
+pub(super) struct Rig {
+    pub(super) d: Daemon,
     server: UnixListener,
     sock: String,
     /// Neovim's `--listen` socket, and the test's channel on it.
-    listen: String,
+    pub(super) listen: String,
     query: crate::nvim::nvim::Nvim,
-    terms: Vec<Term>,
+    pub(super) terms: Vec<Term>,
     /// Files the test made, removed as it ends.
     files: Vec<String>,
 }
@@ -76,7 +76,7 @@ impl Drop for Rig {
 impl Rig {
     /// Neovim started with `args`, and no pane provider. None when Neovim
     /// isn't installed.
-    fn start(args: &[&str]) -> Option<Rig> {
+    pub(super) fn start(args: &[&str]) -> Option<Rig> {
         Rig::start_with(args, None, None)
     }
 
@@ -174,7 +174,7 @@ impl Rig {
 
     /// Self-attaches a new terminal, asking for `file` at `line`, through
     /// `Daemon::accept`: its pane's id.
-    fn attach(&mut self, file: Option<&str>, line: Option<u32>) -> u32 {
+    pub(super) fn attach(&mut self, file: Option<&str>, line: Option<u32>) -> u32 {
         let (mut term, slave) = Term::open();
         let purpose = Purpose::SelfAttach {
             terminal: test_terminal(80, 24),
@@ -195,7 +195,7 @@ impl Rig {
     }
 
     /// Runs the daemon's loop, as `run` does, until `done`. Panics after 20 s.
-    fn pump(&mut self, done: impl Fn(&Rig) -> bool) {
+    pub(super) fn pump(&mut self, done: impl Fn(&Rig) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut events = [Event::default(); 16];
         while !done(self) {
@@ -213,7 +213,7 @@ impl Rig {
     }
 
     /// The window pane `id` shows, once it shows one drawn.
-    fn win_of(&mut self, id: u32) -> i64 {
+    pub(super) fn win_of(&mut self, id: u32) -> i64 {
         self.pump(|r| {
             r.d.panes
                 .by_id(id)
