@@ -37,6 +37,23 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Room for the keys of one read.
 const KEYS_CAPACITY: usize = 4096;
 
+/// A terminal's focus report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusReport {
+    In,
+    Out,
+}
+
+/// What input does that takes focus to its pane (`Forwarder::taking`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Taking {
+    Nothing,
+    /// Keys, pastes, or anything else typed.
+    Key,
+    /// A mouse button going down, not the wheel's.
+    Click,
+}
+
 pub(crate) struct Forwarder {
     pub parser: input::Parser,
     /// The next `nvim_paste` phase: 1 starts a paste, 2 continues it.
@@ -217,9 +234,17 @@ impl Forwarder {
     /// the pane, as opposed to what only reports or looks: focus reports, and
     /// mouse events other than a button going down, such as the wheel and a
     /// pointer moving. Changes nothing: the parser is read from a copy.
+    #[cfg(test)]
     pub(crate) fn takes_focus(&self, bytes: &[u8]) -> bool {
+        self.taking(bytes) != Taking::Nothing
+    }
+
+    /// What in `bytes`, read as `feed` reads them, takes focus: a click, if
+    /// any, else a key, a paste or what can't be read. Changes nothing.
+    pub(crate) fn taking(&self, bytes: &[u8]) -> Taking {
         let mut parser = self.parser.clone();
         parser.feed(bytes);
+        let mut taking = Taking::Nothing;
         while let Some(event) = parser.next() {
             match event {
                 Event::Focus(_) => {}
@@ -229,7 +254,7 @@ impl Forwarder {
                         | MouseButton::WheelDown
                         | MouseButton::WheelLeft
                         | MouseButton::WheelRight => {}
-                        _ => return true,
+                        _ => return Taking::Click,
                     },
                     MouseAction::Release | MouseAction::Drag | MouseAction::Motion => {}
                 },
@@ -237,11 +262,28 @@ impl Forwarder {
                 | Event::PasteStart
                 | Event::Paste(_)
                 | Event::PasteEnd
-                | Event::Unknown(_) => return true,
+                | Event::Unknown(_) => taking = Taking::Key,
             }
         }
         // an ESC left waiting may be the Escape key
-        parser.flush_due()
+        if parser.flush_due() {
+            taking = Taking::Key;
+        }
+        taking
+    }
+
+    /// The last focus report in `bytes`, read as `feed` reads them. Changes
+    /// nothing.
+    pub(crate) fn focus_report(&self, bytes: &[u8]) -> Option<FocusReport> {
+        let mut parser = self.parser.clone();
+        parser.feed(bytes);
+        let mut report = None;
+        while let Some(event) = parser.next() {
+            if let Event::Focus(f) = event {
+                report = Some(if f { FocusReport::In } else { FocusReport::Out });
+            }
+        }
+        report
     }
 
     /// Whether an ESC that ended a read waits for a timeout: start one, and
@@ -666,6 +708,23 @@ mod tests {
         assert!(!f.takes_focus(b"\x1b[<35;5;5M"));
         assert!(!f.takes_focus(b"\x1b[<0;5;5m"));
         assert!(!f.takes_focus(b"\x1b[<32;5;5M"));
+    }
+
+    #[test]
+    fn the_last_focus_report_in_a_read_is_the_one_that_stands() {
+        let f = Forwarder::default();
+        assert_eq!(None, f.focus_report(b"x"));
+        assert_eq!(Some(FocusReport::In), f.focus_report(b"\x1b[I"));
+        assert_eq!(Some(FocusReport::Out), f.focus_report(b"\x1b[Ix\x1b[O"));
+    }
+
+    #[test]
+    fn a_click_among_keys_takes_focus_as_a_click() {
+        let f = Forwarder::default();
+        assert_eq!(Taking::Key, f.taking(b"x\x1b[I"));
+        assert_eq!(Taking::Key, f.taking(b"\x1b[200~hi\x1b[201~"));
+        assert_eq!(Taking::Click, f.taking(b"x\x1b[<0;5;5M"));
+        assert_eq!(Taking::Nothing, f.taking(b"\x1b[<65;5;5M"));
     }
 
     #[test]

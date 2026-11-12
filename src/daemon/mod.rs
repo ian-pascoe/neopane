@@ -17,6 +17,7 @@ pub mod pane_helper;
 pub(crate) mod pane_layout;
 pub(crate) mod panes;
 pub(crate) mod provider;
+pub(crate) mod provider_focus;
 pub mod serve;
 pub(crate) mod surface;
 pub(crate) mod tab_placement;

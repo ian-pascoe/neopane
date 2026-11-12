@@ -12,6 +12,9 @@
 //!   id, which then fails.
 //! - `place_beside` is `session.move_block` and `resize`
 //!   `session.resize_pane`, given the anchor's share, `1 − ratio`.
+//! - `focus` is `session.focus_block`, which switches Rex windows and tabs
+//!   itself; `focus_direction` is `count` identical `session.focus_direction`
+//!   requests with `wrap: false`, done once the last is answered.
 //! - An error `method_not_found` is unsupported, any other fails the act. Rex
 //!   hanging up, failing, or sending what can't be read is `Gone`.
 //!
@@ -19,8 +22,10 @@
 //!   Rex window, and `report_layout` is answered from the last. A float
 //!   group's block is placed at its floating layer's bounds, its frame the
 //!   inset. A new layer opens in its origin's Rex window.
+//! - Each view's focused block is told as `Focused`, unless our own focus
+//!   change is still landing (`Session::landing`): the daemon tells the
+//!   user's moves from what it knew (`ProviderFocus`).
 //!
-//! Until #109, the daemon also focuses blocks through `session` itself.
 
 pub(crate) mod bounds;
 pub(crate) mod layout;
@@ -31,7 +36,8 @@ use serde_json::{Value, json};
 
 use crate::daemon::live_layout::LiveLayout;
 use crate::daemon::provider::{
-    Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
+    Answer, Ask, AskId, Capability, CapabilitySet, Direction, Outcome, PaneProvider, ProviderEvent,
+    TerminalId,
 };
 use crate::name::NAME;
 use crate::rex::client::{self, ResponseResult};
@@ -46,13 +52,24 @@ const CAPABILITIES: &[Capability] = &[
     Capability::Close,
     Capability::PlaceBeside,
     Capability::Resize,
+    Capability::Focus,
+    Capability::FocusDirection,
     Capability::ReportLayout,
     // views come unasked
     Capability::Events,
 ];
 
+/// A `focus_direction` ask, done once Rex answered its last request.
+struct Directing {
+    tag: u64,
+    /// Its requests still unanswered.
+    left: u32,
+    /// The first refusal, which fails it.
+    refused: Option<client::Error>,
+}
+
 pub(crate) struct RexProvider {
-    /// The daemon still focuses through it directly (#109).
+    /// The daemon reaches its connection's fd through it.
     pub session: Session,
     /// The blocks opened for asks, each waiting for its disown's answer.
     opened: Vec<(u64, TerminalId)>,
@@ -60,6 +77,8 @@ pub(crate) struct RexProvider {
     float_asks: Vec<u64>,
     /// The blocks opened for float groups, framed in the layout.
     float_blocks: Vec<TerminalId>,
+    /// The `focus_direction` asks waiting for their requests' answers.
+    directions: Vec<Directing>,
     /// The layout of the last view.
     layout: Option<LiveLayout>,
     events: VecDeque<ProviderEvent>,
@@ -74,20 +93,11 @@ impl RexProvider {
             opened: Vec::new(),
             float_asks: Vec::new(),
             float_blocks: Vec::new(),
+            directions: Vec::new(),
             layout: None,
             events: VecDeque::new(),
             gone: false,
         }
-    }
-
-    /// Asks Rex to focus terminal `t`, unless it already has or will.
-    pub(crate) fn focus(&mut self, t: Option<&TerminalId>) -> Result<(), client::ClientError> {
-        self.session.focus(t.and_then(block_of))
-    }
-
-    /// Whether Rex has focused terminal `t`, or will once asked.
-    pub(crate) fn has_focused(&self, t: Option<&TerminalId>) -> bool {
-        self.session.has_focused(t.and_then(block_of))
     }
 
     /// Sends what `ask` asks of Rex. False if it can't be asked of Rex.
@@ -183,6 +193,25 @@ impl RexProvider {
                 self.float_blocks.retain(|b| *b != terminal);
                 self.session.close_block(tag, terminal.as_str())?
             }
+            Ask::Focus { terminal } => {
+                if block_of(&terminal).is_none() {
+                    self.answer(tag, Outcome::Failed(format!("{terminal} is no Rex block")));
+                    return Ok(true);
+                }
+                self.session.focus_block(tag, terminal.as_str())?;
+            }
+            Ask::FocusDirection { dir, count } => {
+                // the daemon asks one at least
+                debug_assert!(count > 0);
+                self.directions.push(Directing {
+                    tag,
+                    left: count,
+                    refused: None,
+                });
+                for _ in 0..count {
+                    self.session.focus_direction(tag, rex_direction(dir))?;
+                }
+            }
             Ask::ReportLayout => {
                 let outcome = match &self.layout {
                     Some(l) => Outcome::Done(Answer::Layout(l.clone())),
@@ -266,15 +295,20 @@ impl RexProvider {
             }
             (Request::CloseLayer(tag), _) => self.answer(tag, no_block()),
             (
-                Request::CloseBlock(tag) | Request::MoveBlock(tag) | Request::ResizePane(tag),
+                Request::CloseBlock(tag)
+                | Request::MoveBlock(tag)
+                | Request::ResizePane(tag)
+                | Request::FocusBlock(tag),
                 ResponseResult::Ok(_),
             ) => self.answer(tag, Outcome::Done(Answer::Nothing)),
+            (Request::FocusDirection(tag), result) => self.on_direction_answer(tag, result),
             (
                 Request::NewSplit(tag)
                 | Request::NewLayer(tag)
                 | Request::CloseBlock(tag)
                 | Request::MoveBlock(tag)
-                | Request::ResizePane(tag),
+                | Request::ResizePane(tag)
+                | Request::FocusBlock(tag),
                 ResponseResult::Err(e),
             ) => {
                 self.took_float_ask(tag);
@@ -283,6 +317,27 @@ impl RexProvider {
             _ => {}
         }
         Ok(())
+    }
+
+    /// One of the requests of `focus_direction` ask `tag` was answered: the
+    /// last answers the ask, failed if any was refused.
+    fn on_direction_answer(&mut self, tag: u64, result: ResponseResult) {
+        let Some(i) = self.directions.iter().position(|d| d.tag == tag) else {
+            return;
+        };
+        let d = &mut self.directions[i];
+        d.left -= 1;
+        if let ResponseResult::Err(e) = result {
+            d.refused.get_or_insert(e);
+        }
+        if d.left > 0 {
+            return;
+        }
+        let outcome = match self.directions.swap_remove(i).refused {
+            Some(e) => outcome_of_error(&e),
+            None => Outcome::Done(Answer::Nothing),
+        };
+        self.answer(tag, outcome);
     }
 
     /// Whether ask `tag` was an `open_float` waiting for its block; it no
@@ -374,6 +429,16 @@ fn block(attach: &[String], size: Option<[u32; 2]>) -> Value {
         "label": NAME,
         "options": options,
     })
+}
+
+/// Rex's name for the way `dir` goes.
+fn rex_direction(dir: Direction) -> session::Direction {
+    match dir {
+        Direction::Left => session::Direction::Left,
+        Direction::Right => session::Direction::Right,
+        Direction::Up => session::Direction::Up,
+        Direction::Down => session::Direction::Down,
+    }
 }
 
 /// A Rex block id, if `t` is one.

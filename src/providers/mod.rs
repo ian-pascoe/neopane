@@ -8,8 +8,7 @@ use crate::daemon::provider::fake::FakeProvider;
 use rex::RexProvider;
 
 /// The daemon's pane provider, until #115 holds it as a
-/// `Box<dyn PaneProvider>`: Rex's, concretely, so focus can still call it
-/// directly until #109 moves it onto the seam; in tests, also the fake.
+/// `Box<dyn PaneProvider>`: Rex's, concretely; in tests, also the fake.
 pub(crate) enum Held {
     Rex(Box<RexProvider>),
     #[cfg(test)]
@@ -34,7 +33,7 @@ impl Held {
         }
     }
 
-    /// Rex's, for what isn't asked through the seam yet.
+    /// Rex's, for its session's attach and connection, not on the seam yet.
     pub(crate) fn rex(&mut self) -> Option<&mut RexProvider> {
         match self {
             Held::Rex(r) => Some(r),

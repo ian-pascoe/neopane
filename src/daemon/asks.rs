@@ -3,7 +3,9 @@
 //!
 //! An act whose capability the pane provider lacks, or was found not to
 //! support, falls back at once; any other is asked. Layout acts go one at a
-//! time, each asked only once the one before is answered or timed out. An
+//! time, each asked only once the one before is answered or timed out. Focus
+//! acts have their own queue: one running and at most one waiting, a newer
+//! one replacing it, as only the last place focus goes matters. An
 //! ask that is unsupported marks its capability so; one that fails or times
 //! out falls back, the first failure of each capability warning in Neovim.
 //! A terminal id answered too late is closed.
@@ -30,6 +32,8 @@ pub(crate) enum Step {
     Done(Ask, Answer),
     /// It can't be done: do what the daemon does without it.
     FallBack(Ask),
+    /// A newer focus act took its place before it was asked: it never will be.
+    Replaced(Ask),
     /// Show this in Neovim as a warning.
     Warn(String),
 }
@@ -45,10 +49,12 @@ struct Sent {
 #[derive(Debug, Default)]
 pub(crate) struct Asks {
     last_id: u64,
-    /// Asked, unanswered: at most one layout act, and any focus acts.
+    /// Asked, unanswered: at most one layout act and one focus act.
     sent: Vec<Sent>,
     /// Layout acts waiting their turn, oldest first.
     queue: VecDeque<(AskId, Ask)>,
+    /// The focus act waiting for the one running.
+    focus_waiting: Option<(AskId, Ask)>,
     /// Capabilities the pane provider turned out not to support.
     unsupported: CapabilitySet,
     /// Capabilities whose failure has warned.
@@ -70,8 +76,11 @@ impl Asks {
         if cap.is_layout() {
             self.queue.push_back((id, ask));
             self.next_layout_act(p, now);
+        } else if self.focus_running() {
+            if let Some((_, old)) = self.focus_waiting.replace((id, ask)) {
+                self.steps.push_back(Step::Replaced(old));
+            }
         } else {
-            // the focus queue is #109's
             self.send(p, id, ask, now);
         }
     }
@@ -99,6 +108,26 @@ impl Asks {
             }
             self.send(p, id, ask, now);
             return;
+        }
+    }
+
+    /// Whether a focus act is asked and unanswered.
+    fn focus_running(&self) -> bool {
+        self.sent.iter().any(|s| !s.ask.capability().is_layout())
+    }
+
+    /// Asks for the focus act waiting, if none is running.
+    fn next_focus_act(&mut self, p: &mut dyn PaneProvider, now: Instant) {
+        if self.focus_running() {
+            return;
+        }
+        let Some((id, ask)) = self.focus_waiting.take() else {
+            return;
+        };
+        if self.can(p, ask.capability()) {
+            self.send(p, id, ask, now);
+        } else {
+            self.steps.push_back(Step::FallBack(ask));
         }
     }
 
@@ -140,6 +169,7 @@ impl Asks {
             }
         }
         self.next_layout_act(p, now);
+        self.next_focus_act(p, now);
     }
 
     /// Fails the acts whose time is up at `now`.
@@ -157,6 +187,7 @@ impl Asks {
             self.steps.push_back(Step::FallBack(ask));
         }
         self.next_layout_act(p, now);
+        self.next_focus_act(p, now);
     }
 
     /// The pane provider failed as a whole: every act asked or waiting falls
@@ -165,7 +196,8 @@ impl Asks {
         for s in std::mem::take(&mut self.sent) {
             self.steps.push_back(Step::FallBack(s.ask));
         }
-        for (_, ask) in std::mem::take(&mut self.queue) {
+        let waiting = std::mem::take(&mut self.queue);
+        for (_, ask) in waiting.into_iter().chain(self.focus_waiting.take()) {
             self.steps.push_back(Step::FallBack(ask));
         }
     }
@@ -212,7 +244,7 @@ impl Asks {
     pub(crate) fn settles_placement(&self, step: &Step) -> bool {
         let ends_one = match step {
             Step::Done(ask, _) | Step::FallBack(ask) => is_placement(ask),
-            Step::Warn(_) => false,
+            Step::Replaced(_) | Step::Warn(_) => false,
         };
         ends_one && !self.placing()
     }
@@ -230,7 +262,7 @@ impl Asks {
     /// How many acts are asked or waiting.
     #[cfg(test)]
     pub(crate) fn waiting(&self) -> usize {
-        self.sent.len() + self.queue.len()
+        self.sent.len() + self.queue.len() + usize::from(self.focus_waiting.is_some())
     }
 }
 
@@ -446,14 +478,69 @@ mod tests {
         );
     }
 
+    fn focus(t: &str) -> Ask {
+        Ask::Focus {
+            terminal: TerminalId::from(t),
+        }
+    }
+
+    fn focusing() -> FakeProvider {
+        let mut f = FakeProvider::opening();
+        f.caps.insert(Capability::Focus);
+        f.caps.insert(Capability::FocusDirection);
+        f
+    }
+
+    #[test]
+    fn focus_acts_coalesce_to_one_running_and_the_newest_waiting() {
+        let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
+        asks.act(Some(&mut fake), focus("a"), now);
+        asks.act(Some(&mut fake), focus("b"), now);
+        let right = Ask::FocusDirection {
+            dir: Direction::Right,
+            count: 2,
+        };
+        asks.act(Some(&mut fake), right.clone(), now);
+        asks.act(Some(&mut fake), focus("c"), now);
+        // a layout act goes its own way meanwhile
+        asks.act(Some(&mut fake), open(1), now);
+        assert_eq!(vec![focus("a"), open(1)], fake.asked());
+        assert_eq!(
+            vec![Step::Replaced(focus("b")), Step::Replaced(right)],
+            steps(&mut asks)
+        );
+
+        // the newest goes once the one running is answered
+        fake.answer(fake.asks[0].0, Outcome::Done(Answer::Nothing));
+        deliver(&mut asks, &mut fake, now);
+        assert_eq!(vec![focus("a"), open(1), focus("c")], fake.asked());
+        assert_eq!(
+            vec![Step::Done(focus("a"), Answer::Nothing)],
+            steps(&mut asks)
+        );
+        // or once it times out, after two seconds
+        asks.act(Some(&mut fake), focus("d"), now);
+        asks.time_out(&mut fake, now + Duration::from_millis(1999));
+        assert_eq!(3, fake.asks.len());
+        asks.time_out(&mut fake, now + Duration::from_secs(2));
+        assert_eq!(focus("d"), fake.asked()[3]);
+    }
+
     #[test]
     fn a_pane_provider_gone_falls_back_every_act_asked_or_waiting() {
-        let (mut asks, mut fake, now) = (Asks::default(), FakeProvider::opening(), Instant::now());
+        let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
         asks.act(Some(&mut fake), open(1), now);
         asks.act(Some(&mut fake), open(2), now);
+        asks.act(Some(&mut fake), focus("a"), now);
+        asks.act(Some(&mut fake), focus("b"), now);
         asks.gone();
         assert_eq!(
-            vec![Step::FallBack(open(1)), Step::FallBack(open(2))],
+            vec![
+                Step::FallBack(open(1)),
+                Step::FallBack(focus("a")),
+                Step::FallBack(open(2)),
+                Step::FallBack(focus("b")),
+            ],
             steps(&mut asks)
         );
         assert_eq!(0, asks.waiting());

@@ -7,8 +7,8 @@
 //! ready (`on_ready`). What the daemon does with acts, their queue, deadlines
 //! and fallbacks, is `asks.rs`'s.
 //!
-//! Until #109 moves focus onto the seam, the opens, `close`,
-//! `place_beside`, `resize` and `report_layout` are asked through it.
+//! The opens, `close`, `place_beside`, `resize`, `report_layout`, `focus`
+//! and `focus_direction` are asked through it.
 
 use std::fmt;
 
@@ -174,7 +174,7 @@ impl Direction {
 /// One ask of a pane provider: a variant per capability, its fields named
 /// after ADR 0006's inputs (#92 decision 2).
 #[derive(Debug, Clone, PartialEq)]
-// `open`, `find` and focus are asked from #109–#114
+// `open` and `find` are asked from #112–#114
 #[allow(dead_code)]
 pub(crate) enum Ask {
     Open {
