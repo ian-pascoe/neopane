@@ -1,6 +1,6 @@
 # neorex
 
-`neorex` in a Rex pane starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows and shows each window in its own Rex pane. The layers:
+`neorex` in a terminal starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows; in a Rex pane, Rex is its pane provider and shows each window in its own Rex pane, and elsewhere the windows are drawn in the terminal. The layers:
 
 - `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `<name>_*` notes, `<name>` being `NAME` in `src/name.rs`. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
 - `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows in its tab page area, as the `<name>_layout` notes say, through the pane provider's `place_beside` and `resize` (`TabPlacement`).
