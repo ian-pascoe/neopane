@@ -132,13 +132,20 @@ own: keys, Neovim's redraw events, the renderer, and pane hand-off.
 
 Running `neorex` in a Rex pane starts a daemon in the background, which runs
 one headless Neovim and gives each of its windows a Rex pane. The pane you ran
-it in becomes the first window's. It takes its bearings from the environment
-Rex sets in every pane:
+it in attaches to the daemon first: Neovim starts only once the daemon has
+accepted that attach, at that pane's size, and the pane shows its first
+window. When Neovim
+quits, `neorex` exits with Neovim's status: `:q` 0, `:cq` 1, `:cq 3` 3, so
+`:cq` aborts a `git commit` as it does in plain Neovim. It takes its bearings
+from the environment Rex sets in every pane:
 
 - `REX_SERVER`: the URL of the Rex server to connect to. Required.
 - `REX_SESSION`: the Rex session to open panes in. Required.
 - `REX_BLOCK`: the id of the pane `neorex` was run in. Optional: the daemon
-  uses it as the first window's pane, and logs a note if it isn't a block id.
+  reads it from the attach's environment, uses it as the first window's
+  pane, and logs a note if it isn't a block id.
+- `NEOREX_PROVIDER`: a hint at the pane provider, sent with the attach;
+  nothing reads it yet.
 - `NEOREX_LOG`: how much the daemon logs, read as it starts. `warn`: what
   went wrong; `info`, the default: that, and what happened; `debug`: that,
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
@@ -268,17 +275,17 @@ quietly.
 | 0 | success |
 | 1 | a failure or refusal |
 | 2 | a usage error, or a refused Neovim argument |
+| Neovim's | `neorex`, once Neovim quits: `:q` 0, `:cq` 1, `:cq N` N |
 
 ## Troubleshooting
 
 - "run it in a Rex pane": `REX_SERVER` or `REX_SESSION` is missing. Start
   `neorex` from a Rex pane, or set both (see above) to a session you made.
-- `neorex: work didn't start: <why> (log: <path>)`, or a failure line in the
-  pane ending `; see <path>`: read the log at that path. A daemon that failed
-  before it had a log says only why, such as `neorex: /tmp/neorex-501 isn't a
-  private directory (owner 0, mode 0755); set NEOREX_TMPDIR to another place`
-  or `neorex: the socket path for work would be 109 bytes, over the 103
-  allowed; use a shorter --name or NEOREX_TMPDIR`.
+- `neorex: work didn't start: <why> (log: <path>)`: read the log at that
+  path. A daemon that failed before it had a log says only why, such as
+  `neorex: /tmp/neorex-501 isn't a private directory (owner 0, mode 0755); set
+  NEOREX_TMPDIR to another place` or `neorex: the socket path for work would
+  be 109 bytes, over the 103 allowed; use a shorter --name or NEOREX_TMPDIR`.
 - `neorex: the daemon didn't start: <why> (logs: <base>)`: the daemon ended
   before it said anything; its log, if it made one, is under `<base>`.
 - A daemon's log is `/tmp/neorex-<uid>/<daemon name>/log` (under

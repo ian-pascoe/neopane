@@ -103,6 +103,9 @@ pub(crate) struct Daemon {
     escape_timer_due: Option<Instant>,
     /// Set by `stop`; `run` returns it.
     pub stopped: Option<StopReason>,
+    /// Neovim's exit status, once it has quit and exited: the self-attached
+    /// panes' helpers exit with it.
+    pub quit_status: Option<u8>,
     /// The acts asked of the pane provider, or waiting to be.
     pub asks: Asks,
     /// When the ask timer is set to fire, if it is.
@@ -183,9 +186,6 @@ impl Token {
 
 // the fixed tokens must stay below the pane tokens
 const _: () = assert!((Token::FocusInTimer as usize) < pane::TOKEN_BASE);
-
-/// The id `Pane::startup` gives the pane neorex was run in.
-const STARTUP_PANE_ID: u32 = 0;
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -273,7 +273,7 @@ impl Drop for Daemon {
             Some(StopReason::PaneGone) => Ending::Closed,
             None => Ending::Failed,
         };
-        self.panes.deinit(ending);
+        self.panes.deinit(ending, self.quit_status);
         log::flush_traces();
     }
 }
@@ -309,6 +309,7 @@ impl Daemon {
             area_timer_due: None,
             escape_timer_due: None,
             stopped: None,
+            quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
             focus: ProviderFocus::default(),
@@ -320,23 +321,28 @@ impl Daemon {
         }
     }
 
-    /// Adds the launcher's pane, already connected, and starts talking to
-    /// Neovim and the pane provider.
-    pub(crate) fn start(&mut self, launch_pane: Pane) -> Result<()> {
+    /// Adds the first self-attached pane, already accepted, its terminal
+    /// `surface` with the pane provider's id `terminal` if known, and starts
+    /// talking to Neovim, sized to it, and the pane provider.
+    pub(crate) fn start(
+        &mut self,
+        terminal: Option<TerminalId>,
+        surface: Box<Surface>,
+    ) -> Result<()> {
         // only ever called on startup
         debug_assert!(self.panes.list.is_empty());
 
-        let pane = self.panes.add(launch_pane);
+        let pane = self.panes.add_self_attached(terminal, surface);
         pane.register_with(&self.event_loop)?;
+        // no requested pane: its own area until a live layout places it,
+        // drawn and fitted as before there was any
+        pane.area = Area::Own;
         let view = &pane.terminal_surface.as_ref().unwrap().view;
         let (cols, rows) = (view.cols, view.rows);
         self.nvim.attach_ui(cols, rows)?;
         if let Some(r) = self.rex() {
             r.session.attach()?;
         }
-        // no requested pane: its own area until a live layout places it,
-        // drawn and fitted as before there was any
-        self.panes.by_id_mut(STARTUP_PANE_ID).unwrap().area = Area::Own;
         Ok(())
     }
 
@@ -1053,9 +1059,11 @@ impl Daemon {
         if let Some(e) = err {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
-            let size = self
-                .geometry()
-                .window_size(self.panes.by_id(STARTUP_PANE_ID).unwrap());
+            // the first window is the self-attached pane's (#83)
+            let Some(first) = self.panes.unshown_self_attached() else {
+                return Ok(());
+            };
+            let size = self.geometry().window_size(first);
             let mut result = result;
             let chan = windows::parse_channel(&mut result)?;
             self.nvim.setup_req = windows::setup(&mut self.nvim.client, chan, size[0], size[1]);
@@ -1063,8 +1071,8 @@ impl Daemon {
         } else if id == self.nvim.setup_req {
             let mut result = result;
             let wins = windows::parse_setup(&mut result)?;
-            if let Some(launch) = self.panes.by_id_mut(STARTUP_PANE_ID) {
-                launch.neovim_window_handle = Some(wins[0]);
+            if let Some(first) = self.panes.unshown_self_attached_mut() {
+                first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
             // its window is in its pane now: the editor can span the Rex window
@@ -2275,10 +2283,11 @@ impl Daemon {
         }
     }
 
-    /// The pane showing Neovim's current window; before setup, the launcher's.
+    /// The pane showing Neovim's current window; before setup, the
+    /// self-attached pane waiting for the first window.
     fn current_pane(&self) -> Option<&Pane> {
         if self.nvim.current_win == 0 {
-            return self.panes.by_id(STARTUP_PANE_ID);
+            return self.panes.unshown_self_attached();
         }
         self.panes.by_win(self.nvim.current_win)
     }
@@ -3557,12 +3566,10 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_pane_is_its_own_area_until_a_live_layout_places_it() {
+    fn a_self_attached_pane_is_its_own_area_until_a_live_layout_places_it() {
         let mut fx = TablineFixture::init();
         let s = fx.surface(80, 24);
-        fx.d()
-            .start(Pane::startup(Some(TerminalId::from("t0")), s))
-            .unwrap();
+        fx.d().start(Some(TerminalId::from("t0")), s).unwrap();
         // no wait for a report: a tabline pane, the screen its size
         let d = fx.d();
         assert_eq!(Area::Own, d.panes.list[0].area);
@@ -3645,9 +3652,9 @@ mod tests {
     fn with_no_pane_provider_each_pane_is_its_own_area_with_its_own_tabline() {
         let mut fx = TablineFixture::on(with_provider(None));
         let s = fx.surface(80, 24);
-        fx.d().start(Pane::startup(None, s)).unwrap();
+        fx.d().start(None, s).unwrap();
         fx.d().nvim.ready = true;
-        let other = fx.add(1, 60, Area::Unreported);
+        let other = fx.add(2, 60, Area::Unreported);
         fx.d().wait_for_report(other, Instant::now()).unwrap();
         let d = fx.d();
         for p in &d.panes.list {

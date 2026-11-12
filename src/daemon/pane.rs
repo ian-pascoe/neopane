@@ -12,7 +12,7 @@ use super::live_layout::Area;
 use super::pane_layout::PaneLayout;
 use super::provider::{Ask, Direction, TerminalId};
 use super::surface::Surface;
-use crate::attach::{self, Ending, PaneId, Transport};
+use crate::attach::{self, End, Ending, PaneId, Transport};
 use crate::name::NAME;
 use crate::screen::float_groups::Group;
 
@@ -20,14 +20,15 @@ use crate::screen::float_groups::Group;
 pub(crate) type NeovimWindowHandle = i64;
 
 pub(crate) struct Pane {
-    /// The daemon's own number for it, for its loop tokens. 0 is the startup
-    /// pane.
+    /// The daemon's own number for it, for its loop tokens.
     pub id: u32,
-    /// The pane id its helper's hello names, for a requested pane.
+    /// The pane id its helper's hello names, for a requested pane. None for
+    /// a self-attached pane, which placement never moves.
     pub attach_id: Option<PaneId>,
     /// Its terminal's id, from the pane provider: Rex's is its block.
     pub terminal: Option<TerminalId>,
-    /// None for a floating pane of floats, and the startup pane before setup.
+    /// None for a floating pane of floats, and a self-attached pane before
+    /// it takes a window.
     /// Of a pane showing several windows, the one last current in it.
     pub neovim_window_handle: Option<NeovimWindowHandle>,
     /// The windows it shows, laid out as Neovim lays out splits, once it shows
@@ -263,12 +264,17 @@ impl Pane {
         }
     }
 
-    /// The pane the daemon was started from, with its terminal's id if known.
-    pub(crate) fn startup(terminal: Option<TerminalId>, surface: Box<Surface>) -> Pane {
+    /// A self-attached pane: a terminal that attached of its own accord,
+    /// with its terminal's id if known. It has no window yet.
+    pub(crate) fn self_attached(
+        id: u32,
+        terminal: Option<TerminalId>,
+        surface: Box<Surface>,
+    ) -> Pane {
         Pane {
             terminal,
             terminal_surface: Some(surface),
-            ..Pane::blank(0)
+            ..Pane::blank(id)
         }
     }
 
@@ -291,21 +297,20 @@ impl Pane {
 
     /// Hanging up makes the helper restore its terminal and exit, and Rex
     /// close the pane. Its helper is told why its attach ends: its pane
-    /// closed, or, as the daemon ends, `ending`. One that is gone already
-    /// is told nothing.
-    pub(crate) fn deinit(self, ending: Ending) {
+    /// closed, or, as the daemon ends, `ending`, with Neovim's `exit` status
+    /// if Neovim quit. One that is gone already is told nothing.
+    pub(crate) fn deinit(self, ending: Ending, exit: Option<u8>) {
         let ending = match self.closing {
             Some(Close::TerminalHungUp) => return, // the fds close as `self` drops
             Some(Close::WindowClosed | Close::RequestFailed) => Ending::Closed,
             Some(Close::Shutdown) | None => ending,
         };
-        self.end(ending, ending_message(ending));
-    }
-
-    /// Ends the pane's attach as `ending`, with `message` for its helper.
-    pub(crate) fn end(self, ending: Ending, message: &str) {
+        let mut end = End::ending(ending, ending_message(ending), false);
+        if ending == Ending::Quit {
+            end.exit = exit;
+        }
         if let Some(surface) = self.terminal_surface {
-            surface.destroy(ending, message);
+            surface.end_with(end);
         }
     }
 
@@ -347,12 +352,13 @@ mod tests {
         assert_eq!(1000, from_window.neovim_window_handle.unwrap());
         assert!(from_window.terminal.is_none() && from_window.terminal_surface.is_none());
 
-        let at_startup = Pane::startup(Some(TerminalId::from("t")), Surface::for_test(80, 24));
-        assert_eq!(0, at_startup.id);
-        assert!(at_startup.terminal.is_some() && at_startup.terminal_surface.is_some());
-        assert!(at_startup.neovim_window_handle.is_none());
+        let attached =
+            Pane::self_attached(1, Some(TerminalId::from("t")), Surface::for_test(80, 24));
+        assert_eq!(1, attached.id);
+        assert!(attached.terminal.is_some() && attached.terminal_surface.is_some());
+        assert!(attached.neovim_window_handle.is_none() && attached.attach_id.is_none());
 
-        let without_block = Pane::startup(None, Surface::for_test(80, 24));
+        let without_block = Pane::self_attached(2, None, Surface::for_test(80, 24));
         assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
     }
 
@@ -403,7 +409,8 @@ mod tests {
         let (master, slave) = open_pty(80, 24);
         crate::term::raw::as_the_helper_does(slave);
         let (socket, mut helper) = UnixStream::pair().unwrap();
-        let pane = Pane::startup(
+        let pane = Pane::self_attached(
+            1,
             None,
             Surface::create(socket, slave, super::super::surface::cells(80, 24)),
         );
@@ -434,7 +441,7 @@ mod tests {
 
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
-        pane.deinit(Ending::Stopped);
+        pane.deinit(Ending::Stopped, None);
     }
 
     // Closing the terminal's fd doesn't end its watch on Linux, so a pane's
@@ -448,7 +455,8 @@ mod tests {
 
         let (master, slave) = open_pty(80, 24);
         let (socket, mut helper) = UnixStream::pair().unwrap();
-        let pane = Pane::startup(
+        let pane = Pane::self_attached(
+            1,
             None,
             Surface::create(socket, slave, super::super::surface::cells(80, 24)),
         );
@@ -469,6 +477,6 @@ mod tests {
         pane.unregister_from(&event_loop);
         // SAFETY: closing the pty's master.
         unsafe { libc::close(master) };
-        pane.deinit(Ending::Stopped);
+        pane.deinit(Ending::Stopped, None);
     }
 }

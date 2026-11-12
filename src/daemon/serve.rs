@@ -1,14 +1,15 @@
 //! `neorex daemon NAME [--dedup] -- [nvim args]`: the background half of
-//! `neorex`. Claims its directory (`dir`), then takes
-//! the launching pane's terminal, runs Neovim under `--embed`, speaking RPC
-//! over its stdin and stdout, and shows each of its windows in a Rex pane (see
-//! `Daemon`). Exits when Neovim does or the last pane goes away.
+//! `neorex`. Claims its directory (`dir`), accepts the launcher's attach,
+//! an ordinary self-attach, then runs Neovim under `--embed`, sized to it,
+//! speaking RPC over its stdin and stdout, and shows each of its windows in a
+//! Rex pane (see `Daemon`). Exits when Neovim does or the last pane goes
+//! away; a self-attach then exits with Neovim's status.
 //!
 //! Teardown is by values whose `Drop` does it, declared in the order they
 //! must end: the daemon (its panes, then the loop, Rex and Neovim), Neovim's
-//! process, the launcher's pane if the daemon never took it, the socket files,
-//! the helpers' socket, and last the lock on the daemon's directory. The log
-//! stays.
+//! process, the socket files, the helpers' socket, and last the lock on the
+//! daemon's directory. A start that fails once the first attach is accepted
+//! ends it as failed, with the reason. The log stays.
 //!
 //! Every file of a daemon is in its own directory, `<base>/NAME/` (`dir`),
 //! which the daemon claims and holds locked for its whole life.
@@ -27,10 +28,9 @@ use std::time::{Duration, Instant};
 
 use super::attach_conn::{self, Pending, Step, euid};
 use super::daemon::{Daemon, StopReason, Token};
-use super::dir::{self, Claimed, MAX_PATH};
+use super::dir::{self, Claimed};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
-use super::pane::Pane;
 use super::provider::TerminalId;
 use super::surface::Surface;
 use crate::attach::{End, Ending, Purpose, Refusal, Transport};
@@ -63,7 +63,7 @@ impl std::fmt::Display for Error {
             Error::DetachNotBuilt => write!(f, "--detach isn't built yet"),
             Error::NotInRex => write!(f, "run it in a Rex pane"),
             Error::LauncherGone => write!(f, "the launcher went away"),
-            Error::NoPane => write!(f, "the launcher's pane didn't attach"),
+            Error::NoPane => write!(f, "the launcher's terminal didn't attach"),
         }
     }
 }
@@ -137,12 +137,19 @@ pub fn run<S: AsRef<OsStr>>(name: &str, dedup: bool, detach: bool, nvim_args: &[
     result
 }
 
-/// What the launcher is told of `err`, which stopped the start: with the
-/// daemon's name and log, `(name, log)`, once there is a log.
+/// What the launcher is told of `err`, which stopped the start, and prints
+/// after `<name>: `: with the daemon's name and log, `(name, log)`, once
+/// there is a log. Why is cut to 256 bytes.
 fn start_error(err: &dyn std::fmt::Display, logging: Option<(String, String)>) -> String {
+    let mut why = err.to_string();
+    let mut end = why.len().min(256);
+    while !why.is_char_boundary(end) {
+        end -= 1;
+    }
+    why.truncate(end);
     match logging {
-        Some((name, log)) => format!("{name} didn't start: {err} (log: {log})"),
-        None => err.to_string(),
+        Some((name, log)) => format!("{name} didn't start: {why} (log: {log})"),
+        None => why,
     }
 }
 
@@ -286,13 +293,18 @@ impl NvimChild {
     /// it running with no UI. One still running after `exiting` is sent
     /// SIGHUP, which makes it keep its swap files and exit; dropping waits
     /// for it. One that's exiting isn't: a SIGHUP while it deletes its swap
-    /// files would keep them.
-    fn closed_by_nvim(&mut self) {
+    /// files would keep them. Neovim's exit status, if it exited by itself:
+    /// 128 and the signal's number if a signal ended it.
+    fn closed_by_nvim(&mut self) -> Option<u8> {
         if self.wait_for_exit(self.exiting) {
-            return;
+            return match nvim_exit(&mut self.child)? {
+                NvimExit::Status(n) => Some(n),
+                NvimExit::Signal(n) => Some(128u32.saturating_add(n).min(255) as u8),
+            };
         }
         // SAFETY: signalling our own child, which hasn't been reaped.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP) };
+        None
     }
 
     /// Why a Neovim that closed the channel before it answered failed to
@@ -563,26 +575,44 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     (config.ready)()?;
 
-    let rex_block: Option<TerminalId> = match env("REX_BLOCK") {
-        Some(b) => match ids::block(b.as_bytes()) {
-            Ok(_) => Some(TerminalId::from(b.as_str())),
-            Err(_) => {
-                log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
-                None
-            }
-        },
-        None => None,
-    };
+    // the first attach is answered before Neovim starts, which is sized to it
     let name = dir.name().to_string();
-    let mut startup = Startup {
-        log: &log,
-        launch: Some(Pane::startup(rex_block, take_pane(&server, &name, &log)?)),
-    };
-
-    // Rex is connected to while Neovim starts. Declared in this order so
-    // that, on a return, the channel closes before Neovim is waited for.
+    let mut first = Some(first_attach(&server, &name, &log)?);
+    // declared in this order so that, on a return, the panes hang up and
+    // the channel closes before Neovim is waited for
     let mut child;
-    let nvim;
+    let mut d;
+    match start_daemon(dir, nvim_args, config, &server, exe, &mut first) {
+        Ok(started) => (child, d) = started,
+        Err(err) => {
+            if let Some(first) = first.take() {
+                let message = start_error(&*err, Some((name, log)));
+                first.surface.destroy(Ending::Failed, &message);
+            }
+            return Err(err);
+        }
+    }
+
+    let stop_reason = d.run(&server)?;
+    log_info!("{NAME} daemon: {}", stop_reason.tag_name());
+    if stop_reason == StopReason::NvimExited {
+        // the self-attached panes' helpers exit with Neovim's status
+        d.quit_status = child.closed_by_nvim();
+    }
+    Ok(())
+}
+
+/// Starts Neovim, with Rex connected to while it starts, and the daemon
+/// over them, which takes the `first` attach. Neovim's process, and the
+/// daemon.
+fn start_daemon<S: AsRef<OsStr>>(
+    dir: &Claimed,
+    nvim_args: &[S],
+    config: Config<'_>,
+    server: &UnixListener,
+    exe: String,
+    first: &mut Option<FirstAttach>,
+) -> Result<(NvimChild, Daemon)> {
     let (started, rex) = std::thread::scope(|s| {
         let rex = s.spawn(|| Client::connect(config.rex_url, NAME));
         let started = start_nvim(config.nvim_command, dir, nvim_args, config.nvim_timeout);
@@ -591,14 +621,10 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         (started, rex)
     });
-    match started {
-        Ok(started) => (child, nvim) = started,
-        Err(failure) => return Err(startup.give_up(failure)),
-    }
-    let rex = match rex {
-        Ok(rex) => rex,
-        Err(err) => return Err(startup.give_up(StartFailure::Rex(err.to_string()))),
-    };
+    // declared in this order so that, on a return, the channel closes
+    // before Neovim is waited for
+    let (child, nvim) = started?;
+    let rex = rex.map_err(|err| StartFailure::Rex(err.to_string()))?;
 
     let mut event_loop = Loop::init()?;
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
@@ -608,7 +634,6 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     event_loop.add_read(server.as_raw_fd(), Token::HelperListener as usize)?;
     event_loop.add_read(rex.fd(), Token::Provider as usize)?;
 
-    // dropped first: panes hung up before anything else ends
     let mut d = Daemon::new(
         event_loop,
         NvimSession::new(nvim),
@@ -619,20 +644,13 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         exe,
         dir.address(),
     );
-    d.name = name;
+    d.name = dir.name().to_string();
     // requested panes' helpers relay too under the diagnostic
     d.transport = config.transport;
-    d.log = log.clone();
-    d.start(startup.release())?;
-
-    let stop_reason = d.run(&server)?;
-    log_info!("{NAME} daemon: {}", stop_reason.tag_name());
-    if stop_reason == StopReason::NvimExited {
-        // panes first: Neovim may take a while to finish exiting
-        drop(d);
-        child.closed_by_nvim();
-    }
-    Ok(())
+    d.log = dir.log();
+    let first = first.take().expect("the first attach is taken once");
+    d.start(first.terminal, first.surface)?;
+    Ok((child, d))
 }
 
 /// Why the daemon gave up before showing any window, for the user.
@@ -698,46 +716,6 @@ enum NvimExit {
     Signal(u32),
 }
 
-/// The launcher's pane, owned until the daemon takes it over, and what's
-/// needed to tell its user why a start failed.
-struct Startup<'a> {
-    log: &'a str,
-    launch: Option<Pane>,
-}
-
-impl Drop for Startup<'_> {
-    fn drop(&mut self) {
-        if let Some(launch) = self.launch.take() {
-            fail(
-                launch,
-                &format!("the daemon didn't start; see {}", self.log),
-            );
-        }
-    }
-}
-
-impl Startup<'_> {
-    /// The pane, for the daemon to own.
-    fn release(&mut self) -> Pane {
-        self.launch
-            .take()
-            .expect("the launcher's pane was released twice")
-    }
-
-    /// Tells the pane why we're stopping, then returns `failure`, which
-    /// `main` prints to the log.
-    fn give_up(&mut self, failure: StartFailure) -> Box<dyn std::error::Error> {
-        let message = failure_message(&failure, self.log);
-        fail(self.release(), &message);
-        Box::new(failure)
-    }
-}
-
-/// Ends `launch`'s attach as failed with `message`, which its helper prints.
-fn fail(launch: Pane, message: &str) {
-    launch.end(Ending::Failed, message);
-}
-
 /// How `child`, which has ended, ended. Reaps it.
 fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
     let status = child.try_wait().ok()??;
@@ -747,27 +725,23 @@ fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
     status.signal().map(|sig| NvimExit::Signal(sig as u32))
 }
 
-/// A line for the user, which the launcher prints after `<name>: `: why
-/// the start failed, and where the log is. At most 256 bytes plus a path.
-fn failure_message(failure: &StartFailure, log: &str) -> String {
-    let mut w = format!("{failure}; see {log}");
-    let mut end = w.len().min(256 + MAX_PATH);
-    while !w.is_char_boundary(end) {
-        end -= 1;
-    }
-    w.truncate(end);
-    w
-}
-
 /// The environment variable `name`, if set (and Unicode).
 fn env(name: &str) -> Option<String> {
     std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
 }
 
-/// Waits up to 5 s for the launcher's helper, and takes its terminal: the
-/// one attach of its own accord this daemon takes (#105 opens it up). Its
-/// hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running yet.
-fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface>> {
+/// The first attach, accepted before Neovim starts: its terminal, and the
+/// pane provider's id for it if known.
+struct FirstAttach {
+    surface: Box<Surface>,
+    terminal: Option<TerminalId>,
+}
+
+/// Waits up to 5 s for the first attach, the launcher's, and accepts it:
+/// a self-attach, the one this daemon takes of its own accord (#105 opens
+/// it up). Its hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running
+/// yet.
+fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<FirstAttach> {
     let mut fds = [libc::pollfd {
         fd: server.as_raw_fd(),
         events: libc::POLLIN,
@@ -798,7 +772,7 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
         }
     };
     let Purpose::SelfAttach { terminal, .. } = hello.purpose else {
-        let message = format!("the launcher's attach can't be {}", hello.purpose.name());
+        let message = format!("the first attach can't be {}", hello.purpose.name());
         attach_conn::refuse(a.stream, End::refusal(Refusal::Hello, message));
         return Err(Error::NoPane.into());
     };
@@ -810,20 +784,39 @@ fn take_pane(server: &UnixListener, name: &str, log: &str) -> Result<Box<Surface
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
+    let block = rex_block(&terminal.env);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
+    // traced as 0, which no pane's id is: its pane is made after
     log::trace_at(Point::Hello, 0, a.at);
     log::trace(Point::Accepted, 0);
     surface.helper_in = a.rest;
-    Ok(surface)
+    Ok(FirstAttach {
+        surface,
+        terminal: block,
+    })
+}
+
+/// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
+/// hello carries (#114 finds it instead).
+fn rex_block(env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
+    let (_, b) = env.iter().find(|(k, _)| k == b"REX_BLOCK")?;
+    let b = String::from_utf8_lossy(b);
+    match ids::block(b.as_bytes()) {
+        Ok(_) => Some(TerminalId::from(b.as_ref())),
+        Err(_) => {
+            log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::attach::Message;
-    use crate::daemon::dir::Address;
     use crate::daemon::dir::testing::Scratch;
+    use crate::daemon::dir::{Address, MAX_PATH};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
 
@@ -1230,7 +1223,7 @@ mod tests {
         expect_failed_start(
             &["nvim", "--fo"],
             Duration::from_secs(10),
-            r#"Neovim exited at once (status 1): Unknown option argument: "--fo"; see "#,
+            r#"d didn't start: Neovim exited at once (status 1): Unknown option argument: "--fo" (log: "#,
         );
     }
 
@@ -1468,6 +1461,143 @@ mod tests {
         assert_eq!(1, swap_files);
     }
 
+    /// Runs a daemon whose Neovim runs `ex` once the daemon has attached
+    /// and set it up, from a launcher in a pseudo-terminal. Returns how the
+    /// daemon ended and every frame the launcher was sent.
+    fn self_attach_running(ex: &str) -> (Result<()>, Vec<Message>) {
+        let (_base, dir) = test_dir();
+        let address = dir.address();
+        let rex_dir = Scratch::new();
+        let rex_sock = rex_dir.file("rex.sock");
+        let rex = silent_rex(&rex_sock);
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            // SAFETY: `buf` is valid for its length.
+            while unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+            // SAFETY: closing the pty's master.
+            unsafe { libc::close(master) };
+        });
+        let mut launcher: Option<UnixStream> = None;
+        let plugin = format!(
+            "lua local t = vim.uv.new_timer() \
+             t:start(50, 50, vim.schedule_wrap(function() \
+               if _G.{NAME} and #vim.api.nvim_list_uis() > 0 then \
+                 t:stop() vim.cmd('{ex}') \
+               end \
+             end))"
+        );
+        let args = ["-n", "-c", &plugin];
+        let rex_url = format!("unix://{rex_sock}");
+        let result = serve(
+            &dir,
+            &args,
+            Config {
+                nvim_command: &["nvim", "--clean"],
+                ready: Box::new(|| {
+                    launcher = Some(fake_launcher_ready(&address, slave)?);
+                    Ok(())
+                }),
+                ..Config::new(&rex_url, "session:s")
+            },
+        );
+        let said = attach_conn::read_all_frames(&launcher.unwrap());
+        reader.join().unwrap();
+        rex.join().unwrap();
+        (result, said)
+    }
+
+    /// How the launcher exits after an attach that `said` ended.
+    fn launcher_exit(said: &[Message]) -> u8 {
+        let Some(Message::End(z)) = said.last() else {
+            panic!("{said:?}")
+        };
+        assert_eq!(Ending::Quit, z.as_ending(), "{z:?}");
+        crate::daemon::pane_helper::ended(crate::daemon::pane_helper::Want::SelfAttach, z).status
+    }
+
+    #[test]
+    fn a_self_attach_exits_with_neovims_status() {
+        if !have_nvim() {
+            return;
+        }
+        for (ex, status) in [("cq 3", 3), ("cq", 1), ("q", 0)] {
+            let (result, said) = self_attach_running(ex);
+            assert!(result.is_ok(), "{ex}: {result:?}");
+            assert_eq!(status, launcher_exit(&said), "{ex}");
+        }
+    }
+
+    #[test]
+    fn neovim_is_started_only_once_the_hello_is_answered() {
+        let (_base, dir) = test_dir();
+        let address = dir.address();
+        let scratch = Scratch::new();
+        let started = scratch.file("started");
+        let script = format!("touch {started}; exit 1");
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        let mut launcher = None;
+        let _ = serve(
+            &dir,
+            &[] as &[&str],
+            Config {
+                nvim_command: &["sh", "-c", &script, "--"],
+                nvim_timeout: Duration::from_secs(10),
+                ready: Box::new(|| {
+                    let address = address.clone();
+                    let started = started.clone();
+                    launcher = Some(std::thread::spawn(move || {
+                        // a launcher slow to say hello holds Neovim back
+                        let stream = address.connect().unwrap();
+                        std::thread::sleep(Duration::from_millis(300));
+                        let before_hello = exists(&started);
+                        let hello = attach_conn::self_hello(attach_conn::test_terminal(80, 24));
+                        fdpass::send(&stream, &hello, slave).unwrap();
+                        // SAFETY: closing our copy of the slave.
+                        unsafe { libc::close(slave) };
+                        // once Neovim has started, the answer is there already
+                        eventually(|| exists(&started));
+                        stream.set_nonblocking(true).unwrap();
+                        let mut bytes = vec![0u8; 1 << 16];
+                        let n = (&stream).read(&mut bytes).unwrap_or(0);
+                        bytes.truncate(n);
+                        let first = attach_conn::next_message(&mut bytes).unwrap();
+                        (before_hello, first)
+                    }));
+                    Ok(())
+                }),
+                ..Config::new("ws://unused", "unused")
+            },
+        );
+        let (before_hello, first) = launcher.unwrap().join().unwrap();
+        // SAFETY: closing the pty's master.
+        unsafe { libc::close(master) };
+        assert!(!before_hello, "Neovim started before the hello came");
+        assert!(exists(&started), "Neovim never started");
+        assert!(matches!(first, Some(Message::Accept(_))), "{first:?}");
+    }
+
+    #[test]
+    fn a_start_whose_neovim_failed_ends_the_attach_with_the_failure_line() {
+        let (_base, dir) = test_dir();
+        let (_, shown) = failed_start(
+            &dir,
+            TestStart {
+                nvim_command: &["sh", "-c", "echo 'nvim: it broke' >&2; exit 1", "--"],
+                nvim_timeout: Duration::from_secs(10),
+                rex_url: "ws://unused",
+                on_ready: &mut || {},
+            },
+        );
+        assert_eq!(
+            format!(
+                "d didn't start: Neovim exited at once (status 1): it broke (log: {})",
+                dir.log()
+            ),
+            shown
+        );
+    }
+
     #[test]
     fn a_config_slower_than_a_moment_still_starts() {
         // Neovim answers only once its config has run
@@ -1661,14 +1791,14 @@ mod tests {
     }
 
     fn reason(failure: StartFailure) -> String {
-        failure_message(&failure, "/tmp/x/log")
+        start_error(&failure, Some(("d".into(), "/tmp/x/log".into())))
     }
 
     #[test]
     fn a_neovim_older_than_0_12_is_refused_with_its_version() {
         let failure = check_version(&api_info("0.11.2")).unwrap_err();
         assert_eq!(
-            "Neovim 0.12 or later is needed; nvim is 0.11.2; see /tmp/x/log",
+            "d didn't start: Neovim 0.12 or later is needed; nvim is 0.11.2 (log: /tmp/x/log)",
             reason(failure)
         );
         for newer in ["0.12.6", "0.13.0"] {
@@ -1721,7 +1851,10 @@ mod tests {
             ),
         ];
         for (failure, why) in cases {
-            assert_eq!(format!("{why}; see /tmp/x/log"), reason(failure));
+            assert_eq!(
+                format!("d didn't start: {why} (log: /tmp/x/log)"),
+                reason(failure)
+            );
         }
         // the hint alone is no reason
         assert_eq!(None, start_reason(b"More info with \"nvim -h\"\n"));

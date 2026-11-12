@@ -199,7 +199,7 @@ fn attach_with(
         Want::Requested(pane) => Purpose::Requested { pane, terminal },
         Want::SelfAttach => Purpose::SelfAttach {
             terminal,
-            provider: None,
+            provider: provider_hint(),
             file: None,
             line: None,
         },
@@ -798,6 +798,13 @@ fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
             .map(|d| d.as_os_str().as_bytes().to_vec())
             .unwrap_or_default(),
     })
+}
+
+/// The pane provider a self-attach hints at: `$<NAME>_PROVIDER`, when set
+/// and not empty.
+fn provider_hint() -> Option<String> {
+    let hint = std::env::var_os(format!("{}_PROVIDER", crate::name::upper()))?;
+    Some(hint.to_string_lossy().into_owned()).filter(|h| !h.is_empty())
 }
 
 /// The terminal's device path; empty if it has none.

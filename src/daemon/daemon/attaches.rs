@@ -110,7 +110,8 @@ impl Daemon {
                 purpose: Purpose::Requested { .. },
                 ..
             }) => self.attach_requested(a),
-            // the launcher's comes before the loop runs (#105 opens it up)
+            // the first self-attach comes before the loop runs (#105 opens
+            // up the rest)
             Ok(h) => {
                 let z = End::refusal(
                     Refusal::Hello,
