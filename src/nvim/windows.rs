@@ -86,9 +86,10 @@ pub(crate) fn close(nvim: &mut Nvim, win: i64) {
     msgpack::write_int(nvim.writer(), win);
 }
 
-/// Returns the request's id.
+/// Makes `win` Neovim's current window, its home tab page first if that
+/// isn't current, in one request. Returns the request's id.
 pub(crate) fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
-    let id = nvim.request("nvim_set_current_win", 1);
+    let id = nvim.exec_lua(&format!("{NAME}.go(...)"), 1);
     msgpack::write_int(nvim.writer(), win);
     id
 }
@@ -2525,15 +2526,17 @@ mod tests {
     }
 
     #[test]
-    fn the_current_tab_page_is_neovims_even_with_focus_in_another_tab_pages_window() {
+    fn focus_in_another_tab_pages_window_makes_its_label_the_highlighted_one() {
         let Some(mut p) = Pair::new(60, None) else {
             return;
         };
         p.steps(TWO_TABS);
         // two.txt's window, whose home is the first tab page, sits in the
-        // current one, as every pane's window does
-        p.h.sync("vim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))\nassert(vim.fn.tabpagenr() == 2)");
+        // current one, as every pane's window does, until it's current
+        p.h.sync("vim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))");
+        p.r.sync("vim.cmd('tabnext 1')\nvim.api.nvim_set_current_win(vim.fn.bufwinid('two.txt'))");
         p.expect_same();
+        assert_eq!("1", p.h.tabpagenr());
     }
 
     #[test]
@@ -3736,5 +3739,123 @@ mod tests {
         ));
         assert!(h.until(|x| x.last_tabline() >= 1000));
         assert!(h.last_tabline() - 1000 < 20);
+    }
+
+    /// Two tab pages, every window in a pane: the first holds `a` and `b`,
+    /// the second `c`, current. Returns them.
+    fn two_tab_pages(h: &mut Harness) -> [i64; 3] {
+        let a = h.wins[0];
+        h.sync(&format!("vim.cmd('vsplit')\n{}", adopt_all()));
+        let b = h.eval_str("return tostring(vim.api.nvim_get_current_win())");
+        h.sync(&format!("vim.cmd('tabnew')\n{}", adopt_all()));
+        let c = h.eval_str("return tostring(vim.api.nvim_get_current_win())");
+        [a, b.parse().unwrap(), c.parse().unwrap()]
+    }
+
+    impl Harness {
+        /// Records every autocommand of `events` as it fires, in
+        /// `_G.fired`, from now on.
+        fn record(&mut self, events: &[&str]) {
+            let list: Vec<String> = events.iter().map(|e| format!("'{e}'")).collect();
+            self.sync(&format!(
+                "_G.fired = {{}}\n\
+                 vim.api.nvim_create_autocmd({{ {} }}, {{ callback = function(ev) table.insert(_G.fired, ev.event) end }})",
+                list.join(", ")
+            ));
+        }
+
+        /// What `record` recorded since it was last asked, space-separated.
+        fn fired(&mut self) -> String {
+            self.eval_str("local s = table.concat(_G.fired, ' ')\n_G.fired = {}\nreturn s")
+        }
+
+        /// Makes `win` current as the daemon does when its pane is focused,
+        /// and waits until it's reported.
+        fn focus_pane(&mut self, win: i64) {
+            set_current(&mut self.nvim, win);
+            self.nvim.flush().unwrap();
+            self.want = win;
+            assert!(self.until(Harness::is_current));
+        }
+
+        fn tabpagenr(&mut self) -> String {
+            self.eval_str("return tostring(vim.fn.tabpagenr())")
+        }
+    }
+
+    #[test]
+    fn focusing_a_pane_of_another_tab_page_makes_that_tab_page_current() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        // the second tab page has a directory of its own
+        h.sync("vim.cmd('tcd /')");
+        h.record(&["TabLeave", "TabEnter", "DirChanged"]);
+
+        h.focus_pane(b);
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("TabLeave DirChanged TabEnter", h.fired());
+
+        h.focus_pane(a);
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("", h.fired());
+
+        h.focus_pane(c);
+        assert_eq!("2", h.tabpagenr());
+        assert_eq!("TabLeave DirChanged TabEnter", h.fired());
+    }
+
+    #[test]
+    fn gt_goes_to_the_tab_pages_last_current_window_its_own_even_if_that_closed() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        h.focus_pane(a);
+        h.focus_pane(c);
+        h.notes.clear();
+        h.input("gt");
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        assert_eq!("1", h.tabpagenr());
+
+        // the first tab page's last current window closes while it's left:
+        // Neovim would go to its hidden anchor, and on to the window current
+        // before, the second's
+        h.focus_pane(b);
+        h.focus_pane(c);
+        close(&mut h.nvim, b);
+        h.nvim.flush().unwrap();
+        h.gone = b;
+        assert!(h.until(|x| x.kind(x.gone).is_none()));
+        h.notes.clear();
+        h.input("gt");
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            a,
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_window_of_another_tab_page_made_current_inside_neovim_takes_its_tab_page_along() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.record(&["TabLeave", "TabEnter"]);
+        // as a plugin would
+        h.sync(&format!("vim.api.nvim_set_current_win({a})"));
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!("TabLeave TabEnter", h.fired());
     }
 }

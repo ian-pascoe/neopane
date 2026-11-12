@@ -836,13 +836,43 @@ api.nvim_create_autocmd('BufWinEnter', {
   end,
 })
 
+-- The window of tab page `tab` to go to: its own focused last, else its
+-- first shown one.
+local function own_window(tab)
+  local f = focused[tab]
+  if f and shown(f) and tab_of(f) == tab then return f end
+  for _, win in ipairs(api.nvim_list_wins()) do
+    if shown(win) and tab_of(win) == tab then return win end
+  end
+end
+
+-- a tab page was entered since the last report
+local tab_entered = false
+api.nvim_create_autocmd('TabEnter', {
+  group = group,
+  callback = function() tab_entered = true end,
+})
+
 local pending = false
 local function report()
   pending = false
   local cur = api.nvim_get_current_win()
+  local tab = api.nvim_get_current_tabpage()
+  local entered = tab_entered
+  tab_entered = false
+  -- a buffer opened in an anchor: on to the pane it went to
+  if is_anchor(cur) and evict(api.nvim_win_get_tabpage(cur)) then return end
+  -- :tabnext, gt, a tabline click or a tab page closing went to the tab
+  -- page's last current window, which may have closed or be another tab
+  -- page's that only sat in it: its own instead
+  if entered and (is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)) then
+    local to = own_window(tab)
+    if to and to ~= cur then
+      api.nvim_set_current_win(to)
+      return
+    end
+  end
   if is_anchor(cur) then
-    -- a buffer opened in it: on to the pane it went to
-    if evict(api.nvim_win_get_tabpage(cur)) then return end
     -- never shown: move on the way <C-w>w or <C-w>W was going
     local wins = vim.tbl_filter(shown, api.nvim_tabpage_list_wins(0))
     if #wins == 0 then return end
@@ -862,6 +892,13 @@ local function report()
     note('float', cur)
     return
   end
+  -- another tab page's window, made current inside Neovim, as a plugin's
+  -- nvim_set_current_win does: its tab page comes along
+  local mine = home[cur]
+  if not entered and mine and mine ~= tab and api.nvim_tabpage_is_valid(mine) then
+    M.go(cur)
+    return
+  end
   last = cur
   note('win', cur)
 end
@@ -871,6 +908,17 @@ local function schedule_report()
   if pending then return end
   pending = true
   vim.schedule(report)
+end
+
+--- Makes `win` the current window, as when its pane is focused: its home
+--- tab page first, if that isn't current, as `gt` would go there, so
+--- TabLeave and TabEnter fire. A float stays where Neovim keeps it.
+function M.go(win)
+  local tab = home[win]
+  if tab and tab ~= api.nvim_get_current_tabpage() and api.nvim_tabpage_is_valid(tab) and api.nvim_win_is_valid(win) then
+    api.nvim_set_current_tabpage(tab)
+  end
+  if api.nvim_get_current_win() ~= win then api.nvim_set_current_win(win) end
 end
 api.nvim_create_autocmd('WinEnter', {
   group = group,
