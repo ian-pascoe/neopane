@@ -688,7 +688,8 @@ function M.open(file, line, w, h)
   local cur = api.nvim_get_current_win()
   if not shown(cur) and last and shown(last) then cur = last end
   local buf = shown(cur) and api.nvim_win_get_buf(cur)
-  if not buf and last_buf and api.nvim_buf_is_valid(last_buf) then buf = last_buf end
+  -- none left: the buffer last shown, unless it was deleted since
+  if not buf and last_buf and api.nvim_buf_is_loaded(last_buf) and vim.bo[last_buf].buflisted then buf = last_buf end
   buf = buf or api.nvim_create_buf(true, false)
   local view = shown(cur) and api.nvim_win_call(cur, vim.fn.winsaveview)
   -- made with no autocommands, so it's noted before one can flush a redraw
@@ -921,6 +922,7 @@ local function report()
     return
   end
   last = cur
+  last_buf = api.nvim_win_get_buf(cur)
   saw(cur)
   note('win', cur)
 end

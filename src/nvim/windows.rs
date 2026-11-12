@@ -1155,6 +1155,35 @@ mod tests {
     }
 
     #[test]
+    fn with_no_window_left_a_new_window_shows_the_buffer_last_shown_unless_unlisted() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // no window left to show: a new one opens on the buffer last shown,
+        // unless it's deleted (unlisted) since. Closed without autocommands,
+        // so windows.lua doesn't open it again itself.
+        let close =
+            |w: &str| format!("vim.cmd('noautocmd call nvim_win_close(' .. {w} .. ', v:true)')");
+        h.sync(&format!(
+            "vim.api.nvim_buf_set_name(0, 'lastshown') \
+             _G.lastshown = vim.api.nvim_get_current_buf() {}",
+            close(&h.wins[0].to_string())
+        ));
+        h.sync(&format!("_G.w = {NAME}.open(nil, nil, 20, 9)"));
+        h.sync(
+            "assert(vim.api.nvim_win_get_buf(_G.w) == _G.lastshown, 'not on the buffer last shown')",
+        );
+        h.sync(&format!(
+            "{} vim.bo[_G.lastshown].buflisted = false",
+            close("_G.w")
+        ));
+        h.sync(&format!("_G.w = {NAME}.open(nil, nil, 20, 9)"));
+        h.sync(
+            "assert(vim.api.nvim_win_get_buf(_G.w) ~= _G.lastshown, 'an unlisted buffer came back')",
+        );
+    }
+
+    #[test]
     fn windows_become_external_the_anchor_stays_hidden() {
         let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
             return;
