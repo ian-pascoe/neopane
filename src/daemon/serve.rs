@@ -32,7 +32,6 @@ use super::dir::{self, Claimed};
 use super::event_loop::Loop;
 use super::nvim_session::NvimSession;
 use super::pane::SelfAttach;
-use super::provider::TerminalId;
 use super::surface::Surface;
 use crate::attach::{End, Purpose, Refusal, Transport};
 use crate::log::{self, Point, log_info, log_warn};
@@ -42,7 +41,6 @@ use crate::nvim::{msgpack, rpc};
 use crate::providers::Held;
 use crate::providers::rex::RexProvider;
 use crate::rex::client::Client;
-use crate::rex::ids;
 use crate::rex::session::Session as RexSession;
 
 /// `serve` is a top layer: any error will do.
@@ -730,8 +728,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 /// Waits up to 5 s for the first attach, the launcher's, and accepts it:
-/// a self-attach, the one this daemon takes of its own accord (#105 opens
-/// it up). Its hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running
+/// a self-attach; later ones come through the loop. Its hello gets `HELLO_TIMEOUT`, blocking: the loop isn't running
 /// yet.
 fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
     let mut fds = [libc::pollfd {
@@ -776,7 +773,8 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let block = rex_block(&terminal.env);
+    // the launcher's: in the daemon's Rex session, which it started it in
+    let block = attach_conn::rex_block(&terminal.env, None);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after
@@ -787,20 +785,6 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         surface,
         terminal: block,
     })
-}
-
-/// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
-/// hello carries (#114 finds it instead).
-fn rex_block(env: &[(Vec<u8>, Vec<u8>)]) -> Option<TerminalId> {
-    let (_, b) = env.iter().find(|(k, _)| k == b"REX_BLOCK")?;
-    let b = String::from_utf8_lossy(b);
-    match ids::block(b.as_bytes()) {
-        Ok(_) => Some(TerminalId::from(b.as_ref())),
-        Err(_) => {
-            log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
-            None
-        }
-    }
 }
 
 #[cfg(test)]

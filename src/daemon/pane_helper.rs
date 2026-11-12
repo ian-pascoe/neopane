@@ -89,7 +89,27 @@ impl Exit {
 /// the attach ends. A failed self-attach then waits for a key, unless a
 /// shell started it as a job.
 pub fn run(address: &Address, want: Want, transport: Transport) -> Exit {
-    let how = Attach::new(want, transport);
+    run_as(address, Attach::new(want, transport))
+}
+
+/// Self-attaches stdin's terminal to the daemon at `address`, as `run`
+/// does, asking for `file`, absolute, in a new window with the cursor on
+/// `line`.
+pub fn run_opening(
+    address: &Address,
+    transport: Transport,
+    file: Option<Vec<u8>>,
+    line: Option<u32>,
+) -> Exit {
+    let how = Attach {
+        file,
+        line,
+        ..Attach::new(Want::SelfAttach, transport)
+    };
+    run_as(address, how)
+}
+
+fn run_as(address: &Address, how: Attach) -> Exit {
     let exit = attach_stdin(address, &how);
     if !exit.by_signal {
         wait_out(how.started + how.min_life);
@@ -127,9 +147,13 @@ fn attach_stdin(address: &Address, how: &Attach) -> Exit {
 }
 
 /// How the helper attaches.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Attach {
     pub(crate) want: Want,
+    /// For a self-attach: the file to open in a new window, absolute, and
+    /// the cursor's line in it.
+    pub(crate) file: Option<Vec<u8>>,
+    pub(crate) line: Option<u32>,
     pub(crate) transport: Transport,
     /// How long the daemon has to answer.
     pub(crate) answer_within: Duration,
@@ -144,6 +168,8 @@ impl Attach {
     pub(crate) fn new(want: Want, transport: Transport) -> Attach {
         Attach {
             want,
+            file: None,
+            line: None,
             transport,
             answer_within: ANSWER_TIMEOUT,
             // SAFETY: `geteuid` has no preconditions.
@@ -200,8 +226,8 @@ fn attach_with(
         Want::SelfAttach => Purpose::SelfAttach {
             terminal,
             provider: provider_hint(),
-            file: None,
-            line: None,
+            file: how.file.clone(),
+            line: how.line,
         },
     };
     let hello = match Message::Hello(Hello::new(purpose)).encode() {

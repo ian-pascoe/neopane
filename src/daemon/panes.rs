@@ -48,20 +48,33 @@ impl Panes {
         self.list.last_mut().unwrap()
     }
 
-    /// Adds a self-attached pane for `attach`, with the next id.
+    /// Adds a self-attached pane for `attach`, with the next id and a pane
+    /// id, taken as it attaches.
     pub(crate) fn add_self_attached(&mut self, attach: SelfAttach) -> &mut Pane {
         let id = self.next_id;
         self.next_id += 1;
-        self.add(Pane::self_attached(id, attach))
+        let pane_id = self.ids.mint();
+        self.ids.take(&pane_id).expect("just minted");
+        let mut pane = Pane::self_attached(id, attach);
+        pane.attach_id = Some(pane_id);
+        self.add(pane)
     }
 
-    /// The self-attached pane still waiting for a window to show, if any.
+    /// The first self-attached pane still waiting for a window to show, in
+    /// the order they attached, if any.
     pub(crate) fn self_attached_awaiting_window(&self) -> Option<&Pane> {
-        self.list.iter().find(|p| {
+        self.self_attached_awaiting().next()
+    }
+
+    /// The self-attached panes still waiting for a window, in the order
+    /// they attached.
+    pub(crate) fn self_attached_awaiting(&self) -> impl Iterator<Item = &Pane> {
+        self.list.iter().filter(|p| {
             p.is_self_attached()
                 && p.layer.is_none()
                 && p.neovim_window_handle.is_none()
                 && p.terminal_surface.is_some()
+                && p.closing.is_none()
         })
     }
 

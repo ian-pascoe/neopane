@@ -9,6 +9,7 @@ use std::time::Instant;
 use super::*;
 use crate::attach::{End, Hello, Message, PaneId, Purpose, Refusal, Size, Transport};
 use crate::daemon::attach_conn::{self, Arrived, HELLO_TIMEOUT, Pending, Step};
+use crate::daemon::pane::Taking;
 use crate::nvim::msgpack;
 
 /// Loop tokens of connections waiting for their hello start here, far above
@@ -110,8 +111,11 @@ impl Daemon {
                 purpose: Purpose::Requested { .. },
                 ..
             }) => self.attach_requested(a),
-            // the first self-attach comes before the loop runs (#105 opens
-            // up the rest)
+            Ok(Hello {
+                purpose: Purpose::SelfAttach { .. },
+                ..
+            }) => self.attach_self(a),
+            // control requests come later
             Ok(h) => {
                 let z = End::refusal(
                     Refusal::Hello,
@@ -121,6 +125,91 @@ impl Daemon {
                 attach_conn::refuse(a.stream, z);
                 Ok(())
             }
+        }
+    }
+
+    /// A terminal attaching of its own accord, `a`, at any time (#105): it
+    /// gets a pane at once, and its window once Neovim has one for it.
+    /// Refused from the daemon's own Neovim (`nested`).
+    fn attach_self(&mut self, a: Arrived) -> Result<()> {
+        let Arrived {
+            stream,
+            tty,
+            hello,
+            at,
+            rest,
+            ..
+        } = a;
+        let Ok(Hello {
+            build,
+            purpose:
+                Purpose::SelfAttach {
+                    terminal,
+                    file,
+                    line,
+                    ..
+                },
+            ..
+        }) = hello
+        else {
+            unreachable!("on_hello checked it's a self-attach's hello");
+        };
+        log_info!(
+            "{NAME} daemon: hello: {}",
+            attach_conn::describe("self", None, &terminal, &build)
+        );
+        if attach_conn::is_nested(&terminal.env, self.sock.as_arg()) {
+            let z = End::refusal(
+                Refusal::Nested,
+                format!(
+                    "a terminal in {}'s own Neovim can't attach to it",
+                    self.name
+                ),
+            );
+            log_info!("{NAME} daemon: refused a hello: {}", z.message);
+            attach_conn::refuse(stream, z);
+            return Ok(());
+        }
+        if let Err(z) = attach_conn::check_terminal(&terminal, tty.as_ref()) {
+            log_warn!("{NAME} daemon: refused a hello: {}", z.message);
+            attach_conn::refuse(stream, z);
+            return Ok(());
+        }
+        let session = self.rex_ref_session();
+        let block = attach_conn::rex_block(&terminal.env, session.as_deref());
+        let file = file.map(|f| attach_conn::absolute(&f, &terminal.cwd));
+        let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
+        if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
+            log_warn!("{NAME} daemon: a self-attach's helper went: {e}");
+            surface.destroy(crate::attach::Ending::Failed, "");
+            return Ok(());
+        }
+        surface.helper_socket.set_nonblocking(true)?;
+        surface.helper_in = rest;
+        let pane = self.panes.add_self_attached(SelfAttach {
+            surface,
+            terminal: block,
+        });
+        let id = pane.id;
+        pane.taking = file.map(|f| Taking::File(f, line));
+        log::trace_at(Point::Hello, u64::from(id), at);
+        log::trace(Point::Accepted, u64::from(id));
+        pane.register_with(&self.event_loop)?;
+        self.wait_for_report(id, Instant::now())?;
+        self.give_windows()?;
+        self.draw()?;
+        // a size sent right after the hello
+        if self.panes.by_id(id).is_some() {
+            self.read_helper_frames(id)?;
+        }
+        Ok(())
+    }
+
+    /// The Rex session the daemon's pane provider is in, if it's Rex's.
+    fn rex_ref_session(&self) -> Option<String> {
+        match &self.provider {
+            Some(crate::providers::Held::Rex(r)) => Some(r.session.session_id.clone()),
+            _ => None,
         }
     }
 

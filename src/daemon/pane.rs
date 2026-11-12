@@ -37,10 +37,13 @@ impl SelfAttach {
 pub(crate) struct Pane {
     /// The daemon's own number for it, for its loop tokens.
     pub id: u32,
-    /// The pane id its helper's hello names, for a requested pane. None for
-    /// a self-attached pane until #105 gives it one as it attaches;
-    /// placement never moves a self-attached pane.
+    /// Its pane id: the one its helper's hello names, for a requested pane;
+    /// minted as it attaches, for a self-attached one.
     pub attach_id: Option<PaneId>,
+    /// Its terminal attached of its own accord. Placement never moves it.
+    pub self_attached: bool,
+    /// A self-attached pane's window, while it has none: what it asked for.
+    pub taking: Option<Taking>,
     /// Its terminal's id, from the pane provider: Rex's is its block.
     pub terminal: Option<TerminalId>,
     /// None for a floating pane of floats, and a self-attached pane before
@@ -80,6 +83,19 @@ pub(crate) struct Pane {
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).
     pub attach_due: Option<std::time::Instant>,
+}
+
+/// How a self-attached pane gets its window (#105).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Taking {
+    /// A new window on this file, the cursor on this line: not asked yet.
+    File(Vec<u8>, Option<u32>),
+    /// Asked of Neovim, as request `req`: the unshown window `win`, or a new
+    /// window if none.
+    Asked {
+        req: u32,
+        win: Option<NeovimWindowHandle>,
+    },
 }
 
 /// Where a pane opened by `open` goes: beside `origin`'s terminal, as
@@ -253,6 +269,8 @@ impl Pane {
         Pane {
             id,
             attach_id: None,
+            self_attached: false,
+            taking: None,
             terminal: None,
             neovim_window_handle: None,
             layout: None,
@@ -294,14 +312,15 @@ impl Pane {
         Pane {
             terminal: attach.terminal,
             terminal_surface: Some(attach.surface),
+            self_attached: true,
             ..Pane::blank(id)
         }
     }
 
     /// Whether its terminal attached of its own accord rather than for a
-    /// pane the daemon asked for: it has no pane id (until #105).
+    /// pane the daemon asked for.
     pub(crate) fn is_self_attached(&self) -> bool {
-        self.attach_id.is_none()
+        self.self_attached
     }
 
     /// The self-attach a self-attached pane was made for, taken back from

@@ -11,7 +11,8 @@ use super::fdpass;
 use super::pane_helper;
 use crate::attach::{self, ATTACH_PROTOCOL_VERSION, Accept, End, Frame, Hello, Message, Refusal};
 use crate::attach::{PaneId, Terminal, Transport};
-use crate::log;
+use crate::log::{self, log_warn};
+use crate::name::NAME;
 use crate::term::modes;
 
 /// How long a connected peer has to send its hello.
@@ -242,6 +243,51 @@ pub(crate) fn check_terminal(t: &Terminal, tty: Option<&OwnedFd>) -> Result<(), 
     Ok(())
 }
 
+/// Whether a self-attach whose terminal has environment `env` comes from
+/// the daemon at `address`'s own Neovim: `$<NAME>` there is its address
+/// (#91 decision 31).
+pub(crate) fn is_nested(env: &[(Vec<u8>, Vec<u8>)], address: &std::ffi::OsStr) -> bool {
+    let var = crate::name::upper();
+    env.iter()
+        .any(|(k, v)| k == var.as_bytes() && v.as_slice() == address.as_encoded_bytes())
+}
+
+/// The Rex block of a self-attach, from `REX_BLOCK` in the environment its
+/// hello carries, when `REX_SESSION` there is `session`, the daemon's Rex
+/// session, or no session is given (#114 finds it instead).
+pub(crate) fn rex_block(
+    env: &[(Vec<u8>, Vec<u8>)],
+    session: Option<&str>,
+) -> Option<crate::daemon::provider::TerminalId> {
+    let var = |name: &[u8]| env.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    if let Some(session) = session
+        && var(b"REX_SESSION").is_none_or(|s| s.as_slice() != session.as_bytes())
+    {
+        return None;
+    }
+    let b = String::from_utf8_lossy(var(b"REX_BLOCK")?);
+    match crate::rex::ids::block(b.as_bytes()) {
+        Ok(_) => Some(crate::daemon::provider::TerminalId::from(b.as_ref())),
+        Err(_) => {
+            log_warn!("{NAME} daemon: REX_BLOCK isn't a block id: {b}");
+            None
+        }
+    }
+}
+
+/// `file` from a hello, made absolute against `cwd` if it isn't already.
+pub(crate) fn absolute(file: &[u8], cwd: &[u8]) -> Vec<u8> {
+    if file.starts_with(b"/") || cwd.is_empty() {
+        return file.to_vec();
+    }
+    let mut out = cwd.to_vec();
+    if !out.ends_with(b"/") {
+        out.push(b'/');
+    }
+    out.extend_from_slice(file);
+    out
+}
+
 /// The refusal for a hello that can't be read: its reason, and a message
 /// naming the field, or both builds and versions.
 pub(crate) fn refusal_of(e: &attach::Error) -> End {
@@ -328,6 +374,43 @@ pub(crate) fn read_all_frames(stream: &UnixStream) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_self_attach_is_nested_when_its_address_variable_is_the_daemons() {
+        let var = crate::name::upper().into_bytes();
+        let env = |v: &[u8]| vec![(b"TERM".to_vec(), b"x".to_vec()), (var.clone(), v.to_vec())];
+        let ours = std::ffi::OsStr::new("/tmp/x/d/sock");
+        assert!(is_nested(&env(b"/tmp/x/d/sock"), ours));
+        assert!(!is_nested(&env(b"/tmp/x/other/sock"), ours));
+        assert!(!is_nested(&[], ours));
+    }
+
+    #[test]
+    fn a_self_attachs_rex_block_counts_only_in_the_daemons_session() {
+        let block = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+        let env = |session: &str| {
+            vec![
+                (b"REX_SESSION".to_vec(), session.as_bytes().to_vec()),
+                (b"REX_BLOCK".to_vec(), block.as_bytes().to_vec()),
+            ]
+        };
+        let found = |e: &[(Vec<u8>, Vec<u8>)], s| rex_block(e, s).map(|t| t.as_str().to_string());
+        assert_eq!(
+            Some(block.to_string()),
+            found(&env("session:a"), Some("session:a"))
+        );
+        assert_eq!(None, found(&env("session:b"), Some("session:a")));
+        assert_eq!(None, found(&env("session:a")[1..], Some("session:a")));
+        // the launcher's is in the session it started the daemon in
+        assert_eq!(Some(block.to_string()), found(&env("session:b"), None));
+    }
+
+    #[test]
+    fn a_hellos_relative_file_is_made_absolute_against_its_cwd() {
+        assert_eq!(b"/w/notes.md".to_vec(), absolute(b"notes.md", b"/w"));
+        assert_eq!(b"/w/notes.md".to_vec(), absolute(b"notes.md", b"/w/"));
+        assert_eq!(b"/a/b".to_vec(), absolute(b"/a/b", b"/w"));
+    }
     use crate::attach::{PaneId, Purpose, Size};
 
     #[test]

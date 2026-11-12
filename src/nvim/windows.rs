@@ -93,6 +93,62 @@ pub(crate) fn set_current(nvim: &mut Nvim, win: i64) -> u32 {
     id
 }
 
+/// Asks for the windows a self-attached pane could take; `parse_windows`
+/// reads the response.
+pub(crate) fn list_windows(nvim: &mut Nvim) -> u32 {
+    nvim.exec_lua(&format!("return {NAME}.windows()"), 0)
+}
+
+/// A self-attached pane takes unshown window `win` at `cols` x `rows`,
+/// which becomes current. The response is `win`, or 0 if it's gone.
+pub(crate) fn show(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.show(...)"), 3);
+    msgpack::write_int(nvim.writer(), win);
+    msgpack::write_int(nvim.writer(), cols.max(1));
+    msgpack::write_int(nvim.writer(), rows.max(1));
+    id
+}
+
+/// Opens a self-attached pane's new window at `cols` x `rows`, current, in
+/// the current tab page: on `file` with the cursor on `line`, else as
+/// `:split` would. The response is the window.
+pub(crate) fn open(
+    nvim: &mut Nvim,
+    file: Option<&[u8]>,
+    line: Option<u32>,
+    cols: u32,
+    rows: u32,
+) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.open(...)"), 4);
+    let w = nvim.writer();
+    match file {
+        Some(f) => msgpack::write_str(w, f),
+        None => msgpack::write_nil(w),
+    }
+    match line {
+        Some(l) => msgpack::write_int(w, l),
+        None => msgpack::write_nil(w),
+    }
+    msgpack::write_int(w, cols.max(1));
+    msgpack::write_int(w, rows.max(1));
+    id
+}
+
+/// `list_windows`' response: the current window, then the windows a pane
+/// could show, by tab page and window order.
+pub(crate) fn parse_windows(result: &mut Decoder<'_>) -> rpc::Result<(i64, Vec<i64>)> {
+    let n = rpc::expect_array(result)?;
+    if n == 0 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let current = rpc::expect_int(result)?;
+    let mut wins = Vec::with_capacity(n as usize - 1);
+    for _ in 1..n {
+        wins.push(rpc::expect_int(result)?);
+    }
+    Ok((current, wins))
+}
+
 /// Asks for our channel id: the response to the returned id starts with it.
 #[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {

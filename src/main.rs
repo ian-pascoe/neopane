@@ -76,6 +76,23 @@ fn run(command: Command) -> Result<ExitCode> {
                 transport.unwrap_or_else(|| Transport::from_env(|w| eprintln!("{NAME}: {w}")));
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
+        Command::AttachSelf {
+            address,
+            file,
+            line,
+        } => {
+            // made absolute here, links not resolved: the daemon has its own
+            // working directory
+            let file = match file.map(std::path::absolute).transpose() {
+                Ok(f) => f.map(|p| p.into_os_string().into_encoded_bytes()),
+                Err(e) => return Ok(fail(&format!("can't make the file's path absolute: {e}"))),
+            };
+            let address = Address::from_arg(address);
+            let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
+            Ok(helper_exit(pane_helper::run_opening(
+                &address, transport, file, line,
+            )))
+        }
         Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
         Command::DebugKeys => done(debug::keys::run()),
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
