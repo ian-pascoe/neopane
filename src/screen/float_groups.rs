@@ -176,7 +176,7 @@ pub(crate) fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     all
 }
 
-/// Whether group `g`'s editor floats are all hidden, in a tab page that
+/// Whether group `g`'s screen floats are all hidden, in a tab page that
 /// isn't current: Neovim couldn't move them into the current one.
 pub(crate) fn hidden(grids: &Grids, g: &Group) -> bool {
     !g.top_grids().is_empty()

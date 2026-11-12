@@ -40,7 +40,7 @@ fn lists_sent(all: &[u8], call: &str) -> Vec<Vec<i64>> {
 }
 
 #[test]
-fn the_editor_floats_of_float_group_panes_are_told_to_neovim_to_carry_when_they_change() {
+fn the_screen_floats_of_float_group_panes_are_told_to_neovim_to_carry_when_they_change() {
     let mut fx = fixture();
     fx.d.nvim.ready = true;
     show_picker(&mut fx.d);

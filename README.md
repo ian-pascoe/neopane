@@ -347,10 +347,8 @@ quietly.
   resizes, such as with `<C-w>|`, resizes its pane. Moving windows once they
   show in panes, as with `<C-w>H`, still does nothing.
 - A picker or other float group in a Rex floating pane shows over whichever
-  tab page is current, and closes with the tab page it opened in. Closing
-  the tab page it shows over with a typed `:tabclose` sends it back to its
-  own first; closing it any other way, such as from the tabline, a mapping
-  or a plugin, closes the float group with it.
+  tab page is current, and closes with the tab page it opened in: closing
+  the tab page it shows over sends it back to its own first.
 - Neovim's tab-page queries don't match neorex's tab pages (#67). Every
   window shown in a pane sits in Neovim's current tab page, so
   `tabpagebuflist()`, `tabpagewinnr()` and `nvim_tabpage_list_wins()` see all

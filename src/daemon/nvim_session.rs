@@ -41,7 +41,7 @@ pub(crate) struct NvimSession {
     /// off. Neovim never reuses a handle, so closed ones do no harm.
     pub entered_floats: [i64; MAX_ENTERED],
     pub entered_len: u8,
-    /// The editor floats of the float group panes' groups, as Neovim was
+    /// The screen floats of the float group panes' groups, as Neovim was
     /// last told: they move into whichever tab page is current.
     pub carried: Vec<i64>,
     /// The windows panes show, sorted, as Neovim was last told, and room for
@@ -263,7 +263,7 @@ impl NvimSession {
         self.client.ui_try_resize(size[0], size[1])
     }
 
-    /// Tells Neovim `tops`, the editor floats of the float group panes'
+    /// Tells Neovim `tops`, the screen floats of the float group panes'
     /// groups, if they changed: each, with the floats hanging from it, moves
     /// into whichever tab page is current. The caller flushes.
     pub(crate) fn tell_carried(&mut self, tops: Vec<i64>) {
@@ -399,6 +399,59 @@ mod tests {
             }
             r.session.current_win = r.wins[1];
             Some(r)
+        }
+
+        /// As `start`, with `windows.lua` running, as the daemon has it, and
+        /// two tab pages: the first holds pane 0's window, showing `one`, the
+        /// second pane 1's, current.
+        fn with_tab_pages() -> Option<Rig> {
+            let nvim = spawn_for_test_with(&["nvim", "--clean", "--embed", "-n"])?;
+            let fwd = || Forwarder {
+                ctrl_q_quits: false,
+                send_focus: false,
+                ..Forwarder::default()
+            };
+            let mut r = Rig {
+                session: NvimSession::new(nvim),
+                fwds: Fwds([fwd(), fwd()]),
+                wins: [0, 0],
+            };
+            r.session.attach_ui(40, 10).unwrap();
+            // our channel, then setup
+            let chan = r.raw_answer(r.session.channel_req, |res| {
+                windows::parse_channel(res).unwrap()
+            });
+            let id = windows::setup(&mut r.session.client, chan, 40, 9);
+            r.session.client.flush().unwrap();
+            let first = r.raw_answer(id, |res| windows::parse_setup(res).unwrap()[0]);
+            let other = r.lua(&format!(
+                "vim.api.nvim_buf_set_lines(0, 0, -1, false, {{ 'one' }})\n\
+                 vim.cmd('tabnew')\n\
+                 for _, w in ipairs(vim.api.nvim_list_wins()) do {NAME}.adopt(w, 20, 5) end\n\
+                 return tostring(vim.api.nvim_get_current_win())"
+            ));
+            r.wins = [first, other.parse().unwrap()];
+            r.session.current_win = r.wins[1];
+            Some(r)
+        }
+
+        /// Reads until request `id` is answered, and gives its result to `read`.
+        fn raw_answer<T>(&mut self, id: u32, read: impl Fn(&mut Decoder<'_>) -> T) -> T {
+            for _ in 0..200 {
+                assert!(self.session.client.read().unwrap(), "NvimExited");
+                while let Some(frame) = self.session.client.next().unwrap() {
+                    if let rpc::Message::Response {
+                        id: got,
+                        err: None,
+                        mut result,
+                    } = frame.message().unwrap()
+                        && got == id
+                    {
+                        return read(&mut result);
+                    }
+                }
+            }
+            panic!("TestTimedOut");
         }
 
         /// Reads what Neovim has sent, giving every answer to the session.
@@ -1051,6 +1104,26 @@ mod tests {
         assert_eq!(r.wins[1], r.session.current_win);
         let cur = r.current_win();
         assert_eq!(r.wins[1], cur);
+    }
+
+    #[test]
+    fn what_is_typed_into_another_tab_pages_pane_goes_there_after_its_tab_page_is_current() {
+        let Some(mut r) = Rig::with_tab_pages() else {
+            return;
+        };
+        assert!(r.input(0, b"x"));
+        r.settle();
+        assert_eq!(
+            format!("1 {}", r.wins[0]),
+            r.lua("return vim.fn.tabpagenr() .. ' ' .. vim.api.nvim_get_current_win()")
+        );
+        assert_eq!(
+            "ne",
+            r.lua(&format!(
+                "return vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf({}), 0, -1, false)[1]",
+                r.wins[0]
+            ))
+        );
     }
 
     #[test]
