@@ -202,6 +202,29 @@ window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `n
 terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
 name comes later.
 
+### When the last pane goes
+
+A daemon lives while a terminal shows one of its windows, or one is on its
+way (ADR 0003). Panes that show only floats, such as a picker's, don't count.
+When the last one goes, whatever closed it, the daemon sends Neovim
+`FocusLost`, so an autosave plugin can save, and waits for Neovim to be idle,
+a second at most. Then:
+
+- With nothing unsaved, it ends Neovim, as neorex always has, by closing
+  its channel: `VimLeavePre` and `VimLeave` run, and swap files go.
+- With unsaved changes, buffers `:qa` would refuse to quit over, it stays,
+  logs their names, and lists them in `unsaved` in its directory: a first
+  line `unsaved 1`, then each file's full path on a line of its own, an empty
+  line for an unnamed buffer. It keeps one window, the last current one, and
+  closes the rest. `neorex attach --address …` brings that window back, with
+  your changes, and removes `unsaved`; `neorex attach --address … FILE` opens
+  FILE and closes the kept window. Saving or throwing away the last change
+  ends it, and so does a signal, keeping the changes in swap files.
+
+A terminal that attaches while the daemon waits keeps it. One that attaches
+once Neovim is ending is refused with `stopping`. `:q` in the last window
+still quits Neovim, as `:q` always does.
+
 If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
 to start a daemon without one, use --detach` and exits 1. The `debug-rex`
 command reads the same three Rex variables, from its own environment.
@@ -210,7 +233,7 @@ Each daemon has a name: the name of the directory `neorex` was started in,
 cut to its letters, digits, `.`, `_` and `-`, and to 32 characters (`default`
 if nothing is left), with `-2`, `-3`, … added while a daemon of that name
 runs. A daemon keeps its files (its own socket `sock`, Neovim's `nvim.sock`,
-and its `log`) in `$NEOREX_TMPDIR/neorex-<uid>/<daemon name>/`, `/tmp`
+its `log`, and `unsaved` while it stays for unsaved changes) in `$NEOREX_TMPDIR/neorex-<uid>/<daemon name>/`, `/tmp`
 standing in for an unset `NEOREX_TMPDIR` (ADR 0004). The directory `neorex-<uid>` must be yours, a real
 directory, and mode 0700, or `neorex` refuses to start and names
 `NEOREX_TMPDIR`. The daemon holds a lock on its own directory while it runs,
