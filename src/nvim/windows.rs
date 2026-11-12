@@ -1160,13 +1160,15 @@ mod tests {
             return;
         };
         // no window left to show: a new one opens on the buffer last shown,
-        // unless it's deleted (unlisted) since. Closed without autocommands,
+        // unloaded as 'nohidden' leaves it, unless it's deleted (unlisted)
+        // since. Closed without autocommands,
         // so windows.lua doesn't open it again itself.
         let close =
             |w: &str| format!("vim.cmd('noautocmd call nvim_win_close(' .. {w} .. ', v:true)')");
         h.sync(&format!(
-            "vim.api.nvim_buf_set_name(0, 'lastshown') \
-             _G.lastshown = vim.api.nvim_get_current_buf() {}",
+            "vim.o.hidden = false vim.api.nvim_buf_set_name(0, 'lastshown') \
+             _G.lastshown = vim.api.nvim_get_current_buf() {} \
+             assert(not vim.api.nvim_buf_is_loaded(_G.lastshown), 'still loaded')",
             close(&h.wins[0].to_string())
         ));
         h.sync(&format!("_G.w = {NAME}.open(nil, nil, 20, 9)"));

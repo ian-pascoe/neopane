@@ -56,7 +56,7 @@ pub(super) struct Rig {
     server: UnixListener,
     sock: String,
     /// Neovim's `--listen` socket, and the test's channel on it.
-    listen: String,
+    pub(super) listen: String,
     query: crate::nvim::nvim::Nvim,
     pub(super) terms: Vec<Term>,
     /// Files the test made, removed as it ends.

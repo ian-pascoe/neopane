@@ -4,7 +4,10 @@
 use super::lifetime::Stage;
 use super::self_attach_tests::Rig;
 use super::*;
+use crate::daemon::dir::{self, testing::Scratch};
 use crate::daemon::event_loop::Kind;
+use std::io::Read;
+use std::os::unix::net::UnixStream;
 
 /// A daemon over a Neovim with a changed buffer, busy for 1.5 s on
 /// FocusLost, whose one pane has just gone: it waits for Neovim's next
@@ -27,6 +30,11 @@ fn a_stop_during_the_safestate_wait_ends_the_daemon() {
     let Some(mut rig) = waiting_for_safestate() else {
         return;
     };
+    let base = Scratch::new();
+    let claimed = dir::claim(&base.base(), "d").unwrap();
+    rig.d.lifetime.unsaved_file = Some(claimed.unsaved());
+    // a channel of its own, to see Neovim end
+    let probe = UnixStream::connect(&rig.listen).unwrap();
     // the way a signal comes
     rig.d
         .handle(Event {
@@ -36,6 +44,20 @@ fn a_stop_during_the_safestate_wait_ends_the_daemon() {
         })
         .unwrap();
     assert_eq!(Some(StopReason::Signal), rig.d.stopped);
+    // as `serve` ends it: the daemon goes, closing Neovim's channel
+    drop(rig);
+    // fails on macOS once Neovim has hung up, as it may have by now
+    let _ = probe.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut buf = [0u8; 4096];
+    let ended = loop {
+        match (&probe).read(&mut buf) {
+            Ok(0) => break true,
+            Ok(_) => continue,
+            Err(_) => break false,
+        }
+    };
+    assert!(ended, "Neovim is still running");
+    assert!(!claimed.unsaved_path().exists(), "unsaved was left");
 }
 
 #[test]

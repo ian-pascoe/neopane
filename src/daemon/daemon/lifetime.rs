@@ -190,8 +190,7 @@ impl Daemon {
         }
     }
 
-    /// A pane attached: an unattached daemon, or one deciding, is attached
-    /// again, and stays.
+    /// A pane attached: an unattached daemon is attached again, and stays.
     pub(super) fn attached_again(&mut self) {
         if self.lifetime.is_attached() {
             return;
