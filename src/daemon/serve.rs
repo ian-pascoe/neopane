@@ -1109,31 +1109,48 @@ mod tests {
     #[test]
     fn a_daemons_sockets_are_only_its_users() {
         let (_base, dir) = test_dir();
+        let address = dir.address();
         let sock = dir.sock_path();
-        let nvim_sock = dir.nvim_sock();
-        // a Neovim that makes its socket as Neovim does, then answers
-        // nvim_get_api_info with its stdin closed, so the start fails once
-        // the socket is the daemon's: $4 is its --listen socket
+        let scratch = Scratch::new();
+        let seen = scratch.file("seen");
+        // a Neovim that makes its socket as Neovim does, answers
+        // nvim_get_api_info, and notes whether its socket became 0600 within
+        // 5 s, then exits: $4 is its --listen socket
         let answer = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/nvim/testdata/nvim_get_api_info_0.12.6.mpack"
         );
-        let script = format!("head -c 1 >/dev/null; exec 0<&-; : >\"$4\"; cat '{answer}'");
-        // whether Neovim's socket is seen 0600, within 5 s
-        let watcher = std::thread::spawn(move || {
-            eventually(|| exists(&nvim_sock) && mode(&nvim_sock) == 0o600)
-        });
+        let script = format!(
+            "head -c 1 >/dev/null; : >\"$4\"; cat '{answer}'; \
+             for _ in $(seq 500); do \
+               [ \"$(ls -l \"$4\" | cut -c1-10)\" = -rw------- ] && break; sleep 0.01; \
+             done; ls -l \"$4\" | cut -c1-10 >'{seen}'"
+        );
+        let (master, slave) = crate::daemon::surface::open_pty(80, 24);
+        let reader = std::thread::spawn(move || read_screen(master));
+        let mut launcher: Option<UnixStream> = None;
         let mut sock_mode = 0;
-        failed_start(
+        let _ = serve(
             &dir,
-            TestStart {
+            &[] as &[&str],
+            Config {
                 nvim_command: &["sh", "-c", &script, "--"],
                 nvim_timeout: Duration::from_secs(10),
-                on_ready: &mut || sock_mode = mode(&sock),
+                ready: Box::new(|| {
+                    sock_mode = mode(&sock);
+                    launcher = Some(fake_launcher_ready(&address, slave)?);
+                    Ok(())
+                }),
+                ..Config::new()
             },
         );
+        drop(launcher);
+        // the daemon's copy of the pane closed as it ended
+        reader.join().unwrap();
+        // SAFETY: closing the pty's master.
+        unsafe { libc::close(master) };
         assert_eq!(0o600, sock_mode);
-        assert!(watcher.join().unwrap(), "Neovim's socket wasn't 0600");
+        assert_eq!("-rw-------\n", fs::read_to_string(&seen).unwrap());
     }
 
     #[test]
