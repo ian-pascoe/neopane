@@ -1011,13 +1011,13 @@ fn expected(want: &str, got: &Tree) -> String {
 }
 
 /// The name in a word that is exactly `{name}`.
-fn whole_placeholder(word: &[u8]) -> Option<&str> {
+pub(crate) fn whole_placeholder(word: &[u8]) -> Option<&str> {
     let inner = word.strip_prefix(b"{")?.strip_suffix(b"}")?;
     is_placeholder_name(inner).then(|| std::str::from_utf8(inner).unwrap())
 }
 
 /// A word that is exactly `{{name}}`, which passes as `{name}`.
-fn is_escaped(word: &[u8]) -> bool {
+pub(crate) fn is_escaped(word: &[u8]) -> bool {
     word.strip_prefix(b"{{")
         .and_then(|w| w.strip_suffix(b"}}"))
         .is_some_and(is_placeholder_name)

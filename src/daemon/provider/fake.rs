@@ -84,7 +84,9 @@ impl PaneProvider for FakeProvider {
 
     fn timeout(&self, cap: Capability) -> std::time::Duration {
         self.time
-            .unwrap_or(std::time::Duration::from_millis(u64::from(cap.timeout_ms())))
+            .unwrap_or(std::time::Duration::from_millis(u64::from(
+                cap.timeout_ms(),
+            )))
     }
 
     fn ask(&mut self, id: AskId, ask: Ask) {
