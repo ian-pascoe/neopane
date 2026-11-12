@@ -529,6 +529,17 @@ fn a_window_whose_open_failed_with_no_pane_to_join_waits_for_one_unasked() {
     fx.d.panes.by_id_mut(origin).unwrap().neovim_window_handle = Some(1000);
     fx.d.reconcile().unwrap();
     assert_eq!(Some(origin), fx.d.panes.by_win(1002).map(|p| p.id));
-    assert!(fx.d.awaiting_origin.is_empty());
+    assert!(fx.d.unshown_awaiting_origin.is_empty());
     assert_eq!(1, sent_by(fx).asks.len());
+}
+
+#[test]
+fn giving_up_the_last_pane_stops_the_daemon_as_its_last_pane_gone() {
+    let mut fx = fixture();
+    fx.d.nvim.ready = true;
+    draw_external(&mut fx.d, 102, 1002, 80, 23);
+    let id = fx.d.panes.add_for_window(1002).id;
+    fx.d.give_up(id).unwrap();
+    assert!(fx.d.panes.list.is_empty());
+    assert_eq!(Some(StopReason::PaneGone), fx.d.stopped);
 }
