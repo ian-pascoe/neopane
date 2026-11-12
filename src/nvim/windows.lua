@@ -1739,6 +1739,49 @@ api.nvim_create_autocmd('SafeState', {
   end,
 })
 
+-- Unsaved changes: the buffers :qa would refuse to quit over, as the daemon
+-- was last told; whether they may have changed since; and the answer the
+-- daemon asked for at the next SafeState, if any (ADR 0003).
+local unsaved_told
+local unsaved_dirty = true
+local unsaved_ask = 0
+
+-- 'changed' is what :qa goes by: modified, and a buffer it writes
+local function unsaved_now()
+  local files = {}
+  for _, info in ipairs(vim.fn.getbufinfo()) do
+    if info.changed == 1 then files[#files + 1] = info.name end
+  end
+  return files
+end
+
+local function report_unsaved()
+  if not unsaved_dirty and unsaved_ask == 0 then return end
+  local ask = unsaved_ask
+  unsaved_dirty, unsaved_ask = false, 0
+  local files = unsaved_now()
+  if ask == 0 and unsaved_told and vim.deep_equal(files, unsaved_told) then return end
+  unsaved_told = files
+  note('unsaved', files, ask)
+end
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_unsaved })
+api.nvim_create_autocmd({ 'BufModifiedSet', 'BufNew', 'BufFilePost', 'BufWritePost', 'BufUnload', 'BufDelete', 'BufWipeout' }, {
+  group = group,
+  callback = function() unsaved_dirty = true end,
+})
+-- what else 'changed' reads
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'buftype', 'fileformat', 'endofline', 'fixendofline', 'bomb' },
+  callback = function() unsaved_dirty = true end,
+})
+
+--- The daemon is going unattached: at the next SafeState, the unsaved
+--- changes are told as answer `ask`, changed or not.
+function M.unsaved_at_safe_state(ask)
+  unsaved_ask = ask
+end
+
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), `restore` or the daemon
 -- adopts it again.

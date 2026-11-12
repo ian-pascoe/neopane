@@ -190,7 +190,7 @@ pub fn ask_channel(nvim: &mut Nvim) -> u32 {
 /// What the Lua tells the daemon.
 // A layout is held inline; see `Layout`.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
 pub enum Note {
     /// The current window is now this one.
@@ -223,6 +223,10 @@ pub enum Note {
     /// `rows`, its statusline included; 0 for a way it didn't size it. Told
     /// as it's made external too, for a size asked before.
     Resized { win: i64, cols: u32, rows: u32 },
+    /// The unsaved changes: the full names of the buffers `:qa` would refuse
+    /// to quit over, empty for an unnamed one. Told when they change, and at
+    /// the SafeState after `unsaved_at_safe_state` as answer `ask`, else 0.
+    Unsaved { files: Vec<Vec<u8>>, ask: u32 },
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -476,6 +480,9 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
     if method == b"options" {
         return parse_options(params).map(Some);
     }
+    if method == b"unsaved" {
+        return parse_unsaved(params).map(Some);
+    }
     let tag = match method {
         b"win" => Tag::Current,
         b"reopen" => Tag::Reopen,
@@ -593,6 +600,27 @@ fn parse_direction(params: &mut Decoder<'_>) -> rpc::Result<Note> {
         dir,
         count: count.min(u32::MAX as i64) as u32,
     }))
+}
+
+/// `[files, ask]`, as `Note::Unsaved` has them.
+fn parse_unsaved(params: &mut Decoder<'_>) -> rpc::Result<Note> {
+    if rpc::expect_array(params)? < 2 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let n = rpc::expect_array(params)?;
+    let mut files = Vec::with_capacity(n.min(64) as usize);
+    for _ in 0..n {
+        files.push(rpc::expect_str(params)?.to_vec());
+    }
+    let ask = u32::try_from(rpc::expect_int(params)?).map_err(|_| rpc::Error::BadMessage)?;
+    Ok(Note::Unsaved { files, ask })
+}
+
+/// At Neovim's next SafeState, the Lua tells the unsaved changes as answer
+/// `ask`, changed or not.
+pub(crate) fn unsaved_at_safe_state(nvim: &mut Nvim, ask: u32) {
+    nvim.exec_lua(&format!("{NAME}.unsaved_at_safe_state(...)"), 1);
+    msgpack::write_int(nvim.writer(), ask);
 }
 
 /// `[first, anchor]` from `setup`'s response.
@@ -1066,6 +1094,64 @@ mod tests {
                 n + 1
             ));
         }
+    }
+
+    impl Harness {
+        /// Waits for an `unsaved` note saying `files`, answering `ask`.
+        fn until_unsaved(&mut self, files: &[&str], ask: u32) {
+            let want = Note::Unsaved {
+                files: files.iter().map(|f| f.as_bytes().to_vec()).collect(),
+                ask,
+            };
+            for _ in 0..100 {
+                if self.notes.contains(&want) {
+                    break;
+                }
+                // a SafeState in between
+                self.sync("vim.wait(10)");
+            }
+            assert!(self.notes.contains(&want), "{want:?}: {:?}", self.notes);
+            self.notes.clear();
+        }
+    }
+
+    #[test]
+    fn the_unsaved_note_lists_the_buffers_qa_refuses_over_as_they_change() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // as Neovim names it: macOS's /var is /private/var
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let file = tmp.join(format!("{NAME}-unsaved-{}", std::process::id()));
+        let file = file.to_str().unwrap();
+        // nothing, told once
+        h.until_unsaved(&[], 0);
+        h.sync(&format!(
+            "vim.api.nvim_buf_set_name(0, '{file}') \
+             vim.api.nvim_buf_set_lines(0, 0, -1, false, {{ 'changed' }})"
+        ));
+        h.until_unsaved(&[file], 0);
+        // an unnamed buffer, hidden, counts too
+        h.sync(
+            "vim.cmd('hide enew') \
+             vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'new' })",
+        );
+        h.until_unsaved(&[file, ""], 0);
+        // thrown away, and saved as far as Neovim knows
+        h.sync(&format!(
+            "vim.cmd('bwipeout!') \
+             vim.bo[vim.fn.bufnr('{file}')].modified = false"
+        ));
+        h.until_unsaved(&[], 0);
+        // a changed scratch buffer isn't one, nor a :terminal's: asked,
+        // the list is still empty
+        h.sync(
+            "vim.cmd('hide enew') vim.bo.buftype = 'nofile' \
+             vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'scratch' }) \
+             vim.cmd('hide terminal')",
+        );
+        h.lua(&format!("{NAME}.unsaved_at_safe_state(7)"));
+        h.until_unsaved(&[], 7);
     }
 
     #[test]

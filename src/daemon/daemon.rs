@@ -1225,6 +1225,7 @@ impl Daemon {
             windows::Note::Layout(l) => self.on_tab_layout(l)?,
             windows::Note::Options(o) => self.on_split_options(o)?,
             windows::Note::Resized { win, cols, rows } => self.on_resized(win, cols, rows)?,
+            windows::Note::Unsaved { .. } => {}
         }
         Ok(())
     }
