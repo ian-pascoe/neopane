@@ -151,7 +151,7 @@ pub(crate) struct Daemon {
     /// What tests have a self-attach choose, given its hello, in place of
     /// the built-in default.
     #[cfg(test)]
-    pub test_choose: Option<Box<dyn FnMut(&pane::SelfHello) -> crate::providers::choose::Chosen>>,
+    pub test_choose: Option<TestChoose>,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
     /// Warnings for Neovim held until it is set up (`warn_when_ready`).
@@ -163,6 +163,10 @@ pub(crate) struct Daemon {
     pub provider: Option<Box<dyn PaneProvider>>,
     pub nvim: NvimSession,
 }
+
+/// What a test has a self-attach choose, given its hello.
+#[cfg(test)]
+pub(crate) type TestChoose = Box<dyn FnMut(&pane::SelfHello) -> crate::providers::choose::Chosen>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
