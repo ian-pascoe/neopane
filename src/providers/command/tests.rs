@@ -75,7 +75,7 @@ fn answer(p: &mut CommandProvider, within: Duration) -> Option<(AskId, Outcome)>
             return None;
         }
         let mut fds = [libc::pollfd {
-            fd: p.fd(),
+            fd: p.fd().unwrap(),
             events: libc::POLLIN,
             revents: 0,
         }];
@@ -536,7 +536,7 @@ fn told(p: &mut CommandProvider, enough: impl Fn(&[ProviderEvent]) -> bool) -> V
 /// Waits up to `most` for `p`'s loop to be ready, then hands it on.
 fn wait_ready(p: &mut CommandProvider, most: Duration) {
     let mut fds = [libc::pollfd {
-        fd: p.fd(),
+        fd: p.fd().unwrap(),
         events: libc::POLLIN,
         revents: 0,
     }];

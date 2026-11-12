@@ -213,9 +213,12 @@ impl Asks {
         self.next_focus_act(p, now);
     }
 
-    /// The pane provider failed as a whole: every act asked or waiting falls
-    /// back.
+    /// The pane provider is dropped: every act asked or waiting falls back,
+    /// and what it was found not to support, or warned of, is forgotten for
+    /// the next.
     pub(crate) fn gone(&mut self) {
+        self.unsupported = CapabilitySet::default();
+        self.warned = CapabilitySet::default();
         for s in std::mem::take(&mut self.sent) {
             self.steps.push_back(Step::FallBack(s.ask));
         }
@@ -312,6 +315,11 @@ impl Asks {
     /// When the soonest unanswered act times out.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.sent.iter().map(|s| s.due).min()
+    }
+
+    /// Whether any act is asked and unanswered, or waiting its turn.
+    pub(crate) fn busy(&self) -> bool {
+        !self.sent.is_empty() || !self.queue.is_empty() || self.focus_waiting.is_some()
     }
 
     /// How many acts are asked or waiting.

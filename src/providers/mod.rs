@@ -1,78 +1,9 @@
 //! The pane providers: Rex's, built in, and the command runner; and
-//! choosing one for a self-attach (`choose`).
+//! choosing one for a self-attach (`choose`). The daemon holds the one
+//! chosen as a `Box<dyn PaneProvider>`, and knows nothing more of it.
 
 pub(crate) mod choose;
 // built from a config's `provider` once it is chosen, from #129
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod command;
 pub(crate) mod rex;
-
-use std::os::fd::RawFd;
-
-use crate::daemon::provider::PaneProvider;
-#[cfg(test)]
-use crate::daemon::provider::fake::FakeProvider;
-use command::CommandProvider;
-use rex::RexProvider;
-
-/// The daemon's pane provider, until #115 holds it as a
-/// `Box<dyn PaneProvider>`: Rex's or the command runner, concretely; in
-/// tests, also the fake.
-pub(crate) enum Held {
-    Rex(Box<RexProvider>),
-    #[cfg_attr(not(test), allow(dead_code))]
-    Command(Box<CommandProvider>),
-    #[cfg(test)]
-    Fake(FakeProvider),
-}
-
-impl Held {
-    /// It, as the seam the opens and `close` are asked through.
-    pub(crate) fn seam(&mut self) -> &mut dyn PaneProvider {
-        match self {
-            Held::Rex(r) => &mut **r,
-            Held::Command(c) => &mut **c,
-            #[cfg(test)]
-            Held::Fake(f) => f,
-        }
-    }
-
-    pub(crate) fn seam_ref(&self) -> &dyn PaneProvider {
-        match self {
-            Held::Rex(r) => &**r,
-            Held::Command(c) => &**c,
-            #[cfg(test)]
-            Held::Fake(f) => f,
-        }
-    }
-
-    /// The fd it is watched by under `Token::Provider`.
-    pub(crate) fn fd(&self) -> Option<RawFd> {
-        match self {
-            Held::Rex(r) => Some(r.session.client.fd()),
-            Held::Command(c) => Some(c.fd()),
-            #[cfg(test)]
-            Held::Fake(_) => None,
-        }
-    }
-
-    /// Whether it has bytes waiting for room on its fd: the loop watches
-    /// it for writing too until it has none.
-    pub(crate) fn wants_write(&self) -> bool {
-        match self {
-            Held::Rex(r) => r.wants_write(),
-            Held::Command(_) => false,
-            #[cfg(test)]
-            Held::Fake(_) => false,
-        }
-    }
-
-    /// The fake, which a test drives.
-    #[cfg(test)]
-    pub(crate) fn fake(&mut self) -> &mut FakeProvider {
-        match self {
-            Held::Fake(f) => f,
-            _ => panic!("not the fake"),
-        }
-    }
-}

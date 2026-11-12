@@ -16,7 +16,7 @@ struct Three {
 }
 
 impl Three {
-    fn new(provider: Option<Held>) -> Option<Three> {
+    fn new(provider: Option<Box<dyn PaneProvider>>) -> Option<Three> {
         let (mut d, live, reader) = started_with("-O3", provider)?;
         pump(&mut d, |d| {
             d.nvim.ready && d.panes.list.len() == 1 && d.panes.list[0].windows().len() == 3
@@ -58,8 +58,9 @@ impl Three {
 
     /// The `focus_direction` asks so far.
     fn directions(&mut self) -> Vec<Ask> {
-        match &self.d.provider {
-            Some(Held::Fake(f)) => f
+        match self.d.provider.as_mut() {
+            Some(p) => p
+                .fake()
                 .asked()
                 .into_iter()
                 .filter(|a| matches!(a, Ask::FocusDirection { .. }))
@@ -78,7 +79,7 @@ impl Three {
 #[test]
 fn two_ctrl_w_l_in_a_pane_of_three_crosses_one_window_there_then_asks_to_focus_one_right() {
     let f = FakeProvider::with(&[Capability::FocusDirection]);
-    let Some(mut t) = Three::new(Some(Held::Fake(f))) else {
+    let Some(mut t) = Three::new(Some(Box::new(f))) else {
         return;
     };
     let [left, mid, right] = t.wins;
@@ -87,9 +88,10 @@ fn two_ctrl_w_l_in_a_pane_of_three_crosses_one_window_there_then_asks_to_focus_o
     t.until_current(mid);
     assert!(t.directions().is_empty());
     t.keys(b"2\x17l");
-    pump(&mut t.d, |d| match &d.provider {
-        Some(Held::Fake(f)) => !f.asked().is_empty(),
-        _ => false,
+    pump(&mut t.d, |d| {
+        d.provider
+            .as_ref()
+            .is_some_and(|p| !p.fake_ref().asked().is_empty())
     });
     assert_eq!(right, t.d.nvim.current_win);
     assert_eq!(
@@ -104,7 +106,7 @@ fn two_ctrl_w_l_in_a_pane_of_three_crosses_one_window_there_then_asks_to_focus_o
 
 #[test]
 fn without_focus_direction_a_move_stops_at_the_panes_edge() {
-    let Some(mut t) = Three::new(Some(Held::Fake(FakeProvider::with(&[])))) else {
+    let Some(mut t) = Three::new(Some(Box::new(FakeProvider::with(&[])))) else {
         return;
     };
     let [left, _, right] = t.wins;

@@ -222,7 +222,7 @@ impl Rig {
         let mut d = Daemon::new(
             event_loop,
             NvimSession::new(nvim),
-            Some(Held::Fake(FakeProvider::opening())),
+            Some(Box::new(FakeProvider::opening())),
             String::new(),
             crate::daemon::dir::Address::from_arg(Default::default()),
         );

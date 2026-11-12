@@ -356,6 +356,8 @@ impl Daemon {
             return self.refuse_requested(stream, z, Some((id, pane)));
         }
         self.panes.ids.take(&pane).expect("checked");
+        // a pane provider chosen again checks its reach from it
+        let hello = attach_conn::self_hello_of(&terminal, tty.as_ref(), None);
         let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: pane {shown}'s helper went: {e}");
@@ -367,12 +369,10 @@ impl Daemon {
         surface.helper_socket.set_nonblocking(true)?;
         surface.helper_in = rest;
         // a terminal the pane provider hasn't laid out yet says this size
-        let unlaid = self
-            .provider
-            .as_ref()
-            .and_then(|p| p.seam_ref().unlaid_size());
+        let unlaid = self.provider.as_ref().and_then(|p| p.unlaid_size());
         let pane = self.panes.by_id_mut(id).unwrap();
         pane.terminal_surface = Some(surface);
+        pane.hello = Some(Box::new(hello));
         pane.attach_due = None;
         pane.register_with(&self.event_loop)?;
         if pane.awaiting_size {

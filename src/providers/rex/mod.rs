@@ -34,6 +34,7 @@ pub(crate) mod find;
 pub(crate) mod layout;
 
 use std::collections::VecDeque;
+use std::os::fd::RawFd;
 
 use serde_json::{Value, json};
 
@@ -136,11 +137,6 @@ impl RexProvider {
         let mut session = Session::new(client, session_id.to_string());
         session.attach()?;
         Ok(RexProvider::new(session))
-    }
-
-    /// Whether bytes wait for room on Rex's socket.
-    pub(crate) fn wants_write(&self) -> bool {
-        self.session.client.wants_write()
     }
 
     /// Whether asks wait for Rex to attach us, and it has.
@@ -512,6 +508,14 @@ impl PaneProvider for RexProvider {
 
     fn find_vars(&self) -> &[&str] {
         &[find::BLOCK_VAR]
+    }
+
+    fn fd(&self) -> Option<RawFd> {
+        Some(self.session.client.fd())
+    }
+
+    fn wants_write(&self) -> bool {
+        self.session.client.wants_write()
     }
 }
 

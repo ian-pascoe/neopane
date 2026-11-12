@@ -217,7 +217,7 @@ impl CommandProvider {
     }
 
     /// The fd the daemon watches under `Token::Provider`.
-    pub(crate) fn fd(&self) -> RawFd {
+    fn loop_fd(&self) -> RawFd {
         self.inner_loop.fd()
     }
 
@@ -504,6 +504,10 @@ impl CommandProvider {
 impl PaneProvider for CommandProvider {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn fd(&self) -> Option<RawFd> {
+        Some(self.loop_fd())
     }
 
     fn capabilities(&self) -> CapabilitySet {

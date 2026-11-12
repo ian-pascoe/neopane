@@ -11,6 +11,7 @@
 //! and `focus_direction` are asked through it.
 
 use std::fmt;
+use std::os::fd::RawFd;
 use std::time::Duration;
 
 use super::live_layout::LiveLayout;
@@ -325,8 +326,10 @@ pub(crate) enum ProviderEvent {
     },
 }
 
-/// A pane provider: Rex's, built in, and later the command runner; in
-/// tests, `FakeProvider` (#92 decision 1).
+/// A pane provider: Rex's, built in, and the command runner; in tests,
+/// `FakeProvider` (#92 decision 1). The daemon holds one at a time, as a
+/// `Box<dyn PaneProvider>`; dropping it ends whatever it runs, as Rex's
+/// WebSocket and the command runner's `events`.
 pub(crate) trait PaneProvider {
     /// Its name, as warnings and the log show it.
     fn name(&self) -> &str;
@@ -367,6 +370,40 @@ pub(crate) trait PaneProvider {
     /// 15). The daemon cuts it to `MAX_TIMEOUT`.
     fn attach_timeout(&self) -> Duration {
         default_attach_timeout()
+    }
+
+    /// The fd the loop watches it by under `Token::Provider`, if it has one.
+    fn fd(&self) -> Option<RawFd> {
+        None
+    }
+
+    /// Whether it has bytes waiting for room on its fd: the loop watches it
+    /// for writing too until it has none.
+    fn wants_write(&self) -> bool {
+        false
+    }
+
+    /// It, if it's the fake, which a test drives.
+    #[cfg(test)]
+    fn as_fake(&mut self) -> Option<&mut fake::FakeProvider> {
+        None
+    }
+
+    #[cfg(test)]
+    fn as_fake_ref(&self) -> Option<&fake::FakeProvider> {
+        None
+    }
+}
+
+#[cfg(test)]
+impl dyn PaneProvider {
+    /// The fake this is, which a test drives.
+    pub(crate) fn fake(&mut self) -> &mut fake::FakeProvider {
+        self.as_fake().expect("not the fake")
+    }
+
+    pub(crate) fn fake_ref(&self) -> &fake::FakeProvider {
+        self.as_fake_ref().expect("not the fake")
     }
 }
 
