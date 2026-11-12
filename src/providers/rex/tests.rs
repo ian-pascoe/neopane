@@ -1,7 +1,7 @@
 //! Rex's pane provider over a `UnixStream` pair: the asks as the JSON Rex
 //! reads, and Rex's answers as outcomes.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 use serde_json::{Value, json};
@@ -78,6 +78,16 @@ fn requests(p: RexProvider, theirs: UnixStream) -> Vec<(String, Value)> {
             )
         })
         .collect()
+}
+
+#[test]
+fn dropping_it_closes_its_websocket() {
+    let (p, mut theirs) = rex();
+    drop(p);
+    let mut bytes = Vec::new();
+    theirs.read_to_end(&mut bytes).unwrap();
+    // a close frame, then the socket closed
+    assert_eq!(Some(&0x88), bytes.first(), "{bytes:?}");
 }
 
 #[test]
@@ -744,8 +754,6 @@ fn find_block(b: &str) -> Ask {
         env: vec![(b"REX_BLOCK".to_vec(), b.as_bytes().to_vec())],
     }
 }
-
-use std::io::Read;
 
 // Connecting takes steps as Rex answers: nothing waits for it, and a `find`
 // asked meanwhile goes to Rex only once it has attached us to the session.
