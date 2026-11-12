@@ -3577,25 +3577,30 @@ mod tests {
         self_hello(t)
     }
 
-    /// Sends `hello` to `fx`'s daemon, a pty handed over: the helper's end.
-    fn self_attach_with(fx: &mut Fixture, tag: &str, hello: &[u8]) -> UnixStream {
-        let at = Address::new(tag);
+    /// Sends `hello` to `fx`'s daemon, a pty handed over: the helper's end,
+    /// and the pty, kept open while the answer waits. (On Linux, a pty whose
+    /// master has closed is no terminal.)
+    fn self_attach_with(fx: &mut Fixture, tag: &str, hello: &[u8]) -> (UnixStream, Pty) {
+        // an address of its own: the tests run side by side
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = Address::new(&format!("{tag}-{n}"));
         let pty = Pty::new(80, 24);
         let helper = at.send(hello, Some(pty.slave));
         fx.d.accept(&at.server).unwrap();
-        helper
+        (helper, pty)
     }
 
     /// A fixture for daemon `proj` at `/tmp/x/proj/sock`, sent a
     /// self-attach from a terminal on `tty` with `$<NAME>` that address: the
-    /// helper's end.
-    fn maybe_nested(tty: &[u8]) -> (Fixture, UnixStream) {
+    /// helper's end, and the pty.
+    fn maybe_nested(tty: &[u8]) -> (Fixture, (UnixStream, Pty)) {
         let mut fx = fixture();
         fx.d.name = "proj".into();
         fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
         let hello = self_hello_from(b"/tmp/x/proj/sock", tty, false);
-        let helper = self_attach_with(&mut fx, "nested", &hello);
-        (fx, helper)
+        let attached = self_attach_with(&mut fx, "nested", &hello);
+        (fx, attached)
     }
 
     /// Neovim's answer to the channel list the nested check asked for: one
@@ -3625,11 +3630,11 @@ mod tests {
     #[test]
     fn a_self_attach_from_one_of_the_daemons_own_terminals_is_refused_as_nested() {
         // relayed with no tty: at once
-        let (fx, helper) = maybe_nested(b"");
+        let (fx, (helper, _pty)) = maybe_nested(b"");
         assert!(fx.d.nested_checks.is_empty());
         assert_nested(&fx, &helper);
         // on one of Neovim's terminals, once Neovim lists them
-        let (mut fx, helper) = maybe_nested(b"/dev/ttys004");
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys004");
         assert!(sent_to_nvim(&mut fx).contains("nvim_list_chans"));
         chans_answer(&mut fx, &["/dev/ttys001", "/dev/ttys004"]);
         assert_nested(&fx, &helper);
@@ -3638,7 +3643,7 @@ mod tests {
     #[test]
     fn a_self_attach_that_only_inherited_the_daemons_address_is_accepted() {
         // a tmux started from a :terminal
-        let (mut fx, helper) = maybe_nested(b"/dev/ttys009");
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys009");
         chans_answer(&mut fx, &["/dev/ttys004"]);
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         let p = &fx.d.panes.list[0];
@@ -3647,13 +3652,13 @@ mod tests {
         let mut fx = fixture();
         fx.d.sock = crate::daemon::dir::Address::from_arg("/tmp/x/proj/sock".into());
         let hello = self_hello_from(b"/tmp/x/other/sock", b"/dev/ttys004", false);
-        let helper = self_attach_with(&mut fx, "other", &hello);
+        let (helper, _pty) = self_attach_with(&mut fx, "other", &hello);
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
     }
 
     #[test]
     fn a_self_attach_neovim_doesnt_list_terminals_for_in_time_is_refused_as_nested() {
-        let (mut fx, helper) = maybe_nested(b"/dev/ttys009");
+        let (mut fx, (helper, _pty)) = maybe_nested(b"/dev/ttys009");
         fx.d.time_out_hellos(Instant::now() + Duration::from_secs(2))
             .unwrap();
         assert!(fx.d.nested_checks.is_empty());
@@ -3664,13 +3669,14 @@ mod tests {
     fn a_self_attachs_rex_block_is_its_terminal_only_in_the_rex_session() {
         // Rex's session is session:s
         let (mut fx, _rex) = rex_fixture();
-        let helper = self_attach_with(&mut fx, "rex-in", &self_hello_from(b"", b"", true));
+        let (helper, _pty) = self_attach_with(&mut fx, "rex-in", &self_hello_from(b"", b"", true));
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         let t = fx.d.panes.list[0].terminal.clone();
         assert_eq!(Some(TerminalId::from(block_id(7).as_str())), t);
         // with no Rex: no terminal id
         let mut fx = with_provider(None);
-        let helper = self_attach_with(&mut fx, "rex-none", &self_hello_from(b"", b"", true));
+        let (helper, _pty) =
+            self_attach_with(&mut fx, "rex-none", &self_hello_from(b"", b"", true));
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         assert_eq!(None, fx.d.panes.list[0].terminal);
     }
