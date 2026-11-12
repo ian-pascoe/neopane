@@ -176,5 +176,16 @@ each new pane's hello, from its terminal's helper.
 A launcher's hello carrying a 64 KB environment as well as Rex's took 0.111
 to 0.418 ms over 5 launches.
 
-L7 has no numbers yet: its points fire from #114, which records them as it
-lands. The Linux numbers are #133's.
+L7's points fire from SPI-652 (#114). Its baseline is from that change's
+build, on the same machine, with `scripts/latency.sh exec 55` run 3 times,
+each started once the 1-minute load was at most 4: the launcher's terminal
+choosing Rex, from its `find` asked to Rex confirming it.
+
+| Criterion | Scenario | N per run | Medians | p95s | Baseline median | Baseline p95 |
+|---|---|---|---|---|---|---|
+| L7 | `exec` | 55 | 0.982, 0.994, 0.978 | 1.291, 1.273, 1.238 | 0.982 | 1.273 |
+
+The first attach starts connecting to Rex before Neovim starts, so the
+connection and the upgrade's answer are behind Neovim's start, outside L7.
+L7 is the hello and welcome, `session.attach` and `terminal.process`, each
+waiting for Rex's answer. The Linux numbers are #133's.

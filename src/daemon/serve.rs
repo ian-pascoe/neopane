@@ -8,9 +8,8 @@
 //!
 //! Teardown is by values whose `Drop` does it, declared in the order they
 //! must end: the daemon (its panes, then the loop, the pane provider and
-//! Neovim), Neovim's
-//! process, the socket files, the helpers' socket, and last the lock on the
-//! daemon's directory. A start that fails once the first attach is accepted
+//! Neovim), Neovim's process, the socket files, the helpers' socket, and
+//! last the lock on the daemon's directory. A start that fails once the first attach is accepted
 //! ends it as failed, with the reason. The log stays.
 //!
 //! Every file of a daemon is in its own directory, `<base>/NAME/` (`dir`),

@@ -271,9 +271,9 @@ points! {
     Place => "place",
     /// L8: the last placement answered.
     Placed => "placed",
-    /// L7: a pane accepted, its find asked for. Fires from #114.
+    /// L7: a self-attached pane accepted, its `find` asked for.
     Accept => "accept",
-    /// L7: the find confirmed. Fires from #114.
+    /// L7: its `find` confirmed: in reach.
     Found => "found",
     /// L9: a hello received. Fires from #101.
     Hello => "hello",
