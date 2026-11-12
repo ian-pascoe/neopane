@@ -1019,8 +1019,8 @@ api.nvim_create_autocmd('TabEnter', { group = group, callback = bring_carried })
 -- The current tab page is about to close: the floats other tab pages' that
 -- sit in it go back to theirs, as Neovim would close them with it. Neovim
 -- allows no move once it's closing, in TabClosedPre, so only before a typed
--- :tabclose, or a click on the tabline that closes it; one from a mapping or
--- a plugin closes them.
+-- :tabclose, or a middle click after the copy's labels; a close any other
+-- way closes them.
 local function send_floats_home()
   local closing = api.nvim_get_current_tabpage()
   local back = floats_in(closing, false, function(f)
