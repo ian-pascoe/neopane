@@ -28,6 +28,13 @@ pub enum Command {
     /// A command whose handler comes later: it exits 1 with
     /// `<name>: <what> isn't built yet`.
     NotBuilt(String),
+    /// `provider show [NAME]`: a built-in pane provider as Lua, or with no
+    /// NAME, the built-ins.
+    ProviderShow(Option<String>),
+    /// `provider types [--config FILE]`: the config's Lua types.
+    ProviderTypes {
+        config: Option<OsString>,
+    },
     /// `attach --address A --pane ID [--transport fd|relay]`: a requested
     /// pane's helper, which the daemon's attach command runs. Without
     /// `--transport`, `<NAME>_TRANSPORT` chooses.
@@ -126,10 +133,9 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         }
         b"provider" if asks_help(rest) => Ok(Command::Help),
         b"provider" => match rest.first().map(|w| w.as_encoded_bytes()) {
-            Some(sub @ (b"check" | b"show" | b"types")) => Ok(Command::NotBuilt(format!(
-                "provider {}",
-                String::from_utf8_lossy(sub)
-            ))),
+            Some(b"check") => Ok(Command::NotBuilt("provider check".to_string())),
+            Some(b"show") => provider_show(&rest[1..]),
+            Some(b"types") => provider_types(&rest[1..]),
             _ => Err(UsageError(
                 "provider takes check, show or types".to_string(),
             )),
@@ -291,6 +297,37 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
     start.nvim_args = args[i..].to_vec();
     start.reading = nvim_args::read(&start.nvim_args).map_err(UsageError)?;
     Ok(Command::Start(start))
+}
+
+/// `provider show`'s words: `[NAME]`.
+fn provider_show(words: &[OsString]) -> Result<Command, UsageError> {
+    match words {
+        [] => Ok(Command::ProviderShow(None)),
+        [name] if !name.as_encoded_bytes().starts_with(b"-") => Ok(Command::ProviderShow(Some(
+            name.to_string_lossy().into_owned(),
+        ))),
+        _ => Err(UsageError("provider show takes at most one NAME".into())),
+    }
+}
+
+/// `provider types`' words: `[--config FILE]`.
+fn provider_types(words: &[OsString]) -> Result<Command, UsageError> {
+    let mut config = None;
+    let mut i = 0;
+    while let Some(word) = words.get(i) {
+        let Some((option, attached)) = long_option(word, &["--config"]) else {
+            return Err(UsageError("provider types takes only --config FILE".into()));
+        };
+        let value = option_value(option, attached, words, &mut i)?;
+        if value.is_empty() {
+            return Err(UsageError(format!("{option} needs a value")));
+        }
+        if config.replace(value).is_some() {
+            return Err(UsageError(format!("{option} is given twice")));
+        }
+        i += 1;
+    }
+    Ok(Command::ProviderTypes { config })
 }
 
 /// `debug-relay`'s words: a requested pane's `{attach}`, its exe first.

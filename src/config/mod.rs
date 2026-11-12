@@ -9,7 +9,9 @@ mod api;
 pub mod check;
 pub mod child;
 mod runner;
+pub mod show;
 pub mod tree;
+pub mod types;
 pub mod wire;
 
 use std::time::Duration;

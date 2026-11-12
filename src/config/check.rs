@@ -33,6 +33,12 @@ pub enum Choice {
     Pair(Pair),
 }
 
+/// The keys of the table the config file returns.
+pub const FILE_KEYS: [&str; 1] = ["provider"];
+
+/// The keys of a pair: its `name`, then its two sides.
+pub const PAIR_KEYS: [&str; 3] = ["name", "terminal", "layout"];
+
 /// The built-in pane providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
@@ -40,6 +46,12 @@ pub enum Builtin {
 }
 
 impl Builtin {
+    pub const ALL: [Builtin; 1] = [Builtin::Rex];
+
+    pub fn from_name(name: &str) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|b| b.name() == name)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Builtin::Rex => "rex",
@@ -81,6 +93,45 @@ impl Provider {
         self.capabilities
             .iter()
             .find_map(|(have, cmd)| (*have == c).then_some(cmd))
+    }
+}
+
+/// A pane provider table's keys besides its capabilities (#93 decision 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Setting {
+    Name,
+    Timeouts,
+    AttachTimeout,
+    Protocols,
+    ContextVars,
+    FindVars,
+}
+
+impl Setting {
+    pub const ALL: [Setting; 6] = [
+        Setting::Name,
+        Setting::Timeouts,
+        Setting::AttachTimeout,
+        Setting::Protocols,
+        Setting::ContextVars,
+        Setting::FindVars,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Setting::Name => "name",
+            Setting::Timeouts => "timeouts",
+            Setting::AttachTimeout => "attach_timeout",
+            Setting::Protocols => "protocols",
+            Setting::ContextVars => "context_vars",
+            Setting::FindVars => "find_vars",
+        }
+    }
+
+    pub fn from_name(name: &[u8]) -> Option<Setting> {
+        Setting::ALL
+            .into_iter()
+            .find(|s| s.name().as_bytes() == name)
     }
 }
 
@@ -406,7 +457,7 @@ impl Checker {
         let mut found = false;
         let mut has_provider = false;
         for (k, v) in pairs {
-            if !is_key(k, "provider") {
+            if !is_key(k, FILE_KEYS[0]) {
                 self.warn(format!(
                     "{file} returned an unknown key, {}; only provider is read",
                     key_shown(k)
@@ -597,22 +648,22 @@ impl Checker {
                 }
                 continue;
             }
-            match key {
-                b"name" => name = self.name(v, &at),
-                b"timeouts" => timeouts = self.timeouts(v, &at),
-                b"attach_timeout" => {
+            match Setting::from_name(key) {
+                Some(Setting::Name) => name = self.name(v, &at),
+                Some(Setting::Timeouts) => timeouts = self.timeouts(v, &at),
+                Some(Setting::AttachTimeout) => {
                     if let Some(t) = self.seconds(v, &at) {
                         attach_timeout = t;
                     }
                 }
-                b"protocols" => {
+                Some(Setting::Protocols) => {
                     if let Some(p) = self.protocols(v, &at) {
                         protocols = p;
                     }
                 }
-                b"context_vars" => context_vars = self.vars(v, &at),
-                b"find_vars" => find_vars = self.vars(v, &at),
-                _ => self.warn(format!("{at}: unknown field; ignored")),
+                Some(Setting::ContextVars) => context_vars = self.vars(v, &at),
+                Some(Setting::FindVars) => find_vars = self.vars(v, &at),
+                None => self.warn(format!("{at}: unknown field; ignored")),
             }
         }
         if self.problems.errors().len() > errors_before {
@@ -891,7 +942,7 @@ impl Checker {
 /// Whether `tree` is a pair or one side alone: it has `terminal` or
 /// `layout`, other than `false`.
 fn is_pair(tree: &Tree) -> bool {
-    ["terminal", "layout"]
+    PAIR_KEYS[1..]
         .iter()
         .any(|k| !matches!(tree.get(k), None | Some(Tree::Bool(false))))
 }
@@ -966,7 +1017,7 @@ fn quoted(s: &[u8]) -> String {
 }
 
 /// A number as Lua's `tostring` would show it.
-fn number(n: f64) -> String {
+pub(super) fn number(n: f64) -> String {
     if n.is_nan() {
         "nan".into()
     } else if n.is_infinite() {
