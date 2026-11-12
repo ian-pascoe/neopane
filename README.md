@@ -140,23 +140,24 @@ Neovim's status: `:q` 0, `:cq` 1, `:cq 3` 3, so `:cq` aborts a `git commit` as
 it does in plain Neovim.
 
 That first attach chooses the daemon's pane provider, which gives windows
-terminals of their own: Rex is chosen, not required. With `REX_SERVER` and
-`REX_SESSION` set in the attach's environment, as Rex sets them in every pane,
-the daemon connects to that Rex server and session without holding anything
-up: the first window shows at once, and the windows Neovim opened at the
-start, such as `-O a b`'s second, wait for the choice and then open in Rex
-panes beside the first. Rex checks the choice: the terminal must be the Rex
-pane `REX_BLOCK` names, its terminal compared with the terminal of that pane's
-process. Without the variables, every window is drawn in the terminal it was
-opened from, as plain Neovim draws splits. So is it when the choice fails,
-with a warning in Neovim: in a terminal started from a Rex shell, such as a
-Ghostty window, which inherited stale `REX_*`, or one whose `REX_BLOCK` is
-unset or names another pane. The variables, from the attach's environment,
-never the daemon's own:
+terminals of their own, without holding anything up: the first window shows
+at once, and the windows Neovim opened at the start, such as `-O a b`'s
+second, wait for the choice and then open beside the first. Rex is the one
+built in (see [Rex](#rex)): chosen, not required. With no pane provider, or
+when the choice fails, every window is drawn in the terminal it was opened
+from, as plain Neovim draws splits.
 
-- `REX_SERVER`: the URL of the Rex server to connect to.
-- `REX_SESSION`: the Rex session to open panes in.
-- `REX_BLOCK`: the id of the pane the attach runs in, which Rex checks.
+The daemon has one pane provider at a time. It keeps it while a terminal in
+its reach is attached or on its way, and drops it otherwise, as when the last
+of them closes; one that fails as a whole, as Rex does when it quits, is
+dropped at once, with a warning in Neovim. New windows are then drawn in the
+terminals they were opened from, and the next attach chooses again: the
+terminals attached before are checked again, and those in the new pane
+provider's reach rejoin it.
+
+These variables are read from the attach's environment, never the daemon's
+own:
+
 - `NEOREX_PROVIDER`: a hint at the pane provider, sent with the attach;
   `none` chooses none, even in Rex. Other values are for your config, which
   comes later.
@@ -174,10 +175,10 @@ never the daemon's own:
   command, which overrides the variable. Any other value prints `neorex:
   ignoring NEOREX_TRANSPORT=<value> (use fd or relay)`, and `fd` is used.
 
-Each window's Rex pane runs `neorex attach --address <the daemon's address>
+Each window's pane runs `neorex attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
-`docs/attach-protocol.md`) and waits until the daemon ends the attach; Rex then
-closes the pane. The helper, not the daemon, puts its terminal in raw mode and
+`docs/attach-protocol.md`) and waits until the daemon ends the attach; the
+pane provider then closes the pane. The helper, not the daemon, puts its terminal in raw mode and
 back, so a daemon that crashes or is killed leaves every terminal usable: out
 of raw mode and the alternate screen, with a line naming the daemon's log. The
 pane id, such as `2-k3j9x2qpa8`, is good for that one pane's terminal only. A
@@ -195,10 +196,9 @@ second terminal shows `b`; with none, a new window, as `:split` opens one.
 instead, and `+12 notes.md` puts the cursor on line 12. The window it shows
 becomes current. Closing that terminal closes its windows, and only those;
 the terminal goes back to its shell. With no pane provider yet, the attach
-chooses one, as the first did. In a Rex pane of the chosen Rex server and
-session, Rex finds its pane by its `REX_BLOCK`, so `:vsplit` there opens a
-pane beside it; from another session or terminal, `:vsplit` draws the new
-window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
+chooses one, as the first did. In the pane provider's reach, as in a Rex pane
+of the chosen Rex session, `:vsplit` there opens a pane beside it; out of its
+reach, `:vsplit` draws the new window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neorex: a
 terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
 name comes later.
 
@@ -227,8 +227,7 @@ once Neovim is ending is refused with `stopping`. `:q` in the last window
 still quits Neovim, as `:q` always does.
 
 If stdin isn't a terminal, `neorex` prints `neorex: stdin isn't a terminal;
-to start a daemon without one, use --detach` and exits 1. The `debug-rex`
-command reads the same three Rex variables, from its own environment.
+to start a daemon without one, use --detach` and exits 1.
 
 Each daemon has a name: the name of the directory `neorex` was started in,
 cut to its letters, digits, `.`, `_` and `-`, and to 32 characters (`default`
@@ -241,6 +240,31 @@ directory, and mode 0700, or `neorex` refuses to start and names
 which is how it's known to be running. Its log stays after it ends, however it
 ends; the next daemon of that name keeps it as `log.1`, replacing an older
 one. `neorex --help` says the same.
+
+## Rex
+
+Rex's pane provider is built in. An attach chooses Rex when `REX_SERVER` and
+`REX_SESSION` are set in its environment, as Rex sets them in every pane: the
+daemon connects to that Rex server and session, as the client `neorex`, and
+each window gets a Rex pane of its own beside the one it was opened from,
+labelled `neorex`. Rex checks the choice: the terminal must be the Rex pane
+`REX_BLOCK` names, its terminal compared with the terminal of that pane's
+process. The choice fails, with a warning in Neovim, in a terminal started
+from a Rex shell, such as a Ghostty window, which inherited stale `REX_*`, or
+one whose `REX_BLOCK` is unset or names another pane. A later attach is in
+Rex's reach in a Rex pane of the same server and session, found by its
+`REX_BLOCK`. The variables, from the attach's environment:
+
+- `REX_SERVER`: the URL of the Rex server to connect to.
+- `REX_SESSION`: the Rex session to open panes in.
+- `REX_BLOCK`: the id of the pane the attach runs in, which Rex checks.
+
+Rex's connection lasts as long as Rex is the daemon's pane provider: it
+closes when no Rex pane is left attached, or when Rex quits or fails, and a
+new one opens when Rex is chosen again, its panes rejoining.
+
+`neorex debug-rex SOCKET`, Rex's own debug tool, reads the same three
+variables from its own environment.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
