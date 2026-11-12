@@ -267,7 +267,7 @@ impl Daemon {
             attach_conn::refuse(stream, z);
             return Ok(());
         }
-        let self_hello = attach_conn::self_hello_of(&terminal, tty.as_ref(), provider);
+        let self_hello = attach_conn::attach_hello_of(&terminal, tty.as_ref(), provider);
         let opening = file.map(|f| FileAt {
             file: attach_conn::file_against_cwd(&f, &terminal.cwd),
             line,
@@ -357,7 +357,7 @@ impl Daemon {
         }
         self.panes.ids.take(&pane).expect("checked");
         // a pane provider chosen again checks its reach from it
-        let hello = attach_conn::self_hello_of(&terminal, tty.as_ref(), None);
+        let hello = attach_conn::attach_hello_of(&terminal, tty.as_ref(), None);
         let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
         if let Err(e) = attach_conn::send_accept(&surface.helper_socket, &self.name, &self.log) {
             log_warn!("{NAME} daemon: pane {shown}'s helper went: {e}");

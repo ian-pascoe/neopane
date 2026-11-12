@@ -300,3 +300,21 @@ fn opens_not_yet_asked_are_dropped_as_the_daemon_goes_unattached() {
     let asked = fake(&mut rig.fx.d).asked();
     assert_eq!(vec![open_tab_page(ids[0])], asked);
 }
+
+#[test]
+fn an_unattached_daemon_drops_its_pane_provider_and_the_next_attach_chooses_again() {
+    let mut rig = Rig::new();
+    rig.last_pane_goes();
+    rig.told(&["/a"], FIRST_ASK);
+    assert_eq!(Stage::StayingForUnsaved, rig.fx.d.lifetime.stage);
+    // no terminal in its reach
+    rig.fx.d.after_batch().unwrap();
+    assert!(rig.fx.d.provider.is_none());
+    assert_eq!(None, rig.fx.d.stopped);
+    rig.fx.d.test_choose = Some(Box::new(|_| crate::providers::choose::Chosen::Provider {
+        held: Box::new(FakeProvider::opening()),
+        spent: Duration::ZERO,
+    }));
+    let (_helper, _pty) = rig.self_attach(None);
+    assert!(rig.fx.d.provider.is_some());
+}

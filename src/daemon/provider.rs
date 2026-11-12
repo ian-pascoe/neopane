@@ -326,11 +326,11 @@ pub(crate) enum ProviderEvent {
     },
 }
 
-/// A pane provider: Rex's, built in, and the command runner; in tests,
+/// A pane provider: one built in, or the command runner; in tests,
 /// `FakeProvider` (#92 decision 1). The daemon holds one at a time, as a
-/// `Box<dyn PaneProvider>`; dropping it ends whatever it runs, as Rex's
-/// WebSocket and the command runner's `events`.
-pub(crate) trait PaneProvider {
+/// `Box<dyn PaneProvider>`; dropping it ends whatever it runs, such as the
+/// pane provider's connection or its `events`.
+pub(crate) trait PaneProvider: std::any::Any {
     /// Its name, as warnings and the log show it.
     fn name(&self) -> &str;
 
@@ -382,28 +382,21 @@ pub(crate) trait PaneProvider {
     fn wants_write(&self) -> bool {
         false
     }
-
-    /// It, if it's the fake, which a test drives.
-    #[cfg(test)]
-    fn as_fake(&mut self) -> Option<&mut fake::FakeProvider> {
-        None
-    }
-
-    #[cfg(test)]
-    fn as_fake_ref(&self) -> Option<&fake::FakeProvider> {
-        None
-    }
 }
 
 #[cfg(test)]
 impl dyn PaneProvider {
     /// The fake this is, which a test drives.
     pub(crate) fn fake(&mut self) -> &mut fake::FakeProvider {
-        self.as_fake().expect("not the fake")
+        (self as &mut dyn std::any::Any)
+            .downcast_mut()
+            .expect("not the fake")
     }
 
     pub(crate) fn fake_ref(&self) -> &fake::FakeProvider {
-        self.as_fake_ref().expect("not the fake")
+        (self as &dyn std::any::Any)
+            .downcast_ref()
+            .expect("not the fake")
     }
 }
 

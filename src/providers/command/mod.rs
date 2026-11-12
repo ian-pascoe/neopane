@@ -216,11 +216,6 @@ impl CommandProvider {
         Ok(p)
     }
 
-    /// The fd the daemon watches under `Token::Provider`.
-    fn loop_fd(&self) -> RawFd {
-        self.inner_loop.fd()
-    }
-
     fn command(&self, cap: Capability) -> Option<&CapCommand> {
         self.commands.iter().find(|t| t.cap == cap)
     }
@@ -507,7 +502,7 @@ impl PaneProvider for CommandProvider {
     }
 
     fn fd(&self) -> Option<RawFd> {
-        Some(self.loop_fd())
+        Some(self.inner_loop.fd())
     }
 
     fn capabilities(&self) -> CapabilitySet {

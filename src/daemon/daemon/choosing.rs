@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::attach::{PaneId, env_value};
-use crate::daemon::pane::{Reach, SelfHello};
+use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
 use crate::providers::choose::{self, Chosen};
 
@@ -90,17 +90,22 @@ impl Daemon {
         self.provider = Some(held);
         // the panes attached before are out of reach, their windows theirs,
         // until the choice is confirmed: then they rejoin as `find` says
-        for q in self.panes.list.iter_mut() {
-            // those waiting their turn are checked as it comes
-            if q.id != id && !self.waiting_choice.contains(&q.id) {
-                q.reach = Reach::Out;
-            }
-        }
+        self.out_of_reach_but(Some(id));
         // the whole choice has the time: connecting, before, counts
         let due = Instant::now() + crate::config::TIME.saturating_sub(spent);
         self.choosing = Some(Choosing { id, attach, due });
         self.arm_choice_timer(due)?;
         self.find(id)
+    }
+
+    /// Puts every pane but `but` out of reach, except those waiting their
+    /// turn to choose, which are checked as it comes.
+    pub(super) fn out_of_reach_but(&mut self, but: Option<u32>) {
+        for q in self.panes.list.iter_mut() {
+            if Some(q.id) != but && !self.waiting_choice.contains(&q.id) {
+                q.reach = Reach::Out;
+            }
+        }
     }
 
     /// Starts the choice timer for `due`.
@@ -134,15 +139,16 @@ impl Daemon {
     /// if its context variables aren't the choosing attach's, else as its
     /// `find` says.
     fn check_reach(&mut self, id: u32) -> Result<()> {
-        if !self.shares_context(id) {
+        if !self.check_context_reach(id) {
             return self.reach_decided();
         }
         self.find(id)
     }
 
-    /// Whether pane `id`'s hello has the choosing attach's values of the
-    /// pane provider's context variables; if not, it is out of reach.
-    fn shares_context(&mut self, id: u32) -> bool {
+    /// Checks pane `id`'s hello has the choosing attach's values of the
+    /// pane provider's context variables, whether it does; if not, the
+    /// pane is out of reach.
+    fn check_context_reach(&mut self, id: u32) -> bool {
         let vars = self.provider.as_deref().unwrap().context_vars();
         let p = self.panes.by_id(id).unwrap();
         let same = p.hello.as_deref().is_some_and(|hello| {
@@ -178,7 +184,7 @@ impl Daemon {
             return self.reach_decided();
         }
         q.reach = Reach::Finding;
-        let hello: &SelfHello = q.hello.as_deref().expect("a pane that finds has a hello");
+        let hello: &AttachHello = q.hello.as_deref().expect("a pane that finds has a hello");
         let env = hello
             .env
             .iter()
@@ -246,7 +252,7 @@ impl Daemon {
             .map(|p| p.id)
             .collect();
         for id in before {
-            if self.provider.is_some() && self.shares_context(id) {
+            if self.provider.is_some() && self.check_context_reach(id) {
                 self.find(id)?;
             }
         }

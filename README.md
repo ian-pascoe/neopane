@@ -244,24 +244,24 @@ one. `neorex --help` says the same.
 ## Rex
 
 Rex's pane provider is built in. An attach chooses Rex when `REX_SERVER` and
-`REX_SESSION` are set in its environment, as Rex sets them in every pane: the
+`REX_SESSION` are set in its environment, as Rex sets them in every block: the
 daemon connects to that Rex server and session, as the client `neorex`, and
-each window gets a Rex pane of its own beside the one it was opened from,
-labelled `neorex`. Rex checks the choice: the terminal must be the Rex pane
-`REX_BLOCK` names, its terminal compared with the terminal of that pane's
+each window gets a Rex block of its own beside the one it was opened from,
+labelled `neorex`. Rex checks the choice: the terminal must be the Rex block
+`REX_BLOCK` names, its terminal compared with the terminal of that block's
 process. The choice fails, with a warning in Neovim, in a terminal started
 from a Rex shell, such as a Ghostty window, which inherited stale `REX_*`, or
-one whose `REX_BLOCK` is unset or names another pane. A later attach is in
-Rex's reach in a Rex pane of the same server and session, found by its
+one whose `REX_BLOCK` is unset or names another block. A later attach is in
+Rex's reach in a Rex block of the same server and session, found by its
 `REX_BLOCK`. The variables, from the attach's environment:
 
 - `REX_SERVER`: the URL of the Rex server to connect to.
-- `REX_SESSION`: the Rex session to open panes in.
-- `REX_BLOCK`: the id of the pane the attach runs in, which Rex checks.
+- `REX_SESSION`: the Rex session to open blocks in.
+- `REX_BLOCK`: the id of the block the attach runs in, which Rex checks.
 
 Rex's connection lasts as long as Rex is the daemon's pane provider: it
-closes when no Rex pane is left attached, or when Rex quits or fails, and a
-new one opens when Rex is chosen again, its panes rejoining.
+closes when no Rex block is left attached, or when Rex quits or fails, and a
+new one opens when Rex is chosen again, its blocks rejoining.
 
 `neorex debug-rex SOCKET`, Rex's own debug tool, reads the same three
 variables from its own environment.
@@ -270,8 +270,8 @@ To try a build without it grabbing the focus in your own Rex session, which
 neorex does as it works, make a session of your own with `rex new`, and run it
 there, or in a terminal started with `REX_SESSION` set to that session's id
 (`REX_SERVER` stays as Rex set it). A terminal started from one of your own
-panes inherits that pane's `REX_BLOCK`, which the daemon would use as the first
-window's pane, in your session: unset `REX_BLOCK`, or set it to a block in the
+blocks inherits that block's `REX_BLOCK`, which the daemon would use as the first
+window's block, in your session: unset `REX_BLOCK`, or set it to a block in the
 new session.
 
 ## Command reference

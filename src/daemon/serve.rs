@@ -813,7 +813,7 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         attach_conn::refuse(a.stream, z);
         return Err(Error::NoPane.into());
     }
-    let self_hello = attach_conn::self_hello_of(&terminal, a.tty.as_ref(), provider);
+    let self_hello = attach_conn::attach_hello_of(&terminal, a.tty.as_ref(), provider);
     let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after

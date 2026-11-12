@@ -166,7 +166,7 @@ pub(crate) struct Daemon {
 
 /// What a test has a self-attach choose, given its hello.
 #[cfg(test)]
-pub(crate) type TestChoose = Box<dyn FnMut(&pane::SelfHello) -> crate::providers::choose::Chosen>;
+pub(crate) type TestChoose = Box<dyn FnMut(&pane::AttachHello) -> crate::providers::choose::Chosen>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -1890,8 +1890,8 @@ impl Daemon {
         self.run_steps()
     }
 
-    /// Drops the pane provider, ending what it runs: Rex's WebSocket closes
-    /// and the command runner's `events` is killed. Every act asked of it or
+    /// Drops the pane provider, ending what it runs, such as its connection
+    /// or its `events`. Every act asked of it or
     /// waiting falls back, and what it was found not to support is
     /// forgotten. Its terminal ids and live layout go: a pane it hadn't
     /// reported is its own area, and the rest stay as they are. Every pane
@@ -1912,11 +1912,8 @@ impl Daemon {
         }
         for p in &mut self.panes.list {
             p.terminal = None;
-            // those waiting their turn choose, or are checked, as it comes
-            if !self.waiting_choice.contains(&p.id) {
-                p.reach = pane::Reach::Out;
-            }
         }
+        self.out_of_reach_but(None);
         self.focus = ProviderFocus::default();
         self.just_opened.clear();
         self.asks.gone();
@@ -5879,6 +5876,38 @@ mod tests {
         focus_pane(&mut fx, 2, 1001, Some("t2"));
         fx.d.nvim.current_win = 1000;
         pump_until(&mut fx, |d| d.nvim.current_win == 1001);
+    }
+
+    #[test]
+    fn dropping_a_command_runner_kills_its_events() {
+        let script = Script::new("events-dropped");
+        let pid_file = script.0.with_file_name("pid");
+        script.set(&format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        let mut fx = commanded_by(&[(Capability::Events, &["sh", script.path()])]);
+        let started = Instant::now();
+        let pid: libc::pid_t = loop {
+            if let Ok(s) = std::fs::read_to_string(&pid_file)
+                && s.ends_with('\n')
+            {
+                break s.trim().parse().unwrap();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "events never ran"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // SAFETY: signal 0 only checks the process is there.
+        let alive = |pid| unsafe { libc::kill(pid, 0) } == 0;
+        assert!(alive(pid));
+        // no terminal in its reach
+        fx.d.after_batch().unwrap();
+        assert!(fx.d.provider.is_none());
+        let gone = Instant::now();
+        while alive(pid) {
+            assert!(gone.elapsed() < Duration::from_secs(3), "events lives");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A daemon whose fake pane provider can focus and report layouts, but

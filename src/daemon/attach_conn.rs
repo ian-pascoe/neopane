@@ -266,14 +266,14 @@ pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
     }
 }
 
-/// What a self-attach's hello says of its `terminal`, handed over as `tty`
-/// unless relayed, with `hint`, for choosing and reach.
-pub(crate) fn self_hello_of(
+/// What an attach's hello says of its `terminal`, handed over as `tty`
+/// unless relayed, with a self-attach's `hint`, for choosing and reach.
+pub(crate) fn attach_hello_of(
     terminal: &crate::attach::Terminal,
     tty: Option<&std::os::fd::OwnedFd>,
     hint: Option<String>,
-) -> super::pane::SelfHello {
-    super::pane::SelfHello {
+) -> super::pane::AttachHello {
+    super::pane::AttachHello {
         pid: terminal.pid,
         tty: terminal.tty.clone(),
         device: tty_device(tty, &terminal.tty),

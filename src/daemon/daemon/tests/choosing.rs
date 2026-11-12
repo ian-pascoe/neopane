@@ -118,12 +118,26 @@ fn attach_showing_1000(fx: &mut Fixture, hello: &[u8]) -> (u32, UnixStream, Pty)
 
 /// The id of the last `find` asked, and its pane id.
 fn last_find(d: &mut Daemon) -> (AskId, crate::attach::PaneId) {
-    let f = fake(d);
-    let (id, ask) = f.asks.last().expect("an ask").clone();
+    let (id, ask) = last_ask(d);
     let Ask::Find { pane, .. } = ask else {
         panic!("not a find: {ask:?}");
     };
     (id, pane)
+}
+
+/// The id of the last `open_beside` asked, and its ask.
+fn last_open_beside(d: &mut Daemon) -> (AskId, Ask) {
+    let (id, ask) = last_ask(d);
+    assert!(
+        matches!(ask, Ask::OpenBeside { .. }),
+        "not an open_beside: {ask:?}"
+    );
+    (id, ask)
+}
+
+/// The last ask, and its id.
+fn last_ask(d: &mut Daemon) -> (AskId, Ask) {
+    fake(d).asks.last().expect("an ask").clone()
 }
 
 /// The pane provider finds the terminal of the last `find`: `block`.
@@ -253,8 +267,8 @@ fn windows_wait_unshown_for_the_choice_then_open_beside_the_choosing_pane() {
     // opened beside the choosing pane's terminal, as a new window is
     let p = fx.d.panes.by_win(1001).expect("a pane of its own");
     assert!(!p.is_self_attached());
-    let Some(Ask::OpenBeside { origin, dir, .. }) = fake(&mut fx.d).asked().pop() else {
-        panic!("no open_beside");
+    let (_, Ask::OpenBeside { origin, dir, .. }) = last_open_beside(&mut fx.d) else {
+        unreachable!()
     };
     assert_eq!((TerminalId::from(BLOCK), Direction::Right), (origin, dir));
 }
@@ -485,13 +499,8 @@ fn chosen_with_a_requested_pane() -> (Fixture, [u32; 2], Vec<(UnixStream, Pty)>)
     let (first, h1, p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     found(&mut fx.d, BLOCK);
     split_1001_off_1000(&mut fx);
-    let (ask, pane) = {
-        let f = fake(&mut fx.d);
-        let (id, ask) = f.asks.last().unwrap().clone();
-        let Ask::OpenBeside { pane, .. } = ask else {
-            panic!("no open_beside");
-        };
-        (id, pane)
+    let (ask, Ask::OpenBeside { pane, .. }) = last_open_beside(&mut fx.d) else {
+        unreachable!()
     };
     fake(&mut fx.d).opened(ask, BLOCK_2);
     fx.d.drain_provider().unwrap();

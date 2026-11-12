@@ -113,12 +113,4 @@ impl PaneProvider for FakeProvider {
         self.attach_timeout
             .unwrap_or_else(super::default_attach_timeout)
     }
-
-    fn as_fake(&mut self) -> Option<&mut FakeProvider> {
-        Some(self)
-    }
-
-    fn as_fake_ref(&self) -> Option<&FakeProvider> {
-        Some(self)
-    }
 }
