@@ -10,7 +10,7 @@ use super::dir::Address;
 use super::event_loop::{self, Loop};
 use super::live_layout::Area;
 use super::pane_layout::PaneLayout;
-use super::provider::TerminalId;
+use super::provider::{Ask, Direction, TerminalId};
 use super::surface::Surface;
 use crate::attach::{self, Ending, PaneId, Transport};
 use crate::name::NAME;
@@ -52,7 +52,34 @@ pub(crate) struct Pane {
     /// hasn't laid out yet: its window keeps the guessed size until the first
     /// size message, a second, or the pane provider is dropped.
     pub awaiting_size: bool,
+    /// Opened by `open`, for want of `open_beside`: where it is placed, with
+    /// `place_beside`, once it has its terminal id and its terminal has
+    /// attached (ADR 0006).
+    pub placing: Option<Placing>,
     pub last_asked_win_size: LastAskedWinSize,
+}
+
+/// Where a pane opened by `open` goes: beside `origin`'s terminal, as
+/// `place_beside` takes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Placing {
+    pub origin: TerminalId,
+    pub dir: Direction,
+    pub size: u32,
+    pub ratio: f64,
+}
+
+impl Placing {
+    /// The `place_beside` that puts `terminal` there.
+    pub(crate) fn ask(self, terminal: TerminalId) -> Ask {
+        Ask::PlaceBeside {
+            terminal,
+            origin: self.origin,
+            dir: self.dir,
+            size: self.size,
+            ratio: self.ratio,
+        }
+    }
 }
 
 /// What `Pane::last_asked_win_size` holds: the grid, and the window's cols x rows.
@@ -214,6 +241,7 @@ impl Pane {
             area: Area::Unreported,
             report_due: None,
             awaiting_size: false,
+            placing: None,
             last_asked_win_size: LastAskedWinSize::default(),
         }
     }

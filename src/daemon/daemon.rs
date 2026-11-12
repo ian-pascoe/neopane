@@ -26,7 +26,7 @@ use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
-use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd};
+use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing};
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
 use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, TerminalId};
@@ -813,9 +813,8 @@ impl Daemon {
             });
             return Ok(());
         }
-        // SPI-663 (#125): a pane opened by `open` and then moved by
-        // `place_beside` should wait the same way, while its placement is
-        // pending and its hello says the unlaid size; nothing asks `open` yet
+        // its terminal waits for its layout while it says the unlaid size,
+        // whether opened beside its origin or opened and then placed
         self.panes.by_id_mut(pane_id).unwrap().awaiting_size = true;
         let dir = Direction::of_split(sp.side_by_side, sp.before);
         let axis = usize::from(!dir.across());
@@ -825,6 +824,27 @@ impl Daemon {
             Some(o) if o[axis] > 0 => (f64::from(along) / f64::from(o[axis])).clamp(0.0, 1.0),
             _ => 0.5,
         };
+        let p = self.provider.as_ref().map(Held::seam_ref);
+        if !self.asks.may_ask(p, Capability::OpenBeside) && self.asks.may_ask(p, Capability::Open) {
+            // opened, then placed once it attaches (ADR 0006)
+            if self.asks.may_ask(p, Capability::PlaceBeside) {
+                self.panes.by_id_mut(pane_id).unwrap().placing = Some(Placing {
+                    origin,
+                    dir,
+                    size: along,
+                    ratio,
+                });
+            }
+            self.act(Ask::Open {
+                pane: id,
+                attach,
+                title,
+                cols,
+                rows,
+            });
+            log::trace(Point::Split, u64::from(pane_id));
+            return Ok(());
+        }
         self.act(Ask::OpenBeside {
             pane: id,
             attach,
@@ -1496,6 +1516,7 @@ impl Daemon {
         self.provider.as_mut().and_then(Held::rex)
     }
 
+    #[cfg(test)]
     fn rex_ref(&self) -> Option<&RexProvider> {
         match &self.provider {
             Some(Held::Rex(r)) => Some(r),
@@ -1575,7 +1596,7 @@ impl Daemon {
     /// hadn't reported is its own area, and the rest stay as they are.
     fn provider_gone(&mut self, reason: &str) -> Result<()> {
         log_warn!("{NAME} daemon: dropping the pane provider: {reason}");
-        if let Some(fd) = self.rex_ref().map(|r| r.session.client.fd()) {
+        if let Some(fd) = self.provider.as_ref().and_then(Held::fd) {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
@@ -1641,6 +1662,23 @@ impl Daemon {
         Ok(())
     }
 
+    /// Pane `id`, opened by `open`, is placed beside its origin once it has
+    /// its terminal id and its terminal has attached, whichever comes last.
+    pub(crate) fn place_opened(&mut self, id: u32) {
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return;
+        };
+        if p.terminal_surface.is_none() {
+            return;
+        }
+        let Some(t) = p.terminal.clone() else {
+            return;
+        };
+        if let Some(placing) = p.placing.take() {
+            self.act(placing.ask(t));
+        }
+    }
+
     /// The pane provider opened the terminal `ask` asked for, as `t`: link
     /// it to its pane, and focus it if its window is current.
     fn on_opened(&mut self, ask: Ask, t: TerminalId) -> Result<()> {
@@ -1655,6 +1693,7 @@ impl Daemon {
         let p = self.panes.by_id_mut(pane_id).unwrap();
         p.terminal = Some(t.clone());
         let handle = p.neovim_window_handle;
+        self.place_opened(pane_id);
         // a layout that came before the terminal's id placed it already
         if let Some(l) = self.live_layout.clone() {
             self.on_live_layout(l)?;
@@ -1671,7 +1710,7 @@ impl Daemon {
             }
         }
         match ask {
-            Ask::OpenBeside { .. } => {
+            Ask::Open { .. } | Ask::OpenBeside { .. } => {
                 if handle == Some(self.nvim.current_win) {
                     self.focus_terminal(Some(&t));
                 }
@@ -4944,6 +4983,75 @@ mod tests {
         assert_eq!(1002, fx.d.nvim.current_win);
     }
 
+    /// A daemon whose pane provider runs `argv` to focus, watched on its loop.
+    fn focusing_by(argv: &[&str]) -> Fixture {
+        use crate::providers::command::{CommandProvider, Spec, Template};
+        let spec = Spec {
+            name: "cmd".into(),
+            commands: vec![Template {
+                cap: Capability::Focus,
+                argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+                timeout: Duration::from_secs(5),
+                protocol: 1,
+            }],
+        };
+        let p = CommandProvider::new(spec, &[], b"/").unwrap();
+        let mut fx = with_provider(Some(Held::Command(Box::new(p))));
+        let fd = fx.d.provider.as_ref().and_then(Held::fd).unwrap();
+        fx.d.event_loop
+            .add_read(fd, Token::Provider as usize)
+            .unwrap();
+        fx.d.nvim.ready = true;
+        fx
+    }
+
+    #[test]
+    fn a_focus_commands_answer_comes_through_the_daemons_loop() {
+        let mut fx = focusing_by(&["/usr/bin/true"]);
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        fx.d.after_batch().unwrap();
+        assert_eq!(1, fx.d.asks.waiting());
+        let mut events = [Event::default(); 16];
+        let started = Instant::now();
+        while fx.d.asks.waiting() > 0 {
+            assert!(started.elapsed() < Duration::from_secs(5), "no answer");
+            let n = fx.d.event_loop.wait(&mut events).unwrap().len();
+            for &e in &events[..n] {
+                fx.d.handle(e).unwrap();
+            }
+            fx.d.after_batch().unwrap();
+        }
+        assert!(fx.d.focus.has_focused(&TerminalId::from("t2")));
+    }
+
+    #[test]
+    fn a_slow_focus_command_doesnt_delay_a_key() {
+        let mut fx = focusing_by(&["/bin/sleep", "3"]);
+        focus_pane(&mut fx, 1, 1000, Some("t1"));
+        let b = focus_pane(&mut fx, 2, 1001, Some("t2"));
+        fx.d.nvim.current_win = 1001;
+
+        // focus asked for t2: a command that takes 3 s
+        let started = Instant::now();
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        fx.d.after_batch().unwrap();
+        assert_eq!(1, fx.d.asks.waiting());
+        sent_to_nvim(&mut fx);
+        // keys typed meanwhile reach Neovim at once
+        for key in ["x", "y"] {
+            fx.d.on_keys(b, key.as_bytes()).unwrap();
+            fx.d.after_batch().unwrap();
+            let sent = sent_to_nvim(&mut fx);
+            assert!(
+                sent.contains("nvim_input") && sent.contains(key),
+                "{sent:?}"
+            );
+        }
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // still running
+        assert_eq!(1, fx.d.asks.waiting());
+    }
+
     #[test]
     fn keys_typed_while_a_focus_is_unanswered_go_to_the_current_window_and_a_click_moves() {
         let mut fx = focusing();
@@ -5171,6 +5279,76 @@ mod tests {
             assert_eq!(direction, dir);
             assert_eq!(0, sent.neorex_closes());
         }
+    }
+
+    #[test]
+    fn without_open_beside_a_new_window_is_opened_then_placed_once_it_has_its_id_and_attached() {
+        for id_first in [true, false] {
+            let f =
+                FakeProvider::with(&[Capability::Open, Capability::PlaceBeside, Capability::Close]);
+            let mut fx = with_provider(Some(Held::Fake(f)));
+            fake(&mut fx.d).unlaid = Some([80, 24]);
+            pane_in_block(&mut fx.d, 2, 0, 2);
+            note_split_from(&mut fx.d, 3, 2, true, false);
+            fx.d.new_pane(3).unwrap();
+            let new = fx.d.panes.by_win(3).unwrap();
+            // it waits for its layout, as one opened beside its origin does
+            assert!(new.awaiting_size);
+            let (id, pane) = (new.id, new.attach_id.unwrap());
+            let open_id = fake(&mut fx.d).last_id();
+            assert!(matches!(fake(&mut fx.d).asked()[..], [Ask::Open { .. }]));
+
+            let opened = |fx: &mut Fixture| {
+                fake(&mut fx.d).opened(open_id, "t9");
+                fx.d.drain_provider().unwrap();
+            };
+            let at = Address::new(&format!("open-place-{id_first}"));
+            let pty = Pty::new(80, 24);
+            if id_first {
+                opened(&mut fx);
+            }
+            assert_eq!(1, fake(&mut fx.d).asks.len(), "placed too soon");
+            // at the size of a terminal not laid out yet
+            let helper = at.send(&hello_for(pane, 80, 24), Some(pty.slave));
+            fx.d.accept(&at.server).unwrap();
+            let crate::attach::Message::Accept(_) = answer(&helper) else {
+                panic!("not accepted")
+            };
+            if !id_first {
+                assert_eq!(1, fake(&mut fx.d).asks.len(), "placed with no id");
+                opened(&mut fx);
+            }
+            assert!(fx.d.panes.by_id(id).unwrap().awaiting_size);
+            let asked = fake(&mut fx.d).asked();
+            let [
+                _,
+                Ask::PlaceBeside {
+                    terminal,
+                    origin,
+                    dir,
+                    ..
+                },
+            ] = &asked[..]
+            else {
+                panic!("not placed: {asked:?}")
+            };
+            assert_eq!(
+                ("t9", block_id(2).as_str(), Direction::Right),
+                (terminal.as_str(), origin.as_str(), *dir)
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_window_opened_by_open_alone_is_left_where_the_pane_provider_puts_it() {
+        let f = FakeProvider::with(&[Capability::Open, Capability::Close]);
+        let mut fx = with_provider(Some(Held::Fake(f)));
+        pane_in_block(&mut fx.d, 2, 0, 2);
+        note_split_from(&mut fx.d, 3, 2, true, false);
+        fx.d.new_pane(3).unwrap();
+        let p = fx.d.panes.by_win(3).unwrap();
+        assert_eq!(None, p.placing);
+        assert_eq!(vec!["open"], sent_by(fx).capabilities());
     }
 
     #[test]
