@@ -792,6 +792,16 @@ impl PaneView {
         &self.drawn_floats[0..self.drawn_floats_len as usize]
     }
 
+    /// The windows of a pane layout drawn last frame; none if it drew one
+    /// window, or only floats.
+    pub(crate) fn drawn_windows(&self) -> &[Shown] {
+        if self.drawn_grid == LAID_OUT_GRID {
+            &self.drawn_wins
+        } else {
+            &[]
+        }
+    }
+
     /// Draws just floats `placed`, moved up and left by `origin`, over a blank
     /// terminal: a group shown in a Rex floating pane. True if it wrote anything.
     pub(crate) fn frame_floats(

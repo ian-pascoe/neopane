@@ -7,8 +7,8 @@ use crate::daemon::pane::SelfAttach;
 
 /// The other ends of a pane's terminal and helper socket, held open so it
 /// can be drawn.
-struct Live {
-    pty: Pty,
+pub(super) struct Live {
+    pub(super) pty: Pty,
     helper: UnixStream,
 }
 
@@ -368,7 +368,7 @@ fn after_a_version_refusal_new_windows_are_drawn_in_their_origin_panes_until_the
 }
 
 /// Runs `d`'s loop, as `run` does, until `done`. Panics after 20 s.
-fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
+pub(super) fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
     const PUMP_TIMER: usize = usize::MAX;
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut events = [Event::default(); 16];
@@ -389,7 +389,7 @@ fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
 /// A daemon over a real Neovim started with `flag`, such as `-o3`, and
 /// `provider`, its first pane attached in terminal t0 and read: the daemon,
 /// the terminal's other ends, and its reader. None without Neovim.
-fn started_with(
+pub(super) fn started_with(
     flag: &str,
     provider: Option<Held>,
 ) -> Option<(Daemon, Live, std::thread::JoinHandle<()>)> {

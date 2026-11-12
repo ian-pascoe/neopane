@@ -73,7 +73,13 @@ pub(crate) struct Forwarder {
     /// events on one go to its grid. The first `targets_len` are in use.
     pub targets: [Target; MAX_TARGETS],
     pub targets_len: u8,
-    /// The float a button went down on: its drags and release go there too.
+    /// The windows of a pane layout as drawn, below the tabline, each without
+    /// a statusline neorex draws: mouse events under the floats go to the one
+    /// under them, and off them (on a separator, say) nowhere. Empty for a
+    /// pane showing one window, which `grid` takes them all for.
+    pub windows: Vec<Target>,
+    /// The float or window a button went down on: its drags and release go
+    /// there too.
     pub grab: Option<Target>,
     /// Off when the caller tells Neovim about focus itself, from `focused`.
     pub send_focus: bool,
@@ -95,6 +101,7 @@ impl Default for Forwarder {
             tabline_col: 0,
             targets: [Target::default(); MAX_TARGETS],
             targets_len: 0,
+            windows: Vec::new(),
             grab: None,
             send_focus: true,
             focused: None,
@@ -143,18 +150,25 @@ impl Forwarder {
         self.targets_len = n as u8;
     }
 
-    /// The grid a mouse event lands on, and where on it.
-    fn route(&mut self, event: input::Mouse) -> Route {
+    #[cfg(test)]
+    pub(crate) fn set_windows(&mut self, windows: &[Target]) {
+        self.windows.clear();
+        self.windows.extend_from_slice(windows);
+    }
+
+    /// The grid a mouse event lands on, and where on it; None off every
+    /// window of a pane layout.
+    fn route(&mut self, event: input::Mouse) -> Option<Route> {
         let held = event.action == MouseAction::Drag || event.action == MouseAction::Release;
         if event.row < self.tabline_rows && !(held && self.grab.is_some()) {
             if event.action == MouseAction::Release {
                 self.grab = None;
             }
-            return Route {
+            return Some(Route {
                 grid: 1,
                 row: event.row,
                 col: event.col.saturating_add(self.tabline_col),
-            };
+            });
         }
         let mut m = event;
         m.row = m.row.saturating_sub(self.tabline_rows);
@@ -162,14 +176,16 @@ impl Forwarder {
             self.grab
         } else {
             let (row, col) = (m.row as i64, m.col as i64);
+            let under = |t: &Target| {
+                row >= t.row as i64
+                    && row < t.row as i64 + t.height as i64
+                    && col >= t.col as i64
+                    && col < t.col as i64 + t.width as i64
+            };
             (0..self.targets_len as usize)
                 .map(|j| self.targets[self.targets_len as usize - 1 - j])
-                .find(|t| {
-                    row >= t.row as i64
-                        && row < t.row as i64 + t.height as i64
-                        && col >= t.col as i64
-                        && col < t.col as i64 + t.width as i64
-                })
+                .find(under)
+                .or_else(|| self.windows.iter().copied().find(under))
         };
         if m.action == MouseAction::Press
             && m.button != MouseButton::WheelUp
@@ -181,17 +197,20 @@ impl Forwarder {
             self.grab = None;
         }
         let Some(t) = hit else {
-            return Route {
+            if !self.windows.is_empty() {
+                return None;
+            }
+            return Some(Route {
                 grid: self.grid,
                 row: m.row,
                 col: m.col,
-            };
+            });
         };
-        Route {
+        Some(Route {
             grid: t.grid,
             row: (m.row as i64 - t.row as i64).clamp(0, u16::MAX as i64) as u16,
             col: (m.col as i64 - t.col as i64).clamp(0, u16::MAX as i64) as u16,
-        }
+        })
     }
 
     /// Sends the input in `bytes` to Neovim and flushes. `more` is false if
@@ -400,10 +419,11 @@ impl Forwarder {
                     if let Some(mut args) = MouseArgs::from(m) {
                         // keys typed before the click go first
                         result.sent_input |= send_keys(nvim, &mut keys)?;
-                        let to = self.route(m);
-                        args.row = to.row;
-                        args.col = to.col;
-                        args.send(nvim, to.grid);
+                        if let Some(to) = self.route(m) {
+                            args.row = to.row;
+                            args.col = to.col;
+                            args.send(nvim, to.grid);
+                        }
                     }
                 }
                 Event::Unknown(_) => {}
@@ -610,26 +630,90 @@ mod tests {
                 height: 1,
             },
         ]);
-        let off = f.route(mouse(MouseButton::Left, MouseAction::Press, 0, 0));
+        let off = f
+            .route(mouse(MouseButton::Left, MouseAction::Press, 0, 0))
+            .unwrap();
         assert_eq!(2, off.grid);
         assert_eq!(0, off.row);
         f.route(mouse(MouseButton::Left, MouseAction::Release, 0, 0));
 
-        let top = f.route(mouse(MouseButton::Left, MouseAction::Press, 2, 3));
+        let top = f
+            .route(mouse(MouseButton::Left, MouseAction::Press, 2, 3))
+            .unwrap();
         assert_eq!(4, top.grid);
         assert_eq!(0, top.row);
         assert_eq!(1, top.col);
         // dragged off it: still that grid, clamped
-        let drag = f.route(mouse(MouseButton::Left, MouseAction::Drag, 0, 9));
+        let drag = f
+            .route(mouse(MouseButton::Left, MouseAction::Drag, 0, 9))
+            .unwrap();
         assert_eq!(4, drag.grid);
         assert_eq!(0, drag.row);
         assert_eq!(7, drag.col);
         f.route(mouse(MouseButton::Left, MouseAction::Release, 0, 9));
         assert_eq!(None, f.grab);
 
-        let under = f.route(mouse(MouseButton::WheelDown, MouseAction::Press, 4, 1));
+        let under = f
+            .route(mouse(MouseButton::WheelDown, MouseAction::Press, 4, 1))
+            .unwrap();
         assert_eq!(3, under.grid);
         assert_eq!(3, under.row);
+    }
+
+    #[test]
+    fn mouse_events_in_a_pane_layout_go_to_the_window_under_them_and_off_them_nowhere() {
+        // two windows side by side under the tabline, a separator at column
+        // 5, and the left one's last row a statusline of neorex's
+        let mut f = Forwarder {
+            grid: 2,
+            tabline_rows: 1,
+            ..Forwarder::default()
+        };
+        let left = Target {
+            grid: 2,
+            row: 0,
+            col: 0,
+            width: 5,
+            height: 3,
+        };
+        let right = Target {
+            grid: 3,
+            row: 0,
+            col: 6,
+            width: 4,
+            height: 4,
+        };
+        f.set_windows(&[left, right]);
+        f.set_targets(&[Target {
+            grid: 9,
+            row: 3,
+            col: 7,
+            width: 2,
+            height: 1,
+        }]);
+        let press = |f: &mut Forwarder, row, col| {
+            let at = f.route(mouse(MouseButton::Left, MouseAction::Press, row, col));
+            f.route(mouse(MouseButton::Left, MouseAction::Release, row, col));
+            at.map(|r| (r.grid, r.row, r.col))
+        };
+        assert_eq!(Some((3, 1, 2)), press(&mut f, 2, 8));
+        assert_eq!(Some((2, 0, 4)), press(&mut f, 1, 4));
+        // the separator, the statusline neorex draws: no grid's
+        assert_eq!(None, press(&mut f, 2, 5));
+        assert_eq!(None, press(&mut f, 4, 1));
+        assert_eq!(None, f.grab);
+        // a float over a window first, the tabline as ever
+        assert_eq!(Some((9, 0, 1)), press(&mut f, 4, 8));
+        assert_eq!(Some((1, 0, 5)), press(&mut f, 0, 5));
+        // dragged across the separator: still the window pressed
+        f.route(mouse(MouseButton::Left, MouseAction::Press, 1, 2));
+        let drag = f.route(mouse(MouseButton::Left, MouseAction::Drag, 1, 7));
+        assert_eq!(Some((2, 0, 7)), drag.map(|r| (r.grid, r.row, r.col)));
+        f.route(mouse(MouseButton::Left, MouseAction::Release, 1, 7));
+        assert_eq!(None, f.grab);
+        // one window again: its grid takes them all
+        f.set_windows(&[]);
+        assert_eq!(Some((2, 1, 5)), press(&mut f, 2, 5));
     }
 
     #[test]
@@ -647,18 +731,24 @@ mod tests {
             width: 5,
             height: 1,
         }]);
-        let tab = f.route(mouse(MouseButton::Left, MouseAction::Press, 0, 3));
+        let tab = f
+            .route(mouse(MouseButton::Left, MouseAction::Press, 0, 3))
+            .unwrap();
         assert_eq!(1, tab.grid);
         assert_eq!(0, tab.row);
         assert_eq!(43, tab.col);
         f.route(mouse(MouseButton::Left, MouseAction::Release, 0, 3));
         // the window's first row is under the tabline
-        let win = f.route(mouse(MouseButton::Left, MouseAction::Press, 1, 7));
+        let win = f
+            .route(mouse(MouseButton::Left, MouseAction::Press, 1, 7))
+            .unwrap();
         assert_eq!(2, win.grid);
         assert_eq!(0, win.row);
         f.route(mouse(MouseButton::Left, MouseAction::Release, 1, 7));
         // floats are placed on the window's grid too
-        let float = f.route(mouse(MouseButton::WheelDown, MouseAction::Press, 2, 1));
+        let float = f
+            .route(mouse(MouseButton::WheelDown, MouseAction::Press, 2, 1))
+            .unwrap();
         assert_eq!(3, float.grid);
     }
 
@@ -677,8 +767,12 @@ mod tests {
             tabline_col: 60,
             ..Forwarder::default()
         };
-        let a = left.route(mouse(MouseButton::Left, MouseAction::Press, 0, 59));
-        let b = right.route(mouse(MouseButton::Left, MouseAction::Press, 0, 0));
+        let a = left
+            .route(mouse(MouseButton::Left, MouseAction::Press, 0, 59))
+            .unwrap();
+        let b = right
+            .route(mouse(MouseButton::Left, MouseAction::Press, 0, 0))
+            .unwrap();
         assert_eq!(1, a.grid);
         assert_eq!(1, b.grid);
         assert_eq!(59, a.col);

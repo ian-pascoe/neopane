@@ -18,6 +18,7 @@
 //! current window. Past that, the windows farthest from the current one are
 //! cut, until they become current.
 
+use super::provider::Direction;
 use crate::screen::pane_view::Separator;
 
 /// Which way a row or column runs.
@@ -342,6 +343,66 @@ impl PaneLayout {
         }
     }
 
+    /// `count` moves `dir` from window `from`, as `<C-w>h/j/k/l` makes them:
+    /// the window landed on, and how many moves were left at the layout's
+    /// edge. Into windows stacked across the way it goes, a move lands on the
+    /// one level with `at`, the cursor's cell (col, row) as laid out in `area`
+    /// with `from` current, as Neovim's does.
+    pub(crate) fn step(
+        &self,
+        from: i64,
+        dir: Direction,
+        count: u32,
+        area: [u32; 2],
+        at: [u32; 2],
+    ) -> (i64, u32) {
+        let Some(mut path) = path_to(&self.root, from) else {
+            return (from, count);
+        };
+        let (along, forward) = match dir {
+            Direction::Left => (Dir::Row, false),
+            Direction::Right => (Dir::Row, true),
+            Direction::Up => (Dir::Column, false),
+            Direction::Down => (Dir::Column, true),
+        };
+        let laid = self.lay_out(area, from);
+        let mut win = from;
+        for done in 0..count {
+            // the nearest row or column this way with a node past ours
+            let next = (0..path.len()).rev().find_map(|depth| {
+                let Node::Split(d, kids) = node_at(&self.root, &path[..depth]) else {
+                    unreachable!("a window's parent is a split");
+                };
+                let i = path[depth];
+                let i = match (*d == along, forward) {
+                    (false, _) => return None,
+                    (true, true) => (i + 1 < kids.len()).then_some(i + 1)?,
+                    (true, false) => i.checked_sub(1)?,
+                };
+                Some((depth, i))
+            });
+            let Some((depth, i)) = next else {
+                return (win, count - done);
+            };
+            path.truncate(depth);
+            path.push(i);
+            // down to a window: the nearest edge along, the cursor's level across
+            loop {
+                match node_at(&self.root, &path) {
+                    Node::Win(w) => {
+                        win = *w;
+                        break;
+                    }
+                    Node::Split(d, kids) if *d == along => {
+                        path.push(if forward { 0 } else { kids.len() - 1 });
+                    }
+                    Node::Split(d, kids) => path.push(level_with(kids, *d, &laid, at)),
+                }
+            }
+        }
+        (win, 0)
+    }
+
     /// The windows and separators in an area of `area` cells, cols x rows,
     /// with `current` the window that keeps a row of text and isn't cut.
     pub(crate) fn lay_out(&self, area: [u32; 2], current: i64) -> Laid {
@@ -409,6 +470,36 @@ fn even(node: &mut Node, dir: Dir) {
         }
         even(&mut k.node, dir);
     }
+}
+
+/// Of `kids`, a row or column running `dir` as laid out in `laid`, the one
+/// level with cell `at`: the first that reaches past it, else the last shown.
+fn level_with(kids: &[Kid], dir: Dir, laid: &Laid, at: [u32; 2]) -> usize {
+    let mut last = 0;
+    for (i, k) in kids.iter().enumerate() {
+        let mut wins = Vec::new();
+        collect(&k.node, &mut wins);
+        let end = wins
+            .iter()
+            .filter_map(|&w| laid.of(w))
+            .map(|p| match dir {
+                Dir::Row => p.col + p.cols,
+                Dir::Column => p.row + p.rows,
+            })
+            .max();
+        let Some(end) = end else {
+            continue;
+        };
+        let at = match dir {
+            Dir::Row => at[0],
+            Dir::Column => at[1],
+        };
+        if at < end {
+            return i;
+        }
+        last = i;
+    }
+    last
 }
 
 fn contains(node: &Node, win: i64) -> bool {
@@ -612,6 +703,50 @@ mod tests {
 
     const EQUAL: bool = true;
     const UNEVEN: bool = false;
+
+    #[test]
+    fn a_step_crosses_the_windows_that_way_and_gives_back_the_steps_past_the_edge() {
+        let mut l = PaneLayout::new(1);
+        l.split(2, 1, true, false, EQUAL);
+        l.split(3, 2, true, false, EQUAL);
+        let step = |from, dir, count| l.step(from, dir, count, [80, 10], [0, 0]);
+        assert_eq!((3, 0), step(1, Direction::Right, 2));
+        assert_eq!((3, 1), step(2, Direction::Right, 2));
+        assert_eq!((2, 0), step(3, Direction::Left, 1));
+        assert_eq!((1, 3), step(3, Direction::Left, 5));
+        // nothing above or below in a row
+        assert_eq!((2, 1), step(2, Direction::Up, 1));
+        assert_eq!((2, 4), step(2, Direction::Down, 4));
+        // a lone window is all edge
+        let lone = PaneLayout::new(7);
+        assert_eq!((7, 1), lone.step(7, Direction::Right, 1, [80, 10], [0, 0]));
+    }
+
+    #[test]
+    fn a_step_into_windows_stacked_across_its_way_lands_on_the_one_level_with_the_cursor() {
+        // 1 on the left, 2 above 3 on the right: rows 0-9 and 10-19
+        let mut l = PaneLayout::new(1);
+        l.split(2, 1, true, false, EQUAL);
+        l.split(3, 2, false, false, EQUAL);
+        let step = |from, dir, at| l.step(from, dir, 1, [80, 20], at);
+        assert_eq!((2, 0), step(1, Direction::Right, [5, 3]));
+        assert_eq!((3, 0), step(1, Direction::Right, [5, 15]));
+        assert_eq!((3, 0), step(1, Direction::Right, [5, 10]));
+        assert_eq!((1, 0), step(3, Direction::Left, [50, 15]));
+        assert_eq!((3, 0), step(2, Direction::Down, [50, 3]));
+        assert_eq!((2, 1), step(2, Direction::Up, [50, 3]));
+        // the cursor stays where it was across a count, as Neovim's does
+        assert_eq!((3, 1), l.step(2, Direction::Down, 2, [80, 20], [50, 3]));
+        // a column of windows side by side: down from above, into the one
+        // under the cursor's column
+        let mut l = PaneLayout::new(1);
+        l.split(2, 1, false, false, EQUAL);
+        l.split(3, 2, true, false, EQUAL);
+        let step = |from, dir, at| l.step(from, dir, 1, [80, 20], at);
+        assert_eq!((2, 0), step(1, Direction::Down, [10, 2]));
+        assert_eq!((3, 0), step(1, Direction::Down, [60, 2]));
+        assert_eq!((1, 0), step(3, Direction::Up, [60, 12]));
+    }
 
     #[test]
     fn a_vertical_split_puts_the_new_window_beside_with_a_separator_between() {

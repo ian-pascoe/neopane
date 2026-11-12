@@ -1314,9 +1314,11 @@ impl Daemon {
         p.layout_asked.clear();
     }
 
-    /// `<C-w>h/j/k/l`: the pane provider moves focus to the pane that way, if
-    /// any. It tells the new focus as the user's, and Neovim's current window
-    /// follows. Without `focus_direction`, nothing moves.
+    /// `<C-w>h/j/k/l`: in a pane laying out several windows, the move steps
+    /// across them first. The pane provider moves focus the rest of the way,
+    /// to the pane that way, if any. It tells the new focus as the user's, and
+    /// Neovim's current window follows. Without `focus_direction`, a move
+    /// stops at the pane's edge.
     fn on_direction(&mut self, m: windows::Move) -> Result<()> {
         let dir = match m.dir {
             windows::Direction::Left => Direction::Left,
@@ -1324,15 +1326,48 @@ impl Daemon {
             windows::Direction::Up => Direction::Up,
             windows::Direction::Right => Direction::Right,
         };
+        let count = self.step_in_layout(dir, m.count.max(1))?;
         let p = self.provider.as_ref().map(Held::seam_ref);
-        if !self.asks.may_ask(p, Capability::FocusDirection) {
+        if count == 0 || !self.asks.may_ask(p, Capability::FocusDirection) {
             return Ok(());
         }
         self.act(Ask::FocusDirection {
             dir,
-            count: m.count.clamp(1, MAX_DIRECTION_COUNT),
+            count: count.min(MAX_DIRECTION_COUNT),
         });
         Ok(())
+    }
+
+    /// Moves Neovim's current window `count` windows `dir` across its pane's
+    /// layout, as far as it goes. The moves left at the pane's edge.
+    fn step_in_layout(&mut self, dir: Direction, count: u32) -> Result<u32> {
+        let win = self.nvim.current_win;
+        let Some(p) = self.panes.by_win(win) else {
+            return Ok(count);
+        };
+        let Some(layout) = &p.layout else {
+            return Ok(count);
+        };
+        let area = self.geometry().window_size(p);
+        // the cursor's cell in the pane, where Neovim last put it in the window
+        let at = match (layout.lay_out(area, win).of(win), self.grids.grid_of(win)) {
+            (Some(w), Some(grid)) => {
+                let g = self.grids.get(grid);
+                let [row, col] = g.map_or([0, 0], |g| [g.cursor_row, g.cursor_col]);
+                [w.col + col.min(w.cols), w.row + row.min(w.rows)]
+            }
+            _ => [0, 0],
+        };
+        let (to, left) = layout.step(win, dir, count, area, at);
+        if to != win {
+            let id = p.id;
+            self.panes.by_id_mut(id).unwrap().neovim_window_handle = Some(to);
+            self.make_current(id)?;
+            self.size_window(id);
+            self.nvim.client.flush()?;
+            self.draw()?;
+        }
+        Ok(left)
     }
 
     /// A float became current: if it's in a floating pane, focus that.
@@ -2424,6 +2459,7 @@ impl Daemon {
             // the floats of the frame last drawn: unchanged while frames are
             // held back, as no frame is built
             set_targets(&mut s.forwarder, s.view.drawn_floats());
+            set_windows(&mut s.forwarder, s.view.drawn_windows());
             if !drawn {
                 continue;
             }
@@ -2760,6 +2796,19 @@ fn set_targets(f: &mut Forwarder, rects: &[Rect]) {
     f.set_targets(&targets);
 }
 
+/// Mouse events on the windows of a pane layout drawn go to their grids, a
+/// statusline neorex draws no grid's.
+fn set_windows(f: &mut Forwarder, shown: &[Shown]) {
+    f.windows.clear();
+    f.windows.extend(shown.iter().map(|s| forwarder::Target {
+        grid: s.grid,
+        row: s.row as i32,
+        col: s.col as i32,
+        width: s.cols,
+        height: s.rows.saturating_sub(u32::from(s.statusline.is_some())),
+    }));
+}
+
 #[cfg(test)]
 mod slow_terminal_tests;
 
@@ -2782,6 +2831,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     mod fallback;
+    mod in_layout;
 
     /// A daemon with no Neovim behind it, only a socket that nothing
     /// answers, and a fake pane provider that can open and close.
