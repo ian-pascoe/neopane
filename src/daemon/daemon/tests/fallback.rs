@@ -3,34 +3,35 @@
 
 use super::*;
 use crate::attach::{Ending, Hello, Message, Purpose, Refusal};
+use crate::daemon::pane::SelfAttach;
 
 /// The other ends of a pane's terminal and helper socket, held open so it
 /// can be drawn.
 struct Live {
-    _pty: Pty,
-    _helper: UnixStream,
+    pty: Pty,
+    helper: UnixStream,
+}
+
+/// A terminal of `cols` x `rows` handed over on a helper's socket, as an
+/// attach brings it, and its other ends.
+fn attached_surface(cols: u16, rows: u16) -> (Box<Surface>, Live) {
+    let pty = Pty::new(cols, rows);
+    let (socket, helper) = UnixStream::pair().unwrap();
+    // SAFETY: a copy of the pty's slave, for the surface to own.
+    let slave = unsafe { libc::dup(pty.slave) };
+    let cells = crate::daemon::surface::cells(cols, rows);
+    (Surface::create(socket, slave, cells), Live { pty, helper })
 }
 
 /// Pane `id` of window `win`, drawn, its terminal `terminal`, attached and
 /// drawn into. Its id, and its terminal's other ends.
 fn live_pane(fx: &mut Fixture, id: u32, win: i64, terminal: Option<&str>) -> (u32, Live) {
     draw_external(&mut fx.d, id + 2, win, 80, 23);
-    let pty = Pty::new(80, 24);
-    let (socket, helper) = UnixStream::pair().unwrap();
-    // SAFETY: a copy of the pty's slave, for the surface to own.
-    let slave = unsafe { libc::dup(pty.slave) };
+    let (surface, live) = attached_surface(80, 24);
     let mut p = Pane::from_neovim_window(id, win);
-    p.terminal_surface = Some(Surface::create(
-        socket,
-        slave,
-        crate::daemon::surface::cells(80, 24),
-    ));
+    p.terminal_surface = Some(surface);
     p.terminal = terminal.map(TerminalId::from);
     p.area = Area::Own;
-    let live = Live {
-        _pty: pty,
-        _helper: helper,
-    };
     (fx.d.panes.add(p).id, live)
 }
 
@@ -230,18 +231,17 @@ fn a_self_attached_panes_last_window_closing_ends_its_attach_and_closes_no_termi
     let mut fx = fixture();
     fx.d.nvim.ready = true;
     let _origin = live_pane(&mut fx, 50, 1000, Some("t1"));
-    let pty = Pty::new(80, 24);
-    let (socket, helper) = UnixStream::pair().unwrap();
-    // SAFETY: a copy of the pty's slave, for the surface to own.
-    let slave = unsafe { libc::dup(pty.slave) };
-    let surface = Surface::create(socket, slave, crate::daemon::surface::cells(80, 24));
-    let mut launcher = Pane::startup(Some(TerminalId::from("t0")), surface);
-    launcher.neovim_window_handle = Some(1001);
-    fx.d.panes.add(launcher);
+    let (surface, live) = attached_surface(80, 24);
+    let terminal = Some(TerminalId::from("t0"));
+    let id =
+        fx.d.panes
+            .add_self_attached(SelfAttach { surface, terminal })
+            .id;
+    fx.d.panes.by_id_mut(id).unwrap().neovim_window_handle = Some(1001);
 
     fx.d.reconcile().unwrap();
-    assert!(fx.d.panes.by_id(STARTUP_PANE_ID).is_none());
-    let said = crate::daemon::attach_conn::read_all_frames(&helper);
+    assert!(fx.d.panes.by_id(id).is_none());
+    let said = crate::daemon::attach_conn::read_all_frames(&live.helper);
     let Some(Message::End(z)) = said.last() else {
         panic!("{said:?}")
     };
@@ -379,10 +379,10 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
             String::new(),
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
-        let pty = Pty::new(120, 40);
+        let (surface, live) = attached_surface(120, 40);
         // what the daemon draws, read so it never waits
         // SAFETY: a copy of the pty's master, for the reader to own.
-        let master = unsafe { libc::dup(pty.master) };
+        let master = unsafe { libc::dup(live.pty.master) };
         let reader = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             // SAFETY: `buf` is valid for its length.
@@ -390,11 +390,9 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
             // SAFETY: the reader's copy.
             unsafe { libc::close(master) };
         });
-        let (socket, _helper) = UnixStream::pair().unwrap();
-        // SAFETY: a copy of the pty's slave, for the surface to own.
-        let slave = unsafe { libc::dup(pty.slave) };
-        let surface = Surface::create(socket, slave, crate::daemon::surface::cells(120, 40));
-        d.start(Pane::startup(None, surface)).unwrap();
+        let terminal = None;
+        d.start(&mut Some(SelfAttach { surface, terminal }))
+            .unwrap();
 
         pump(&mut d, |d| {
             d.nvim.ready
@@ -419,7 +417,7 @@ fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_
             }
         }
         drop(d);
-        drop(pty);
+        drop(live);
         reader.join().unwrap();
     }
 }
