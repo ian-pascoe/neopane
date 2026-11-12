@@ -290,6 +290,7 @@ impl Daemon {
         log::trace_at(Point::Hello, u64::from(id), at);
         log::trace(Point::Accepted, u64::from(id));
         pane.register_with(&self.event_loop)?;
+        self.attached_again();
         self.wait_for_report(id, Instant::now())?;
         self.give_windows()?;
         self.draw()?;

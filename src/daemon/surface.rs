@@ -156,11 +156,15 @@ impl Surface {
     /// A surface over a throwaway pty of `cols` x `rows`, for tests of what
     /// holds one. Nothing reads what it draws.
     pub(crate) fn for_test(cols: u32, rows: u32) -> Box<Surface> {
-        let (master, slave) = open_pty(cols as u16, rows as u16);
+        // a terminal that takes every frame, so drawing never hangs it up
+        let null = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
         let (socket, _other) = UnixStream::pair().unwrap();
-        let mut surface = Surface::create(socket, slave, cells(cols as u16, rows as u16));
-        // SAFETY: closing the pty's master, which nothing else holds.
-        unsafe { libc::close(master) };
+        let tty = std::os::fd::IntoRawFd::into_raw_fd(null);
+        let mut surface = Surface::create(socket, tty, cells(cols as u16, rows as u16));
         surface.writer.clear();
         surface.view = PaneView::init(cols, rows);
         surface

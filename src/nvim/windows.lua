@@ -16,6 +16,9 @@ end
 local anchors = {}
 -- the window last reported as current
 local last
+-- the buffer a window a pane could show showed last, for a new window
+-- once none is left
+local last_buf
 -- tab page made after setup -> { back = the window current before it }.
 -- Its windows show in a tab page area, and it closes with the last.
 -- The record also holds its window layout, as the daemon is told of it, and
@@ -669,6 +672,13 @@ function M.show(win, w, h)
   return win
 end
 
+api.nvim_create_autocmd({ 'BufEnter', 'WinEnter' }, {
+  group = group,
+  callback = function()
+    if shown(api.nvim_get_current_win()) then last_buf = api.nvim_get_current_buf() end
+  end,
+})
+
 --- A self-attached pane's new window, external at `w` x `h` and current, in
 --- the current tab page: on `file`, if given, its cursor on `line`, else on
 --- the buffer the current window shows, as :split opens it. Returns it.
@@ -677,7 +687,9 @@ function M.open(file, line, w, h)
   if line == vim.NIL then line = nil end
   local cur = api.nvim_get_current_win()
   if not shown(cur) and last and shown(last) then cur = last end
-  local buf = shown(cur) and api.nvim_win_get_buf(cur) or api.nvim_create_buf(true, false)
+  local buf = shown(cur) and api.nvim_win_get_buf(cur)
+  if not buf and last_buf and api.nvim_buf_is_valid(last_buf) then buf = last_buf end
+  buf = buf or api.nvim_create_buf(true, false)
   local view = shown(cur) and api.nvim_win_call(cur, vim.fn.winsaveview)
   -- made with no autocommands, so it's noted before one can flush a redraw
   -- that shows it: its pane is the one that asked. WinNew, then entering

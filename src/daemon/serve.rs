@@ -3,8 +3,9 @@
 //! an ordinary self-attach, which chooses the pane provider from its hello,
 //! then runs Neovim under `--embed`, sized to it, speaking RPC over its stdin
 //! and stdout, and shows its windows in panes (see `Daemon`). Exits when
-//! Neovim does or the last pane goes away; a self-attach then exits with
-//! Neovim's status.
+//! Neovim does, or the last pane goes away with nothing unsaved (ADR 0003);
+//! a self-attach then exits with Neovim's status. Attaches that come while
+//! Neovim ends are refused as `stopping`.
 //!
 //! Teardown is by values whose `Drop` does it, declared in the order they
 //! must end: the daemon (its panes, then the loop, the pane provider and
@@ -247,6 +248,9 @@ const NVIM_EXIT_GRACE: Duration = Duration::from_secs(3);
 /// sent SIGHUP. One that's exiting ends within milliseconds of closing it.
 const NVIM_EXITING: Duration = Duration::from_millis(500);
 
+/// How long an attach refused as the daemon ends has for its hello.
+const STOPPING_HELLO: Duration = Duration::from_millis(500);
+
 /// How much of Neovim's stderr is kept for the reason a start failed.
 const STDERR_HEAD: usize = 4096;
 
@@ -294,6 +298,30 @@ impl NvimChild {
         // SAFETY: signalling our own child, which hasn't been reaped.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP) };
         None
+    }
+
+    /// Waits up to `grace` for Neovim, whose channel has closed, to end,
+    /// refusing attaches on `server` meanwhile as `stopping`. Dropping kills
+    /// one that hasn't.
+    fn wait_refusing(&mut self, server: &UnixListener) {
+        let deadline = Instant::now() + self.grace;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            refuse_stopping(
+                server,
+                left.clamp(Duration::from_millis(100), STOPPING_HELLO),
+            );
+            if !matches!(self.child.try_wait(), Ok(None)) || left.is_zero() {
+                return;
+            }
+            let mut fds = [libc::pollfd {
+                fd: server.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            // SAFETY: one valid pollfd.
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, 10) };
+        }
     }
 
     /// Why a Neovim that closed the channel before it answered failed to
@@ -595,7 +623,29 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         // the self-attached panes' helpers exit with Neovim's status
         d.quit_status = child.closed_by_nvim();
     }
+    // ending Neovim has begun: the panes hang up and the channel closes,
+    // and every attach until Neovim has ended is refused
+    drop(d);
+    child.wait_refusing(&server);
     Ok(())
+}
+
+/// Refuses the attaches waiting on `server` as `stopping`, each once its
+/// hello has come, so its helper reads the refusal, or after `within`.
+fn refuse_stopping(server: &UnixListener, within: Duration) {
+    let _ = server.set_nonblocking(true);
+    while let Ok((stream, _)) = server.accept() {
+        let Ok(Some(pending)) = Pending::new(stream, within, euid()) else {
+            continue;
+        };
+        if let Step::Arrived(a) = pending.read_blocking() {
+            log_info!("{NAME} daemon: refused an attach: ending");
+            attach_conn::refuse(
+                a.stream,
+                End::refusal(Refusal::Stopping, "the daemon is ending"),
+            );
+        }
+    }
 }
 
 /// Starts Neovim, and the daemon over it, which takes the `first` attach
@@ -625,6 +675,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     // requested panes' helpers relay too under the diagnostic
     d.transport = config.transport;
     d.log = dir.log();
+    d.unsaved_file = Some(dir.unsaved());
     d.first_choice = Some(chosen);
     d.start(first)?;
     Ok((child, d))
