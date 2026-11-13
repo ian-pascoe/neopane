@@ -53,7 +53,15 @@ fn run(command: Command) -> Result<ExitCode> {
             }
         }
         Command::ProviderTypes { config } => Ok(write_types(config)),
-        Command::ProviderCheck(options) => {
+        Command::ProviderCheck(c) => {
+            let options = neopane::providers::check::Options {
+                config: c.config,
+                provider: c.provider,
+                daemon_name: c.daemon_name,
+                no_find: c.no_find,
+                full: c.full,
+                json: c.json,
+            };
             let checked = neopane::providers::check::run(&options);
             let code = print(&checked.out);
             Ok(if checked.status == 0 {

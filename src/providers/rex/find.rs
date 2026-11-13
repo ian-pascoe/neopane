@@ -29,6 +29,24 @@ pub(crate) enum Verdict {
     Unprovable(String),
 }
 
+/// What a `find` came to, and the terminal of the Rex block's child, if
+/// the system says: `provider check` names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub verdict: Verdict,
+    pub theirs: Option<u64>,
+}
+
+/// The device of the controlling terminal of the Rex block's child, in
+/// Rex's answer to `terminal.process`, if the system says.
+pub(crate) fn child_tty(result: &ResponseResult, tty_of_pid: TtyOfPid) -> Option<u64> {
+    let ResponseResult::Ok(ok) = result else {
+        return None;
+    };
+    let pid = client::get_int(client::get(ok, "child"), "pid")?;
+    tty_of_pid(u32::try_from(pid).ok()?)
+}
+
 /// The block `REX_BLOCK` names in `env`, the `find` variables' values, or
 /// why it names none: out of reach.
 pub(crate) fn block_in(env: &[(Vec<u8>, Vec<u8>)]) -> Result<String, String> {

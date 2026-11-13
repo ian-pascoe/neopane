@@ -817,13 +817,7 @@ pub(crate) fn size_of(tty: RawFd) -> io::Result<Size> {
 /// What the hello says of terminal `tty`: its size and device, and this
 /// process's pid, environment and working directory.
 fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
-    let mut env: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (k, v) in std::env::vars_os() {
-        let k = k.as_bytes().to_vec();
-        if !env.iter().any(|(seen, _)| *seen == k) {
-            env.push((k, v.as_bytes().to_vec()));
-        }
-    }
+    let env = environment();
     Ok(Terminal {
         transport,
         size: size_of(tty)?,
@@ -834,6 +828,18 @@ fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
             .map(|d| d.as_os_str().as_bytes().to_vec())
             .unwrap_or_default(),
     })
+}
+
+/// This process's environment, as a hello sends it: raw, each name once.
+pub(crate) fn environment() -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut env: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        let k = k.as_bytes().to_vec();
+        if !env.iter().any(|(seen, _)| *seen == k) {
+            env.push((k, v.as_bytes().to_vec()));
+        }
+    }
+    env
 }
 
 /// The pane provider a self-attach hints at: `given`, `--provider P`, else
@@ -848,7 +854,7 @@ pub fn provider_hint(given: Option<&OsStr>) -> Option<String> {
 }
 
 /// The terminal's device path; empty if it has none.
-fn tty_name(tty: RawFd) -> Vec<u8> {
+pub(crate) fn tty_name(tty: RawFd) -> Vec<u8> {
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is valid for its length.
     let r = unsafe { libc::ttyname_r(tty, buf.as_mut_ptr().cast(), buf.len()) };

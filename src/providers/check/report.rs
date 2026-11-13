@@ -9,11 +9,12 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use super::find::{Answered, Find, exit_of};
-use super::rex::{RexReport, RexVerdict};
+use super::rex::RexReport;
 use super::{Check, ConfigState, How, Verdict};
 use crate::config::check::{Problem, Severity};
 use crate::config::{Builtin, Capability, Choice, Provider};
 use crate::name::NAME;
+use crate::providers::rex::find::{BLOCK_VAR, Verdict as RexVerdict};
 use crate::util::seconds;
 
 /// The widest line shown without `--full`, in columns.
@@ -47,12 +48,93 @@ impl Role {
         }
     }
 
+    /// Whether its table lists capability `cap`: one it gives, a one-step
+    /// one on a terminal side (absent from a pair), or one ignored.
+    fn lists(self, cap: Capability, ignored: bool) -> bool {
+        self.uses(cap) || (self == Role::Terminal && cap.is_one_step()) || ignored
+    }
+
     fn gives_layout(self) -> bool {
         self != Role::Terminal
     }
 
     fn gives_terminals(self) -> bool {
         self != Role::Layout
+    }
+}
+
+/// What a pair is: both sides, or one alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairKind {
+    Both,
+    TerminalAlone,
+    LayoutAlone,
+}
+
+impl PairKind {
+    fn of(pair: &crate::config::Pair) -> PairKind {
+        match (&pair.terminal, &pair.layout) {
+            (Some(_), Some(_)) => PairKind::Both,
+            (Some(_), None) => PairKind::TerminalAlone,
+            _ => PairKind::LayoutAlone,
+        }
+    }
+
+    /// As the JSON's `chose.kind` says it.
+    fn name(self) -> &'static str {
+        match self {
+            PairKind::Both => "pair",
+            PairKind::TerminalAlone => "terminal",
+            PairKind::LayoutAlone => "layout",
+        }
+    }
+
+    /// As the report's `chose` line says it.
+    fn text(self) -> &'static str {
+        match self {
+            PairKind::Both => "a pair",
+            PairKind::TerminalAlone => "a terminal side alone",
+            PairKind::LayoutAlone => "a layout side alone",
+        }
+    }
+}
+
+/// How a table keeps a live layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveLayout {
+    Events,
+    ReportLayout,
+    No,
+}
+
+impl LiveLayout {
+    fn of(p: &Provider) -> LiveLayout {
+        match (
+            p.capability(Capability::ReportLayout).is_some(),
+            p.capability(Capability::Events).is_some(),
+        ) {
+            (true, true) => LiveLayout::Events,
+            (true, false) => LiveLayout::ReportLayout,
+            (false, _) => LiveLayout::No,
+        }
+    }
+
+    /// As the JSON says it.
+    fn name(self) -> &'static str {
+        match self {
+            LiveLayout::Events => "events",
+            LiveLayout::ReportLayout => "report_layout",
+            LiveLayout::No => "no",
+        }
+    }
+
+    /// As the report's `live layout` line says it.
+    fn text(self) -> &'static str {
+        match self {
+            LiveLayout::Events => "yes: report_layout and events",
+            LiveLayout::ReportLayout => "yes: report_layout (read after each act)",
+            LiveLayout::No => "no: each pane is its own layout area",
+        }
     }
 }
 
@@ -195,20 +277,19 @@ fn chose_line(choice: &Choice, how: How) -> String {
         Choice::Builtin(b) => format!("\"{}\", built in", b.name()),
         Choice::Whole(p) => format!("a table, {}, at {}", p.name, p.path),
         Choice::Pair(pair) => {
-            let kind = match (&pair.terminal, &pair.layout) {
-                (Some(_), Some(_)) => "a pair",
-                (Some(_), None) => "a terminal side alone",
-                _ => "a layout side alone",
-            };
-            format!("{kind}, {}, at provider()", pair.name)
+            format!(
+                "{}, {}, at provider()",
+                PairKind::of(pair).text(),
+                pair.name
+            )
         }
     };
     format!("chose  {what}, {by}")
 }
 
-/// What falls back for capability `cap` when it is absent from a table
-/// whose other capabilities are `p`'s.
-fn fallback(cap: Capability, p: &Provider) -> &'static str {
+/// What does without capability `cap` when it is absent; `report_layout`
+/// whether the table reads the layout.
+fn fallback(cap: Capability, report_layout: bool) -> &'static str {
     match cap {
         Capability::Open => "new windows are drawn in the pane they were opened from",
         Capability::Close => "a terminal it opened closes only as its attach ends",
@@ -220,9 +301,7 @@ fn fallback(cap: Capability, p: &Provider) -> &'static str {
         Capability::Focus => "Neovim's current window doesn't focus its terminal",
         Capability::FocusDirection => "a move stops at the pane's edge",
         Capability::ReportLayout => "each pane is its own layout area",
-        Capability::Events if p.capability(Capability::ReportLayout).is_some() => {
-            "the layout is read after each act"
-        }
+        Capability::Events if report_layout => "the layout is read after each act",
         Capability::Events => "no live layout",
         Capability::OpenBeside => "open, then place_beside",
         Capability::OpenFloat => "float groups are drawn in panes",
@@ -253,21 +332,27 @@ fn state<'a>(cap: Capability, p: &'a Provider, c: &'a Check) -> State<'a> {
     } else if let Some(why) = ignored(cap, p, c) {
         State::Ignored(why)
     } else {
-        State::Absent(fallback(cap, p))
+        let report_layout = p.capability(Capability::ReportLayout).is_some();
+        State::Absent(fallback(cap, report_layout))
     }
 }
 
+/// The capabilities table `p`, used as `role`, lists, in #93's order.
+fn listed<'a>(p: &'a Provider, role: Role, c: &'a Check) -> impl Iterator<Item = Capability> + 'a {
+    Capability::ALL
+        .into_iter()
+        .filter(move |&cap| role.lists(cap, ignored(cap, p, c).is_some()))
+}
+
 fn table_lines(p: &Provider, role: Role, c: &Check, full: bool) -> Vec<String> {
-    let label = match role {
-        Role::Whole => "table",
-        Role::Terminal => "terminal",
-        Role::Layout => "layout",
-    };
     let mut lines = vec![format!(
-        "{label}  {} at {}, protocol {}",
-        p.name, p.path, p.protocol
+        "{}  {} at {}, protocol {}",
+        role.name(),
+        p.name,
+        p.path,
+        p.protocol
     )];
-    for cap in Capability::ALL.into_iter().filter(|&cap| role.uses(cap)) {
+    for cap in listed(p, role, c) {
         let name = cap.name();
         lines.push(match state(cap, p, c) {
             State::Present(command) => {
@@ -284,7 +369,7 @@ fn table_lines(p: &Provider, role: Role, c: &Check, full: bool) -> Vec<String> {
         });
     }
     if role.gives_layout() {
-        lines.push(format!("  live layout  {}", live_layout_text(p)));
+        lines.push(format!("  live layout  {}", LiveLayout::of(p).text()));
     }
     if role.gives_terminals() {
         let default = if p.attach_timeout == crate::config::check::ATTACH_TIMEOUT {
@@ -324,26 +409,6 @@ fn table_lines(p: &Provider, role: Role, c: &Check, full: bool) -> Vec<String> {
 /// This attach's value of variable `name`.
 fn value_of(c: &Check, name: &str) -> Option<String> {
     crate::attach::env_value(&c.attach.env, name).map(|v| String::from_utf8_lossy(v).into_owned())
-}
-
-/// How table `p` keeps a live layout.
-fn live_layout(p: &Provider) -> &'static str {
-    match (
-        p.capability(Capability::ReportLayout).is_some(),
-        p.capability(Capability::Events).is_some(),
-    ) {
-        (true, true) => "events",
-        (true, false) => "report_layout",
-        (false, _) => "no",
-    }
-}
-
-fn live_layout_text(p: &Provider) -> &'static str {
-    match live_layout(p) {
-        "events" => "yes: report_layout and events",
-        "report_layout" => "yes: report_layout (read after each act)",
-        _ => "no: each pane is its own layout area",
-    }
 }
 
 /// An argv on one line, each word as a shell would read it back.
@@ -398,10 +463,9 @@ fn rex_lines(r: &RexReport) -> Vec<String> {
     if let Some(rev) = r.api_revision {
         lines.push(format!("  api revision  {rev}"));
     }
-    for (cap, needs) in &r.missing {
+    if let (Some(needs), Some(has)) = (r.missing, r.api_revision) {
         lines.push(format!(
-            "  missing  {} (needs Rex API revision {needs})",
-            cap.name()
+            "  missing  every capability (needs Rex API revision {needs}, this server has {has})"
         ));
     }
     if let Some(e) = &r.error {
@@ -415,7 +479,7 @@ fn find_text(f: &Find) -> String {
         |t: &Duration, title: &str| format!("{}, title {title} written, then restored", took(*t));
     match f {
         Find::NotRun(why) => format!("not run: {why}"),
-        Find::Absent => format!("absent: {}", fallback_find()),
+        Find::Absent => format!("absent: {}", fallback(Capability::Find, false)),
         Find::Ran {
             title,
             took,
@@ -433,21 +497,18 @@ fn find_text(f: &Find) -> String {
                 seconds(*t)
             ),
         },
-        Find::Rex { block, verdict, .. } => match verdict {
-            RexVerdict::Proven => format!("proven: {block} is this terminal's"),
-            RexVerdict::Disproved(why) => format!("disproved: {why}"),
-            RexVerdict::Unprovable(why) => {
-                format!(
-                    "unprovable: {why}; trusted {}",
-                    crate::providers::rex::find::BLOCK_VAR
-                )
-            }
+        Find::Rex {
+            block,
+            verdict,
+            theirs,
+            ..
+        } => match (verdict, theirs) {
+            (RexVerdict::Proven, _) => format!("proven: {block} is this terminal's"),
+            (RexVerdict::Disproved(why), Some(tty)) => format!("disproved: {why} ({tty})"),
+            (RexVerdict::Disproved(why), None) => format!("disproved: {why}"),
+            (RexVerdict::Unprovable(why), _) => format!("unprovable: {why}; trusted {BLOCK_VAR}"),
         },
     }
-}
-
-fn fallback_find() -> &'static str {
-    "the choice is accepted, with no id"
 }
 
 fn result_text(v: &Verdict) -> String {
@@ -547,25 +608,18 @@ fn chose_json(choice: &Choice, how: How) -> Value {
         Choice::None => ("none", None, None),
         Choice::Builtin(b) => ("builtin", Some(b.name().to_string()), None),
         Choice::Whole(p) => ("table", Some(p.name.clone()), Some(p.path.clone())),
-        Choice::Pair(pair) => {
-            let kind = match (&pair.terminal, &pair.layout) {
-                (Some(_), Some(_)) => "pair",
-                (Some(_), None) => "terminal",
-                _ => "layout",
-            };
-            (
-                kind,
-                Some(pair.name.clone()),
-                Some("provider()".to_string()),
-            )
-        }
+        Choice::Pair(pair) => (
+            PairKind::of(pair).name(),
+            Some(pair.name.clone()),
+            Some("provider()".to_string()),
+        ),
     };
     json!({ "kind": kind, "name": name, "path": path, "how": how })
 }
 
 fn table_json(p: &Provider, role: Role, c: &Check) -> Value {
     let mut caps = Map::new();
-    for cap in Capability::ALL.into_iter().filter(|&cap| role.uses(cap)) {
+    for cap in listed(p, role, c) {
         let v = match state(cap, p, c) {
             State::Present(command) => json!({
                 "state": "present",
@@ -601,7 +655,7 @@ fn table_json(p: &Provider, role: Role, c: &Check) -> Value {
         "protocol": p.protocol,
         "capabilities": caps,
         "settings": settings,
-        "live_layout": if role.gives_layout() { json!(live_layout(p)) } else { Value::Null },
+        "live_layout": role.gives_layout().then(|| LiveLayout::of(p).name()),
         "context_vars": context,
         "find_vars": p.find_vars,
     })
@@ -615,7 +669,12 @@ fn find_json(f: &Find) -> Value {
     };
     let (title, exit, took, why) = match f {
         Find::NotRun(why) => (None, None, None, Some(why.clone())),
-        Find::Absent => (None, None, None, Some(fallback_find().to_string())),
+        Find::Absent => (
+            None,
+            None,
+            None,
+            Some(fallback(Capability::Find, false).to_string()),
+        ),
         Find::Ran {
             title,
             took,
@@ -659,10 +718,11 @@ fn rex_json(r: &RexReport, f: &Find) -> Value {
         }),
         _ => Value::Null,
     };
+    // every capability: Rex doesn't say which revision each came in
     let missing: Vec<Value> = r
         .missing
         .iter()
-        .map(|(cap, needs)| json!({ "capability": cap.name(), "needs": needs }))
+        .map(|needs| json!({ "capability": null, "needs": needs }))
         .collect();
     json!({
         "server": r.server,

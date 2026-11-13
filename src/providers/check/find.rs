@@ -1,23 +1,24 @@
 //! `provider check`'s `find`, run as a self-attach here would (#93
 //! decision 30): the pane title `<name>-<token>` written into this
-//! terminal, the chosen pane provider's `find` run with the pane id
-//! `0-<token>` by the command runner, then the old title put back, or
-//! cleared where the terminal keeps none. Nothing else is run.
+//! terminal, the chosen pane provider's `find` asked with the pane id
+//! `0-<token>`, through the pane provider seam, then the old title put
+//! back, or cleared where the terminal keeps none. Nothing else is asked.
 
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
-use super::rex::RexVerdict;
 use crate::attach::PaneId;
 use crate::config::{Attach, Choice};
+use crate::daemon::pane_helper::tty_name;
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, Outcome, PaneProvider, ProviderEvent,
 };
 use crate::name::NAME;
 use crate::providers::command::{CommandProvider, Spec};
+use crate::providers::rex::find::Verdict;
 use crate::term::modes::{TITLE_POP, TITLE_PUSH};
-use crate::util::seconds;
+use crate::util::{seconds, wait_readable};
 
 /// This process's terminal: stdin, if it is one.
 #[derive(Debug)]
@@ -36,15 +37,7 @@ pub(super) fn stdin_tty() -> Option<Tty> {
         return None;
     }
     let fd = std::io::stdin().as_fd().try_clone_to_owned().ok()?;
-    let mut buf = [0u8; 256];
-    // SAFETY: `buf` is valid for its length.
-    let r = unsafe { libc::ttyname_r(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-    let path = if r == 0 {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf[..end].to_vec()
-    } else {
-        Vec::new()
-    };
+    let path = tty_name(fd.as_raw_fd());
     let device = crate::daemon::attach_conn::tty_device(Some(&fd), b"");
     Some(Tty { fd, path, device })
 }
@@ -62,11 +55,13 @@ pub(crate) enum Find {
         took: Duration,
         answer: Answered,
     },
-    /// Rex's, for the block `REX_BLOCK` names.
+    /// Rex's, for the Rex block `REX_BLOCK` names; `theirs` the path of the
+    /// terminal of that Rex block, where the system names it.
     Rex {
         took: Duration,
         block: String,
-        verdict: RexVerdict,
+        verdict: Verdict,
+        theirs: Option<String>,
     },
 }
 
@@ -94,7 +89,7 @@ impl Find {
                 answer: Answered::Failed(_) | Answered::TimedOut(_),
                 ..
             } | Find::Rex {
-                verdict: RexVerdict::Disproved(_),
+                verdict: Verdict::Disproved(_),
                 ..
             }
         )
@@ -113,7 +108,7 @@ impl Find {
                 ..
             }
             | Find::Rex {
-                verdict: RexVerdict::Disproved(why),
+                verdict: Verdict::Disproved(why),
                 ..
             } => format!("find didn't confirm this terminal ({why})"),
             _ => String::new(),
@@ -128,7 +123,7 @@ impl Find {
                 answer: Answered::Id(id),
                 ..
             } => Some(id),
-            Find::Rex { block, verdict, .. } if !matches!(verdict, RexVerdict::Disproved(_)) => {
+            Find::Rex { block, verdict, .. } if !matches!(verdict, Verdict::Disproved(_)) => {
                 Some(block)
             }
             _ => None,
@@ -136,9 +131,65 @@ impl Find {
     }
 }
 
-/// Runs `choice`'s `find` for `attach`, in terminal `tty`, as the daemon
-/// would for a self-attach: with the pane title written first, and put
-/// back after.
+/// How an ask ended.
+pub(super) enum Asked {
+    Answered(Outcome),
+    /// The pane provider failed as a whole, and why.
+    Gone(String),
+    TimedOut,
+}
+
+/// Asks `provider` to `find` this terminal, `tty`, for `attach`, with pane
+/// id `pane`, as the daemon asks for a self-attach; waits for its answer
+/// until `due`.
+pub(super) fn ask(
+    provider: &mut dyn PaneProvider,
+    attach: &Attach,
+    tty: &Tty,
+    pane: PaneId,
+    due: Instant,
+) -> Asked {
+    const ID: AskId = AskId(1);
+    let find_vars = provider.find_vars();
+    let env = attach
+        .env
+        .iter()
+        .filter(|(k, _)| find_vars.iter().any(|v| v.as_bytes() == k.as_slice()))
+        .cloned()
+        .collect();
+    provider.ask(
+        ID,
+        Ask::Find {
+            pane,
+            pid: attach.pid,
+            tty: String::from_utf8_lossy(&tty.path).into_owned(),
+            device: tty.device,
+            title: crate::daemon::pane::title(&pane),
+            env,
+        },
+    );
+    let Some(fd) = provider.fd() else {
+        return Asked::Gone("it can't be watched".into());
+    };
+    loop {
+        // an answer due now comes at the next `on_ready`, at once
+        provider.on_ready(0);
+        while let Some(event) = provider.next() {
+            match event {
+                ProviderEvent::Answered { id: ID, outcome } => return Asked::Answered(outcome),
+                ProviderEvent::Gone { reason } => return Asked::Gone(reason),
+                _ => {}
+            }
+        }
+        if !wait_readable(fd, due) {
+            return Asked::TimedOut;
+        }
+    }
+}
+
+/// Runs `choice`'s command `find` for `attach`, in terminal `tty`, as the
+/// daemon would for a self-attach: with the pane title written first, and
+/// put back after.
 pub(super) fn run(choice: &Choice, attach: &Attach, tty: &Tty) -> Find {
     let Some(mut spec) = Spec::of(choice) else {
         return Find::Absent;
@@ -148,41 +199,32 @@ pub(super) fn run(choice: &Choice, attach: &Attach, tty: &Tty) -> Find {
     let Some(timeout) = spec.commands.first().map(|c| c.timeout) else {
         return Find::Absent;
     };
-    let find_vars = spec.find_vars.clone();
     let pane = PaneId::unnumbered();
     let title = crate::daemon::pane::title(&pane);
-    let started = Instant::now();
     let mut provider = match CommandProvider::new(spec, &attach.env, &attach.cwd) {
         Ok(p) => p,
         Err(e) => {
             return Find::Ran {
                 title,
-                took: started.elapsed(),
+                took: Duration::ZERO,
                 answer: Answered::Failed(format!("can't run it: {e}")),
             };
         }
     };
-    let env = attach
-        .env
-        .iter()
-        .filter(|(k, _)| find_vars.iter().any(|v| v.as_bytes() == k.as_slice()))
-        .cloned()
-        .collect();
-    let ask = Ask::Find {
-        pane,
-        pid: attach.pid,
-        tty: String::from_utf8_lossy(&tty.path).into_owned(),
-        device: tty.device,
-        title: title.clone(),
-        env,
-    };
     write_to(tty, &format!("{TITLE_PUSH}\x1b]2;{title}\x1b\\"));
     let started = Instant::now();
-    let answer = answer(&mut provider, ask, started + timeout, timeout);
+    let asked = ask(&mut provider, attach, tty, pane, started + timeout);
     let took = started.elapsed();
     // nothing it started outlives it
     drop(provider);
     write_to(tty, TITLE_POP);
+    let answer = match asked {
+        Asked::Answered(Outcome::Done(Answer::Terminal(id))) => Answered::Id(id.to_string()),
+        Asked::Answered(Outcome::Done(_)) => Answered::NoId,
+        Asked::Answered(Outcome::Unsupported) => Answered::Unsupported,
+        Asked::Answered(Outcome::Failed(why)) | Asked::Gone(why) => Answered::Failed(why),
+        Asked::TimedOut => Answered::TimedOut(timeout),
+    };
     Find::Ran {
         title,
         took,
@@ -196,41 +238,6 @@ fn write_to(tty: &Tty, text: &str) {
     if let Ok(fd) = tty.fd.try_clone() {
         let mut f = std::fs::File::from(fd);
         let _ = f.write_all(text.as_bytes()).and_then(|()| f.flush());
-    }
-}
-
-/// Asks `provider` `ask` and waits for its answer until `due`.
-fn answer(provider: &mut dyn PaneProvider, ask: Ask, due: Instant, timeout: Duration) -> Answered {
-    const ID: AskId = AskId(1);
-    provider.ask(ID, ask);
-    let Some(fd) = provider.fd() else {
-        return Answered::Failed("it can't be watched".into());
-    };
-    loop {
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Answered::TimedOut(timeout);
-        }
-        let mut fds = [libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        let ms = left.as_millis().clamp(1, 1000) as libc::c_int;
-        // SAFETY: one valid pollfd.
-        unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
-        provider.on_ready(0);
-        while let Some(event) = provider.next() {
-            let ProviderEvent::Answered { id: ID, outcome } = event else {
-                continue;
-            };
-            return match outcome {
-                Outcome::Done(Answer::Terminal(id)) => Answered::Id(id.to_string()),
-                Outcome::Done(_) => Answered::NoId,
-                Outcome::Unsupported => Answered::Unsupported,
-                Outcome::Failed(why) => Answered::Failed(why),
-            };
-        }
     }
 }
 

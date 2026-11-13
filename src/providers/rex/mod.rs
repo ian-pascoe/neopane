@@ -50,7 +50,7 @@ use crate::rex::ids;
 use crate::rex::session::{self, Conn, Request, Session, Update};
 
 /// What Rex is asked through the seam.
-pub(crate) const CAPABILITIES: &[Capability] = &[
+const CAPABILITIES: &[Capability] = &[
     Capability::OpenBeside,
     Capability::OpenFloat,
     Capability::OpenTabPage,
@@ -64,12 +64,6 @@ pub(crate) const CAPABILITIES: &[Capability] = &[
     // views come unasked
     Capability::Events,
 ];
-
-/// The Rex API revision capability `cap` needs from the server: the one
-/// this client speaks, for every capability, until one needs a later one.
-pub(crate) fn revision_needed(_cap: Capability) -> i64 {
-    client::API_REVISION
-}
 
 /// A `find` asked of Rex: its block, and the attaching terminal's device.
 struct Finding {
@@ -109,6 +103,8 @@ pub(crate) struct RexProvider {
     pub(crate) tty_of_pid: find::TtyOfPid,
     /// A `find` trusted `REX_BLOCK` unproved, which is logged once.
     pub(crate) trusted: bool,
+    /// What the last `find` came to, for `provider check`.
+    pub(crate) last_find: Option<find::Found>,
     /// What was asked before Rex attached us to its session, asked once it
     /// has: Rex runs some requests out of order.
     deferred: Vec<(AskId, Ask)>,
@@ -131,6 +127,7 @@ impl RexProvider {
             finding: Vec::new(),
             tty_of_pid: find::tty_of_pid,
             trusted: false,
+            last_find: None,
             deferred: Vec::new(),
             applied_rev: 0,
         }
@@ -143,7 +140,15 @@ impl RexProvider {
         stream: std::os::unix::net::UnixStream,
         session_id: &str,
     ) -> Result<RexProvider, client::ClientError> {
-        let client = client::Client::start(stream, NAME)?;
+        RexProvider::attaching(client::Client::start(stream, NAME)?, session_id)
+    }
+
+    /// Rex's pane provider on `client`, a connection to the Rex server,
+    /// attaching to Rex session `session_id`, as `connecting`.
+    pub(crate) fn attaching(
+        client: client::Client,
+        session_id: &str,
+    ) -> Result<RexProvider, client::ClientError> {
         let mut session = Session::new(client, session_id.to_string(), NAME);
         session.attach()?;
         Ok(RexProvider::new(session))
@@ -274,7 +279,13 @@ impl RexProvider {
                     self.session.process(tag, &block)?;
                     self.finding.push(Finding { tag, block, device });
                 }
-                Err(why) => self.answer(tag, Outcome::Failed(why)),
+                Err(why) => {
+                    self.last_find = Some(find::Found {
+                        verdict: find::Verdict::Disproved(why.clone()),
+                        theirs: None,
+                    });
+                    self.answer(tag, Outcome::Failed(why))
+                }
             },
             Ask::ReportLayout => {
                 let outcome = match &self.layout {
@@ -462,7 +473,12 @@ impl RexProvider {
             return;
         };
         let Finding { block, device, .. } = self.finding.swap_remove(i);
-        let outcome = match find::verdict(result, device, self.tty_of_pid) {
+        let verdict = find::verdict(result, device, self.tty_of_pid);
+        self.last_find = Some(find::Found {
+            verdict: verdict.clone(),
+            theirs: find::child_tty(result, self.tty_of_pid),
+        });
+        let outcome = match verdict {
             find::Verdict::Proven => Outcome::Done(Answer::Terminal(block.as_str().into())),
             find::Verdict::Disproved(why) => Outcome::Failed(why),
             find::Verdict::Unprovable(why) => {

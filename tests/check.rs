@@ -6,9 +6,12 @@ mod support;
 
 use std::collections::BTreeSet;
 use std::io::Read;
+use std::io::Write;
 use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use neopane::name::NAME;
 use serde_json::Value;
@@ -97,6 +100,7 @@ return {
         timeouts = { focus = 1.5 },
         context_vars = { "TERM_PROGRAM" },
         find_vars = { "WINDOWID" },
+        open_tab_page = { "aero-tab" },
       },
     }
   end,
@@ -142,21 +146,31 @@ fn a_config_error_exits_1_quoting_the_neovim_message() {
 }
 
 #[test]
-fn a_named_file_that_isnt_there_is_an_error() {
+fn a_named_file_that_isnt_there_is_an_error_saying_what_named_it() {
     let home = Home::new("missing");
+    let work = home.dir.join("work").canonicalize().unwrap();
     let out = home.check(&["--config", "gone.lua"]);
     assert_eq!(Some(1), out.status.code(), "{}", stdout(&out));
-    let gone = home
-        .dir
-        .join("work")
-        .canonicalize()
-        .unwrap()
-        .join("gone.lua");
     assert_eq!(
         format!(
-            "result  error: {NAME}: config: {} isn't there ({}_CONFIG names it); no pane provider",
-            gone.display(),
-            NAME.to_ascii_uppercase()
+            "result  error: {NAME}: config: {} isn't there (--config names it); no pane provider",
+            work.join("gone.lua").display(),
+        ),
+        line(&out, "result")
+    );
+    assert_eq!("find  not run: the config failed", line(&out, "find"));
+    let upper = NAME.to_ascii_uppercase();
+    let out = home
+        .command(&[])
+        .env(format!("{upper}_CONFIG"), "gone.lua")
+        .output()
+        .unwrap();
+    assert_eq!(Some(1), out.status.code(), "{}", stdout(&out));
+    assert_eq!(
+        format!(
+            "result  error: {NAME}: config: {} isn't there ({upper}_CONFIG names it); no pane \
+             provider",
+            work.join("gone.lua").display(),
         ),
         line(&out, "result")
     );
@@ -186,11 +200,17 @@ fn a_pairs_report_shows_each_table_in_use() {
         "terminal  ghostty at provider().terminal, protocol 1\n\
          \x20 open  ghostty-open --title {title} {attach}  (5 s)\n\
          \x20 close  absent: a terminal it opened closes only as its attach ends\n\
+         \x20 open_beside  absent: open, then place_beside\n\
+         \x20 open_float  absent: float groups are drawn in panes\n\
+         \x20 open_tab_page  absent: tab pages stay whole in the pane they opened in\n\
          \x20 attach timeout  5 s (default)\n",
         "layout  aero at provider().layout, protocol 1\n\
          \x20 find  sh -c 'echo found; exit 0'  (3 s)\n\
          \x20 place_beside  absent: a terminal it opened stays where it opened\n",
         "\n  focus  aero focus {terminal}  (1.5 s)\n",
+        // a half's one-step capability is ignored, and says why
+        "\n  open_tab_page  ignored: a half's one-step capability is ignored; only a table \
+         returned whole gets one\n",
         "\n  live layout  no: each pane is its own layout area\n\
          \x20 reach  TERM_PROGRAM=ghostty\n\
          \x20 find vars  WINDOWID\n",
@@ -218,7 +238,7 @@ fn a_whole_tables_report_shows_its_one_step_capabilities_and_what_falls_back() {
     assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
     let report = stdout(&out);
     for want in [
-        "\ntable  mux at provider(), protocol 1\n",
+        "\nwhole  mux at provider(), protocol 1\n",
         "\n  open_float  absent: float groups are drawn in panes\n",
         "\n  live layout  yes: report_layout (read after each act)\n",
         "\n  attach timeout  9 s\n",
@@ -353,13 +373,35 @@ fn json_has_the_documented_keys() {
     assert_eq!("not run", v["find"]["verdict"]);
     assert_eq!(false, v["find"]["ran"]);
     assert_eq!(Value::Null, v["rex"]);
-    assert_eq!(serde_json::json!([]), v["problems"]);
-    assert_eq!("ok", v["result"]["state"]);
+    let why = "a half's one-step capability is ignored; only a table returned whole gets one";
+    assert_eq!(
+        serde_json::json!({ "state": "ignored", "why": why }),
+        tables[1]["capabilities"]["open_tab_page"]
+    );
+    assert_eq!(
+        serde_json::json!({ "state": "absent", "fallback": "float groups are drawn in panes" }),
+        tables[0]["capabilities"]["open_float"]
+    );
+    assert_eq!(
+        serde_json::json!([{"level": "warning", "path": "provider().layout.open_tab_page",
+                            "message": why}]),
+        v["problems"]
+    );
+    // a check-only warning shows nowhere in Neovim
+    assert_eq!(
+        serde_json::json!({ "state": "ok", "message": null }),
+        v["result"]
+    );
 
     let home = Home::new("json-error").with_config("return { provider = 1, x = 2 }");
     let out = home.check(&["--json"]);
     assert_eq!(Some(1), out.status.code());
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        serde_json::json!({"ran": false, "title": null, "exit": null, "seconds": null,
+                           "id": null, "verdict": "not run", "why": "the config failed"}),
+        v["find"]
+    );
     let mut problems = v["problems"].as_array().unwrap().clone();
     for p in &problems {
         keys_in(p, "problem");
@@ -382,45 +424,93 @@ fn json_has_the_documented_keys() {
     );
 }
 
+/// A pseudo-terminal of a test's own.
+struct Pty {
+    master: OwnedFd,
+    slave: OwnedFd,
+}
+
+impl Pty {
+    fn open() -> Pty {
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: valid out-pointers; no name, termios or size.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(0, rc);
+        // SAFETY: openpty made both, and they are ours alone.
+        unsafe {
+            Pty {
+                master: OwnedFd::from_raw_fd(master),
+                slave: OwnedFd::from_raw_fd(slave),
+            }
+        }
+    }
+
+    /// A `sleep` whose controlling terminal is this one, as a Rex block's
+    /// shell's is its terminal.
+    fn leader(&self) -> Child {
+        let mut c = Command::new("sleep");
+        c.arg("30")
+            .stdin(self.slave.try_clone().unwrap())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: setsid and ioctl are async-signal-safe.
+        unsafe {
+            c.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        c.spawn().unwrap()
+    }
+
+    /// Runs `command` in this terminal: its exit status and everything it
+    /// wrote. `leader`, if any, is ended once it has exited.
+    fn run(self, mut command: Command, leader: Option<Child>) -> (Option<i32>, String) {
+        let mut child = command
+            .stdin(self.slave.try_clone().unwrap())
+            .stdout(self.slave.try_clone().unwrap())
+            .stderr(self.slave)
+            .spawn()
+            .unwrap();
+        // its copy of the terminal goes, or the reader never sees the end
+        drop(command);
+        let master = self.master;
+        let reader = std::thread::spawn(move || {
+            let mut master = std::fs::File::from(master);
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8_lossy(&all).into_owned()
+        });
+        let status = child.wait().unwrap();
+        if let Some(mut leader) = leader {
+            let _ = leader.kill();
+            let _ = leader.wait();
+        }
+        // the slave's copies are all gone: the reader sees EIO
+        (status.code(), reader.join().unwrap())
+    }
+}
+
 /// `provider check` with `args` in a pseudo-terminal of its own: its exit
 /// status and everything written to the terminal.
 fn in_pty(home: &Home, args: &[&str]) -> (Option<i32>, String) {
-    let (mut master, mut slave) = (-1, -1);
-    // SAFETY: valid out-pointers; no name, termios or size.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(0, rc);
-    // SAFETY: openpty made both, and they are ours alone.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    let mut child = home
-        .command(args)
-        .stdin(slave.try_clone().unwrap())
-        .stdout(slave.try_clone().unwrap())
-        .stderr(slave)
-        .spawn()
-        .unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut master = std::fs::File::from(master);
-        let mut all = Vec::new();
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = master.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            all.extend_from_slice(&buf[..n]);
-        }
-        String::from_utf8_lossy(&all).into_owned()
-    });
-    let status = child.wait().unwrap();
-    // the slave's copies are gone with the child: the reader sees EIO
-    (status.code(), reader.join().unwrap())
+    Pty::open().run(home.command(args), None)
 }
 
 /// The pane title a report's find line names.
@@ -505,4 +595,228 @@ fn a_file_in_another_place_is_found_as_the_daemon_finds_it() {
     assert_eq!(format!("config  {}", file.display()), line(&out, "config"));
     assert_eq!("chose  none, by provider()", line(&out, "chose"));
     assert_eq!("result  none", line(&out, "result"));
+}
+
+const BLOCK: &str = "block:01a17fb6-c5b4-7d9c-8e1e-9fd2a65e8a50";
+
+/// A fake Rex server on a Unix socket in `home`, for one connection: it
+/// upgrades it and welcomes it, says it is version 9.9.9 at API revision
+/// `revision`, and that the Rex block's child is process `child`.
+fn fake_rex(home: &Home, revision: i64, child: Option<u32>) -> PathBuf {
+    let path = home.dir.join("rex.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let key = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let mut sha = sha1_smol::Sha1::new();
+        sha.update(key.as_bytes());
+        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        use base64::Engine;
+        let accept = base64::engine::general_purpose::STANDARD.encode(sha.digest().bytes());
+        write!(
+            s,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\
+             Sec-WebSocket-Protocol: rex.control.v1\r\n\r\n"
+        )
+        .unwrap();
+        let _hello = read_frame(&mut s);
+        let welcome = serde_json::json!({
+            "type": "welcome", "protocol": "rex.control.v1",
+            "limits": { "max_message_bytes": 1 << 20 }, "api_revision": revision,
+        });
+        send(&mut s, &welcome);
+        while let Some(frame) = read_frame(&mut s) {
+            let v: Value = serde_json::from_slice(&frame).unwrap();
+            let payload = match v["method"].as_str().unwrap() {
+                "server.version" => {
+                    serde_json::json!({ "rex_version": "9.9.9", "api_revision": revision })
+                }
+                "com.superlogical.terminal.process" => {
+                    serde_json::json!({ "child": { "pid": child.unwrap() } })
+                }
+                _ => serde_json::json!({}),
+            };
+            let answer = serde_json::json!({
+                "type": "response", "id": v["id"], "seq": 0, "payload": payload,
+            });
+            send(&mut s, &answer);
+        }
+    });
+    path
+}
+
+/// A client's masked text frame from `s`, None at its end or a close.
+fn read_frame(s: &mut UnixStream) -> Option<Vec<u8>> {
+    let mut head = [0u8; 2];
+    s.read_exact(&mut head).ok()?;
+    if head[0] & 0x0f == 8 {
+        return None;
+    }
+    let len = match head[1] & 0x7f {
+        126 => {
+            let mut n = [0u8; 2];
+            s.read_exact(&mut n).ok()?;
+            u16::from_be_bytes(n) as usize
+        }
+        127 => {
+            let mut n = [0u8; 8];
+            s.read_exact(&mut n).ok()?;
+            u64::from_be_bytes(n) as usize
+        }
+        n => n as usize,
+    };
+    let mut mask = [0u8; 4];
+    s.read_exact(&mut mask).ok()?;
+    let mut body = vec![0u8; len];
+    s.read_exact(&mut body).ok()?;
+    Some(
+        body.iter()
+            .enumerate()
+            .map(|(i, b)| b ^ mask[i % 4])
+            .collect(),
+    )
+}
+
+/// Sends `v` to the client as a server's text frame.
+fn send(s: &mut UnixStream, v: &Value) {
+    let text = v.to_string();
+    let mut frame = vec![0x81];
+    if text.len() < 126 {
+        frame.push(text.len() as u8);
+    } else {
+        frame.push(126);
+        frame.extend_from_slice(&(text.len() as u16).to_be_bytes());
+    }
+    frame.extend_from_slice(text.as_bytes());
+    let _ = s.write_all(&frame);
+}
+
+/// `provider check` with `args`, Rex at `rex` chosen by the default.
+fn in_rex(home: &Home, rex: &std::path::Path, args: &[&str]) -> Command {
+    let mut c = home.command(args);
+    c.env("REX_SERVER", format!("unix://{}", rex.display()))
+        .env("REX_SESSION", "session:s")
+        .env("REX_BLOCK", BLOCK);
+    c
+}
+
+#[test]
+fn rexs_section_names_the_server_its_version_and_api_revision() {
+    let home = Home::new("rex");
+    let rex = fake_rex(&home, 12, None);
+    let out = in_rex(&home, &rex, &[]).output().unwrap();
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    assert_eq!(
+        format!("chose  \"rex\", built in, by {NAME}.default"),
+        line(&out, "chose")
+    );
+    assert!(
+        stdout(&out).contains(&format!(
+            "\nrex  unix://{}\n  version  9.9.9\n  api revision  12\nfind  not run: ",
+            rex.display()
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!("result  ok (find not run)", line(&out, "result"));
+}
+
+#[test]
+fn rex_as_json() {
+    let home = Home::new("rex-json");
+    // older than any this build speaks
+    let rex = fake_rex(&home, 0, None);
+    let out = in_rex(&home, &rex, &["--json"]).output().unwrap();
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    keys_in(&v["rex"], "rex");
+    assert_eq!(format!("unix://{}", rex.display()), v["rex"]["server"]);
+    assert_eq!("9.9.9", v["rex"]["version"]);
+    assert_eq!(0, v["rex"]["api_revision"]);
+    assert_eq!(Value::Null, v["rex"]["find"]);
+    let missing = v["rex"]["missing"].as_array().unwrap();
+    assert_eq!(1, missing.len(), "{missing:?}");
+    assert_eq!(Value::Null, missing[0]["capability"]);
+    assert!(missing[0]["needs"].as_i64().unwrap() > 0);
+    assert_eq!("builtin", v["chose"]["kind"]);
+    assert_eq!("default", v["chose"]["how"]);
+    assert_eq!(
+        serde_json::json!(["open_beside", "open_float", "open_tab_page"]),
+        v["one_step"]
+    );
+}
+
+#[test]
+fn an_old_rex_server_misses_every_capability() {
+    let home = Home::new("rex-old");
+    let rex = fake_rex(&home, 0, None);
+    let out = in_rex(&home, &rex, &[]).output().unwrap();
+    let missing = stdout(&out)
+        .lines()
+        .find(|l| l.starts_with("  missing  "))
+        .unwrap_or_else(|| panic!("{}", stdout(&out)));
+    assert!(
+        missing.starts_with("  missing  every capability (needs Rex API revision "),
+        "{missing}"
+    );
+    assert!(missing.ends_with(", this server has 0)"), "{missing}");
+}
+
+#[test]
+fn rexs_find_proves_the_rex_block_whose_terminal_is_this_one() {
+    let home = Home::new("rex-proven");
+    let pty = Pty::open();
+    let leader = pty.leader();
+    let rex = fake_rex(&home, 12, Some(leader.id()));
+    let (code, written) = pty.run(in_rex(&home, &rex, &[]), Some(leader));
+    assert_eq!(Some(0), code, "{written}");
+    assert!(
+        written.contains(&format!("find  proven: {BLOCK} is this terminal's")),
+        "{written}"
+    );
+    assert!(written.contains("result  ok\r\n"), "{written}");
+    // Rex panes never get a title
+    assert!(!written.contains("\x1b]2;"), "{written:?}");
+}
+
+#[test]
+fn rexs_find_disproves_another_terminals_rex_block() {
+    let home = Home::new("rex-disproved");
+    let other = Pty::open();
+    let leader = other.leader();
+    let rex = fake_rex(&home, 12, Some(leader.id()));
+    let (code, written) = Pty::open().run(in_rex(&home, &rex, &[]), None);
+    let mut leader = leader;
+    let _ = leader.kill();
+    let _ = leader.wait();
+    drop(other);
+    assert_eq!(Some(1), code, "{written}");
+    let find = written
+        .lines()
+        .find(|l| l.starts_with("find  "))
+        .unwrap()
+        .trim_end();
+    assert!(
+        find.starts_with("find  disproved: REX_BLOCK names another terminal (/dev/"),
+        "{find}"
+    );
+    // the Neovim message names no terminal
+    assert!(
+        written.contains(&format!(
+            "result  error: {NAME}: rex: find didn't confirm this terminal (REX_BLOCK names \
+             another terminal); no pane provider\r\n"
+        )),
+        "{written}"
+    );
 }

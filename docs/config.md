@@ -194,8 +194,8 @@ capability. With stdin not a terminal, it writes no title and runs no
 `find`, and the result is `ok (find not run)`.
 
 - `--config FILE`: the file; by default `$NEOPANE_CONFIG`, then the default
-  places, as [The file](#the-file) says. A file it names that isn't there is
-  an error.
+  places, as [The file](#the-file) says. A file either names that isn't
+  there is an error, whose message says which named it.
 - `--provider P`: the hint; by default `$NEOPANE_PROVIDER`. `none` skips the
   file; `""` means no hint.
 - `--daemon-name N`: `attach.daemon`; by default the name a daemon started
@@ -214,10 +214,10 @@ The report's sections:
 | `attach` | its tty (or `no terminal`), pid, working directory, daemon name and hint |
 | `ran` | how long the file took and the lines it printed; or its Lua error, with Lua's traceback where it gives one, the timeout, or why it ended without answering |
 | `chose` | none, `"rex"`, a table, a pair or one side alone, its name and Lua path, and whether `provider()` or `neopane.default` chose |
-| `table`, `terminal`, `layout` | each table in use: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`); `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`) and `reach` (its context variables, with this attach's values) and `find vars`, for a table that gives the layout; `attach timeout`, such as `5 s (default)`, for one that opens terminals |
+| `whole`, `terminal`, `layout` | each table in use, by its role: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`). A pair's terminal side lists the one-step capabilities too, absent from a pair, and either side lists any it gave that are ignored. `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`), `reach` (its context variables, with this attach's values) and `find vars` show for a table that gives the layout, so not for a terminal side; `attach timeout`, such as `5 s (default)`, for one that opens terminals, so not for a layout side |
 | `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
-| `rex` | for `"rex"`: the server's URL, version and API revision, and `missing  <capability> (needs Rex API revision N)` for each capability the server is too old for |
-| `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)`, or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
+| `rex` | for `"rex"`: the server's URL, version and API revision (`server.version`'s, else the one its welcome agreed), and, for a server older than this build speaks, `missing  every capability (needs Rex API revision N, this server has M)`: Rex doesn't say which revision each method came in, so it isn't told capability by capability |
+| `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)` (the path where the system names it: on macOS, and for a pseudo-terminal on Linux), or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
 | `errors`, `warnings` | every problem, with its path |
 | `result` | `ok`, `none` or `error`, quoting the exact message Neovim would show |
 
@@ -232,6 +232,9 @@ chose  a pair, ghostty+aerospace, at provider(), by provider()
 terminal  ghostty at provider().terminal, protocol 1
   open  sh -c 'exec open -na Ghostty.app --args --title="$NEOPANE_TITLE" --abnormal-command-exit-ru…
   close  absent: a terminal it opened closes only as its attach ends
+  open_beside  absent: open, then place_beside
+  open_float  absent: float groups are drawn in panes
+  open_tab_page  absent: tab pages stay whole in the pane they opened in
   attach timeout  5 s (default)
 layout  aerospace at provider().layout, protocol 1
   find  /Users/me/.config/neopane/bin/aerospace-find  (3 s)
@@ -263,7 +266,7 @@ don't change it.
  "chose":{"kind":"pair","name":"ghostty+aerospace","path":"provider()","how":"provider"},
  "tables":[{"role":"terminal","name":"ghostty","path":"provider().terminal","protocol":1,
             "capabilities":{"open":{"state":"present","argv":["sh","-c","…","sh","{attach}"],"timeout":5.0},
-                            "close":{"state":"absent","fallback":"a terminal it opened closes only as its attach ends"}},
+                            "close":{"state":"absent","fallback":"a terminal it opened closes only as its attach ends"},…},
             "settings":{"name":"ghostty","attach_timeout":5.0},"live_layout":null,
             "context_vars":{},"find_vars":[]},
            {"role":"layout","name":"aerospace","path":"provider().layout","protocol":1,
@@ -284,16 +287,18 @@ don't change it.
   `table`, `pair`, `terminal` or `layout` (one side alone); `how` is
   `provider`, `default`, or null for the hint `none`.
 - `tables[]`: `role` is `whole`, `terminal` or `layout`. Each capability its
-  role gives is `present` (with `argv`, and `timeout` in seconds, null for
+  table lists, as the text report does, is `present` (with `argv`, and `timeout` in seconds, null for
   `events`), `ignored` (with `why`) or `absent` (with `fallback`).
   `live_layout` is `events`, `report_layout`, `no`, or null for a terminal
   side; `context_vars` maps each variable to this attach's value, or null.
-- `find.verdict`: `accepted`, `refused` or `not run`; `exit` is null for a
+- `find.verdict`: `accepted`, `refused` or `not run`, with `why` saying why
+  it wasn't run; `exit` is null for a
   signal, a timeout, Rex's, or exit 69 (`why`: `unsupported`), which can't
   be told from a command that can't start.
-- `rex`: null unless `"rex"` was chosen; `missing[]` holds `capability` and
-  `needs`, and `find` is `proven`, `disproved`, `unprovable`, or null when
-  it didn't run.
+- `rex`: null unless `"rex"` was chosen; `missing[]` is empty, or holds
+  one `{"capability": null, "needs": N}` for a server older than this build
+  speaks (null: every capability); `find` is `proven`, `disproved`,
+  `unprovable`, or null when it didn't run.
 - `problems[]`: `level` is `error` or `warning`; `path` is the Lua path, the
   file's name for its own table, or null.
 - `result.state`: `ok`, `none` or `error`; `message` is what Neovim would

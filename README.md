@@ -376,11 +376,11 @@ Rex's connection lasts as long as Rex is the daemon's pane provider: it
 closes when no Rex block is left attached, or when Rex quits or fails, and a
 new one opens when Rex is chosen again, its blocks rejoining.
 
-`neopane provider check`, in a Rex pane, checks the connection: it shows the
-Rex server, its version and API revision, any capability it is too old for,
-and whether Rex proves this terminal is the block `REX_BLOCK` names
-(`docs/config.md`). `neopane debug-rex SOCKET`, Rex's own debug tool, reads
-the same three variables from its own environment.
+`neopane provider check`, in a Rex pane, checks Rex's connection: it shows
+the Rex server, its version and API revision, whether this build needs a
+newer one, and whether Rex proves this terminal is the Rex block `REX_BLOCK`
+names (`docs/config.md`). `neopane debug-rex SOCKET`, Rex's own debug tool,
+reads the same three variables from its own environment.
 
 To try a build without it grabbing the focus in your own Rex session, which
 neopane does as it works, make a session of your own with `rex new`, and run it
