@@ -195,8 +195,45 @@ pub fn tracing() -> bool {
 /// Writes a log line at `level`, if it's on, after the traces waiting. (See
 /// `log_warn!`, `log_info!` and `log_debug!`.)
 pub fn line(level: LogLevel, args: std::fmt::Arguments<'_>) {
+    #[cfg(test)]
+    if capturing::push(level, args) {
+        return;
+    }
     // a failed log write has nowhere to be told
     let _ = LOG.line_into(&mut io::stderr().lock(), level, args);
+}
+
+/// For tests: the lines logged on this thread, kept instead of written.
+#[cfg(test)]
+pub(crate) mod capturing {
+    use std::cell::RefCell;
+
+    use super::{LOG, LogLevel};
+
+    thread_local! {
+        static LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f`, and the lines it logged, at the level set, in order.
+    pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+        LINES.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        let r = f();
+        let lines = LINES.with(|l| l.borrow_mut().take()).unwrap_or_default();
+        (r, lines)
+    }
+
+    /// Keeps the line if this thread captures: whether it did.
+    pub(super) fn push(level: LogLevel, args: std::fmt::Arguments<'_>) -> bool {
+        LINES.with(|l| match l.borrow_mut().as_mut() {
+            Some(lines) => {
+                if LOG.enabled(level) {
+                    lines.push(args.to_string());
+                }
+                true
+            }
+            None => false,
+        })
+    }
 }
 
 /// Logs a line at `warn`: something went wrong.

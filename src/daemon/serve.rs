@@ -37,7 +37,7 @@ use super::pane::SelfAttach;
 use super::surface::Surface;
 use crate::attach::{End, Purpose, Refusal, Transport};
 use crate::log::{self, Point, log_info, log_warn};
-use crate::name::{self, NAME};
+use crate::name::NAME;
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
 use crate::providers::choose::{self, Chosen};
@@ -515,7 +515,7 @@ fn start_nvim<S: AsRef<OsStr>>(
         .args(["--cmd", &format!("let g:{NAME} = 1")])
         .args(nvim_args)
         // Neovim's alone: nothing else the daemon runs gets it
-        .env(name::upper(), dir.address().as_arg())
+        .env(super::find::inside_var(), dir.address().as_arg())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1724,7 +1724,10 @@ mod tests {
             return;
         };
         let out = path(&nvim.dir, "out");
-        let cmd = format!("terminal echo \"${}\" > {out}", name::upper());
+        let cmd = format!(
+            "terminal echo \"${}\" > {out}",
+            crate::daemon::find::inside_var()
+        );
         let id = nvim.nvim().request("nvim_command", 1);
         msgpack::write_str(nvim.nvim().writer(), &cmd);
         nvim.nvim().flush().unwrap();
@@ -1743,7 +1746,7 @@ mod tests {
     /// The environment variable that makes `sigkill_helper` run, naming the
     /// file it edits.
     fn sigkill_helper_var() -> String {
-        format!("{}_TEST_SIGKILL", name::upper())
+        format!("{}_TEST_SIGKILL", crate::name::upper())
     }
 
     /// For `a_sigkilled_daemons_neovim_exits_keeping_a_changed_buffers_swap`,

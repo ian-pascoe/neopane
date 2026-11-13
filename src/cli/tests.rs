@@ -580,7 +580,7 @@ fn found(file: Option<&str>, line: Option<u32>) -> Result<Command, UsageError> {
 fn attach_with_an_address_self_attaches_with_an_optional_file_and_line() {
     let self_attach = |file: Option<&str>, line: Option<u32>| {
         Ok(Command::AttachSelf(AttachSelf {
-            to: Target::Address("/tmp/x/sock".into()),
+            to: Target::Address(Address::from_arg("/tmp/x/sock".into())),
             provider: None,
             file: file.map(OsString::from),
             line,
@@ -647,8 +647,8 @@ fn attach_takes_only_line_and_file() {
         ("attach -O a", takes),
         ("attach +cmd f", takes),
         ("attach -- a b", takes),
-        ("attach --address /a +3", "+LINE needs a FILE"),
-        ("attach +3 +4 f", "+LINE is given twice"),
+        ("attach --address /a +3", takes),
+        ("attach +3 +4 f", takes),
         (
             "attach --address /a --address /b",
             "--address is given twice",
@@ -706,7 +706,7 @@ fn a_daemon_name_is_1_to_32_of_letters_digits_dot_underscore_dash() {
 fn the_bare_address_is_exactly_attach_address() {
     let attach = |provider: Option<&str>, file: Option<&str>, line| {
         Ok(Command::AttachSelf(AttachSelf {
-            to: Target::Address("/a/sock".into()),
+            to: Target::Address(Address::from_arg("/a/sock".into())),
             provider: provider.map(OsString::from),
             file: file.map(OsString::from),
             line,
@@ -717,16 +717,15 @@ fn the_bare_address_is_exactly_attach_address() {
         parsed("--provider p --address=/a/sock +12 -- f.txt"),
         attach(Some("p"), Some("f.txt"), Some(12))
     );
-    let beyond = |word: &str| {
-        format!(
-            "--address only attaches, so it takes only [+LINE] FILE; {word} is for starting a \
-             daemon (open windows from Neovim)"
-        )
-    };
-    assert_eq!(refused("--address /a -O a b"), beyond("-O"));
-    assert_eq!(refused("--address /a a b"), beyond("b"));
-    assert_eq!(refused("--address /a +cmd"), beyond("+cmd"));
-    assert_eq!(refused("--address /a +3"), "+LINE needs a FILE");
+    // as attach --address says
+    for line in [
+        "--address /a -O a b",
+        "--address /a a b",
+        "--address /a +cmd",
+        "--address /a +3",
+    ] {
+        assert_eq!(refused(line), "attach takes [+LINE] [FILE]", "{line}");
+    }
     assert_eq!(
         refused("--address /a --detach"),
         "--address attaches to a running daemon, and --detach starts one: give one"
@@ -769,5 +768,6 @@ fn a_running_name_takes_only_line_and_file() {
     };
     assert_eq!(running("-O a b"), beyond("-O"));
     assert_eq!(running("a b"), beyond("b"));
-    assert_eq!(running("+3"), Err(UsageError("+LINE needs a FILE".into())));
+    assert_eq!(running("+3"), beyond("+3"));
+    assert_eq!(running("+3 +4 f"), beyond("+4"));
 }

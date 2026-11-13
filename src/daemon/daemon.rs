@@ -3694,7 +3694,10 @@ mod tests {
         use crate::daemon::attach_conn::{self_hello, test_terminal};
         let mut t = test_terminal(80, 24);
         if !address.is_empty() {
-            t.env = vec![(crate::name::upper().into_bytes(), address.to_vec())];
+            t.env = vec![(
+                crate::daemon::find::inside_var().into_bytes(),
+                address.to_vec(),
+            )];
         }
         t.tty = tty.to_vec();
         self_hello(t)

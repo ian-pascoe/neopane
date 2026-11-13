@@ -328,6 +328,41 @@ fn a_self_attach_from_the_same_context_is_found_and_in_reach() {
     );
 }
 
+/// `rex_hello` with the hint `hint`, as `--provider` gives it.
+fn rex_hello_hinting(session: &str, hint: &str) -> Vec<u8> {
+    use crate::attach::{Hello, Message, Purpose};
+    use crate::daemon::attach_conn::test_terminal;
+    let mut terminal = test_terminal(80, 24);
+    terminal.env = env_of(session, BLOCK);
+    let purpose = Purpose::SelfAttach {
+        terminal,
+        provider: Some(hint.into()),
+        file: None,
+        line: None,
+    };
+    Message::Hello(Hello::new(purpose)).encode().unwrap()
+}
+
+#[test]
+fn a_hint_from_a_self_attach_that_doesnt_choose_is_logged_as_ignored() {
+    let mut fx = chosen_in_session_a();
+    fx.d.name = "work".into();
+    let hello = rex_hello_hinting("session:a", "tmux");
+    let (_, lines) = crate::log::capturing::capture(|| attach_showing_1000(&mut fx, &hello));
+    let ignored = format!("{NAME} daemon: hint tmux ignored: work keeps fake");
+    assert!(lines.contains(&ignored), "{lines:?}");
+}
+
+#[test]
+fn a_hint_from_a_self_attach_that_chooses_isnt_logged_as_ignored() {
+    let (mut fx, _) = fixture_choosing(vec![finding()]);
+    fx.d.name = "work".into();
+    let hello = rex_hello_hinting("session:a", "tmux");
+    let (_, lines) = crate::log::capturing::capture(|| attach_showing_1000(&mut fx, &hello));
+    assert!(lines.iter().any(|l| l.contains("chose fake")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("ignored")), "{lines:?}");
+}
+
 /// Neovim's redraw batch ends: a `flush`, as it sends one.
 fn nvim_flushes(fx: &mut Fixture) {
     let mut buf = Vec::new();

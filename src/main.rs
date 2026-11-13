@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use neopane::attach::Transport;
-use neopane::cli::{self, AttachSelf, Command, Start, Target, UsageError};
+use neopane::cli::{self, AttachSelf, Command, Start, UsageError};
 use neopane::daemon::dir::{self, Address};
 use neopane::daemon::find::{self, find_daemon};
 use neopane::daemon::{launch, pane_helper, serve};
@@ -115,7 +115,7 @@ fn run_start(start: Start) -> ExitCode {
         return fail(&format!("{option} isn't built yet"));
     }
     if let Some(name) = &start.name {
-        let running = dir::base().is_ok_and(|base| base.address(name).answers());
+        let running = dir::base().is_ok_and(|base| base.live(name));
         if running {
             return match start.attach_to_running(name) {
                 Ok(attach) => attach_self(attach),
@@ -125,7 +125,7 @@ fn run_start(start: Start) -> ExitCode {
     }
     let launch = launch::Launch {
         name: start.name,
-        provider: hint(start.provider),
+        provider: start.provider,
     };
     helper_exit(launch::run(&start.nvim_args, launch))
 }
@@ -134,14 +134,9 @@ fn run_start(start: Start) -> ExitCode {
 /// daemon not found is a failed self-attach, held as one.
 fn attach_self(attach: AttachSelf) -> ExitCode {
     let started = std::time::Instant::now();
-    let target = match attach.to {
-        Target::Address(a) => find::Target::Address(Address::from_arg(a)),
-        Target::Name(n) => find::Target::Name(n),
-        Target::Found => find::Target::Found,
-    };
     let inside = std::env::var_os(find::inside_var());
     let warn = &mut |w: String| eprintln!("{NAME}: {w}");
-    let address = match find_daemon(dir::base, &target, inside.as_deref(), warn) {
+    let address = match find_daemon(dir::base, &attach.to, inside.as_deref(), warn) {
         Ok(address) => address,
         Err(e) => return helper_exit(pane_helper::launcher_failed(e.to_string(), started)),
     };
@@ -155,16 +150,9 @@ fn attach_self(attach: AttachSelf) -> ExitCode {
     let opening = pane_helper::Opening {
         file,
         line: attach.line,
-        provider: hint(attach.provider),
+        provider: attach.provider,
     };
     helper_exit(pane_helper::run_self(&address, transport, opening))
-}
-
-/// `--provider P`, for the hello; empty is none given.
-fn hint(provider: Option<OsString>) -> Option<String> {
-    provider
-        .map(|p| p.to_string_lossy().into_owned())
-        .filter(|p| !p.is_empty())
 }
 
 /// The first of `start`'s options that does nothing yet.

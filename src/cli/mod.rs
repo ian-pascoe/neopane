@@ -8,9 +8,10 @@ mod nvim_args;
 use std::ffi::{OsStr, OsString};
 
 use crate::attach::{PaneId, Transport};
-use crate::daemon::dir::valid_name;
+use crate::daemon::dir::{Address, valid_name};
 use crate::name::NAME;
 
+pub use crate::daemon::find::Target;
 pub use crate::name::repo_url;
 pub use help::{PANE_PROVIDER_PROTOCOLS, debug_help, help, version};
 pub use nvim_args::Reading;
@@ -85,17 +86,6 @@ pub struct AttachSelf {
     pub line: Option<u32>,
 }
 
-/// The daemon a self-attach is to.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Target {
-    /// `--address A`.
-    Address(OsString),
-    /// `--name N`, a valid daemon name.
-    Name(String),
-    /// Neither: `$<NAME>`, else the only one running.
-    Found,
-}
-
 /// The bare form's own options, and Neovim's arguments as typed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Start {
@@ -114,13 +104,12 @@ impl Start {
     /// The bare `--name N` with N running: `attach --name N`, as long as
     /// Neovim's arguments are only `[+LINE] [--] [FILE]` (#94 decision 15).
     pub fn attach_to_running(&self, name: &str) -> Result<AttachSelf, UsageError> {
-        let (file, line) = attach_words(&self.nvim_args).map_err(|misfit| {
-            misfit.usage(|word| {
-                format!(
-                    "{name} is running, so it takes only [+LINE] FILE; {word} is for starting \
-                     a daemon (open windows from Neovim)"
-                )
-            })
+        let (file, line) = attach_words(&self.nvim_args).map_err(|Misfit(word)| {
+            UsageError(format!(
+                "{name} is running, so it takes only [+LINE] FILE; {} is for starting a \
+                 daemon (open windows from Neovim)",
+                word.to_string_lossy()
+            ))
         })?;
         Ok(AttachSelf {
             to: Target::Name(name.to_string()),
@@ -358,16 +347,9 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
         start.address = Some(address);
         return Ok(Command::Start(start));
     }
-    let (file, line) = attach_words(&start.nvim_args).map_err(|misfit| {
-        misfit.usage(|word| {
-            format!(
-                "--address only attaches, so it takes only [+LINE] FILE; {word} is for \
-                 starting a daemon (open windows from Neovim)"
-            )
-        })
-    })?;
+    let (file, line) = attach_words(&start.nvim_args).map_err(|_| attach_takes())?;
     Ok(Command::AttachSelf(AttachSelf {
-        to: Target::Address(address),
+        to: Target::Address(Address::from_arg(address)),
         provider: start.provider,
         file,
         line,
@@ -387,38 +369,29 @@ fn both_choose() -> UsageError {
     UsageError("--name and --address both choose a daemon: give one".to_string())
 }
 
-/// Why words don't fit a self-attach's `[+LINE] [--] [FILE]`.
+/// The word that doesn't fit a self-attach's `[+LINE] [--] [FILE]`: an
+/// option, a second file or `+LINE`, or a `+LINE` with no file.
 #[derive(Debug, PartialEq, Eq)]
-enum Misfit {
-    /// A word beyond them: an option, or a second file.
-    Word(OsString),
-    LineTwice,
-    LineWithoutFile,
-}
+struct Misfit(OsString);
 
-impl Misfit {
-    /// The usage error, `beyond` saying what a word beyond them is for.
-    fn usage(self, beyond: impl FnOnce(&str) -> String) -> UsageError {
-        UsageError(match self {
-            Misfit::Word(word) => beyond(&word.to_string_lossy()),
-            Misfit::LineTwice => "+LINE is given twice".into(),
-            Misfit::LineWithoutFile => "+LINE needs a FILE".into(),
-        })
-    }
+/// Any self-attach word that doesn't fit (#94 decision 22).
+fn attach_takes() -> UsageError {
+    UsageError("attach takes [+LINE] [FILE]".into())
 }
 
 /// A self-attach's `[+LINE] [--] [FILE]`, read a word at a time.
 #[derive(Debug, Default)]
 struct AttachWords {
     file: Option<OsString>,
-    line: Option<u32>,
+    /// The line, and its word as typed.
+    line: Option<(u32, OsString)>,
     /// After `--`.
     files_only: bool,
 }
 
 impl AttachWords {
     /// Whether options may still come: not after `--`.
-    fn options(&self) -> bool {
+    fn takes_options(&self) -> bool {
         !self.files_only
     }
 
@@ -430,24 +403,24 @@ impl AttachWords {
             self.files_only = true;
             return Ok(());
         } else if let Some(n) = plus_line(bytes) {
-            return match self.line.replace(n) {
-                Some(_) => Err(Misfit::LineTwice),
+            return match self.line.replace((n, word.clone())) {
+                Some(_) => Err(Misfit(word.clone())),
                 None => Ok(()),
             };
         } else if (bytes.starts_with(b"-") && bytes.len() > 1) || bytes.starts_with(b"+") {
-            return Err(Misfit::Word(word.clone()));
+            return Err(Misfit(word.clone()));
         }
         if self.file.replace(word.clone()).is_some() {
-            return Err(Misfit::Word(word.clone()));
+            return Err(Misfit(word.clone()));
         }
         Ok(())
     }
 
     fn end(self) -> Result<(Option<OsString>, Option<u32>), Misfit> {
-        if self.line.is_some() && self.file.is_none() {
-            return Err(Misfit::LineWithoutFile);
+        match (self.file, self.line) {
+            (None, Some((_, word))) => Err(Misfit(word)),
+            (file, line) => Ok((file, line.map(|(n, _)| n))),
         }
-        Ok((self.file, self.line))
     }
 }
 
@@ -600,10 +573,9 @@ fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
     let (mut name, mut address, mut provider) = (None, None, None);
     let mut read = AttachWords::default();
     let mut i = 0;
-    let takes = |_: &str| "attach takes [+LINE] [FILE]".to_string();
     while let Some(word) = words.get(i) {
         let option = read
-            .options()
+            .takes_options()
             .then(|| long_option(word, &["--name", "--address", "--provider"]))
             .flatten();
         if let Some((option, attached)) = option {
@@ -617,15 +589,15 @@ fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
                 return Err(UsageError(format!("{option} is given twice")));
             }
         } else {
-            read.take(word).map_err(|m| m.usage(takes))?;
+            read.take(word).map_err(|_| attach_takes())?;
         }
         i += 1;
     }
-    let (file, line) = read.end().map_err(|m| m.usage(takes))?;
+    let (file, line) = read.end().map_err(|_| attach_takes())?;
     let to = match (name, address) {
         (Some(_), Some(_)) => return Err(both_choose()),
         (Some(name), None) => Target::Name(daemon_name(&name)?),
-        (None, Some(address)) => Target::Address(address),
+        (None, Some(address)) => Target::Address(Address::from_arg(address)),
         (None, None) => Target::Found,
     };
     Ok(Command::AttachSelf(AttachSelf {

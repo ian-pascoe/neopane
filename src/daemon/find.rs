@@ -3,11 +3,16 @@
 //! to start one.
 
 use std::ffi::OsStr;
+use std::time::{Duration, Instant};
 
 use super::dir::{self, Address, Base};
 use crate::name::{self, NAME};
 
-/// What a self-attach asks for.
+/// How long a live daemon has to answer at its address: one that has just
+/// claimed its name binds a moment later.
+pub const ANSWER_WITHIN: Duration = Duration::from_secs(1);
+
+/// The daemon a self-attach is to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// `--address A`.
@@ -97,22 +102,36 @@ pub fn find_daemon(
         ));
     }
     let base = base().map_err(NotFound::Dir)?;
-    if let Target::Name(name) = target {
-        let address = base.address(name);
-        if address.answers() {
-            return Ok(address);
+    let name = match target {
+        Target::Name(name) if base.live(name) => name.clone(),
+        Target::Name(name) => {
+            return Err(NotFound::NoSuchName {
+                name: name.clone(),
+                running: base.running(),
+            });
         }
-        return Err(NotFound::NoSuchName {
-            name: name.clone(),
-            running: base.running(),
-        });
+        _ => {
+            let mut running = base.running();
+            match running.len() {
+                0 => return Err(NotFound::NoneRunning),
+                1 => running.remove(0),
+                _ => return Err(NotFound::Several(running)),
+            }
+        }
+    };
+    answering(base.address(&name), ANSWER_WITHIN)
+}
+
+/// `address`, once a daemon answers there, within `within`.
+fn answering(address: Address, within: Duration) -> Result<Address, NotFound> {
+    let due = Instant::now() + within;
+    while !address.answers() {
+        if Instant::now() >= due {
+            return Err(NotFound::NoAnswer(address));
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let mut running = base.running();
-    match running.len() {
-        0 => Err(NotFound::NoneRunning),
-        1 => Ok(base.address(&running.remove(0))),
-        _ => Err(NotFound::Several(running)),
-    }
+    Ok(address)
 }
 
 #[cfg(test)]
@@ -122,9 +141,10 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     /// A scratch root holding a base directory, and the daemons there,
-    /// faked by sockets that listen.
+    /// faked by claimed directories and listening daemon addresses.
     struct Rig {
         root: Scratch,
+        claimed: Vec<dir::Claimed>,
         listening: Vec<UnixListener>,
     }
 
@@ -132,6 +152,7 @@ mod tests {
         fn new() -> Rig {
             Rig {
                 root: Scratch::new(),
+                claimed: Vec::new(),
                 listening: Vec::new(),
             }
         }
@@ -141,15 +162,23 @@ mod tests {
             dir::base_dir(&self.root.0, unsafe { libc::getuid() })
         }
 
-        /// A daemon named `name`, listening.
+        /// A daemon named `name`, live and listening.
         fn run(&mut self, name: &str) -> Address {
-            let claimed = dir::claim(&self.base().unwrap(), name).unwrap();
+            let claimed = self.starting(name);
             self.listening.push(claimed.bind().unwrap());
-            // its lock goes, but its socket still answers
-            claimed.address()
+            let address = claimed.address();
+            self.claimed.push(claimed);
+            address
         }
 
-        /// A directory whose daemon is gone, its socket left behind.
+        /// A daemon named `name` that has claimed its directory, live, but
+        /// hasn't bound its address yet.
+        fn starting(&self, name: &str) -> dir::Claimed {
+            dir::claim(&self.base().unwrap(), name).unwrap()
+        }
+
+        /// A directory whose daemon is gone, its socket left behind,
+        /// unlocked.
         fn stale(&mut self, name: &str) -> Address {
             let claimed = dir::claim(&self.base().unwrap(), name).unwrap();
             drop(claimed.bind().unwrap());
@@ -277,5 +306,51 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.to_string(), "x is already running");
+    }
+
+    #[test]
+    fn a_daemon_that_holds_its_lock_but_hasnt_bound_yet_is_waited_for() {
+        let mut rig = Rig::new();
+        let claimed = rig.starting("work");
+        let address = claimed.address();
+        // live, in the lists too, before it answers
+        assert_eq!(rig.base().unwrap().running(), vec!["work".to_string()]);
+        let binding = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let listener = claimed.bind().unwrap();
+            (claimed, listener)
+        });
+        assert_eq!(rig.find(&name("work"), None).0, Ok(address.clone()));
+        assert_eq!(rig.find(&Target::Found, None).0, Ok(address));
+        let (claimed, listener) = binding.join().unwrap();
+        rig.claimed.push(claimed);
+        rig.listening.push(listener);
+    }
+
+    #[test]
+    fn a_live_daemon_that_never_answers_says_so() {
+        let mut rig = Rig::new();
+        let claimed = rig.starting("work");
+        let address = claimed.address();
+        rig.claimed.push(claimed);
+        let started = Instant::now();
+        let (found, _) = rig.find(&name("work"), None);
+        assert_eq!(found, Err(format!("no daemon answers at {address}")));
+        assert!(started.elapsed() >= ANSWER_WITHIN);
+    }
+
+    #[test]
+    fn a_socket_that_answers_in_an_unlocked_directory_isnt_running() {
+        let mut rig = Rig::new();
+        let claimed = rig.starting("ghost");
+        rig.listening.push(claimed.bind().unwrap());
+        drop(claimed);
+        let (found, _) = rig.find(&Target::Found, None);
+        assert_eq!(
+            found,
+            Err(format!(
+                "no daemon is running; start one with {NAME} [FILE]"
+            ))
+        );
     }
 }

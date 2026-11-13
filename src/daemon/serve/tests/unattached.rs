@@ -273,7 +273,7 @@ fn an_attach_once_neovim_is_ending_is_refused_as_stopping() {
 /// The environment variable that makes `unattached_helper` run, naming a
 /// base directory and a file.
 fn unattached_helper_var() -> String {
-    format!("{}_TEST_UNATTACHED", name::upper())
+    format!("{}_TEST_UNATTACHED", crate::name::upper())
 }
 
 /// For `the_log_names_the_unsaved_changes_a_daemon_stays_for`, in a process

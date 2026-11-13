@@ -7,6 +7,7 @@
 //! the daemon wrote and restores its terminal, however the attach ended.
 //! `docs/attach-protocol.md` is the reference.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -99,8 +100,8 @@ pub struct Opening {
     /// it.
     pub file: Option<Vec<u8>>,
     pub line: Option<u32>,
-    /// `--provider P`, the hint, before `$<NAME>_PROVIDER`.
-    pub provider: Option<String>,
+    /// `--provider P`, the hint, as given (see `provider_hint`).
+    pub provider: Option<OsString>,
 }
 
 /// Self-attaches stdin's terminal to the daemon at `address`, as `run`
@@ -160,8 +161,8 @@ pub(crate) struct Attach {
     /// the cursor's line in it.
     pub(crate) file: Option<Vec<u8>>,
     pub(crate) line: Option<u32>,
-    /// For a self-attach: the hint given, else `$<NAME>_PROVIDER` is read.
-    pub(crate) provider: Option<String>,
+    /// For a self-attach: `--provider P`, as given (see `provider_hint`).
+    pub(crate) provider: Option<OsString>,
     pub(crate) transport: Transport,
     /// How long the daemon has to answer.
     pub(crate) answer_within: Duration,
@@ -234,7 +235,7 @@ fn attach_with(
         Want::Requested(pane) => Purpose::Requested { pane, terminal },
         Want::SelfAttach => Purpose::SelfAttach {
             terminal,
-            provider: how.provider.clone().or_else(provider_hint),
+            provider: provider_hint(how.provider.as_deref()),
             file: how.file.clone(),
             line: how.line,
         },
@@ -835,10 +836,14 @@ fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
     })
 }
 
-/// The pane provider a self-attach hints at: `$<NAME>_PROVIDER`, when set
-/// and not empty.
-fn provider_hint() -> Option<String> {
-    let hint = std::env::var_os(format!("{}_PROVIDER", crate::name::upper()))?;
+/// The pane provider a self-attach hints at: `given`, `--provider P`, else
+/// `$<NAME>_PROVIDER`; empty counts as unset.
+pub fn provider_hint(given: Option<&OsStr>) -> Option<String> {
+    let env = || std::env::var_os(format!("{}_PROVIDER", crate::name::upper()));
+    let hint = match given.filter(|g| !g.is_empty()) {
+        Some(given) => given.to_os_string(),
+        None => env()?,
+    };
     Some(hint.to_string_lossy().into_owned()).filter(|h| !h.is_empty())
 }
 
@@ -1354,6 +1359,26 @@ mod tests {
             libc::close(master);
             libc::close(slave);
         }
+    }
+
+    #[test]
+    fn the_provider_given_goes_into_a_self_attachs_hello() {
+        let how = Attach {
+            provider: Some("tmux".into()),
+            ..Attach::new(Want::SelfAttach, Transport::Fd)
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        against_with(how, None, move |f| {
+            tx.send(f.hello.purpose.clone()).unwrap();
+            send(&f.s, end(Ending::Closed, "closed", false));
+        });
+        let Purpose::SelfAttach { provider, .. } = rx.recv().unwrap() else {
+            panic!("not a self-attach");
+        };
+        assert_eq!(Some("tmux".to_string()), provider);
+        // given, it wins over the variable; empty is unset
+        assert_eq!(Some("x".to_string()), provider_hint(Some(OsStr::new("x"))));
+        assert_eq!(provider_hint(None), provider_hint(Some(OsStr::new(""))));
     }
 
     #[test]

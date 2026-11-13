@@ -617,6 +617,7 @@ fn attach_with_no_daemon_running_says_how_to_start_one() {
         format!("{NAME}: no daemon is running; start one with {NAME} [FILE]\n")
     );
     let out = attach(&["attach", "--name", "work"]);
+    assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
         format!("{NAME}: no daemon named work is running\n")
@@ -628,6 +629,49 @@ fn attach_with_no_daemon_running_says_how_to_start_one() {
         text(&out.stderr),
         format!("{NAME}: no daemon answers at /nowhere/sock\n")
     );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn attach_among_several_real_daemons_needs_a_running_name() {
+    let tmp = scratch("sev");
+    let attach = |args: &[&str]| {
+        Command::new(exe())
+            .args(args)
+            .env(neopane::daemon::dir::tmpdir_var(), &tmp)
+            .env_remove(NAME.to_ascii_uppercase())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    // live and listening, each waiting for its launcher's attach
+    let mut daemons: Vec<_> = ["notes", "scratch", "work"]
+        .into_iter()
+        .map(|name| {
+            let (child, said) = listening_daemon(&tmp, &[name, "--"]);
+            assert_eq!(said, format!("ok {name}\n"));
+            child
+        })
+        .collect();
+    let out = attach(&["attach", "f.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: 3 daemons are running (notes, scratch, work); choose one with --name\n")
+    );
+    let mut work = daemons.pop().unwrap();
+    work.kill().unwrap();
+    work.wait().unwrap();
+    let out = attach(&["attach", "--name", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon named work is running (running: notes, scratch)\n")
+    );
+    for mut d in daemons {
+        d.kill().unwrap();
+        d.wait().unwrap();
+    }
     std::fs::remove_dir_all(&tmp).unwrap();
 }
 

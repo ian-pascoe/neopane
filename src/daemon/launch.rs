@@ -75,8 +75,8 @@ pub struct Launch {
     /// `--name N`: the daemon is named exactly N. Without it, it is named
     /// after this directory, de-duplicated.
     pub name: Option<String>,
-    /// `--provider P`, for the first attach's hello.
-    pub provider: Option<String>,
+    /// `--provider P`, as given, for the first attach's hello.
+    pub provider: Option<std::ffi::OsString>,
 }
 
 /// Starts a daemon and attaches this terminal to it: how the attach ended,
