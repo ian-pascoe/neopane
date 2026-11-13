@@ -1064,6 +1064,7 @@ impl Daemon {
         pane.tab = sp.tab;
         pane.shown_tab = sp.tab;
         pane.split = Some(sp);
+        pane.opened_size = Some(size);
         let (pane_id, id) = (pane.id, pane.attach_id.expect("a requested pane"));
         let attach = pane::attach_words(&self.exe, &self.sock, self.transport, pane);
         let title = pane::title(&id);

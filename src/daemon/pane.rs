@@ -124,6 +124,9 @@ pub(crate) struct Pane {
     /// hasn't laid out yet: its window keeps the guessed size until the first
     /// size message, a second, or the pane provider is dropped.
     pub awaiting_size: bool,
+    /// The size its terminal was asked to open at, cols x rows: what a split
+    /// of it guesses from until its terminal attaches.
+    pub opened_size: Option<[u32; 2]>,
     /// Opened by `open`, for want of `open_beside`: where it is placed, with
     /// `place_beside`, once it has its terminal id and its terminal has
     /// attached (ADR 0006).
@@ -549,6 +552,7 @@ impl Pane {
             area: Area::Unreported,
             report_due: None,
             awaiting_size: false,
+            opened_size: None,
             placing: None,
             last_asked_win_size: LastAskedWinSize::default(),
             split: None,
