@@ -392,7 +392,10 @@ one it was opened from. A group of floats you enter, such as a picker, gets
 a tmux floating pane, framed, on tmux 3.7 or newer; older ones draw it in
 its pane. tmux checks the choice: the terminal's tty must be one of that
 tmux server's panes', so a `TMUX` inherited by another terminal chooses
-none. It needs tmux 3.2 or newer. `neopane provider show tmux` prints
+none, which only the log tells. In a tmux started from a Rex pane, whose
+panes inherit Rex's variables too, the terminal's tty tells them apart
+([docs/config.md](docs/config.md#the-default)). It needs tmux 3.2 or newer.
+`neopane provider show tmux` prints
 its table, which `neopane.builtin.tmux()` returns for your config to change
 ([docs/config.md](docs/config.md#tmux)); `--provider none` opts out.
 
@@ -413,7 +416,8 @@ command.
   the file and `--provider P` gives the hint; `--daemon-name N` sets
   `attach.daemon`; `--no-find` skips `find`; `--full` shows lines it would
   cut; `--json` prints one JSON object. It exits 0 for a pane provider or
-  none by design, 1 for an error or a `find` refusing this terminal, 2 for a
+  none by design (with no config, also a `find` refusing the default's
+  guess), 1 for an error or a `find` refusing the config's choice, 2 for a
   usage error.
 - `neopane provider show [NAME]` prints a built-in pane provider as Lua, to
   copy and change ([docs/config.md](docs/config.md#built-in-pane-providers)).
