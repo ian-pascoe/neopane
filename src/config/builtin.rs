@@ -49,6 +49,7 @@ impl BuiltinTable {
                 Capability::Resize,
                 Capability::Focus,
                 Capability::FocusDirection,
+                Capability::OpenTabPage,
             ],
         }
     }
@@ -200,6 +201,10 @@ mod tests {
                 (
                     "focus_direction",
                     "{exe} provider builtin tmux focus_direction".to_string()
+                ),
+                (
+                    "open_tab_page",
+                    "{exe} provider builtin tmux open_tab_page".to_string()
                 ),
             ]
         );

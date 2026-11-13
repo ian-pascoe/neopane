@@ -36,6 +36,7 @@ mod layout;
 mod panes;
 mod resize;
 mod server;
+mod tab_page;
 mod window_layout;
 
 pub(crate) use inside::inside;
@@ -72,6 +73,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::PlaceBeside => finish(cap, resize::place_beside(given).map(|()| None)),
         Capability::Focus => finish(cap, focus::focus(given).map(|()| None)),
         Capability::FocusDirection => finish(cap, focus::focus_direction(given).map(|()| None)),
+        Capability::OpenTabPage => finish(cap, tab_page::open_tab_page(given).map(Some)),
         _ => UNSUPPORTED,
     }
 }

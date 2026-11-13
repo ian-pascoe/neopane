@@ -219,7 +219,9 @@ mod tests {
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"open_beside\" }},\n  \
                    open_float = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
-                 \"open_float\" }},\n\
+                 \"open_float\" }},\n  \
+                   open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"open_tab_page\" }},\n\
                  }}\n"
             )
         );

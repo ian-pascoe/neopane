@@ -228,3 +228,44 @@ fn focus_direction_steps_in_the_shown_window_and_stops_at_its_edge() {
     drop(tmux);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn open_tab_page_opens_a_window_after_the_origins_running_the_attach() {
+    if !have_tmux() {
+        return;
+    }
+    let (tmux, dir) = server("tmux-tab-page");
+    split(&tmux, "%0", &["-h"]);
+    tmux.run(&["new-window", "-d"]);
+    let client = tmux.attached();
+    tmux.run(&["resize-pane", "-Z", "-t", "%0"]);
+    let pane = done(
+        &tmux,
+        "open_tab_page",
+        &[
+            ("ORIGIN", "%0"),
+            ("ATTACH", "sleep 300"),
+            ("ATTACH_JSON", r#"["sleep","300"]"#),
+            ("COLS", "80"),
+            ("ROWS", "24"),
+        ],
+    );
+    assert!(pane.starts_with('%'), "{pane}");
+    // after the origin's window, the session still on the origin's
+    let windows = tmux.run(&["list-windows", "-F", "#{window_index} #{pane_id}"]);
+    let second = windows.lines().nth(1).unwrap();
+    assert_eq!(second, format!("1 {pane}"), "{windows}");
+    assert_eq!(shown(&tmux), "@0 %0");
+    assert_eq!(of(&tmux, "%0", "#{window_zoomed_flag}"), "1");
+    assert_eq!(of(&tmux, &pane, "#{pane_start_command}"), "sleep 300");
+    // a one-word attach would go through a shell
+    let out = act(
+        &tmux,
+        "open_tab_page",
+        &[("ORIGIN", "%0"), ("ATTACH", "sleep")],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    drop(client);
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&dir);
+}
