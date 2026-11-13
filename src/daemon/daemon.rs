@@ -6328,7 +6328,7 @@ mod tests {
         }
 
         /// How many windows it asked Neovim to close.
-        fn neopane_closes(&self) -> usize {
+        fn name_closes(&self) -> usize {
             self.nvim.matches(&format!("{NAME}.close")).count()
         }
 
@@ -6402,7 +6402,7 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(direction, dir);
-            assert_eq!(0, sent.neopane_closes());
+            assert_eq!(0, sent.name_closes());
         }
     }
 
@@ -6503,7 +6503,7 @@ mod tests {
         assert_eq!(vec![unplaced], pane_ids(&fx.d));
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6551,7 +6551,7 @@ mod tests {
         assert_eq!(1, fx.d.panes.list.len());
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     /// The sizes a daemon asked Neovim to give windows, in order: window,
@@ -6900,7 +6900,7 @@ mod tests {
         assert!(fx.d.panes.list.is_empty());
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6915,7 +6915,7 @@ mod tests {
         let sent = sent_by(fx);
         // its terminal was closed as its request failed
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6931,7 +6931,7 @@ mod tests {
         assert_eq!(2, fx.d.asks.waiting());
         let sent = sent_by(fx);
         assert_eq!(vec!["open_float"], sent.capabilities());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6948,7 +6948,7 @@ mod tests {
         let sent = sent_by(fx);
         // Rex closed the pane itself
         assert!(sent.asks.is_empty());
-        assert_eq!(1, sent.neopane_closes());
+        assert_eq!(1, sent.name_closes());
     }
 
     #[test]
@@ -6962,7 +6962,7 @@ mod tests {
         let sent = sent_by(fx);
         // only the floating pane's own request, from the setup: Rex closed it
         assert_eq!(vec!["open_float"], sent.capabilities());
-        assert_eq!(1, sent.neopane_closes());
+        assert_eq!(1, sent.name_closes());
     }
 
     /// A ready daemon with panes in blocks for windows 1 and 2, only window 2
@@ -6998,7 +6998,7 @@ mod tests {
             sent.asks[0]
         );
         // the window is already gone
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -7021,7 +7021,7 @@ mod tests {
             assert_eq!(None, fx.d.stopped);
             let sent = sent_by(fx);
             assert!(sent.asks.is_empty(), "reopened={reopened}");
-            assert_eq!(0, sent.neopane_closes());
+            assert_eq!(0, sent.name_closes());
         }
     }
 
@@ -7035,6 +7035,6 @@ mod tests {
         assert!(deciding(&fx.d));
         let sent = sent_by(fx);
         assert_eq!(vec!["close"], sent.capabilities());
-        assert_eq!(0, sent.neopane_closes());
+        assert_eq!(0, sent.name_closes());
     }
 }

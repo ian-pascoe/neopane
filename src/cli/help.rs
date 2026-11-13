@@ -157,7 +157,7 @@ mod tests {
             format!("{NAME} provider show "),
             format!("{NAME} provider types "),
             format!("EDITOR={NAME}"),
-            format!("More: https://github.com/ian-pascoe/{NAME}"),
+            format!("More: {}", repo_url()),
             format!("Developer tools: {NAME} help debug"),
         ] {
             assert!(help.contains(&want), "{want}");

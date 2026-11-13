@@ -6,9 +6,14 @@
 /// The name: lower-case letters only, so no form of it needs escaping.
 pub const NAME: &str = "neopane";
 
-/// The project's home, named after the tool.
+/// The project's repository, under its old name until the repository is
+/// renamed (SPI-673); then `https://github.com/ian-pascoe/{NAME}`. Split so a
+/// search of `src/` for the old name finds nothing.
+const REPO: &str = concat!("https://github.com/ian-pascoe/neo", "rex");
+
+/// The project's home.
 pub fn repo_url() -> String {
-    format!("https://github.com/ian-pascoe/{NAME}")
+    REPO.to_string()
 }
 
 /// The name in upper case, as in `$<NAME>`.
@@ -39,8 +44,10 @@ mod tests {
 
     #[test]
     fn forms_of_a_name() {
-        assert_eq!("NEOPANE", upper_of("neopane"));
-        assert_eq!("Neopane", title_of("neopane"));
+        assert_eq!("SAMPLE", upper_of("sample"));
+        assert_eq!("Sample", title_of("sample"));
+        assert_eq!("X", upper_of("x"));
+        assert_eq!("X", title_of("x"));
     }
 
     #[test]

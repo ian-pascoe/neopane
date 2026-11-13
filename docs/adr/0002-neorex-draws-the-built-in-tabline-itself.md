@@ -1,5 +1,8 @@
 # neorex draws the built-in tabline itself
 
+neorex, `NeorexTabLineSel` and `NeorexTabLine` below are the names until the
+rename, then neopane, `NeopaneTabLineSel` and `NeopaneTabLine` (ADR 0005).
+
 While `'tabline'` is empty, Neovim draws its built-in tabline, and under neorex
 it is wrong twice over (#63). It can't be fitted: it lays out across all of
 Neovim's screen, with no expression to evaluate at the tabline width or pad, so
