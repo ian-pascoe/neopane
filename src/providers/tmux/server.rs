@@ -74,6 +74,12 @@ impl Server {
 /// than [`OLDEST`]: `3.1c`, `2.9` are; `3.2a`, `3.10`, `next-3.9` and a
 /// version it can't read, such as `master`, aren't.
 pub(super) fn too_old(version: &str) -> bool {
+    older_than(version, OLDEST)
+}
+
+/// Whether tmux `version`, as `tmux -V` gives it after `tmux `, is older
+/// than `major`.`minor`; a version it can't read isn't.
+pub(super) fn older_than(version: &str, (major_floor, minor_floor): (u32, u32)) -> bool {
     let digits = version.trim_start_matches(|c: char| !c.is_ascii_digit());
     let mut parts = digits.split('.');
     let major = parts.next().and_then(|m| m.parse::<u32>().ok());
@@ -84,7 +90,7 @@ pub(super) fn too_old(version: &str) -> bool {
             .parse::<u32>()
     });
     match (major, minor) {
-        (Some(major), Some(Ok(minor))) => (major, minor) < OLDEST,
+        (Some(major), Some(Ok(minor))) => (major, minor) < (major_floor, minor_floor),
         _ => false,
     }
 }
