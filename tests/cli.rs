@@ -1485,3 +1485,33 @@ fn the_first_attach_to_a_kept_daemon_shows_its_current_tab_page() {
     };
     assert!(within_10s(both), "{:?}", shown(&drawn));
 }
+
+#[test]
+fn a_file_attach_to_a_kept_daemon_closes_the_window_it_started_with() {
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("df");
+    std::fs::write(tmp.join("a.txt"), "first file\n").unwrap();
+    std::fs::write(tmp.join("b.txt"), "second file\n").unwrap();
+    let sock = base_of(&tmp).join("w/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let out = detached(&tmp, &tmp, &["--detach", "--name", "w", "a.txt"]);
+    assert_eq!((out.status.code(), text(&out.stdout)), (Some(0), "w\n"));
+    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach", "b.txt"], &[], 80);
+    ending.helpers.push(helper);
+    assert!(
+        within_10s(|| shown(&drawn).contains("second file")),
+        "{:?}",
+        shown(&drawn)
+    );
+    // as an attach to a daemon its last pane left: no window but the file's
+    let shown_files = "join(map(filter(nvim_list_wins(), 'nvim_win_get_config(v:val).external'), \
+                       'fnamemodify(bufname(winbufnr(v:val)), \":t\")'))";
+    let files = until_expr(&sock, shown_files, |f| f == "b.txt");
+    assert_eq!(files.as_deref(), Some("b.txt"));
+}

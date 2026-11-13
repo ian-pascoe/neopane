@@ -1386,10 +1386,11 @@ impl Daemon {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
             // the first window is the self-attached pane's (#83); a kept
-            // daemon's, with none, the screen's but its last row
+            // daemon's is kept, the screen's but its last row, and an
+            // attach that came meanwhile is served once it's set up
             let size = match self.panes.self_attached_awaiting_window() {
+                _ if self.lifetime.asked_to_stay => [KEPT_SIZE[0], KEPT_SIZE[1] - self.msg_rows],
                 Some(first) => self.geometry().window_size(first),
-                None if self.lifetime.asked_to_stay => [KEPT_SIZE[0], KEPT_SIZE[1] - self.msg_rows],
                 None => return Ok(()),
             };
             let mut result = result;
@@ -1399,7 +1400,13 @@ impl Daemon {
         } else if id == self.nvim.setup_req {
             let mut result = result;
             let wins = windows::parse_setup(&mut result)?;
-            if let Some(first) = self.panes.self_attached_awaiting_window_mut() {
+            if self.lifetime.asked_to_stay {
+                // kept for the first attach, as one its last pane left is
+                self.lifetime.kept = Some(lifetime::Kept {
+                    win: wins[0],
+                    tab: 0,
+                });
+            } else if let Some(first) = self.panes.self_attached_awaiting_window_mut() {
                 first.neovim_window_handle = Some(wins[0]);
             }
             self.nvim.ready = true;
