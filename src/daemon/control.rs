@@ -64,11 +64,20 @@ pub fn ask(address: &Address, purpose: Purpose, within: Duration) -> Result<Repl
     let hello = Message::Hello(Hello::new(purpose))
         .encode()
         .expect("a control request fits a frame");
-    stream
-        .set_write_timeout(Some(within))
+    timeout(stream.set_write_timeout(Some(within)))
         .and_then(|()| stream.write_all(&hello))
         .map_err(|e| Failure::Failed(format!("can't send the request: {e}")))?;
     read_reply(&mut stream, due, within)
+}
+
+/// Setting a socket's timeout, which macOS refuses with EINVAL once the
+/// peer has hung up: a read then doesn't block, and finds what it sent
+/// before, so that's no failure.
+fn timeout(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        r => r,
+    }
 }
 
 /// Reads frames from `stream` until the reply, or a refusal, by `due`.
@@ -91,9 +100,10 @@ fn read_reply(stream: &mut UnixStream, due: Instant, within: Duration) -> Result
         if left.is_zero() {
             return Err(Failure::NoAnswer(within));
         }
-        stream
-            .set_read_timeout(Some(left))
-            .map_err(|e| Failure::Failed(e.to_string()))?;
+        // never 0, which would mean none
+        let left = left.max(Duration::from_millis(1));
+        timeout(stream.set_read_timeout(Some(left)))
+            .map_err(|e| Failure::Failed(format!("can't read its answer: {e}")))?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err(Failure::Failed("it hung up without an answer".into())),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -316,6 +326,31 @@ mod tests {
         let address = Address::from_arg(at.into_os_string());
         let got = ask(&address, status_purpose(), Duration::from_millis(100));
         assert!(matches!(got, Err(Failure::Failed(_))), "{got:?}");
+    }
+
+    #[test]
+    fn a_reply_from_a_daemon_that_already_hung_up_is_read() {
+        use crate::attach::{ATTACH_PROTOCOL_VERSION, Message, Reply};
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        let reply = Reply {
+            ok: true,
+            message: None,
+            v: ATTACH_PROTOCOL_VERSION,
+            build: "b".into(),
+            name: "work".into(),
+            pid: 1,
+            status: None,
+            waited: None,
+        };
+        theirs
+            .write_all(&Message::Reply(reply.clone()).encode().unwrap())
+            .unwrap();
+        // gone before anything is read: on macOS, setting a timeout now
+        // fails with EINVAL
+        drop(theirs);
+        let within = Duration::from_secs(1);
+        let got = read_reply(&mut ours, Instant::now() + within, within);
+        assert_eq!(Ok(reply), got);
     }
 
     #[test]

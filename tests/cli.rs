@@ -1028,6 +1028,8 @@ fn older_daemon(tmpdir: &Path, refusal: Option<&'static str>) {
                 waited: None,
             });
             let _ = s.write_all(&reply.encode().unwrap());
+            // open until the client hangs up, as a daemon is
+            while matches!(s.read(&mut buf), Ok(1..)) {}
         }
     });
 }
