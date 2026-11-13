@@ -1,4 +1,4 @@
-//! neopane: a Rex-native Neovim frontend.
+//! neopane: one Neovim in the background, shown in every terminal attached to it.
 
 #![warn(unreachable_pub)]
 

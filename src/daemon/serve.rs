@@ -590,7 +590,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     mut config: Config<'_>,
 ) -> Result<()> {
     let log = dir.log();
-    // resolved, symlinks and all: the `nrex` link shouldn't end up in every
+    // resolved, symlinks and all: the `npane` link shouldn't end up in every
     // pane's command
     let exe = std::env::current_exe()?
         .canonicalize()?
