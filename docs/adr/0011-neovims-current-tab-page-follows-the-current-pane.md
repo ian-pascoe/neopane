@@ -77,8 +77,11 @@ moves into whichever tab page is current (#90).
   page it sits in closes. Neovim allows no move as a tab page starts to
   close (TabClosedPre gives E1312), so it's moved back as the first of that
   tab page's windows closes, before the rest of its floats do; a close that
-  then fails should bring it back (untested: a failing `:tabclose` of a
-  tab page holding a modified external window hangs Neovim). The
+  then fails brings it back. Such a close is one from a window with
+  unsaved changes: Neovim 0.12 would try to close that floating window
+  forever, so neopane closes the tab page's other windows from its anchor,
+  as Neovim closes splits (E445), first closing one window that can close,
+  which sends the group home (SPI-1112). The
   exception is a float of it that is the current window: Neovim closes
   that one first, as it closes the current float of any tab page that
   closes, and the rest of the group goes home. A close that fires no
