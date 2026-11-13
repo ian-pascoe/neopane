@@ -105,8 +105,12 @@ impl Daemon {
                 self.config_failed(id, line)
             }
             ChooseBy::Default => {
-                let chosen =
-                    choose::choose(&hello.env, hello.hint.as_deref(), &mut choose::connect());
+                let chosen = choose::choose(
+                    &hello.env,
+                    &hello.cwd,
+                    hello.hint.as_deref(),
+                    &mut choose::connect(),
+                );
                 self.take_choice(id, chosen)
             }
         }

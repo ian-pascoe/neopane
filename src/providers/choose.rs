@@ -3,9 +3,10 @@
 //! one, chooses: it runs in the config child, on a thread of its own so the
 //! daemon's loop never waits for it (`ConfigRun`), and what it returned is
 //! checked by the daemon (`by_config`). With no file, the built-in
-//! `<name>.default` chooses, run in the daemon itself: Rex when the
-//! attach's environment has `REX_SERVER` and `REX_SESSION`, else none. The
-//! hint `none` skips both.
+//! `<name>.default` chooses, run in the daemon itself: tmux's table in a
+//! tmux pane, Rex when the attach's environment has `REX_SERVER` and
+//! `REX_SESSION`, else none (`config::default_of`). The hint `none` skips
+//! both.
 //!
 //! Choosing Rex only starts connecting to it, which never blocks: the
 //! daemon's loop takes the steps, and its `find` confirms the choice.
@@ -73,10 +74,10 @@ pub(crate) fn default_choice(env: &Env) -> Choice {
     })
 }
 
-/// Chooses for a self-attach with environment `env` and `hint`, connecting
-/// to Rex through `connect` if that's the choice.
-pub(crate) fn choose(env: &Env, hint: Option<&str>, connect: &mut Connect) -> Chosen {
-    let started = Instant::now();
+/// Chooses with the built-in default for a self-attach with environment
+/// `env`, working directory `cwd` and `hint`, connecting to Rex through
+/// `connect` if that's the choice.
+pub(crate) fn choose(env: &Env, cwd: &[u8], hint: Option<&str>, connect: &mut Connect) -> Chosen {
     if hint == Some(HINT_NONE) {
         return Chosen::None {
             why: format!("the hint is {HINT_NONE}"),
@@ -84,11 +85,13 @@ pub(crate) fn choose(env: &Env, hint: Option<&str>, connect: &mut Connect) -> Ch
         };
     }
     match default_choice(env) {
-        Choice::Builtin(Builtin::Rex) => start_rex(env, connect, started),
-        _ => Chosen::None {
-            why: "REX_SERVER and REX_SESSION aren't both set".into(),
+        Choice::None => Chosen::None {
+            why: "neither tmux's variables (TERM_PROGRAM=tmux, TMUX) nor Rex's (REX_SERVER, \
+                  REX_SESSION) are set"
+                .into(),
             warn: false,
         },
+        choice => of_choice(&choice, env, cwd, connect),
     }
 }
 
@@ -290,7 +293,8 @@ pub(crate) fn by_config(
         Ok(chosen) => {
             log_problems(&chosen.warnings);
             let warning = chosen.warnings.message();
-            (of_choice(&chosen.choice, hello, connect), warning)
+            let chosen = of_choice(&chosen.choice, &hello.env, &hello.cwd, connect);
+            (chosen, warning)
         }
     }
 }
@@ -305,20 +309,20 @@ fn log_problems(problems: &Problems) {
     }
 }
 
-/// The pane provider for the config's `choice`, for the choosing attach,
-/// whose hello is `hello`.
-fn of_choice(choice: &Choice, hello: &AttachHello, connect: &mut Connect) -> Chosen {
+/// The pane provider for `choice`, for the choosing attach, whose
+/// environment is `env` and working directory `cwd`.
+fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], connect: &mut Connect) -> Chosen {
     let started = Instant::now();
     match choice {
         Choice::None => Chosen::None {
             why: "the config chose none".into(),
             warn: false,
         },
-        Choice::Builtin(Builtin::Rex) => start_rex(&hello.env, connect, started),
+        Choice::Builtin(Builtin::Rex) => start_rex(env, connect, started),
         Choice::Whole(_) | Choice::Pair(_) => {
             let spec = Spec::of(choice).expect("a table or a pair has a spec");
             let name = spec.name.clone();
-            match CommandProvider::new(spec, &hello.env, &hello.cwd) {
+            match CommandProvider::new(spec, env, cwd) {
                 Ok(p) => Chosen::Provider {
                     held: Box::new(p),
                     spent: started.elapsed(),
@@ -357,6 +361,26 @@ mod tests {
         assert_eq!(
             Choice::None,
             default_choice(&env(&[("TMUX", "/tmp/t,1,0")]))
+        );
+    }
+
+    #[test]
+    fn the_default_chooses_tmuxs_table_with_term_program_tmux_and_tmux_set() {
+        let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
+        let inside = [("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")];
+        assert_eq!(tmux, default_choice(&env(&inside)));
+        // the innermost: Rex's variables leak into tmux run in a Rex pane
+        let rex = [("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")];
+        assert_eq!(tmux, default_choice(&env(&[inside, rex].concat())));
+        // TMUX leaks into terminals tmux doesn't run
+        assert_eq!(
+            Choice::None,
+            default_choice(&env(&[("TERM_PROGRAM", "ghostty"), ("TMUX", "/tmp/t,1,0")]))
+        );
+        assert_eq!(Choice::None, default_choice(&env(&inside[..1])));
+        assert_eq!(
+            Choice::None,
+            default_choice(&env(&[("TERM_PROGRAM", "tmux"), ("TMUX", "")]))
         );
     }
 
@@ -472,9 +496,9 @@ mod tests {
     #[test]
     fn the_hint_none_or_no_rex_chooses_none_quietly() {
         let in_rex = env(&[("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")]);
-        let (_, warn) = none(choose(&in_rex, Some("none"), &mut connects_nowhere()));
+        let (_, warn) = none(choose(&in_rex, b"/", Some("none"), &mut connects_nowhere()));
         assert!(!warn);
-        let (_, warn) = none(choose(&env(&[]), None, &mut connects_nowhere()));
+        let (_, warn) = none(choose(&env(&[]), b"/", None, &mut connects_nowhere()));
         assert!(!warn);
     }
 
@@ -483,7 +507,7 @@ mod tests {
         // stale REX_*: a Ghostty window started from a Rex shell, Rex since quit
         let stale = env(&[("REX_SERVER", "unix:///gone"), ("REX_SESSION", "session:s")]);
         let mut refused: Connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
-        let (why, warn) = none(choose(&stale, None, &mut refused));
+        let (why, warn) = none(choose(&stale, b"/", None, &mut refused));
         assert!(warn);
         assert!(why.starts_with("rex: can't reach Rex: "), "{why}");
     }
@@ -497,7 +521,8 @@ mod tests {
             assert_eq!("unix:///s", url);
             Ok(ours.take().unwrap())
         });
-        let Chosen::Provider { held, spent } = choose(&in_rex, Some("tmux"), &mut connect) else {
+        let Chosen::Provider { held, spent } = choose(&in_rex, b"/", Some("tmux"), &mut connect)
+        else {
             panic!("chose none");
         };
         assert_eq!("rex", held.name());

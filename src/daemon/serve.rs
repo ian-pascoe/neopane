@@ -644,6 +644,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
             ChooseBy::Missing(_) => None,
             ChooseBy::Default => Some(choose::choose(
                 &h.env,
+                &h.cwd,
                 h.hint.as_deref(),
                 &mut choose::connect(),
             )),

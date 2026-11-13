@@ -186,6 +186,9 @@ fn listening_daemon_with(
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
         .env_remove("REX_SERVER")
         .env_remove("REX_SESSION")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -416,7 +419,10 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         text(&out.stdout),
-        "rex  return \"rex\" from provider() (built in; no Lua table)\n"
+        format!(
+            "rex   return \"rex\" from provider() (built in; no Lua table)\n\
+             tmux  {NAME}.builtin.tmux()\n"
+        )
     );
     assert_eq!(text(&out.stderr), "");
 
@@ -435,7 +441,7 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        format!("{NAME}: no built-in pane provider named foo (built-ins: rex)\n")
+        format!("{NAME}: no built-in pane provider named foo (built-ins: rex, tmux)\n")
     );
 
     let out = run(&["provider", "show", "a", "b"]);
@@ -1249,6 +1255,9 @@ fn detached_command(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Command {
         .env_remove(format!("{upper}_PROVIDER"))
         .env_remove("REX_SERVER")
         .env_remove("REX_SESSION")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::null());
     command
 }

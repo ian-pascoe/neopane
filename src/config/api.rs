@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
 
-use super::BuiltinTable;
 use super::builtin::tree_of_table;
 use super::tree::Tree;
 use super::wire::Request;
+use super::{Builtin, BuiltinTable};
 use crate::name::NAME;
 use crate::util::seconds;
 
@@ -100,7 +100,8 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
 /// Sends the config's output to stderr, and wraps `run` and `which`.
 const PRELUDE: &str = include_str!("prelude.lua");
 
-/// `<name>.default(attach)`: never raises.
+/// `<name>.default(attach)`: `"rex"`, a built-in table, or nil. Never
+/// raises.
 fn default(lua: &Lua, attach: Value) -> mlua::Result<Value> {
     let env = match attach {
         Value::Table(t) => t.raw_get::<Value>("env").ok(),
@@ -115,8 +116,9 @@ fn default(lua: &Lua, attach: Value) -> mlua::Result<Value> {
             _ => None,
         }
     };
-    Ok(match super::default_name(|name| var(name)) {
-        Some(name) => Value::String(lua.create_string(name)?),
+    Ok(match super::default_of(|name| var(name)) {
+        Some(super::DefaultName::Rex) => Value::String(lua.create_string(Builtin::Rex.name())?),
+        Some(super::DefaultName::Table(table)) => built_in(lua, table)?,
         None => Value::Nil,
     })
 }

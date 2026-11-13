@@ -57,8 +57,10 @@ impl Home {
             .env_remove(format!("{upper}_PROVIDER"))
             .env_remove("REX_SERVER")
             .env_remove("REX_SESSION")
-            .env_remove("REX_BLOCK")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .env_remove("TERM_PROGRAM")
+            .env_remove("REX_BLOCK")
             .stdin(Stdio::null());
         c
     }

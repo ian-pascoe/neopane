@@ -1041,7 +1041,7 @@ fn provider_show_prints_what_builtin_returns() {
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
     // set means present, even empty, as the daemon reads its own
-    let envs: [&[(&str, &str)]; 7] = [
+    let envs: [&[(&str, &str)]; 9] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
@@ -1053,9 +1053,18 @@ fn default_agrees_with_the_daemons() {
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
+        &[("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")],
+        &[
+            ("TERM_PROGRAM", "tmux"),
+            ("TMUX", "/tmp/t,1,0"),
+            ("REX_SERVER", "ws://x"),
+            ("REX_SESSION", "s"),
+        ],
     ];
-    let want = [false, true, false, false, true, true, true];
-    for (env, want) in envs.into_iter().zip(want) {
+    let want = [false, true, false, false, true, true, true, false, false];
+    let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
+    let wants_tmux = [false, false, false, false, false, false, false, true, true];
+    for ((env, want), wants_tmux) in envs.into_iter().zip(want).zip(wants_tmux) {
         let mut f = Fixture::new(source);
         f.attach.env = env
             .iter()
@@ -1065,6 +1074,7 @@ fn default_agrees_with_the_daemons() {
         assert_eq!(f.choose().unwrap().choice, daemons, "{env:?}");
         let rex = Choice::Builtin(Builtin::Rex);
         assert_eq!(daemons == rex, want, "{env:?}");
+        assert_eq!(daemons == tmux, wants_tmux, "{env:?}");
     }
 }
 
