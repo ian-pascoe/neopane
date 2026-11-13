@@ -487,7 +487,8 @@ end
 -- right edge, and the statusline below it; ours are the windows' alone, so
 -- they're added here. `dir` is 'row' for widths, 'col' for heights. Returns
 -- `set`, which gives the window at the end of `chain`, the nodes from `root`
--- down, `size` cells along `dir`.
+-- down, `size` cells along `dir`. 'winfixwidth' and 'winfixheight' aren't
+-- modelled: a window with them gives and takes cells as any other.
 local function resizer(root)
   -- node -> { right, bottom }: at the right edge, at the bottom
   local edges = {}

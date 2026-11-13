@@ -392,16 +392,22 @@ file, to copy into your `init.lua` and change. Its every capability runs
 capability contract for that multiplexer (`docs/capabilities.md`, "Built-in
 commands").
 
+`:vertical resize` and `:resize` on a window resize its pane too, in any tab
+page, whichever side of a split the window is on. Each pane has its own
+message row and the panes a border between them, where Neovim's screen has
+one command line, so with `:resize` a lower window's pane can come up to two
+rows short. Rex resizes only a split it placed, or one whose two panes sit
+side by side in its layout: in the first tab page, where panes stay where
+they opened, resizing a window of three or more may leave its pane as it was.
+
 ### tmux
 
 On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
 config, and each Neovim window gets a tmux pane of its own, split beside the
 pane it came from; on tmux 3.7 or newer, a group of floats you enter gets a
 tmux floating pane. `<C-w>h/j/k/l` move tmux's focus, stopping at the
-window's edge, and each tab page gets a tmux window. In any tab page,
-`:vertical resize` or `:resize` on a window, whichever side of a split it
-is on, resizes its tmux pane. On tmux 3.8 or newer, moving
-between panes with tmux's own keys, or clicking one, moves Neovim's current
+window's edge, and each tab page gets a tmux window. On tmux 3.8 or newer,
+moving between panes with tmux's own keys, or clicking one, moves Neovim's current
 window there at once; older tmux has no way to tell neopane unasked, so the
 move is learned at the next key you type or the next focus report. `neopane
 provider check` shows what your tmux can do. The default knows tmux by its
