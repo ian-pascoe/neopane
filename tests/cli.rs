@@ -707,7 +707,7 @@ fn in_pty(tmpdir: &Path, cwd: &Path, args: &[&str]) -> std::process::Child {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     };
     assert_eq!(0, rc);
