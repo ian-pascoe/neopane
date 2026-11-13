@@ -402,3 +402,207 @@ fn in_tmux_3_8_select_pane_moves_neovims_current_window_and_no_client_is_added()
     drop(tmux);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A daemon in a pane of a private tmux server, with no config, and a
+/// client attached to it: everything ends as it drops.
+struct Live {
+    ending: Ending,
+    _client: TmuxClient,
+    tmux: TmuxServer,
+    tmp: std::path::PathBuf,
+}
+
+impl Live {
+    /// None without `nvim` or `tmux`.
+    fn start(test: &str) -> Option<Live> {
+        if !have_nvim() || !have_tmux() {
+            return None;
+        }
+        let tmp = scratch(test);
+        let exe = exe();
+        let tmux = TmuxServer::start(
+            &tmp,
+            &[
+                (&neopane::daemon::dir::tmpdir_var(), tmp.as_os_str()),
+                ("XDG_CONFIG_HOME", tmp.as_os_str()),
+                ("XDG_STATE_HOME", tmp.as_os_str()),
+            ],
+            &[exe.to_str().unwrap(), "--name", "work"],
+        );
+        let client = tmux.attached();
+        let sock = base_of(&tmp).join("work/nvim.sock");
+        let live = Live {
+            ending: Ending {
+                sock,
+                helpers: Vec::new(),
+                tmp: tmp.clone(),
+            },
+            _client: client,
+            tmux,
+            tmp,
+        };
+        let answered = until_expr(&live.ending.sock, "1", |_| true);
+        assert!(
+            answered.is_some(),
+            "work's Neovim never answered: {} {}",
+            live.log(),
+            live.tmux.run(&["capture-pane", "-p", "-t", "%0"])
+        );
+        let s = until(
+            |s: &serde_json::Value| s["provider"] == "tmux",
+            || live.status(),
+        );
+        assert_eq!(s["provider"], "tmux", "{}", live.log());
+        Some(live)
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(base_of(&self.tmp).join("work/log")).unwrap_or_default()
+    }
+
+    fn status(&self) -> serde_json::Value {
+        json(&under(&self.tmp, &["status", "--json", "--name", "work"]))
+    }
+
+    /// Runs `cmd` in Neovim, as `:execute` does.
+    fn ex(&self, cmd: &str) {
+        remote_expr(&self.ending.sock, &format!("execute('{cmd}')")).unwrap();
+    }
+
+    /// Types `keys` in Neovim's Normal mode, mappings and all, `\<C-w>`
+    /// as Vim's double-quoted strings read it.
+    fn normal(&self, keys: &str) {
+        remote_expr(&self.ending.sock, &format!("execute(\"normal {keys}\")")).unwrap();
+    }
+
+    /// The tmux window and pane the client shows.
+    fn shown(&self) -> String {
+        self.tmux
+            .run(&["list-clients", "-F", "#{window_id} #{pane_id}"])
+    }
+
+    /// Waits for `want` to be what the client shows; what it last was.
+    fn until_shown(&self, want: &str) -> String {
+        until(|s: &String| s == want, || self.shown())
+    }
+
+    /// `:vsplit`, once its pane has attached and been placed: the new
+    /// window's pane, left of `%0`.
+    fn vsplit(&self) -> String {
+        self.ex("vsplit");
+        let s = until(|s: &serde_json::Value| s["panes"] == 2, || self.status());
+        assert_eq!(s["panes"], 2, "its attach never came: {}", self.log());
+        let lefts = || {
+            self.tmux
+                .run(&["list-panes", "-t", "%0", "-F", "#{pane_left} #{pane_id}"])
+        };
+        let lefts = until(|l: &String| l.lines().count() == 2, lefts);
+        let left = lefts.lines().find(|l| l.starts_with("0 ")).unwrap();
+        let left = left.split(' ').nth(1).unwrap().to_string();
+        assert_ne!(left, "%0", "{lefts}");
+        left
+    }
+}
+
+#[test]
+fn ctrl_w_l_moves_tmux_focus_right_and_not_past_the_edge() {
+    let Some(live) = Live::start("tmux-cw") else {
+        return;
+    };
+    let first = remote_expr(&live.ending.sock, "win_getid()").unwrap();
+    let left = live.vsplit();
+    live.normal("\\<C-w>h");
+    assert_eq!(
+        live.until_shown(&format!("@0 {left}")),
+        format!("@0 {left}"),
+        "{}",
+        live.log()
+    );
+    live.normal("\\<C-w>l");
+    assert_eq!(live.until_shown("@0 %0"), "@0 %0", "{}", live.log());
+    // Neovim's current window follows: the first, right of the new one
+    let now = until_expr(&live.ending.sock, "win_getid()", |w| w == first);
+    assert_eq!(now, Some(first));
+    // at the right edge it goes nowhere, not round to the left
+    live.normal("\\<C-w>l");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(live.shown(), "@0 %0", "{}", live.log());
+}
+
+#[test]
+fn tabnew_opens_a_tmux_window_and_gt_focuses_it() {
+    let Some(live) = Live::start("tmux-tl") else {
+        return;
+    };
+    let windows = || {
+        live.tmux
+            .run(&["list-windows", "-F", "#{window_id} #{pane_id}"])
+    };
+    live.ex("tabnew");
+    let now = until(|w: &String| w.lines().count() == 2, windows);
+    assert_eq!(
+        now.lines().count(),
+        2,
+        "no tmux window opened: {}",
+        live.log()
+    );
+    let tab = now.lines().nth(1).unwrap().to_string();
+    let s = until(|s: &serde_json::Value| s["panes"] == 2, || live.status());
+    assert_eq!(s["panes"], 2, "its attach never came: {}", live.log());
+    live.ex("tabnext 1");
+    assert_eq!(live.until_shown("@0 %0"), "@0 %0", "{}", live.log());
+    live.normal("gt");
+    assert_eq!(live.until_shown(&tab), tab, "{}", live.log());
+}
+
+/// Only a tab page with a tab page area has its panes placed and sized,
+/// so the windows are split in a tab page `:tabnew` opened. The size the
+/// daemon asks is the right window's, as Neovim's layout has it: the
+/// window resized is that one.
+#[test]
+fn vertical_resize_gives_the_tmux_pane_that_many_columns() {
+    let Some(live) = Live::start("tmux-rl") else {
+        return;
+    };
+    // the tab page's window, once its pane has attached
+    let right_win = remote_expr(&live.ending.sock, "execute('tabnew') .. win_getid()").unwrap();
+    let s = until(|s: &serde_json::Value| s["panes"] == 2, || live.status());
+    assert_eq!(s["panes"], 2, "its attach never came: {}", live.log());
+    // Neovim makes a window in the current tab page, whatever focus did
+    live.ex("2tabnext | vsplit");
+    let s = until(|s: &serde_json::Value| s["panes"] == 3, || live.status());
+    assert_eq!(s["panes"], 3, "its attach never came: {}", live.log());
+    // none until the window is there
+    let widths = || {
+        let mut list = live.tmux.command();
+        list.args(["list-panes", "-t", "@1", "-F", "#{pane_width}"]);
+        let out = list.output().unwrap().stdout;
+        let widths = text(&out).lines().map(|w| w.parse::<i32>().unwrap());
+        widths.collect::<Vec<_>>()
+    };
+    let two = until(|w: &Vec<i32>| w.len() == 2, widths);
+    assert_eq!(two.len(), 2, "{two:?}: {}", live.log());
+    // a size Neovim gives a window before it is external isn't told:
+    // resize once it is, fitted to its pane
+    let fitted = format!(
+        "luaeval('vim.api.nvim_win_get_config({right_win}).external') ? winwidth({right_win}) : 0"
+    );
+    let fitted = || {
+        let w = remote_expr(&live.ending.sock, &fitted).and_then(|w| w.parse::<i32>().ok());
+        (w.unwrap_or(0), widths())
+    };
+    let placed = |(w, widths): &(i32, Vec<i32>)| widths.len() == 2 && widths.contains(w);
+    let got = until(placed, fitted);
+    assert!(placed(&got), "{got:?}: {}", live.log());
+    // no width before each is within a cell of the next, nor its rest
+    for n in [30, 60, 45] {
+        // Neovim tells a tab page's layout only while it is current
+        let resize =
+            format!("execute('2tabnext') .. win_execute({right_win}, 'vertical resize {n}')");
+        remote_expr(&live.ending.sock, &resize).unwrap();
+        // its pane, whichever it is: the other has the rest of the 79
+        let sized = |w: &Vec<i32>| w.iter().any(|w| (w - n).abs() <= 1);
+        let got = until(sized, widths);
+        assert!(sized(&got), "{got:?} columns, none {n}: {}", live.log());
+    }
+}
