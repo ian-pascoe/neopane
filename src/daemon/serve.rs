@@ -1,5 +1,7 @@
-//! `neopane daemon NAME [--dedup] -- [nvim args]`: the background half of
-//! `neopane`. Claims its directory (`dir`), accepts the launcher's attach,
+//! `neopane daemon NAME [--dedup] [--detach] -- [nvim args]`: the background
+//! half of `neopane`. Claims its directory (`dir`), accepts the launcher's
+//! attach (a kept daemon, `--detach`, has none: it starts Neovim at once,
+//! and tells the launcher its name once Neovim answers),
 //! an ordinary self-attach, which chooses the pane provider from its hello,
 //! then runs Neovim under `--embed`, sized to it, speaking RPC over its stdin
 //! and stdout, and shows its windows in panes (see `Daemon`). Exits when
@@ -49,8 +51,6 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// Why the daemon couldn't start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// `--detach`, which comes with #124.
-    DetachNotBuilt,
     LauncherGone,
     NoPane,
     /// A `stop` came before the first attach.
@@ -60,7 +60,6 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::DetachNotBuilt => write!(f, "--detach isn't built yet"),
             Error::LauncherGone => write!(f, "the launcher went away"),
             Error::NoPane => write!(f, "the launcher's terminal didn't attach"),
             Error::Stopped => write!(f, "it was stopped before its first attach"),
@@ -90,7 +89,11 @@ pub(crate) struct Config<'a> {
     /// How long Neovim has to answer its first request.
     pub(crate) nvim_timeout: Duration,
     /// Called once the helpers' socket listens: the launcher may connect.
+    /// For a kept daemon, once Neovim has answered too.
     pub(crate) ready: Box<dyn FnMut() -> Result<()> + 'a>,
+    /// `--detach`: a kept daemon, which starts Neovim at once, with no
+    /// first attach.
+    pub(crate) detach: bool,
     /// How requested panes' helpers attach: `<NAME>_TRANSPORT`, read as
     /// the daemon starts.
     pub(crate) transport: Transport,
@@ -103,6 +106,7 @@ impl<'a> Config<'a> {
             nvim_command: &["nvim"],
             nvim_timeout: NVIM_START_TIMEOUT,
             ready: Box::new(|| Ok(())),
+            detach: false,
             transport: Transport::from_env(|w| log_warn!("{NAME} daemon: {w}")),
         }
     }
@@ -158,9 +162,6 @@ fn start<S: AsRef<OsStr>>(
     told: &Cell<bool>,
     logging: &Cell<Option<(String, String)>>,
 ) -> Result<()> {
-    if detach {
-        return Err(Error::DetachNotBuilt.into());
-    }
     let base = dir::base()?;
     let claimed = dir::claim_name(&base, name, dedup)?;
     let log = create_log(&claimed.log())?;
@@ -180,6 +181,7 @@ fn start<S: AsRef<OsStr>>(
     };
     let config = Config {
         ready: Box::new(ready),
+        detach,
         ..Config::new()
     };
     serve(&claimed, nvim_args, config)
@@ -607,11 +609,21 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // remove its own
     let _files = dir.remove_sockets_on_drop();
 
-    (config.ready)()?;
+    // a kept daemon's launcher is told once Neovim answers
+    let mut ready = std::mem::replace(&mut config.ready, Box::new(|| Ok(())));
+    let detach = config.detach;
+    if !detach {
+        ready()?;
+    }
 
-    // the first attach is answered before Neovim starts, which is sized to it
+    // the first attach is answered before Neovim starts, which is sized to
+    // it; a kept daemon has none
     let name = dir.name().to_string();
-    let mut first = Some(first_attach(&server, &dir.address(), &name, &log)?);
+    let mut first = if detach {
+        None
+    } else {
+        Some(first_attach(&server, &dir.address(), &name, &log)?)
+    };
     // the config file, from the start environment only (ADR 0007)
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let config_file = choose::config_path(&std::env::vars_os().collect::<Vec<_>>(), &cwd);
@@ -636,10 +648,8 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
                 &mut choose::connect(),
             )),
         },
-        None => Some(Chosen::None {
-            why: "no hello".into(),
-            warn: false,
-        }),
+        // kept: the first attach chooses, as any after the last pane
+        None => None,
     };
     // declared in this order so that, on a return, the panes hang up and
     // the channel closes before Neovim is waited for
@@ -660,6 +670,9 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
         }
     }
 
+    if detach {
+        ready()?;
+    }
     let stop_reason = d.run(&server)?;
     log_info!("{NAME} daemon: {}", stop_reason.tag_name());
     if stop_reason == StopReason::NvimExited {
@@ -739,7 +752,11 @@ fn start_daemon<S: AsRef<OsStr>>(
     d.first_choice = choice.chosen;
     d.first_config = choice.config_run;
     d.config_file = choice.config_file;
-    d.start(first)?;
+    if first.is_some() {
+        d.start(first)?;
+    } else {
+        d.start_kept()?;
+    }
     Ok((child, d))
 }
 

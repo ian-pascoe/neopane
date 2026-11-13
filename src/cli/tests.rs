@@ -925,3 +925,46 @@ fn the_bare_address_with_no_wait_attaches_to_it() {
         Err(UsageError("attach takes [+LINE] [FILE]".into()))
     );
 }
+
+#[test]
+fn the_unsaved_file_question_is_only_for_one_file_to_start_with() {
+    let attach = |line: &str| {
+        let mut asked = None;
+        let attach = started(line).question_attach(|f| {
+            asked = Some(f.to_os_string());
+            Some("notes".into())
+        });
+        (attach, asked)
+    };
+    let to_notes = |file: &str, line| AttachSelf {
+        to: Target::Name("notes".into()),
+        provider: None,
+        file: Some(file.into()),
+        line,
+    };
+    assert_eq!(
+        (Some(to_notes("notes.md", None)), Some("notes.md".into())),
+        attach("notes.md")
+    );
+    assert_eq!(Some(to_notes("-n", None)), attach("-- -n").0);
+    assert_eq!(
+        Some(to_notes("notes.md", Some(12))),
+        attach("+12 -- notes.md").0
+    );
+    assert_eq!(Some(to_notes("f", None)), attach("--name work f").0);
+    let with_provider = started("--provider p f").question_attach(|_| Some("notes".into()));
+    assert_eq!(Some("p".into()), with_provider.unwrap().provider);
+    // no daemon holds it
+    assert_eq!(None, started("f").question_attach(|_| None));
+    for line in [
+        "",
+        "+12",
+        "-O a b",
+        "a b",
+        "-n notes.md",
+        "notes.md -c q",
+        "--detach notes.md",
+    ] {
+        assert_eq!((None, None), attach(line), "{line}");
+    }
+}

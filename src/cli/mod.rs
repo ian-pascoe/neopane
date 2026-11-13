@@ -158,6 +158,25 @@ impl Start {
         })
     }
 
+    /// The attach a yes to the unsaved-file question runs, to the daemon
+    /// `to` that holds the file: asked about only when Neovim's arguments
+    /// are exactly `[+LINE] [--] FILE`, without `--detach` (#94 decision
+    /// 19). Its file is as typed.
+    pub fn question_attach(&self, to: impl FnOnce(&OsStr) -> Option<String>) -> Option<AttachSelf> {
+        if self.detach {
+            return None;
+        }
+        let (Some(file), line) = attach_words(&self.nvim_args).ok()? else {
+            return None;
+        };
+        Some(AttachSelf {
+            to: Target::Name(to(&file)?),
+            provider: self.provider.clone(),
+            file: Some(file),
+            line,
+        })
+    }
+
     /// The bare `--address A`, kept by `--no-wait`: `attach --address A`
     /// (#94 decision 16). None without `--address`.
     pub fn attach_to_address(&self) -> Result<Option<AttachSelf>, UsageError> {

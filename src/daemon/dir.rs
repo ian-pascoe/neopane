@@ -230,6 +230,21 @@ impl Base {
         names
     }
 
+    /// The live daemons, by name, whose `unsaved` file lists `file`: those
+    /// unattached with its changes unsaved (#94 decision 19). Paths match
+    /// with links resolved as far as they exist, and normalised past that.
+    pub fn holding_unsaved(&self, file: &Path) -> Vec<String> {
+        let file = resolved(file);
+        self.running()
+            .into_iter()
+            .filter(|name| {
+                Unsaved::lists(&self.0.join(name))
+                    .iter()
+                    .any(|l| resolved(l) == file)
+            })
+            .collect()
+    }
+
     /// The base directory at `path`, unchecked.
     #[cfg(test)]
     pub(crate) fn at(path: &Path) -> Base {
@@ -241,6 +256,32 @@ impl std::fmt::Display for Base {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.display())
     }
+}
+
+/// `path` as the OS opens it: made absolute, with links and `..` resolved
+/// in the longest part of it that exists, and the rest normalised as
+/// written. Two paths to one file, there or not yet, are the same.
+fn resolved(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let parts: Vec<Component> = absolute.components().collect();
+    let (mut real, rest) = (0..=parts.len())
+        .rev()
+        .find_map(|n| {
+            let prefix: PathBuf = parts[..n].iter().collect();
+            prefix.canonicalize().ok().map(|real| (real, &parts[n..]))
+        })
+        .unwrap_or_else(|| (PathBuf::new(), &parts[..]));
+    for c in rest {
+        match c {
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::CurDir => {}
+            c => real.push(c),
+        }
+    }
+    real
 }
 
 /// Where attaches reach a daemon (ADR 0004). Outside this module it is
@@ -425,6 +466,24 @@ impl Unsaved {
                 Err(e)
             }
         }
+    }
+
+    /// The files the `unsaved` file in daemon directory `dir` lists: none
+    /// if it isn't there, or is in a format this build doesn't read, as a
+    /// daemon of another version may write.
+    pub(crate) fn lists(dir: &Path) -> Vec<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(text) = fs::read(dir.join(UNSAVED)) else {
+            return Vec::new();
+        };
+        let mut lines = text.split(|&b| b == b'\n');
+        if lines.next() != Some(b"unsaved 1") {
+            return Vec::new();
+        }
+        lines
+            .filter(|l| l.starts_with(b"/"))
+            .map(|l| PathBuf::from(OsStr::from_bytes(l)))
+            .collect()
     }
 
     /// Removes it, if it's there.
@@ -851,5 +910,53 @@ mod tests {
         let err = claim_name(&base, "wwww", true).unwrap_err();
         assert!(matches!(err, Error::PathTooLong { .. }), "{err}");
         assert!(fs::symlink_metadata(base.0.join("wwww")).is_err());
+    }
+
+    #[test]
+    fn the_daemons_holding_a_files_unsaved_changes_are_found_by_name() {
+        let scratch = Scratch::new();
+        let base = scratch.base();
+        let files = scratch.0.join("files");
+        fs::create_dir(&files).unwrap();
+        fs::write(files.join("notes.md"), "").unwrap();
+        std::os::unix::fs::symlink(files.join("notes.md"), files.join("link.md")).unwrap();
+        // as Neovim names them: macOS's /var is /private/var
+        let real = files.canonicalize().unwrap();
+        let listed = |p: PathBuf| p.into_os_string().into_encoded_bytes();
+        let held = |name: &str, unsaved: &[Vec<u8>]| {
+            let d = claim(&base, name).unwrap();
+            d.unsaved().write(unsaved).unwrap();
+            d
+        };
+        let _b = held("b", &[listed(real.join("notes.md"))]);
+        let _a = held("a", &[b"/x".to_vec(), listed(real.join("notes.md"))]);
+        let _c = held("c", &[listed(real.join("other.md"))]);
+        // its daemon gone: stale
+        drop(held("0", &[listed(real.join("notes.md"))]));
+        fs::write(
+            scratch.0.join("0").join(UNSAVED),
+            format!("unsaved 1\n{}\n", real.join("notes.md").display()),
+        )
+        .unwrap();
+        let holding = |file: PathBuf| base.holding_unsaved(&file);
+        let both = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(both, holding(files.join("notes.md")));
+        // links resolved where the file is there
+        assert_eq!(both, holding(files.join("link.md")));
+        // normalised where it isn't
+        assert_eq!(vec!["c"], holding(files.join("sub/../other.md")));
+        assert_eq!(vec!["c"], holding(real.join("./other.md")));
+        assert!(holding(files.join("none.md")).is_empty());
+        // `..` after a link to a directory, as the OS opens it: from the
+        // link's target, not the link's own directory
+        let elsewhere = scratch.0.join("elsewhere");
+        fs::create_dir_all(elsewhere.join("deep")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("deep"), files.join("dirlink")).unwrap();
+        let _e = held(
+            "e",
+            &[listed(elsewhere.canonicalize().unwrap().join("x.md"))],
+        );
+        assert_eq!(vec!["e"], holding(files.join("dirlink/../x.md")));
+        assert!(holding(files.join("x.md")).is_empty());
     }
 }

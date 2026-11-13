@@ -2190,4 +2190,11 @@ note_focus(first)
 report_tabline()
 report_cmdheight()
 fit_tabline()
-return { first, anchor_of(api.nvim_get_current_tabpage()) }
+-- the buffer Neovim starts with when given no file: a kept daemon's first
+-- attach may close its window
+local start_buf = api.nvim_win_get_buf(first)
+local throwaway = api.nvim_buf_get_name(start_buf) == ''
+  and not vim.bo[start_buf].modified
+  and api.nvim_buf_line_count(start_buf) == 1
+  and api.nvim_buf_get_lines(start_buf, 0, 1, false)[1] == ''
+return { first, anchor_of(api.nvim_get_current_tabpage()), throwaway }

@@ -335,12 +335,55 @@ a second at most. Then:
   ends it, and so do `neopane kill --force` and a signal, keeping the changes
   in swap files.
 
+A daemon started with `--detach` is kept: it outlives its last pane even
+with nothing unsaved (see [Kept daemons](#kept-daemons)).
+
 A terminal that attaches while the daemon waits keeps it. One that attaches
 once Neovim is ending is refused with `stopping`. `:q` in the last window
 still quits Neovim, as `:q` always does.
 
 If stdin isn't a terminal, `neopane` prints `neopane: stdin isn't a terminal;
 to start a daemon without one, use --detach` and exits 1.
+
+### Kept daemons
+
+`neopane --detach [--name N] [NVIM-ARGS]` starts a kept daemon and needs no
+terminal. Neovim starts at once, with NVIM-ARGS, and `neopane` prints only the
+daemon's name (`work-2`) on stdout once Neovim answers; it doesn't wait for
+`VimEnter`. `neopane attach` then shows it: the first attach shows Neovim's
+current tab page, and `neopane attach FILE` opens FILE beside the windows
+NVIM-ARGS opened. Started on no file, the empty window Neovim starts with
+closes once FILE shows, as the window a last pane leaves does. A kept daemon
+stays kept for its whole life: it outlives its last pane with nothing unsaved,
+so `list` shows `kept` after its panes and `status` says it `stays until
+killed`. It ends only when Neovim quits, on `neopane kill`, on a signal, or on
+a crash. While it has no pane, it lists its unsaved files in `unsaved`, as
+above.
+
+A failed start is one line on stderr, `neopane: work didn't start: <why>
+(log: …)`, and exit 1, with no key wait. `--detach --name N` with `N`
+running exits 1 with `neopane: N is already running; attach with neopane
+attach --name N`. With `--address` or `--provider` it exits 2. `--detach`
+always starts a new daemon, even in a daemon's own `:terminal`.
+
+### The unsaved-file question
+
+When `neopane [+LINE] [--] FILE` is about to start a daemon (`--name N`
+included, when `N` isn't running), from a terminal (stdin and stderr), and
+without `--detach`, it first looks for a daemon that no terminal shows holding
+unsaved changes to FILE: it reads the `unsaved` file of each running daemon,
+and matches FILE as the system opens it, links and `..` resolved in the part
+of the path that exists, the rest normalised as written. The first such daemon
+by name is asked about, on stderr:
+
+```text
+neopane: notes.md has unsaved changes in notes (also in notes-2), which no terminal shows. Attach to it? [Y/n]
+```
+
+` (also in …)` names the other daemons holding it, if any. Answer `y`, `Y`
+or Enter to run `neopane attach --name notes [+LINE] FILE`; `n` or `N` to
+start the new daemon as asked; Ctrl-D or Ctrl-C to exit 1 with nothing
+started. Anything else asks again. It is asked under `EDITOR=neopane` too.
 
 Each daemon has a name: the name of the directory `neopane` was started in,
 cut to its letters, digits, `.`, `_` and `-`, and to 32 characters (`default`
@@ -410,9 +453,8 @@ Usage:
   …
 ```
 
-Not built yet, exiting 1 with `neopane: <what> isn't built yet`: the bare
-form's `--detach`. `--provider` with `--detach` exits 2: it is for the
-terminal that chooses the pane provider. `provider check` is in
+`--provider` with `--detach` exits 2: it is for the terminal that chooses
+the pane provider. `provider check` is in
 [`docs/config.md`](docs/config.md#provider-check).
 
 ### Own options first, then Neovim's

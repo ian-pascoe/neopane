@@ -1,7 +1,8 @@
 //! A daemon's life after its last pane (ADR 0003): it ends, unless Neovim
-//! has unsaved changes. Then it stays, unattached, keeping one window for
-//! the next attach, until an attach comes, the changes are gone, or a
-//! signal ends it.
+//! has unsaved changes or it is kept, started with `--detach`. Then it
+//! stays, unattached, keeping one window for the next attach, until an
+//! attach comes, the changes are gone (unless it is kept), or a signal ends
+//! it. A kept daemon starts unattached.
 //!
 //! "The last pane goes" when no pane shows a window and none is on its way:
 //! a float group pane doesn't count, nor a requested pane whose request
@@ -25,9 +26,9 @@ pub(crate) enum Stage {
     /// The last pane went: Neovim's answer `ask` about its unsaved changes
     /// is awaited, until the unattach timer fires.
     Deciding { ask: u32 },
-    /// Unattached, staying for unsaved changes, listed in the `unsaved`
-    /// file.
-    StayingForUnsaved,
+    /// It stays, unattached: for unsaved changes, listed in the `unsaved`
+    /// file, or because it is kept.
+    Staying,
 }
 
 /// A daemon's life after its panes, and what it goes by.
@@ -43,6 +44,9 @@ pub(crate) struct Lifetime {
     pub(crate) unsaved_file: Option<crate::daemon::dir::Unsaved>,
     /// The window an unattached daemon keeps, unshown, for the next attach.
     pub(super) kept: Option<Kept>,
+    /// Asked to stay, by `--detach`: for the daemon's life, it outlives its
+    /// last pane with nothing unsaved.
+    pub(crate) asked_to_stay: bool,
 }
 
 /// A window kept for the next attach, and the tab page its pane held it in,
@@ -61,6 +65,7 @@ impl Default for Lifetime {
             ask: 0,
             unsaved_file: None,
             kept: None,
+            asked_to_stay: false,
         }
     }
 }
@@ -169,11 +174,11 @@ impl Daemon {
         self.lifetime.unsaved = files;
         match self.lifetime.stage {
             Stage::Deciding { ask: asked } if ask == asked => self.decide(),
-            Stage::StayingForUnsaved if self.lifetime.unsaved.is_empty() => {
+            Stage::Staying if self.lifetime.unsaved.is_empty() && !self.lifetime.asked_to_stay => {
                 log_info!("{NAME} daemon: no unsaved changes are left");
                 self.stop(StopReason::PaneGone);
             }
-            Stage::StayingForUnsaved => self.write_unsaved(),
+            Stage::Staying => self.write_unsaved(),
             _ => {}
         }
         Ok(())
@@ -189,14 +194,21 @@ impl Daemon {
         Ok(())
     }
 
-    /// Ends, with nothing unsaved; else stays unattached, listing them.
+    /// Ends, with nothing unsaved, unless kept; else stays unattached,
+    /// listing them.
     fn decide(&mut self) {
+        if self.lifetime.asked_to_stay {
+            log_info!("{NAME} daemon: kept, staying unattached");
+            self.lifetime.stage = Stage::Staying;
+            self.write_unsaved();
+            return;
+        }
         if self.lifetime.unsaved.is_empty() {
             log_info!("{NAME} daemon: nothing unsaved");
             self.stop(StopReason::PaneGone);
             return;
         }
-        self.lifetime.stage = Stage::StayingForUnsaved;
+        self.lifetime.stage = Stage::Staying;
         log_info!(
             "{NAME} daemon: staying unattached for unsaved changes in {}",
             names(&self.lifetime.unsaved)
@@ -204,11 +216,15 @@ impl Daemon {
         self.write_unsaved();
     }
 
-    /// Lists the unsaved changes in the `unsaved` file.
+    /// Lists the unsaved changes in the `unsaved` file, removed when there
+    /// are none, as a kept daemon may have.
     fn write_unsaved(&self) {
-        if let Some(f) = &self.lifetime.unsaved_file
-            && let Err(e) = f.write(&self.lifetime.unsaved)
-        {
+        let Some(f) = &self.lifetime.unsaved_file else {
+            return;
+        };
+        if self.lifetime.unsaved.is_empty() {
+            f.remove();
+        } else if let Err(e) = f.write(&self.lifetime.unsaved) {
             log_warn!("{NAME} daemon: couldn't write the unsaved file: {e}");
         }
     }

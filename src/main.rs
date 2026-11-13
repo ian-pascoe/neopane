@@ -130,10 +130,11 @@ fn write_types(config: Option<OsString>) -> ExitCode {
 /// The bare form (#94 decisions 13, 15 and 17): in a daemon's own
 /// `:terminal`, it opens a file there; else `--name N` attaches when N is
 /// running, else starts it; without it, a daemon named after this directory
-/// starts. `--no-wait` matters only inside.
+/// starts, once the unsaved-file question, if asked, is answered no.
+/// `--no-wait` matters only inside.
 fn run_start(start: Start) -> ExitCode {
     if start.detach {
-        return fail("--detach isn't built yet");
+        return detach(start);
     }
     let inside = inside();
     let wait = Wait::unless(start.no_wait);
@@ -161,11 +162,63 @@ fn run_start(start: Start) -> ExitCode {
     } else if let Some(i) = &inside {
         return open_inside(i, &start.nvim_args, wait);
     }
+    match ask_about_unsaved(&start) {
+        Some(Ok(attach)) => return attach_self(attach, inside, wait),
+        Some(Err(code)) => return code,
+        None => {}
+    }
     let launch = launch::Launch {
         name: start.name,
         provider: start.provider,
     };
     helper_exit(launch::run(&start.nvim_args, launch))
+}
+
+/// The unsaved-file question (#94 decision 19), asked when the daemon
+/// about to start is for one file whose unsaved changes a daemon holds,
+/// unattached, and a person is there to answer: the attach to it, for
+/// yes; the exit status, for no answer; None to start the daemon.
+fn ask_about_unsaved(start: &Start) -> Option<std::result::Result<AttachSelf, ExitCode>> {
+    // SAFETY: isatty only inspects the fd.
+    let terminals = unsafe { libc::isatty(0) == 1 && libc::isatty(2) == 1 };
+    if !terminals {
+        return None;
+    }
+    let base = dir::base().ok()?;
+    let mut holding = Vec::new();
+    let attach = start.question_attach(|file| {
+        holding = base.holding_unsaved(Path::new(file));
+        holding.first().cloned()
+    })?;
+    let shown = attach.file.as_deref().unwrap_or_default().to_string_lossy();
+    let question = launch::unsaved_question(&shown, &holding);
+    // Ctrl-C exits 1 while it's asked
+    let before = exit_on_interrupt();
+    let answer = launch::ask(&question, &mut io::stdin().lock(), &mut io::stderr());
+    // SAFETY: putting back the handler there was.
+    unsafe { libc::signal(libc::SIGINT, before) };
+    match answer {
+        launch::Answer::Yes => Some(Ok(attach)),
+        launch::Answer::No => None,
+        launch::Answer::Quit => Some(Err(ExitCode::from(1))),
+    }
+}
+
+/// `--detach` (#94 decision 18): starts a kept daemon, from anywhere, and
+/// prints its name once its Neovim answers. A failure is one line, with no
+/// key wait.
+fn detach(start: Start) -> ExitCode {
+    if let Some(name) = &start.name
+        && dir::base().is_ok_and(|base| base.live(name))
+    {
+        return fail(&format!(
+            "{name} is already running; attach with {NAME} attach --name {name}"
+        ));
+    }
+    match launch::detach(&start.nvim_args, start.name) {
+        Ok(name) => print(&format!("{name}\n")),
+        Err(e) => fail(&e.to_string()),
+    }
 }
 
 /// The daemon whose own Neovim this runs in, as `$<NAME>` proves (#94
@@ -219,14 +272,14 @@ fn open_waited(inside: &find::Inside, open: OpenFile) -> ExitCode {
     }
 }
 
-/// Ctrl-C exits 1, quietly (#94 decision 28).
-fn exit_on_interrupt() {
+/// Ctrl-C exits 1, quietly (#94 decision 28). The handler there was.
+fn exit_on_interrupt() -> libc::sighandler_t {
     extern "C" fn quit(_: libc::c_int) {
         // SAFETY: _exit is async-signal-safe.
         unsafe { libc::_exit(1) }
     }
     // SAFETY: `quit` only calls _exit.
-    unsafe { libc::signal(libc::SIGINT, quit as *const () as libc::sighandler_t) };
+    unsafe { libc::signal(libc::SIGINT, quit as *const () as libc::sighandler_t) }
 }
 
 /// A self-attach to a running daemon, found as #94 decision 23 says, or

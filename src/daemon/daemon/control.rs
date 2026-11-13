@@ -182,6 +182,7 @@ impl Daemon {
                 self.provider.is_some() && self.asks.unsupported(c)
             })),
             terminals: Some(self.told.terminals.clone()),
+            kept: Some(self.lifetime.asked_to_stay),
             ..attach_conn::idle_status(&self.sock, &self.log)
         }
     }

@@ -675,7 +675,8 @@ impl Multi {
                                 | Note::Unsaved { .. }
                                 | Note::Cwd(_)
                                 | Note::Terminals(_)
-                                | Note::Opened(_) => {}
+                                | Note::Opened(_)
+                                | Note::Done { .. } => {}
                             }
                         }
                     }
@@ -695,7 +696,7 @@ impl Multi {
                             self.setup_req = windows::setup(&mut self.nvim, chan, cols, rows);
                             self.nvim.flush()?;
                         } else if id == self.setup_req {
-                            let wins = windows::parse_setup(&mut result)?;
+                            let wins = windows::parse_setup(&mut result)?.wins;
                             self.panes[0].win = wins[0];
                             self.anchor = wins[1];
                         }

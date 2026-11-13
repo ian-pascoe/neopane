@@ -99,16 +99,6 @@ fn usage_errors_are_one_line_and_exit_2() {
 }
 
 #[test]
-fn commands_built_later_exit_1() {
-    let out = run(&["--detach"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        text(&out.stderr),
-        format!("{NAME}: --detach isn't built yet\n")
-    );
-}
-
-#[test]
 fn a_command_word_naming_a_file_says_so() {
     let dir = std::env::temp_dir().join(format!("{NAME}-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -158,10 +148,6 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
     // SAFETY: getuid can't fail.
     let uid = unsafe { libc::getuid() };
     let base = tmp.join(format!("{NAME}-{uid}"));
-
-    let out = daemon(&tmp, &["work", "--detach", "--"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(text(&out.stdout), "error --detach isn't built yet\n");
 
     // a base directory others can read
     std::fs::create_dir(&base).unwrap();
@@ -1240,4 +1226,324 @@ fn as_git_s_editor_in_a_daemons_terminal_a_file_is_waited_for() {
     );
     assert_ne!(until_file(&with(&out, "git")).as_deref(), Some("0"));
     assert_eq!(git(&repo, &["log", "-1", "--format=%s"]), "second");
+}
+
+/// `neopane` with `args`, from no terminal, in `cwd`, its daemons under
+/// `tmpdir` with nothing around them, as `in_pty` has them.
+fn detached(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Output {
+    detached_command(tmpdir, cwd, args).output().unwrap()
+}
+
+/// The command `detached` runs.
+fn detached_command(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Command {
+    let upper = NAME.to_ascii_uppercase();
+    let mut command = Command::new(exe());
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
+        .env("XDG_CONFIG_HOME", tmpdir)
+        .env("XDG_STATE_HOME", tmpdir)
+        .env_remove(&upper)
+        .env_remove(format!("{upper}_CONFIG"))
+        .env_remove(format!("{upper}_PROVIDER"))
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .stdin(Stdio::null());
+    command
+}
+
+/// Waits up to 10 s for `done`.
+fn within_10s(mut done: impl FnMut() -> bool) -> bool {
+    let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < due {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// What `drawn` shows so far, lossily.
+fn shown(drawn: &Drawn) -> String {
+    String::from_utf8_lossy(&drawn.lock().unwrap()).into_owned()
+}
+
+#[test]
+fn detach_starts_a_kept_daemon_that_attach_shows_and_kill_ends() {
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("detach");
+    std::fs::write(tmp.join("f.txt"), "detached text\n").unwrap();
+    let cwd = tmp.join("work");
+    std::fs::create_dir(&cwd).unwrap();
+    let sock = base_of(&tmp).join("work/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+
+    // named after its directory, its name printed once Neovim answers
+    let out = detached(&tmp, &cwd, &["--detach", "../f.txt"]);
+    assert_eq!(
+        (out.status.code(), text(&out.stdout), text(&out.stderr)),
+        (Some(0), "work\n", "")
+    );
+    assert_eq!(
+        remote_expr(&sock, "expand('%:t')").as_deref(),
+        Some("f.txt")
+    );
+    let work = || json(&under(&tmp, &["status", "--json", "--name", "work"]));
+    assert_eq!(
+        (work()["panes"].clone(), work()["kept"].clone()),
+        (0.into(), true.into())
+    );
+    let status = text(&under(&tmp, &["status"]).stdout).to_string();
+    assert!(
+        status.contains("\n  stays      until killed, started with --detach\n"),
+        "{status}"
+    );
+
+    // a name running can't be started again
+    let out = detached(&tmp, &cwd, &["--detach", "--name", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: work is already running; attach with {NAME} attach --name work\n")
+    );
+
+    // attach shows its window
+    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach"], &[], 80);
+    ending.helpers.push(helper);
+    assert!(
+        within_10s(|| shown(&drawn).contains("detached text")),
+        "{:?}",
+        shown(&drawn)
+    );
+    assert!(within_10s(|| work()["panes"] == 1));
+
+    // its last pane gone with nothing unsaved, it stays
+    let mut helper = ending.helpers.pop().unwrap();
+    helper.kill().unwrap();
+    helper.wait().unwrap();
+    assert!(within_10s(|| work()["panes"] == 0));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(remote_expr(&sock, "1").as_deref(), Some("1"));
+    let listed = text(&under(&tmp, &["list"]).stdout).to_string();
+    assert!(listed.contains("\nwork  0 kept "), "{listed}");
+
+    // kill ends it
+    let out = under(&tmp, &["kill"]);
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    assert!(!base_of(&tmp).join("work/sock").exists());
+}
+
+#[test]
+fn detach_that_fails_says_why_in_one_line() {
+    let tmp = scratch("dfail");
+    let out = detached_command(&tmp, &tmp, &["--detach", "--name", "work"])
+        .env("PATH", tmp.join("nowhere"))
+        .output()
+        .unwrap();
+    let log = base_of(&tmp).join("work/log");
+    assert_eq!(
+        (
+            out.status.code(),
+            text(&out.stdout),
+            text(&out.stderr).to_string()
+        ),
+        (
+            Some(1),
+            "",
+            format!(
+                "{NAME}: work didn't start: can't run nvim: not found on PATH (log: {})\n",
+                log.display()
+            )
+        )
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+/// Kills every daemon under its directory as it drops, unsaved changes
+/// and all, and the helpers.
+struct KillAll {
+    tmp: PathBuf,
+    helpers: Vec<std::process::Child>,
+}
+
+impl Drop for KillAll {
+    fn drop(&mut self) {
+        let _ = under(&self.tmp, &["kill", "--all", "--force"]);
+        for h in &mut self.helpers {
+            let _ = h.kill();
+            let _ = h.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.tmp);
+    }
+}
+
+#[test]
+fn a_file_with_unsaved_changes_in_a_daemon_no_terminal_shows_is_asked_about() {
+    use std::io::Write;
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("question");
+    std::fs::write(tmp.join("notes.md"), "text\n").unwrap();
+    let mut all = KillAll {
+        tmp: tmp.clone(),
+        helpers: Vec::new(),
+    };
+    let notes = base_of(&tmp).join("notes");
+    let out = detached(
+        &tmp,
+        &tmp,
+        &[
+            "--detach",
+            "--name",
+            "notes",
+            "notes.md",
+            "-c",
+            "normal! ichanged",
+        ],
+    );
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    assert!(
+        within_10s(|| notes.join("unsaved").exists()),
+        "never listed"
+    );
+    let question = format!(
+        "{NAME}: ../notes.md has unsaved changes in notes, which no terminal shows. Attach to \
+         it? [Y/n] "
+    );
+    let running = || base_of(&tmp).read_dir().unwrap().count();
+    // a short name for the daemon `n` starts, as its socket's path is long
+    let cwd = tmp.join("n");
+    std::fs::create_dir(&cwd).unwrap();
+    let asking = |all: &mut KillAll| {
+        let (helper, drawn, keys) = in_pty_typed(&tmp, &cwd, &["../notes.md"], &[], 120);
+        all.helpers.push(helper);
+        let asked = within_10s(|| shown(&drawn).contains(&question));
+        assert!(asked, "{:?}", shown(&drawn));
+        (drawn, keys)
+    };
+
+    // Ctrl-D: exit 1, nothing started
+    let (_, mut keys) = asking(&mut all);
+    keys.write_all(b"\x04").unwrap();
+    let mut helper = all.helpers.pop().unwrap();
+    assert!(within_10s(|| helper.try_wait().unwrap().is_some()));
+    assert_eq!(helper.wait().unwrap().code(), Some(1));
+    assert_eq!(running(), 1);
+
+    // anything else asks again; n starts a new daemon
+    let (drawn, mut keys) = asking(&mut all);
+    keys.write_all(b"what\n").unwrap();
+    assert!(within_10s(|| shown(&drawn).matches(&question).count() == 2));
+    keys.write_all(b"n\n").unwrap();
+    assert!(within_10s(|| running() == 2), "{:?}", shown(&drawn));
+    let out = under(&tmp, &["kill", "--force", "--name", "n"]);
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    let mut helper = all.helpers.pop().unwrap();
+    let _ = helper.kill();
+    let _ = helper.wait();
+
+    // y attaches
+    let (drawn, mut keys) = asking(&mut all);
+    keys.write_all(b"y\n").unwrap();
+    assert!(
+        within_10s(|| shown(&drawn).contains("changedtext")),
+        "{:?}",
+        shown(&drawn)
+    );
+    let status = json(&under(&tmp, &["status", "--json", "--name", "notes"]));
+    assert_eq!(status["panes"], 1);
+}
+
+#[test]
+fn the_first_attach_to_a_kept_daemon_shows_its_current_tab_page() {
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("dtab");
+    std::fs::write(tmp.join("a.txt"), "first tab\n").unwrap();
+    std::fs::write(tmp.join("b.txt"), "second tab\n").unwrap();
+    let mut ending = Ending {
+        sock: base_of(&tmp).join("w/nvim.sock"),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let args = [
+        "--detach", "--name", "w", "-p", "a.txt", "b.txt", "-c", "tabnext",
+    ];
+    let out = detached(&tmp, &tmp, &args);
+    assert_eq!((out.status.code(), text(&out.stdout)), (Some(0), "w\n"));
+    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach"], &[], 80);
+    ending.helpers.push(helper);
+    assert!(
+        within_10s(|| shown(&drawn).contains("second tab")),
+        "{:?}",
+        shown(&drawn)
+    );
+    assert!(!shown(&drawn).contains("first tab"), "{:?}", shown(&drawn));
+}
+
+/// A kept daemon started with `args` in a scratch directory `test` holding
+/// `a.txt`, `b.txt` and `c.txt`, then `attach c.txt`: the files its
+/// external windows show, sorted, once `c.txt` shows, and what the attach
+/// drew.
+fn attached_c(test: &str, args: &[&str]) -> (Option<String>, String) {
+    let tmp = scratch(test);
+    for f in ["a", "b", "c"] {
+        std::fs::write(tmp.join(format!("{f}.txt")), format!("file {f}\n")).unwrap();
+    }
+    let sock = base_of(&tmp).join("w/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let mut start = vec!["--detach", "--name", "w"];
+    start.extend(args);
+    let out = detached(&tmp, &tmp, &start);
+    assert_eq!((out.status.code(), text(&out.stdout)), (Some(0), "w\n"));
+    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach", "c.txt"], &[], 120);
+    ending.helpers.push(helper);
+    within_10s(|| shown(&drawn).contains("file c"));
+    let files = "join(sort(map(filter(nvim_list_wins(), 'nvim_win_get_config(v:val).external'), \
+                 'fnamemodify(bufname(winbufnr(v:val)), \":t\")')))";
+    let want = if args.is_empty() {
+        "c.txt"
+    } else {
+        "a.txt b.txt c.txt"
+    };
+    let files = until_expr(&sock, files, |f| f == want);
+    // drawn with the rest of the tab page, past the first redraws
+    within_10s(|| args.is_empty() || shown(&drawn).contains("file a"));
+    (files, shown(&drawn))
+}
+
+#[test]
+fn a_file_attach_to_a_kept_daemon_keeps_the_windows_its_arguments_opened() {
+    if !have_nvim() {
+        return;
+    }
+    let (files, drawn) = attached_c("dkeep", &["-O", "a.txt", "b.txt"]);
+    assert_eq!(files.as_deref(), Some("a.txt b.txt c.txt"));
+    for f in ["file a", "file b", "file c"] {
+        assert!(drawn.contains(f), "{f}: {drawn:?}");
+    }
+}
+
+#[test]
+fn a_file_attach_to_a_kept_daemon_started_on_no_file_closes_its_empty_window() {
+    if !have_nvim() {
+        return;
+    }
+    let (files, drawn) = attached_c("dempty", &[]);
+    assert_eq!(files.as_deref(), Some("c.txt"));
+    assert!(drawn.contains("file c"), "{drawn:?}");
 }
