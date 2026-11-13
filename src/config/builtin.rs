@@ -44,6 +44,7 @@ impl BuiltinTable {
                 Capability::ReportLayout,
                 Capability::OpenBeside,
                 Capability::OpenFloat,
+                Capability::Events,
             ],
         }
     }
@@ -185,6 +186,7 @@ mod tests {
                     "open_float",
                     "{exe} provider builtin tmux open_float".to_string()
                 ),
+                ("events", "{exe} provider builtin tmux events".to_string()),
             ]
         );
         assert!(t.settings.is_empty());

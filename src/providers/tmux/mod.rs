@@ -13,6 +13,9 @@
 //!   its content on the float group; tmux 3.7 at least, else exit 69.
 //! - `report_layout` (`layout.rs`): one area per window of the server,
 //!   from `list-panes -a`.
+//! - `events` (`events.rs`): a `wait-for -E` waiter per event, a line
+//!   after each burst, the focus with it when it moved; tmux 3.8 at
+//!   least, else exit 69. It runs until every waiter is gone.
 //! - `inside.tmux` (`inside.rs`), no capability: `find`'s whole check,
 //!   run by the built-in default and the config's `<name>.inside.tmux`.
 //!
@@ -21,6 +24,7 @@
 //! and gives the exit status: 69 where the installed tmux can't. Every
 //! pane id read or given is `%` and digits (`is_pane_id`).
 
+mod events;
 mod find;
 mod float;
 mod inside;
@@ -57,6 +61,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::OpenFloat => finish(cap, float::open_float(given).map(Some)),
         Capability::Close => finish(cap, panes::close(given).map(|()| None)),
         Capability::ReportLayout => finish(cap, layout::report_layout(given).map(Some)),
+        Capability::Events => finish(cap, Err::<Option<String>, _>(events::events(given))),
         _ => UNSUPPORTED,
     }
 }

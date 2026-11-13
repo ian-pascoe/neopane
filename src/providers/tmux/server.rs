@@ -105,12 +105,8 @@ impl Server {
     /// `tmux -S SOCKET args…`'s stdout, or why it failed: its first stderr
     /// line.
     pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, String> {
-        let out = Command::new("tmux")
-            .arg("-S")
-            .arg(OsStr::from_bytes(&self.socket))
-            .args(args)
-            .env_remove("TMUX_PANE")
-            .stdin(Stdio::null())
+        let out = self
+            .command(args)
             .output()
             .map_err(|e| format!("can't run tmux: {e}"))?;
         if out.status.success() {
@@ -124,6 +120,17 @@ impl Server {
             shown.join(" "),
             out.status
         ))
+    }
+
+    /// `tmux -S SOCKET args…`, to run, its stdin `/dev/null`.
+    pub(super) fn command<S: AsRef<OsStr>>(&self, args: &[S]) -> Command {
+        let mut cmd = Command::new("tmux");
+        cmd.arg("-S")
+            .arg(OsStr::from_bytes(&self.socket))
+            .args(args)
+            .env_remove("TMUX_PANE")
+            .stdin(Stdio::null());
+        cmd
     }
 
     /// The installed tmux's version, as `tmux -V` prints it, such as

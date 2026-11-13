@@ -196,3 +196,32 @@ fn open_float_is_unsupported_below_tmux_3_7_naming_its_version() {
     assert!(err.contains("tmux 3.6 has no floating panes"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn events_is_unsupported_below_tmux_3_8_naming_its_version() {
+    let dir = scratch("tmux-noevents");
+    let fake = dir.join("tmux");
+    // a tmux 3.7 that fails anything but -V, so only the version is asked
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1\" = -V ] && echo 'tmux 3.7c' && exit 0\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(exe())
+        .args(["provider", "builtin", "tmux", "events"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "events")
+        .env("TMUX", "/tmp/nowhere,1,0")
+        .env("PATH", &dir)
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(69), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty());
+    let err = text(&out.stderr);
+    assert!(err.contains("tmux 3.7c can't wait for events"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

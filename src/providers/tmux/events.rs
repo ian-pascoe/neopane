@@ -1,0 +1,417 @@
+//! `events`: live focus and layout from tmux 3.8's `wait-for -E`, without
+//! attaching a client. One waiter per event of [`EVENTS`], each a `tmux
+//! wait-for -E NAME`, which ends at that event anywhere on the server.
+//!
+//! - A waiter that ends with the event is armed again at once; after
+//!   [`SETTLE`], with every waiter that ended meanwhile armed again too, it
+//!   prints one line: `{"focus":"%N"}` if the focused pane, found as
+//!   `report_layout` finds it, changed, else a bare line, so the layout is
+//!   read again.
+//! - A waiter that fails at once, within [`AT_ONCE`], is dropped; one that
+//!   fails later, such as at a server's restart, is armed again, and fails
+//!   at once if the server is gone. Once every waiter is gone, it fails.
+//! - Below 3.8 there's no `wait-for -E`: it exits 69, and the daemon reads
+//!   the layout after each act instead.
+//!
+//! Control mode, the other way to hear tmux unasked, is no use: a control
+//! client counts as attached, runs the user's `client-attached` hooks, and
+//! keeps every pane of its session from losing focus. Hooks set on the
+//! server would outlive a daemon killed.
+
+use std::process::Stdio;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use super::Failure;
+use super::layout::focused;
+use super::server::{Server, older_than};
+use crate::providers::builtin::{DONE, Given, print_line};
+
+/// The first tmux with `wait-for -E`.
+pub(super) const FIRST_WITH_EVENTS: (u32, u32) = (3, 8);
+
+/// The events waited for: what moves panes or windows, or the client the
+/// focus is read from.
+pub(super) const EVENTS: [&str; 9] = [
+    "window-layout-changed",
+    "window-pane-changed",
+    "session-window-changed",
+    "client-session-changed",
+    "window-linked",
+    "window-unlinked",
+    "client-attached",
+    "client-detached",
+    "client-active",
+];
+
+/// How long after an event it waits for the rest of its burst.
+const SETTLE: Duration = Duration::from_millis(30);
+
+/// A waiter failing sooner than this after it was armed failed at once.
+const AT_ONCE: Duration = Duration::from_secs(1);
+
+/// Runs `events` on the server `TMUX` names, until every waiter is gone
+/// or the daemon stops reading: why it ended.
+pub(super) fn events(given: &Given) -> Failure {
+    let server = match Server::of(given) {
+        Ok(s) => s,
+        Err(why) => return why.into(),
+    };
+    let version = match Server::version() {
+        Ok(v) => v,
+        Err(why) => return why.into(),
+    };
+    if older_than(&version, FIRST_WITH_EVENTS) {
+        let (major, minor) = FIRST_WITH_EVENTS;
+        return Failure::Unsupported(format!(
+            "tmux {version} can't wait for events: that needs {major}.{minor} or newer"
+        ));
+    }
+    let mut waiters = Tmux::on(server);
+    watch(&mut waiters, |line| print_line(line.as_bytes()) == DONE)
+}
+
+/// A waiter that ended.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Ended {
+    pub event: &'static str,
+    /// Whether it ended with its event, not failing.
+    pub woke: bool,
+    /// How long it ran.
+    pub ran: Duration,
+}
+
+/// What the loop runs on: tmux's waiters, or a test's.
+pub(super) trait Waiters {
+    /// Starts a waiter on `event`; `next` tells when it ends.
+    fn arm(&mut self, event: &'static str);
+    /// The next waiter to end, waiting at most `within`, or until one does
+    /// with None.
+    fn next(&mut self, within: Option<Duration>) -> Option<Ended>;
+    /// The focused pane, as `report_layout` finds it, if any.
+    fn focus(&mut self) -> Option<String>;
+}
+
+/// Runs the loop on `waiters`, printing each line with `print`, which
+/// says false once the reader is gone: why it ended.
+pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> bool) -> Failure {
+    for event in EVENTS {
+        waiters.arm(event);
+    }
+    let mut live = EVENTS.len();
+    let mut focus = waiters.focus();
+    while live > 0 {
+        let Some(first) = waiters.next(None) else {
+            continue;
+        };
+        let mut woke = false;
+        let mut ended = Some(first);
+        let due = Instant::now() + SETTLE;
+        while let Some(e) = ended {
+            woke |= e.woke;
+            if e.woke || e.ran >= AT_ONCE {
+                waiters.arm(e.event);
+            } else {
+                live -= 1;
+            }
+            let left = due.saturating_duration_since(Instant::now());
+            ended = waiters.next(Some(left));
+        }
+        if !woke {
+            continue;
+        }
+        let now = waiters.focus();
+        let line = match &now {
+            Some(pane) if now != focus => json!({ "focus": pane }).to_string(),
+            _ => String::new(),
+        };
+        if now.is_some() {
+            focus = now;
+        }
+        if !print(&line) {
+            return Failure::Failed("the reader is gone".into());
+        }
+    }
+    Failure::Failed("every waiter failed".into())
+}
+
+/// tmux's waiters: each a `tmux wait-for -E EVENT`, waited for on a thread
+/// of its own, which tells the loop as it ends. Those still running are
+/// killed as it drops.
+struct Tmux {
+    server: Server,
+    tx: Sender<Ended>,
+    rx: Receiver<Ended>,
+    /// The pids of the waiters running.
+    running: Arc<Mutex<Vec<u32>>>,
+}
+
+impl Tmux {
+    fn on(server: Server) -> Tmux {
+        let (tx, rx) = channel();
+        Tmux {
+            server,
+            tx,
+            rx,
+            running: Arc::default(),
+        }
+    }
+}
+
+impl Waiters for Tmux {
+    fn arm(&mut self, event: &'static str) {
+        let armed = Instant::now();
+        let tx = self.tx.clone();
+        // its stdout is ours, the daemon's lines; its stderr goes to the log
+        let spawned = self
+            .server
+            .command(&["wait-for", "-E", event])
+            .stdout(Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("tmux events: can't run tmux wait-for -E {event}: {e}");
+                let _ = tx.send(Ended {
+                    event,
+                    woke: false,
+                    ran: Duration::ZERO,
+                });
+                return;
+            }
+        };
+        let pid = child.id();
+        self.running.lock().unwrap().push(pid);
+        let running = Arc::clone(&self.running);
+        std::thread::spawn(move || {
+            // waits without reaping it, so a pid listed is never another's
+            // SAFETY: zeroed siginfo_t is valid; waitid writes it.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: a plain syscall, on our own child.
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            let woke = {
+                let mut running = running.lock().unwrap();
+                running.retain(|&p| p != pid);
+                child.wait().is_ok_and(|s| s.success())
+            };
+            let _ = tx.send(Ended {
+                event,
+                woke,
+                ran: armed.elapsed(),
+            });
+        });
+    }
+
+    fn next(&mut self, within: Option<Duration>) -> Option<Ended> {
+        match within {
+            None => self.rx.recv().ok(),
+            Some(d) => self.rx.recv_timeout(d).ok(),
+        }
+    }
+
+    fn focus(&mut self) -> Option<String> {
+        focused(&self.server).ok().flatten()
+    }
+}
+
+impl Drop for Tmux {
+    fn drop(&mut self) {
+        for &pid in self.running.lock().unwrap().iter() {
+            // SAFETY: a plain syscall, to a waiter of ours: one listed
+            // isn't reaped while the lock is held.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    /// A step of a fake's script.
+    enum Step {
+        /// A waiter ends.
+        End(Ended),
+        /// No waiter ends within the settle.
+        Quiet,
+    }
+
+    /// Waiters that end as their script says; focus is each of `focus` in
+    /// turn, the last kept.
+    #[derive(Default)]
+    struct Fake {
+        script: VecDeque<Step>,
+        armed: Vec<&'static str>,
+        focus: VecDeque<Option<String>>,
+        last_focus: Option<String>,
+    }
+
+    impl Waiters for Fake {
+        fn arm(&mut self, event: &'static str) {
+            self.armed.push(event);
+        }
+
+        fn next(&mut self, within: Option<Duration>) -> Option<Ended> {
+            loop {
+                match self.script.pop_front() {
+                    Some(Step::End(e)) => return Some(e),
+                    Some(Step::Quiet) if within.is_some() => return None,
+                    Some(Step::Quiet) => continue,
+                    None if within.is_some() => return None,
+                    None => panic!("nothing more ends, and the loop waits for ever"),
+                }
+            }
+        }
+
+        fn focus(&mut self) -> Option<String> {
+            if let Some(f) = self.focus.pop_front() {
+                self.last_focus = f;
+            }
+            self.last_focus.clone()
+        }
+    }
+
+    fn woke(event: &'static str) -> Step {
+        Step::End(Ended {
+            event,
+            woke: true,
+            ran: Duration::from_secs(5),
+        })
+    }
+
+    fn failed(event: &'static str, ran: Duration) -> Step {
+        Step::End(Ended {
+            event,
+            woke: false,
+            ran,
+        })
+    }
+
+    /// Every waiter failing at once, after `steps`.
+    fn then_all_fail(mut steps: Vec<Step>) -> VecDeque<Step> {
+        steps.extend(EVENTS.map(|e| failed(e, Duration::ZERO)));
+        steps.into()
+    }
+
+    /// What `fake` printed, and why it ended.
+    fn run(fake: &mut Fake) -> (Vec<String>, Failure) {
+        let mut lines = Vec::new();
+        let why = watch(fake, |l| {
+            lines.push(l.to_string());
+            true
+        });
+        (lines, why)
+    }
+
+    #[test]
+    fn it_arms_one_waiter_per_event_and_fails_once_every_one_failed_at_once() {
+        let mut fake = Fake {
+            script: then_all_fail(Vec::new()),
+            ..Fake::default()
+        };
+        let (lines, why) = run(&mut fake);
+        assert_eq!(fake.armed, EVENTS);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(matches!(why, Failure::Failed(_)));
+    }
+
+    #[test]
+    fn an_event_arms_its_waiter_again_and_prints_the_focus_only_when_it_moved() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                woke("window-layout-changed"),
+                Step::Quiet,
+                woke("window-pane-changed"),
+                Step::Quiet,
+                woke("client-active"),
+                Step::Quiet,
+            ]),
+            // at the start, then after each event
+            focus: ["%0", "%0", "%3", "%3"].map(|f| Some(f.into())).into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, ["", r#"{"focus":"%3"}"#, ""]);
+        assert_eq!(
+            fake.armed[EVENTS.len()..],
+            [
+                "window-layout-changed",
+                "window-pane-changed",
+                "client-active"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_burst_within_the_settle_prints_one_line_arming_each_waiter_again() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                woke("window-layout-changed"),
+                woke("window-pane-changed"),
+                woke("window-layout-changed"),
+                Step::Quiet,
+            ]),
+            focus: [None, Some("%2".into())].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [r#"{"focus":"%2"}"#]);
+        assert_eq!(
+            fake.armed[EVENTS.len()..],
+            [
+                "window-layout-changed",
+                "window-pane-changed",
+                "window-layout-changed"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_waiter_failing_after_a_while_is_armed_again_and_prints_nothing() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                failed("client-active", Duration::from_secs(30)),
+                Step::Quiet,
+            ]),
+            ..Fake::default()
+        };
+        let (lines, why) = run(&mut fake);
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(fake.armed[EVENTS.len()..], ["client-active"]);
+        // it was armed again, so one more had to fail at once
+        assert!(matches!(why, Failure::Failed(_)));
+    }
+
+    #[test]
+    fn with_no_focus_known_no_focus_is_printed() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![woke("client-detached"), Step::Quiet]),
+            focus: [Some("%1".into()), None].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [""]);
+    }
+
+    #[test]
+    fn it_ends_once_the_reader_is_gone() {
+        let mut fake = Fake {
+            script: vec![woke("window-linked"), Step::Quiet].into(),
+            ..Fake::default()
+        };
+        let why = watch(&mut fake, |_| false);
+        assert!(matches!(why, Failure::Failed(w) if w.contains("reader")));
+    }
+}
