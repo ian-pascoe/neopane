@@ -16,6 +16,8 @@
 //! - `events` (`events.rs`): a `wait-for -E` waiter per event, a line
 //!   after each burst, the focus with it when it moved; tmux 3.8 at
 //!   least, else exit 69. It runs until every waiter is gone.
+//! - `provider check`'s tmux section (`check.rs`), no capability: the
+//!   `tmux` on `PATH`, its version, the server, and what it's too old for.
 //! - `inside.tmux` (`inside.rs`), no capability: `find`'s whole check,
 //!   run by the built-in default and the config's `<name>.inside.tmux`.
 //!
@@ -24,6 +26,7 @@
 //! and gives the exit status: 69 where the installed tmux can't. Every
 //! pane id read or given is `%` and digits (`is_pane_id`).
 
+pub(crate) mod check;
 mod events;
 mod find;
 mod float;

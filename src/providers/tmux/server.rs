@@ -51,55 +51,12 @@ impl Server {
         env: &[(Vec<u8>, Vec<u8>)],
         time: Duration,
     ) -> Result<Vec<u8>, Ran> {
-        let mut child = Command::new("tmux")
-            .arg("-S")
-            .arg(OsStr::from_bytes(&self.socket))
-            .args(args)
-            .env_clear()
-            .envs(
-                env.iter()
-                    .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
-            )
-            .env_remove("TMUX_PANE")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Ran::CantRun(e.to_string()))?;
-        let read = |pipe: Option<Box<dyn Read + Send>>| {
-            std::thread::spawn(move || {
-                let mut out = Vec::new();
-                if let Some(mut p) = pipe {
-                    let _ = p.read_to_end(&mut out);
-                }
-                out
-            })
-        };
-        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-        let due = Instant::now() + time;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < due => std::thread::sleep(Duration::from_millis(5)),
-                Ok(None) | Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Ran::TimedOut);
-                }
-            }
-        };
-        let (out, err) = (
-            stdout.join().unwrap_or_default(),
-            stderr.join().unwrap_or_default(),
-        );
-        if status.success() {
-            return Ok(out);
-        }
-        let err = String::from_utf8_lossy(&err);
-        Err(Ran::Failed(
-            err.lines().next().unwrap_or_default().to_string(),
-        ))
+        let socket: [&OsStr; 2] = ["-S".as_ref(), OsStr::from_bytes(&self.socket)];
+        let args: Vec<&OsStr> = socket
+            .into_iter()
+            .chain(args.iter().map(AsRef::as_ref))
+            .collect();
+        run_within(&args, env, time)
     }
 
     /// `tmux -S SOCKET args…`'s stdout, or why it failed: its first stderr
@@ -150,6 +107,63 @@ pub(super) fn version_of(out: &[u8]) -> String {
     let shown = String::from_utf8_lossy(out);
     let shown = shown.trim();
     shown.strip_prefix("tmux ").unwrap_or(shown).to_string()
+}
+
+/// `tmux args…`'s stdout, run in environment `env` alone (less
+/// `TMUX_PANE`), `tmux` found on its `PATH`; killed if it hasn't exited
+/// within `time`.
+pub(super) fn run_within<S: AsRef<OsStr>>(
+    args: &[S],
+    env: &[(Vec<u8>, Vec<u8>)],
+    time: Duration,
+) -> Result<Vec<u8>, Ran> {
+    let mut child = Command::new("tmux")
+        .args(args)
+        .env_clear()
+        .envs(
+            env.iter()
+                .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
+        )
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Ran::CantRun(e.to_string()))?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let due = Instant::now() + time;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < due => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Ran::TimedOut);
+            }
+        }
+    };
+    let (out, err) = (
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default(),
+    );
+    if status.success() {
+        return Ok(out);
+    }
+    let err = String::from_utf8_lossy(&err);
+    Err(Ran::Failed(
+        err.lines().next().unwrap_or_default().to_string(),
+    ))
 }
 
 /// How a timed run of tmux failed.

@@ -15,6 +15,7 @@ use crate::config::check::{Problem, Severity};
 use crate::config::{Builtin, Capability, Choice, Defaulted, Provider};
 use crate::name::NAME;
 use crate::providers::rex::find::{BLOCK_VAR, Verdict as RexVerdict};
+use crate::providers::tmux::check::TmuxReport;
 use crate::util::seconds;
 
 /// The widest line shown without `--full`, in columns.
@@ -229,6 +230,11 @@ pub(super) fn text(c: &Check, full: bool) -> String {
     }
     if let Some(rex) = &c.rex {
         for line in rex_lines(rex) {
+            put(line);
+        }
+    }
+    if let Some(tmux) = &c.tmux {
+        for line in tmux_lines(tmux) {
             put(line);
         }
     }
@@ -479,6 +485,62 @@ fn rex_lines(r: &RexReport) -> Vec<String> {
     lines
 }
 
+/// The tmux section's lines.
+fn tmux_lines(t: &TmuxReport) -> Vec<String> {
+    let mut lines = vec![match &t.path {
+        Some(path) => format!("tmux  {path}"),
+        None => "tmux  not on PATH".into(),
+    }];
+    if let Some(v) = &t.version {
+        lines.push(format!("  version  {v}"));
+    }
+    lines.push(match &t.socket {
+        Some(socket) => format!("  socket  {socket}"),
+        None => "  socket  none: TMUX isn't set".into(),
+    });
+    lines.push(match &t.server {
+        Ok(()) => "  server  answers".into(),
+        Err(why) => format!("  server  doesn't answer: {why}"),
+    });
+    let this = t.version.as_deref().unwrap_or("unknown");
+    for m in &t.missing {
+        let (major, minor) = m.needs;
+        lines.push(match m.capability {
+            Some(cap) => format!(
+                "  {}  exits 69: needs tmux {major}.{minor}, this is {this}",
+                cap.name()
+            ),
+            None => {
+                format!("  missing  every capability (needs tmux {major}.{minor}, this is {this})")
+            }
+        });
+    }
+    lines
+}
+
+/// The tmux section as JSON.
+fn tmux_json(t: &TmuxReport) -> Value {
+    let missing: Vec<Value> = t
+        .missing
+        .iter()
+        .map(|m| {
+            let (major, minor) = m.needs;
+            json!({
+                "capability": m.capability.map(Capability::name),
+                "needs": format!("{major}.{minor}"),
+            })
+        })
+        .collect();
+    json!({
+        "path": t.path,
+        "version": t.version,
+        "socket": t.socket,
+        "answers": t.server.is_ok(),
+        "error": t.server.as_ref().err(),
+        "missing": missing,
+    })
+}
+
 fn find_text(f: &Find) -> String {
     let after =
         |t: &Duration, title: &str| format!("{}, title {title} written, then restored", took(*t));
@@ -629,6 +691,7 @@ pub(super) fn json(c: &Check) -> String {
         "one_step": one_step_json,
         "find": find_json(&c.find),
         "rex": rex,
+        "tmux": c.tmux.as_ref().map_or(Value::Null, tmux_json),
         "default": c.default.as_ref().map_or(Value::Null, default_json),
         "problems": problems,
         "result": result,
@@ -868,6 +931,101 @@ mod tests {
             split_path("init.lua failed to load: x", file)
         );
         assert_eq!((None, "/x isn't there"), split_path("/x isn't there", file));
+    }
+
+    /// A tmux 3.4 on a server that answers, whose table gives `open_float`
+    /// and `events`.
+    fn tmux_3_4() -> TmuxReport {
+        use crate::providers::tmux::check::Missing;
+        TmuxReport {
+            path: Some("/usr/bin/tmux".into()),
+            version: Some("3.4".into()),
+            socket: Some("/tmp/tmux-501/default".into()),
+            server: Ok(()),
+            missing: vec![
+                Missing {
+                    capability: Some(Capability::OpenFloat),
+                    needs: (3, 7),
+                },
+                Missing {
+                    capability: Some(Capability::Events),
+                    needs: (3, 8),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn tmuxs_section_names_its_path_version_socket_server_and_each_capability_it_cant() {
+        assert_eq!(
+            tmux_lines(&tmux_3_4()),
+            [
+                "tmux  /usr/bin/tmux",
+                "  version  3.4",
+                "  socket  /tmp/tmux-501/default",
+                "  server  answers",
+                "  open_float  exits 69: needs tmux 3.7, this is 3.4",
+                "  events  exits 69: needs tmux 3.8, this is 3.4",
+            ]
+        );
+        assert_eq!(
+            tmux_json(&tmux_3_4()),
+            json!({
+                "path": "/usr/bin/tmux",
+                "version": "3.4",
+                "socket": "/tmp/tmux-501/default",
+                "answers": true,
+                "error": null,
+                "missing": [
+                    { "capability": "open_float", "needs": "3.7" },
+                    { "capability": "events", "needs": "3.8" },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_tmux_below_the_floor_misses_every_capability_and_one_not_found_says_so() {
+        use crate::providers::tmux::check::Missing;
+        let old = TmuxReport {
+            version: Some("3.1c".into()),
+            server: Err("no server running on /tmp/x".into()),
+            missing: vec![Missing {
+                capability: None,
+                needs: (3, 2),
+            }],
+            ..tmux_3_4()
+        };
+        assert_eq!(
+            tmux_lines(&old)[3..],
+            [
+                "  server  doesn't answer: no server running on /tmp/x",
+                "  missing  every capability (needs tmux 3.2, this is 3.1c)",
+            ]
+        );
+        let v = tmux_json(&old);
+        assert_eq!(v["answers"], false);
+        assert_eq!(v["error"], "no server running on /tmp/x");
+        assert_eq!(
+            v["missing"],
+            json!([{ "capability": null, "needs": "3.2" }])
+        );
+
+        let none = TmuxReport {
+            path: None,
+            version: None,
+            socket: None,
+            server: Err("TMUX isn't set".into()),
+            missing: Vec::new(),
+        };
+        assert_eq!(
+            tmux_lines(&none),
+            [
+                "tmux  not on PATH",
+                "  socket  none: TMUX isn't set",
+                "  server  doesn't answer: TMUX isn't set",
+            ]
+        );
     }
 
     #[test]
