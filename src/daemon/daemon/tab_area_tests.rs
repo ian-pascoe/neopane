@@ -1,67 +1,70 @@
 //! A tab page gets its tab page area when it first becomes current (ADR
 //! 0012, SPI-657), with a real Neovim and a fake pane provider: the tab pages
 //! Neovim started with, later windows of a tab page, pairs, and `<C-w>T`.
+//!
+//! Nothing asked is shown by a later act whose ask is waited for: the asks
+//! before it are all there are.
 
-use super::self_attach_tests::{Rig, remove, three_files};
+use super::self_attach_tests::Rig;
 use super::*;
 use crate::daemon::provider::fake::FakeProvider;
+use crate::daemon::provider::{Answer, Outcome};
 
-/// Neovim started with `args`, `fake` its pane provider, the first pane's
-/// terminal `t0`; once it is set up and the first window shows. None when
-/// Neovim isn't installed.
-fn start(args: &[&str], fake: FakeProvider, files: &[String]) -> Option<Rig> {
-    let Some(mut rig) = Rig::start_with(args, Some(Box::new(fake)), Some(TerminalId::from("t0")))
-    else {
-        remove(files);
-        return None;
-    };
-    rig.files = files.to_vec();
+/// `-p` with the first `n` files of test `tag`, `alpha`, `bravo` and
+/// `charlie`, and `fake` the pane provider; once Neovim is set up and the
+/// first window shows. The window on each file. None when Neovim isn't
+/// installed.
+fn tabs(tag: &str, n: usize, fake: FakeProvider) -> Option<(Rig, Vec<i64>)> {
+    let (mut rig, files) = Rig::tabs(tag, n, Some(Box::new(fake)))?;
     rig.pump(|r| r.d.nvim.ready);
     rig.win_of(1);
-    Some(rig)
-}
-
-/// `-p` with the files of test `tag`: `alpha`, `bravo` and `charlie`, or
-/// the first `n`.
-fn tabs(tag: &str, n: usize, fake: FakeProvider) -> Option<(Rig, Vec<i64>)> {
-    let files = three_files(tag);
-    let mut args = vec!["-p"];
-    args.extend(files[..n].iter().map(String::as_str));
-    let mut rig = start(&args, fake, &files)?;
-    let wins = rig.wins_on(&files[..n]);
+    let wins = rig.wins_on(&files);
     Some((rig, wins))
 }
 
-/// Runs the daemon's loop for `ms`, so whatever is coming comes.
-fn settle(rig: &mut Rig, ms: u64) {
-    let until = Instant::now() + Duration::from_millis(ms);
-    rig.pump(|_| Instant::now() >= until);
-}
-
-/// Has Neovim run Lua `code`, through the daemon's own channel, as a key
-/// the daemon sends it would.
+/// Runs Lua `code` in Neovim and waits until it has run, failing on an
+/// error in it.
 fn lua(rig: &mut Rig, code: &str) {
-    let _ = rig.d.nvim.client.exec_lua(code, 0);
-    rig.d.nvim.client.flush().unwrap();
+    rig.ints(&format!("{code}\nreturn {{}}"));
 }
 
-fn asked(rig: &mut Rig) -> Vec<Ask> {
-    rig.d.provider.as_mut().unwrap().fake().asked()
+fn asked(rig: &Rig) -> Vec<Ask> {
+    rig.d.provider.as_ref().unwrap().fake_ref().asked()
 }
 
-fn capabilities(rig: &mut Rig) -> Vec<&'static str> {
+/// The capabilities asked, in order.
+fn capabilities(rig: &Rig) -> Vec<&'static str> {
     asked(rig).iter().map(|a| a.capability().name()).collect()
 }
 
-/// Pumps until Lua `code`, returning a list of ints, returns `want`.
-fn until_lua(rig: &mut Rig, code: &str, want: &[i64]) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if rig.ints(code) == want {
-            return;
-        }
-        assert!(Instant::now() < deadline, "{code}: {:?}", rig.ints(code));
-        settle(rig, 50);
+/// Pumps until `n` asks were asked.
+fn until_asked(rig: &mut Rig, n: usize) {
+    rig.pump(|r| r.d.provider.as_ref().unwrap().fake_ref().asks.len() >= n);
+}
+
+/// Answers the last open asked with terminal `t`.
+fn answer_last(rig: &mut Rig, t: &str) {
+    let f = rig.d.provider.as_mut().unwrap().fake();
+    let (id, _) = f
+        .asks
+        .iter()
+        .rev()
+        .find(|(_, a)| !matches!(a, Ask::Close { .. }))
+        .expect("an open");
+    f.opened(*id, t);
+    rig.d.drain_provider().unwrap();
+}
+
+/// Pumps until `win` is Neovim's current window, as the daemon was told.
+fn until_current(rig: &mut Rig, win: i64) {
+    rig.pump(|r| r.d.nvim.current_win == win);
+}
+
+/// The origin of open `ask`.
+fn origin(ask: &Ask) -> &str {
+    match ask {
+        Ask::OpenBeside { origin, .. } | Ask::OpenTabPage { origin, .. } => origin.as_str(),
+        a => panic!("not an open: {a:?}"),
     }
 }
 
@@ -70,28 +73,28 @@ fn only_the_current_tab_pages_windows_open_at_start_and_gt_asks_open_tab_page_on
     let Some((mut rig, wins)) = tabs("tp-start", 3, FakeProvider::opening()) else {
         return;
     };
-    settle(&mut rig, 300);
-    assert!(asked(&mut rig).is_empty(), "{:?}", asked(&mut rig));
-    assert_eq!(1, rig.d.panes.list.len());
-
     lua(&mut rig, "vim.cmd('tabnext')");
-    rig.pump(|r| !r.d.provider.as_ref().unwrap().fake_ref().asks.is_empty());
-    settle(&mut rig, 300);
-    assert_eq!(vec!["open_tab_page"], capabilities(&mut rig));
-    let Ask::OpenTabPage { origin, .. } = &asked(&mut rig)[0] else {
-        unreachable!()
-    };
+    until_asked(&mut rig, 1);
+    // the first ask: nothing was asked at start
+    assert_eq!(vec!["open_tab_page"], capabilities(&rig));
     // from the pane current before
-    assert_eq!("t0", origin.as_str());
+    assert_eq!("t0", origin(&asked(&rig)[0]));
     let p = rig.d.panes.by_win(wins[1]).expect("a pane for b's window");
     assert_ne!(0, p.tab);
+    answer_last(&mut rig, "t5");
 
-    // back, and there again: once only
+    // back, and there again: asks nothing more, as a split in the first tab
+    // page, asked after, shows
     lua(&mut rig, "vim.cmd('tabprevious')");
-    settle(&mut rig, 200);
+    until_current(&mut rig, wins[0]);
     lua(&mut rig, "vim.cmd('tabnext')");
-    settle(&mut rig, 300);
-    assert_eq!(vec!["open_tab_page"], capabilities(&mut rig));
+    until_current(&mut rig, wins[1]);
+    lua(&mut rig, "vim.cmd('tabprevious')");
+    until_current(&mut rig, wins[0]);
+    lua(&mut rig, "vim.cmd('vsplit')");
+    until_asked(&mut rig, 2);
+    assert_eq!(vec!["open_tab_page", "open_beside"], capabilities(&rig));
+    assert_eq!("t0", origin(&asked(&rig)[1]));
 }
 
 #[test]
@@ -100,20 +103,29 @@ fn a_later_window_of_a_startup_tab_page_waits_for_its_areas_first_terminal() {
         return;
     };
     lua(&mut rig, "vim.cmd('tabnext')");
-    rig.pump(|r| !r.d.provider.as_ref().unwrap().fake_ref().asks.is_empty());
-    let open = rig.d.provider.as_mut().unwrap().fake().last_id();
-    lua(&mut rig, "vim.cmd('vsplit')");
-    settle(&mut rig, 300);
-    assert_eq!(vec!["open_tab_page"], capabilities(&mut rig));
+    until_asked(&mut rig, 1);
+    let split = rig.ints("vim.cmd('vsplit')\nreturn { vim.api.nvim_get_current_win() }")[0];
+    // made external: the daemon has looked at it since, and waits
+    rig.pump(|r| {
+        r.d.grids
+            .wins
+            .values()
+            .any(|w| w.win == split && w.kind == WinKind::External)
+    });
+    assert!(rig.d.panes.by_win(split).is_none());
+    assert_eq!(vec!["open_tab_page"], capabilities(&rig));
 
-    rig.d.provider.as_mut().unwrap().fake().opened(open, "t5");
-    rig.d.drain_provider().unwrap();
-    rig.pump(|r| r.d.provider.as_ref().unwrap().fake_ref().asks.len() > 1);
-    let asks = asked(&mut rig);
-    let [_, Ask::OpenBeside { origin, .. }] = &asks[..] else {
-        panic!("not opened beside: {asks:?}")
-    };
-    assert_eq!("t5", origin.as_str());
+    // the area's first terminal comes: it opens beside that
+    answer_last(&mut rig, "t5");
+    until_asked(&mut rig, 2);
+    let asks = asked(&rig);
+    assert!(
+        matches!(asks[1], Ask::OpenBeside { .. }),
+        "{:?}",
+        capabilities(&rig)
+    );
+    assert_eq!("t5", origin(&asks[1]));
+    assert_ne!(0, rig.d.panes.by_win(split).expect("a pane").tab);
 }
 
 #[test]
@@ -138,8 +150,6 @@ fn in_a_pair_tab_pages_are_drawn_in_their_pane() {
             .and_then(|p| p.neovim_window_handle)
             .is_some_and(|w| !wins.contains(&w))
     });
-    settle(&mut rig, 300);
-    assert!(asked(&mut rig).is_empty(), "{:?}", asked(&mut rig));
     assert_eq!(1, rig.d.panes.list.len());
     let p = rig.d.panes.by_id(1).unwrap();
     // each tab page its own layout there: the first, b's and the new one's
@@ -149,52 +159,82 @@ fn in_a_pair_tab_pages_are_drawn_in_their_pane() {
     shown.dedup();
     assert_eq!(3, shown.len(), "{shown:?}");
     assert_eq!(0, shown[0]);
+
+    // nothing was asked: a split in the first tab page, asked after, is the
+    // first ask
+    lua(&mut rig, "vim.cmd('tabfirst')\nvim.cmd('vsplit')");
+    until_asked(&mut rig, 1);
+    assert_eq!(vec!["open"], capabilities(&rig));
 }
 
-/// The tab page count, whether window `win` is still valid, and the
-/// current window's buffer.
+/// The tab page count, whether window `win` is still valid, the current
+/// window's buffer, and how many times the refusal was said.
 fn after_move(win: i64) -> String {
     format!(
-        "return {{ vim.fn.tabpagenr('$'), vim.api.nvim_win_is_valid({win}) and 1 or 0, \
-         vim.api.nvim_get_current_buf() }}"
+        "local said = 0\n\
+         for _ in vim.api.nvim_exec2('messages', {{ output = true }}).output\
+         :gmatch('Already only one window') do said = said + 1 end\n\
+         return {{ vim.fn.tabpagenr('$'), vim.api.nvim_win_is_valid({win}) and 1 or 0, \
+         vim.api.nvim_get_current_buf(), said }}"
     )
+}
+
+/// Types `keys` in Normal mode, mappings and all.
+fn normal(rig: &mut Rig, keys: &str) {
+    lua(rig, &format!("vim.cmd.normal(vim.keycode('{keys}'))"));
 }
 
 #[test]
 fn ctrl_w_capital_t_moves_a_window_to_a_new_tab_page_and_refuses_a_tab_pages_only_window() {
-    let files = three_files("tp-move");
-    let Some(mut rig) = start(&[&files[0]], FakeProvider::opening(), &files) else {
+    let Some((mut rig, wins)) = tabs("tp-move", 1, FakeProvider::opening()) else {
         return;
     };
-    let first = rig.win_of(1);
+    let first = wins[0];
     let buf = rig.ints("return { vim.api.nvim_get_current_buf() }")[0];
 
-    // its tab page's only window: refused
-    lua(&mut rig, "vim.cmd.normal(vim.keycode('<C-w>T'))");
-    settle(&mut rig, 200);
-    assert_eq!(vec![1, 1, buf], rig.ints(&after_move(first)));
-    assert!(asked(&mut rig).is_empty());
+    // its tab page's only window: refused, from Visual mode too
+    normal(&mut rig, "<C-w>T");
+    assert_eq!(vec![1, 1, buf, 1], rig.ints(&after_move(first)));
+    normal(&mut rig, "v<C-w>T");
+    assert_eq!(vec![1, 1, buf, 2], rig.ints(&after_move(first)));
 
+    // nothing was asked: the split is the first ask
     lua(&mut rig, "vim.cmd('vsplit')");
-    rig.pump(|r| r.d.panes.list.len() == 2);
+    until_asked(&mut rig, 1);
+    assert_eq!(vec!["open_beside"], capabilities(&rig));
     let split = rig.ints("return { vim.api.nvim_get_current_win() }")[0];
     assert_ne!(first, split);
-    lua(&mut rig, "vim.cmd.normal(vim.keycode('<C-w>T'))");
-    until_lua(&mut rig, &after_move(split), &[2, 0, buf]);
-    rig.pump(|r| r.d.provider.as_ref().unwrap().fake_ref().asks.len() > 1);
-    settle(&mut rig, 300);
-    // a new window, with its own place
+    // answered, so the next open isn't queued behind it
+    answer_last(&mut rig, "t1");
+
+    // moved, from Visual mode: a new window, with its own place
+    normal(&mut rig, "v<C-w>T");
+    assert_eq!(vec![2, 0, buf, 2], rig.ints(&after_move(split)));
+    // its old pane's terminal closes; answered, the next ask comes at once
+    until_asked(&mut rig, 2);
+    assert_eq!(vec!["open_beside", "close"], capabilities(&rig));
+    let f = rig.d.provider.as_mut().unwrap().fake();
+    f.answer(f.last_id(), Outcome::Done(Answer::Nothing));
+    rig.d.drain_provider().unwrap();
+    until_asked(&mut rig, 3);
+    assert_eq!(
+        vec!["open_beside", "close", "open_tab_page"],
+        capabilities(&rig)
+    );
     let moved = rig.ints("return { vim.api.nvim_get_current_win() }")[0];
     assert!(moved != first && moved != split);
-    assert_eq!(
-        vec!["open_beside", "open_tab_page"],
-        capabilities(&mut rig)[..2]
-    );
     // the old one's pane is gone
     rig.pump(|r| r.d.panes.by_win(split).is_none());
 
-    // the new tab page's only window: refused too
-    lua(&mut rig, "vim.cmd.normal(vim.keycode('<C-w>T'))");
-    settle(&mut rig, 200);
-    assert_eq!(vec![2, 1, buf], rig.ints(&after_move(moved)));
+    // the new tab page's only window: refused too, and asks nothing, as a
+    // split in the first tab page, asked after, shows
+    answer_last(&mut rig, "t2");
+    normal(&mut rig, "<C-w>T");
+    assert_eq!(vec![2, 1, buf, 3], rig.ints(&after_move(moved)));
+    lua(&mut rig, "vim.cmd('tabfirst')\nvim.cmd('vsplit')");
+    until_asked(&mut rig, 4);
+    assert_eq!(
+        vec!["open_beside", "close", "open_tab_page", "open_beside"],
+        capabilities(&rig)
+    );
 }

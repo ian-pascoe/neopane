@@ -57,10 +57,10 @@ pub(super) struct Rig {
     sock: String,
     /// Neovim's `--listen` socket, and the test's channel on it.
     pub(super) listen: String,
-    pub(super) query: crate::nvim::nvim::Nvim,
+    query: crate::nvim::nvim::Nvim,
     pub(super) terms: Vec<Term>,
     /// Files the test made, removed as it ends.
-    pub(super) files: Vec<String>,
+    files: Vec<String>,
 }
 
 impl Drop for Rig {
@@ -82,7 +82,7 @@ impl Rig {
 
     /// Neovim started with `args`, `provider` the pane provider and
     /// `terminal` its id for the first pane.
-    pub(super) fn start_with(
+    fn start_with(
         args: &[&str],
         provider: Option<Box<dyn PaneProvider>>,
         terminal: Option<TerminalId>,
@@ -160,10 +160,22 @@ impl Rig {
     /// `-p` with three files, named for test `tag`, holding one line each:
     /// `alpha`, `bravo`, `charlie`; and the files.
     fn three_tabs(tag: &str) -> Option<(Rig, Vec<String>)> {
-        let files = three_files(tag);
+        Rig::tabs(tag, 3, None)
+    }
+
+    /// `-p` with the first `n` of the files `three_files` makes for test
+    /// `tag`, and `provider` the pane provider, the first pane's terminal
+    /// `t0` if there is one; and the files.
+    pub(super) fn tabs(
+        tag: &str,
+        n: usize,
+        provider: Option<Box<dyn PaneProvider>>,
+    ) -> Option<(Rig, Vec<String>)> {
+        let files = files(tag, n);
         let mut args = vec!["-p"];
         args.extend(files.iter().map(String::as_str));
-        let started = Rig::start(&args);
+        let terminal = provider.as_ref().map(|_| TerminalId::from("t0"));
+        let started = Rig::start_with(&args, provider, terminal);
         if started.is_none() {
             remove(&files);
         }
@@ -283,8 +295,13 @@ fn ints(nvim: &mut crate::nvim::nvim::Nvim, code: &str) -> Vec<i64> {
 
 /// `-p` with three files, named for test `tag`, holding one line each:
 /// `alpha`, `bravo`, `charlie`.
-pub(super) fn three_files(tag: &str) -> Vec<String> {
-    ["alpha", "bravo", "charlie"]
+fn three_files(tag: &str) -> Vec<String> {
+    files(tag, 3)
+}
+
+/// The first `n` of `three_files`' files for test `tag`.
+fn files(tag: &str, n: usize) -> Vec<String> {
+    ["alpha", "bravo", "charlie"][..n]
         .iter()
         .map(|word| {
             let f = std::env::temp_dir()
@@ -297,7 +314,7 @@ pub(super) fn three_files(tag: &str) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn remove(files: &[String]) {
+fn remove(files: &[String]) {
     for f in files {
         let _ = std::fs::remove_file(f);
     }

@@ -668,7 +668,7 @@ end
 --- it's gone.
 function M.show(win, w, h)
   if not shown(win) then return 0 end
-  -- the terminal is its tab page's place: it never moves into an area
+  -- the terminal is its tab page's place: it never moves into a tab page area
   if home[win] then unvisited[home[win]] = nil end
   -- `win` and its home tab page become current, carried floats moving in
   M.go(win)
@@ -1291,8 +1291,10 @@ end
 -- (0.12). Ours is `:tab split`, then the old window closes as :close closes
 -- it, its pane with it; the new tab page gets its place as any does.
 -- Refused for its home tab page's only window, as Neovim refuses a tab
--- page's only window. With a count N, before tab page N.
-vim.keymap.set('n', '<C-w>T', function()
+-- page's only window. With a count N, before tab page N. From Visual mode
+-- too: that ends first, as entering another window ends it; refused, the
+-- selection stays.
+vim.keymap.set(modes, '<C-w>T', function()
   local win = api.nvim_get_current_win()
   if not shown(win) then return vim.cmd('wincmd T') end
   local tab = tab_of(win)
@@ -1300,8 +1302,9 @@ vim.keymap.set('n', '<C-w>T', function()
   for _, w in ipairs(api.nvim_list_wins()) do
     if w ~= win and shown(w) and tab_of(w) == tab then alone = false end
   end
-  if alone then return api.nvim_echo({ { 'Already only one window' } }, false, {}) end
+  if alone then return api.nvim_echo({ { 'Already only one window' } }, true, {}) end
   local count = vim.v.count
+  if vim.fn.mode():match('^[vV\22]') then vim.cmd('normal! \27') end
   local view = vim.fn.winsaveview()
   vim.cmd((count > 0 and tostring(count - 1) or '') .. 'tab split')
   vim.fn.winrestview(view)
