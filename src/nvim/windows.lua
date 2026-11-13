@@ -479,15 +479,59 @@ local function sized_by_neovim(win)
   return api.nvim_win_get_width(win) ~= p.w or math.abs(api.nvim_win_get_height(win) - text_height(win, p.h)) > 1
 end
 
--- Takes the sizes Neovim gave the external windows in `node` since
-local function take_sizes(node)
+-- Gives kid `i` of row or column `node` `size` cells along it, as Neovim
+-- resizes a window of a split: the kid after it gives them or takes them
+-- back, or the one before if it's last, keeping a cell. So `node` keeps its
+-- size, as its windows' panes keep theirs between them.
+local function give(node, i, size)
+  local row = node.dir == 'row'
+  local kid = node.kids[i]
+  local other = node.kids[i + 1] or node.kids[i - 1]
+  local old = row and kid.w or kid.h
+  local room = row and other.w or other.h
+  size = math.max(1, math.min(size, old + room - 1))
+  if row then
+    fit_node(kid, size, kid.h)
+    fit_node(other, room + old - size, other.h)
+  else
+    fit_node(kid, kid.w, size)
+    fit_node(other, other.w, room + old - size)
+  end
+end
+
+-- Gives the window at the end of `path`, a list of { node, i } from the
+-- root, the kid `i` of each `node` leading to it, `size` cells along `dir`:
+-- through the nearest row or column `dir` holding it, else on its own.
+local function give_window(path, dir, size)
+  for at = #path, 1, -1 do
+    if path[at].node.dir == dir then return give(path[at].node, path[at].i, size) end
+  end
+  local win = path[#path] and path[#path].node.kids[path[#path].i]
+  if win and dir == 'row' then win.w = size elseif win then win.h = size end
+end
+
+-- Takes the sizes Neovim gave the external windows in `node` since, each
+-- from the window beside it (see `give`). `path` leads to `node` from the
+-- root of the layout, as `give_window` has it.
+local function take_sizes(node, path)
   if not node.kids then
     if api.nvim_win_get_config(node.win).external and sized_by_neovim(node.win) then
-      node.w, node.h = api.nvim_win_get_width(node.win), api.nvim_win_get_height(node.win)
+      local w, h = api.nvim_win_get_width(node.win), api.nvim_win_get_height(node.win)
+      if not path or #path == 0 then
+        node.w, node.h = w, h
+        return
+      end
+      if w ~= node.w then give_window(path, 'row', w) end
+      if h ~= node.h then give_window(path, 'col', h) end
     end
     return
   end
-  for _, kid in ipairs(node.kids) do take_sizes(kid) end
+  path = path or {}
+  for i, kid in ipairs(node.kids) do
+    path[#path + 1] = { node = node, i = i }
+    take_sizes(kid, path)
+    path[#path] = nil
+  end
   node.w, node.h = extent(node.dir, node.kids)
 end
 
