@@ -4896,6 +4896,172 @@ mod tests {
         assert_eq!("0 0", h.tab_numbers(&[top, kid]));
     }
 
+    impl Harness {
+        /// Gives window `win` a buffer of its own with changes it can't
+        /// abandon: changed, and 'nohidden'.
+        fn change(&mut self, win: i64) {
+            self.sync(&format!(
+                "vim.o.hidden = false\n\
+                 local buf = vim.api.nvim_create_buf(true, false)\n\
+                 vim.api.nvim_win_set_buf({win}, buf)\n\
+                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, {{ 'changed' }})"
+            ));
+        }
+
+        /// Runs the Ex command `cmd` from Lua: `ok`, or the error it
+        /// gives.
+        fn try_command(&mut self, cmd: &str) -> String {
+            self.eval_str(&format!(
+                "local ok, err = pcall(vim.cmd, '{cmd}')\n\
+                 return ok and 'ok' or tostring(err):match('E%d+') or tostring(err)"
+            ))
+        }
+
+        fn tab_count(&mut self) -> String {
+            self.eval_str("return tostring(vim.fn.tabpagenr('$'))")
+        }
+
+        /// The windows that show buffer `buf`, and whether it has changes,
+        /// as `<windows> <modified>`.
+        fn buffer_state(&mut self, buf: &str) -> String {
+            self.eval_str(&format!(
+                "return #vim.fn.win_findbuf({buf}) .. ' ' .. tostring(vim.bo[{buf}].modified)"
+            ))
+        }
+    }
+
+    // Neovim 0.12's :tabclose loops forever on a current float it can't close
+    // (SPI-1112); every window here floats, external ones too.
+
+    #[test]
+    fn tabclose_with_changes_in_the_current_window_fails_as_for_a_split() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.change(c);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        assert_eq!("2", h.tab_count());
+        assert_eq!("2", h.tabpagenr());
+        // back in the window it was in, never the hidden anchor
+        assert_eq!(
+            c.to_string(),
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+        );
+        assert_eq!(Some(WinKind::External), h.kind(c));
+    }
+
+    #[test]
+    fn tabclose_typed_with_changes_in_the_current_window_fails() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.change(c);
+        h.input(":tabclose<CR>");
+        h.barrier();
+        assert_eq!("2", h.tab_count());
+        assert_eq!(Some(WinKind::External), h.kind(c));
+    }
+
+    #[test]
+    fn tabclose_with_changes_in_another_window_of_the_tab_page_fails() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.sync(&format!("vim.cmd('vsplit')\n{}", adopt_all()));
+        let d = h.eval_str("return tostring(vim.api.nvim_get_current_win())");
+        h.change(c);
+        assert_ne!(c.to_string(), d);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("2", h.tab_count());
+        assert_eq!(Some(WinKind::External), h.kind(c));
+    }
+
+    #[test]
+    fn tabclose_bang_closes_a_tab_page_with_changes_and_keeps_them_hidden() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.change(c);
+        let buf = h.eval_str(&format!("return tostring(vim.api.nvim_win_get_buf({c}))"));
+        assert_eq!("ok", h.try_command("tabclose!"));
+        h.barrier();
+        assert_eq!("1", h.tab_count());
+        assert_eq!("0 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn tabclose_with_changes_under_hidden_closes_the_tab_page() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.change(c);
+        h.sync("vim.o.hidden = true");
+        let buf = h.eval_str(&format!("return tostring(vim.api.nvim_win_get_buf({c}))"));
+        assert_eq!("ok", h.try_command("tabclose"));
+        h.barrier();
+        assert_eq!("1", h.tab_count());
+        assert_eq!("0 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn tabclose_closes_the_tab_page_though_a_window_that_followed_it_in_has_changes() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // `a`, the first tab page's, sits in the second, current
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.change(a);
+        let buf = h.eval_str(&format!("return tostring(vim.api.nvim_win_get_buf({a}))"));
+        assert_eq!("ok", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("1", h.tab_count());
+        // reopened at home, its changes and all
+        assert_eq!("1 true", h.buffer_state(&buf));
+        // its 'bufhidden' as it was
+        assert_eq!("", h.eval_str(&format!("return vim.bo[{buf}].bufhidden")));
+    }
+
+    #[test]
+    fn tabclose_of_another_tab_page_with_changes_returns() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.change(a);
+        let buf = h.eval_str(&format!("return tostring(vim.api.nvim_win_get_buf({a}))"));
+        h.try_command("1tabclose");
+        h.barrier();
+        h.sync("");
+        // whatever closed, the changes are still shown
+        assert_eq!("1 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_come_back_after_a_tabclose_that_fails() {
+        let Some((mut h, floats)) = picker_carried_into_the_second() else {
+            return;
+        };
+        let c: i64 = h
+            .eval_str("return tostring(vim.api.nvim_get_current_win())")
+            .parse()
+            .unwrap();
+        h.change(c);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("2", h.tab_count());
+        assert_eq!("2 2 1", h.tab_numbers(&floats));
+    }
+
     #[test]
     fn a_tab_page_whose_label_counts_no_window_doesnt_end_neovim() {
         let Some(mut h) = Harness::start_sized(60, 10) else {
