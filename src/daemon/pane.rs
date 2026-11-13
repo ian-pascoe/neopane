@@ -616,6 +616,14 @@ impl Pane {
         self.self_attached
     }
 
+    /// The id of the live layout area it's in, if a live layout has it in one.
+    pub(crate) fn live_area(&self) -> Option<&str> {
+        match &self.area {
+            Area::Live { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
     /// The self-attach a self-attached pane was made for, taken back from
     /// it; None once its terminal is gone.
     pub(crate) fn into_self_attach(mut self) -> Option<SelfAttach> {

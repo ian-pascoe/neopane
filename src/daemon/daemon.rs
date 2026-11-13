@@ -36,7 +36,7 @@ use super::provider::{
 };
 use super::provider_focus::ProviderFocus;
 use super::surface::{self, Sent, Surface};
-use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
+use super::tab_placement::{self, Action, PaneMove, Tab, TabPlacement, WindowState};
 use super::window_changes::WindowChanges;
 use crate::attach::{Ending, Size, Transport};
 use crate::log::{self, Point, log_info, log_warn};
@@ -344,11 +344,12 @@ struct Tabline {
     col: u32,
 }
 
-/// The terminals of the panes a move is between: the one placed, and the
-/// one it is placed beside.
-struct Terminals {
-    moved: TerminalId,
-    origin: TerminalId,
+/// The moves `plan` of a tab page, to ask as `capability`; the tab page has
+/// no tab page area if `no_area`.
+struct TabPlan {
+    plan: TabPlacement,
+    capability: Capability,
+    no_area: bool,
 }
 
 /// The panes, as `NvimSession` needs them to send input: borrowed apart from the daemon's `nvim`.
@@ -1893,14 +1894,13 @@ impl Daemon {
                 self.tab_layouts.swap_remove_index(i);
                 continue;
             }
-            let in_place = !self.has_tab_page_area(tab_page);
-            if !in_place && !places {
+            let no_area = !self.has_tab_page_area(tab_page);
+            if !no_area && !places {
                 continue;
             }
             let tab = &mut self.tab_layouts[i];
-            // what was placed in an area is no size of panes left where they opened
-            if tab.in_place != in_place {
-                tab.in_place = in_place;
+            if tab.no_area != no_area {
+                tab.no_area = no_area;
                 tab.placed = None;
             }
             let mut states = [WindowState::Skipped; Layout::MAX_NODES];
@@ -1920,27 +1920,32 @@ impl Daemon {
                     self.tab_layouts.swap_remove_index(i);
                 }
                 // left where they opened: only sizes are applied from here
-                Action::Rearrange(plan) if in_place => tab.placed = Some(plan),
+                Action::Rearrange(plan) if no_area => tab.placed = Some(plan),
                 Action::Rearrange(plan) => {
                     tab.placed = Some(plan);
                     log::trace(Point::Place, layout.tab as u64);
-                    plans.push((plan, Capability::PlaceBeside, in_place));
+                    plans.push(TabPlan {
+                        plan,
+                        capability: Capability::PlaceBeside,
+                        no_area,
+                    });
                 }
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
                     if resizes {
                         log::trace(Point::Place, layout.tab as u64);
-                        plans.push((plan, Capability::Resize, in_place));
+                        plans.push(TabPlan {
+                            plan,
+                            capability: Capability::Resize,
+                            no_area,
+                        });
                     }
                 }
             }
         }
-        for (plan, capability, in_place) in plans {
-            for m in plan.items() {
-                if in_place && !self.share_an_area(m) {
-                    continue;
-                }
-                if let Some(ask) = self.placement_ask(m, capability) {
+        for placing in plans {
+            for m in placing.plan.items() {
+                if let Some(ask) = self.placement_ask(m, placing.capability, placing.no_area) {
                     self.act(ask);
                 }
             }
@@ -1948,25 +1953,15 @@ impl Daemon {
         Ok(())
     }
 
-    /// Whether the live layout has the panes of move `m` in one layout area.
-    fn share_an_area(&self, m: &PaneMove) -> bool {
-        let area = |win: i64| match self.panes.by_win(win).map(|p| &p.area) {
-            Some(Area::Live { id, .. }) => Some(id),
-            _ => None,
-        };
-        area(m.win).is_some_and(|a| area(m.beside) == Some(a))
-    }
-
-    /// The ask of `capability` for move `m`: the `place_beside` that makes it,
-    /// or the `resize` that sizes its split. None if either of its panes has
-    /// no terminal, if both are one, or for any other capability. The ask's
-    /// ratio is the moved terminal's share, `m.ratio` that of the pane it
-    /// goes beside.
-    fn placement_ask(&self, m: &PaneMove, capability: Capability) -> Option<Ask> {
-        let Terminals { moved, origin } = self.terminals_of(m)?;
-        if moved == origin {
-            return None;
-        }
+    /// The ask of `capability` for move `m`, of a tab page with no tab page
+    /// area if `no_area`: the `place_beside` that makes it, or the `resize`
+    /// that sizes its split. None for any other capability, or for a pair of
+    /// panes `takes_part` leaves out. The ask's ratio is the moved terminal's
+    /// share, `m.ratio` that of the pane it goes beside.
+    fn placement_ask(&self, m: &PaneMove, capability: Capability, no_area: bool) -> Option<Ask> {
+        let moved = self.panes.by_win(m.win)?;
+        let beside = self.panes.by_win(m.beside)?;
+        let (moved, origin) = takes_part_together(moved, beside, no_area)?;
         let dir = Direction::of_split(m.side_by_side, false);
         let (size, ratio) = (m.size, 1.0 - m.ratio);
         Some(match capability {
@@ -2007,13 +2002,6 @@ impl Daemon {
             .list
             .iter()
             .any(|p| p.tab == tab && p.layer.is_none() && p.closing.is_none())
-    }
-
-    /// The terminals of the panes a move is between, if both have one.
-    fn terminals_of(&self, m: &PaneMove) -> Option<Terminals> {
-        let moved = self.panes.by_win(m.win)?.terminal.clone()?;
-        let origin = self.panes.by_win(m.beside)?.terminal.clone()?;
-        Some(Terminals { moved, origin })
     }
 
     /// Window `new` reopened `old`, closing: it takes `old`'s pane, which
@@ -3284,10 +3272,41 @@ impl Daemon {
     }
 }
 
+/// Whether pane `p` takes part in placing its tab page's panes, the tab page
+/// having no tab page area if `no_area`. A closing one doesn't. A
+/// self-attached pane's terminal may be anywhere, so it is never moved, nor
+/// what another is placed beside. But a tab page without a tab page area, as
+/// the first, is never moved, only resized, its panes left where they
+/// opened: there a self-attached pane is resized too, once it has a
+/// terminal, and only against a pane the live layout has in its layout area
+/// (see `takes_part_together`).
+fn takes_part(p: &Pane, no_area: bool) -> bool {
+    p.closing.is_none() && (!p.is_self_attached() || (no_area && p.terminal.is_some()))
+}
+
+/// The terminals of panes `moved` and `beside`, if they take part together
+/// in placing their tab page's panes (see `takes_part`): each has a terminal
+/// of its own, and without a tab page area, the live layout has both in one
+/// layout area.
+fn takes_part_together(
+    moved: &Pane,
+    beside: &Pane,
+    no_area: bool,
+) -> Option<(TerminalId, TerminalId)> {
+    let (a, b) = (moved.terminal.clone()?, beside.terminal.clone()?);
+    if a == b
+        || (no_area
+            && moved
+                .live_area()
+                .is_none_or(|l| beside.live_area() != Some(l)))
+    {
+        return None;
+    }
+    Some((a, b))
+}
+
 /// How far window `win`, node `at` of `tab`'s layout, has got toward a pane;
-/// notes down in `tab` that it was drawn. A self-attached pane is never
-/// moved, but in a tab page without a tab page area, where nothing is, one
-/// with a terminal is resized. A window that's undrawn keeps its
+/// notes down in `tab` that it was drawn. A window that's undrawn keeps its
 /// tab page waiting, with no time limit: Neovim draws a window it made, or
 /// tells us the layout without it once it's gone. (It takes the daemon's fields
 /// it reads, since `tab` is borrowed from it.)
@@ -3314,7 +3333,7 @@ fn observe_window(
             WindowState::Pending
         };
     };
-    if p.closing.is_some() || (p.is_self_attached() && (!tab.in_place || p.terminal.is_none())) {
+    if !takes_part(p, tab.no_area) {
         return WindowState::Skipped;
     }
     if p.terminal.is_none() {
@@ -3428,7 +3447,7 @@ mod tests {
     mod fallback;
     mod floats_in_panes;
     mod in_layout;
-    mod resize_in_place;
+    mod no_area;
     mod statuslines;
     mod tab_layouts;
     mod tabs;
