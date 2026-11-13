@@ -611,19 +611,32 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // the first attach is answered before Neovim starts, which is sized to it
     let name = dir.name().to_string();
     let mut first = Some(first_attach(&server, &dir.address(), &name, &log)?);
-    // it chooses now: connecting to Rex goes on as Neovim starts
+    // the config file, from the start environment only (ADR 0007)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+    let config_file = choose::config_path(&std::env::vars_os().collect::<Vec<_>>(), &cwd);
+    // with no config to run, it chooses now: connecting to Rex goes on as
+    // Neovim starts; a config runs once the loop does
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
-        Some(h) => choose::choose(&h.env, h.hint.as_deref(), &mut choose::connect()),
-        None => Chosen::None {
+        Some(h) if choose::config_for(config_file.as_deref(), h.hint.as_deref()).is_some() => None,
+        Some(h) => Some(choose::choose(
+            &h.env,
+            h.hint.as_deref(),
+            &mut choose::connect(),
+        )),
+        None => Some(Chosen::None {
             why: "no hello".into(),
             warn: false,
-        },
+        }),
     };
     // declared in this order so that, on a return, the panes hang up and
     // the channel closes before Neovim is waited for
     let mut child;
     let mut d;
-    match start_daemon(dir, nvim_args, config, &server, exe, &mut first, chosen) {
+    let choice = FirstChoice {
+        chosen,
+        config_file,
+    };
+    match start_daemon(dir, nvim_args, config, &server, exe, &mut first, choice) {
         Ok(started) => (child, d) = started,
         Err(err) => {
             if let Some(first) = first.take() {
@@ -672,8 +685,15 @@ fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::S
     }
 }
 
+/// What the first attach chose before Neovim started, if it did, and the
+/// config file the daemon found at start.
+struct FirstChoice {
+    chosen: Option<Chosen>,
+    config_file: Option<std::path::PathBuf>,
+}
+
 /// Starts Neovim, and the daemon over it, which takes the `first` attach
-/// and what it `chosen`. Neovim's process, and the daemon.
+/// and its `choice`. Neovim's process, and the daemon.
 fn start_daemon<S: AsRef<OsStr>>(
     dir: &Claimed,
     nvim_args: &[S],
@@ -681,7 +701,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     server: &UnixListener,
     exe: String,
     first: &mut Option<SelfAttach>,
-    chosen: Chosen,
+    choice: FirstChoice,
 ) -> Result<(NvimChild, Daemon)> {
     // declared in this order so that, on a return, the channel closes
     // before Neovim is waited for
@@ -700,7 +720,8 @@ fn start_daemon<S: AsRef<OsStr>>(
     d.transport = config.transport;
     d.log = dir.log();
     d.lifetime.unsaved_file = Some(dir.unsaved());
-    d.first_choice = Some(chosen);
+    d.first_choice = choice.chosen;
+    d.config_file = choice.config_file;
     d.start(first)?;
     Ok((child, d))
 }

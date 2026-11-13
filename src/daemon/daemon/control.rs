@@ -27,7 +27,8 @@ pub(crate) enum NoProvider {
     HintNone,
     /// The choice was refused: `find` didn't confirm it in time.
     FindRefused,
-    // `none (config error)` comes with the config's states (#129)
+    /// The config failed, or returned something malformed.
+    ConfigError,
 }
 
 impl std::fmt::Display for NoProvider {
@@ -36,6 +37,7 @@ impl std::fmt::Display for NoProvider {
             NoProvider::None => "none",
             NoProvider::HintNone => "none (hint none)",
             NoProvider::FindRefused => "none (find refused)",
+            NoProvider::ConfigError => "none (config error)",
         })
     }
 }
@@ -196,10 +198,10 @@ impl Daemon {
     }
 
     /// The pane provider as `status` shows it: its name, `(choosing)` while
-    /// its `find` hasn't confirmed it, or `none` and why.
+    /// the config runs or its `find` hasn't confirmed it, or `none` and why.
     pub(super) fn provider_shown(&self) -> String {
         match &self.provider {
-            Some(_) if self.choosing.is_some() => "(choosing)".to_string(),
+            _ if self.a_choice_runs() => "(choosing)".to_string(),
             Some(p) => p.name().to_string(),
             None => self.no_provider.to_string(),
         }

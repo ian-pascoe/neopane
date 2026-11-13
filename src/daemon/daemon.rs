@@ -156,6 +156,12 @@ pub(crate) struct Daemon {
     just_opened: Vec<(TerminalId, Instant)>,
     /// The choice running, while its `find` hasn't confirmed it.
     choosing: Option<choosing::Choosing>,
+    /// The config file, as found at start: `init.lua` chooses if it is
+    /// there at a choice (ADR 0007).
+    pub config_file: Option<std::path::PathBuf>,
+    /// The config running for a choice, and the choosing pane, until it
+    /// answers.
+    config_run: Option<(u32, crate::providers::choose::ConfigRun)>,
     /// Self-attaches that came while a choice ran, waiting their turn.
     waiting_choice: Vec<u32>,
     /// The choosing attach's values of the pane provider's context
@@ -226,6 +232,8 @@ pub(crate) enum Token {
     ChoiceTimer,
     UnattachTimer,
     StopTimer,
+    /// The config's run for a choice is done.
+    Config,
 }
 
 impl Token {
@@ -248,13 +256,14 @@ impl Token {
             13 => Token::ChoiceTimer,
             14 => Token::UnattachTimer,
             15 => Token::StopTimer,
+            16 => Token::Config,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::StopTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::Config as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -396,6 +405,8 @@ impl Daemon {
             focus_in: None,
             just_opened: Vec::new(),
             choosing: None,
+            config_file: None,
+            config_run: None,
             waiting_choice: Vec::new(),
             context: Vec::new(),
             provider_writes: false,
@@ -525,6 +536,7 @@ impl Daemon {
             Some(Token::ChoiceTimer) => self.time_out_choice(Instant::now())?,
             Some(Token::UnattachTimer) => self.unattach_wait_over()?,
             Some(Token::StopTimer) => self.stop_wait_over(),
+            Some(Token::Config) => self.on_config()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -966,6 +978,14 @@ impl Daemon {
             let any = || self.any_terminal(|q| q.layer.is_none() && q.tab == 0);
             (from.or_else(any), true)
         };
+        // a terminal opened and never placed needs no origin
+        let p = self.provider.as_deref();
+        let unplaced = beside
+            && !self.asks.may_ask(p, Capability::OpenBeside)
+            && !self.asks.may_ask(p, Capability::PlaceBeside);
+        if unplaced && origin.is_none() {
+            return self.open_unplaced(win, sp);
+        }
         let Some(origin) = origin else {
             return Ok(()); // no origin yet: next flush
         };
@@ -1037,6 +1057,28 @@ impl Daemon {
             dir,
             size: along,
             ratio,
+            cols,
+            rows,
+        });
+        log::trace(Point::Split, u64::from(pane_id));
+        Ok(())
+    }
+
+    /// Opens a terminal for window `win`, split off as `sp`, that nothing
+    /// will place: the pane provider can only `open`, and no pane has a
+    /// terminal id to start it beside, as when it has no `find`.
+    fn open_unplaced(&mut self, win: i64, sp: windows::Split) -> Result<()> {
+        let [cols, rows] = self.new_pane_size(win);
+        let pane = self.panes.add_for_window(win);
+        pane.split = Some(sp);
+        let (pane_id, id) = (pane.id, pane.attach_id.expect("a requested pane"));
+        let attach = pane::attach_words(&self.exe, &self.sock, self.transport, pane);
+        let title = pane::title(&id);
+        self.changes.forget_split(win);
+        self.act(Ask::Open {
+            pane: id,
+            attach,
+            title,
             cols,
             rows,
         });

@@ -40,6 +40,8 @@ pub(crate) struct AttachHello {
     /// `tty` when relayed.
     pub device: Option<u64>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Its working directory, where a config it chooses with runs.
+    pub cwd: Vec<u8>,
     /// The `--provider` hint.
     pub hint: Option<String>,
 }
@@ -277,7 +279,7 @@ pub(crate) enum Close {
 }
 
 /// Above Daemon's fixed tokens, so they never clash.
-pub(crate) const TOKEN_BASE: usize = 16;
+pub(crate) const TOKEN_BASE: usize = 32;
 
 /// Which of a pane's fds an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
