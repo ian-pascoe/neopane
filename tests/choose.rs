@@ -48,19 +48,21 @@ impl Work {
     /// without a hit-enter prompt, which would hold Neovim's answers.
     fn attach(&mut self) {
         let var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
-        let helper = in_pty_with(
-            &self.tmp,
-            &self.tmp,
-            &["--name", "work"],
-            &[(&var, self.config.as_os_str())],
-            160,
-        );
+        let config = self.config.clone();
+        self.attach_with(&[(&var, config.as_os_str())]);
+    }
+
+    /// `attach`, with only `env` set: with no config, unless it names one.
+    fn attach_with(&mut self, env: &[(&str, &std::ffi::OsStr)]) {
+        let helper = in_pty_with(&self.tmp, &self.tmp, &["--name", "work"], env, 160);
         self.ending.helpers.push(helper);
     }
 
     /// Waits for its Neovim to answer.
     fn until_up(&self) {
-        until_expr(&self.sock, "1", |_| true).expect("work's Neovim never answered");
+        if until_expr(&self.sock, "1", |_| true).is_none() {
+            panic!("work's Neovim never answered: {}", self.log());
+        }
     }
 
     /// What `status --json` says of it.
@@ -228,6 +230,62 @@ fn a_find_that_refuses_the_terminal_means_no_pane_provider() {
     assert_eq!(s["provider"], "none (find refused)");
     let warning =
         format!("{NAME}: fake: find didn't confirm this terminal (exit 1); no pane provider");
+    let messages = work.until_message(&warning);
+    assert_eq!(messages.matches(&warning).count(), 1, "{messages}");
+}
+
+/// What a terminal Rex's variables leaked into has, after Rex quit.
+const STALE_REX: [(&str, &str); 2] = [
+    ("REX_SERVER", "unix:///nowhere/rex.sock"),
+    ("REX_SESSION", "session:gone"),
+];
+
+fn stale_rex() -> Vec<(&'static str, &'static std::ffi::OsStr)> {
+    STALE_REX
+        .iter()
+        .map(|(k, v)| (*k, std::ffi::OsStr::new(v)))
+        .collect()
+}
+
+#[test]
+fn with_no_config_a_stale_rex_is_none_logged_and_never_warned_of() {
+    if !have_nvim() {
+        return;
+    }
+    let mut work = Work::new("rex-none", "");
+    work.attach_with(&stale_rex());
+    work.until_up();
+    let s = work.until_status(|s| s["provider"] != "(choosing)");
+    assert_eq!(s["provider"], "none (can't start)", "{}", work.log());
+    assert_eq!(work.listed_provider(), "none (can't start)");
+    let log = work.log();
+    assert!(
+        log.contains("rex: can't reach Rex: ") && log.contains("not warned of"),
+        "{log}"
+    );
+    // give a warning time to show, then look
+    std::thread::sleep(Duration::from_millis(500));
+    let messages = remote_expr(&work.sock, "execute('messages')").unwrap_or_default();
+    assert!(!messages.contains("no pane provider"), "{messages}");
+}
+
+#[test]
+fn a_config_choosing_a_stale_rex_warns() {
+    if !have_nvim() {
+        return;
+    }
+    let mut work = Work::new(
+        "rex-cfg",
+        "return { provider = function(attach) return \"rex\" end }\n",
+    );
+    let var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
+    let config = work.config.clone();
+    let env = [stale_rex(), vec![(var.as_str(), config.as_os_str())]].concat();
+    work.attach_with(&env);
+    work.until_up();
+    let s = work.until_status(|s| s["provider"] != "(choosing)");
+    assert_eq!(s["provider"], "none (can't start)", "{}", work.log());
+    let warning = format!("{NAME}: rex: can't reach Rex: ");
     let messages = work.until_message(&warning);
     assert_eq!(messages.matches(&warning).count(), 1, "{messages}");
 }
