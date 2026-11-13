@@ -481,58 +481,154 @@ local function sized_by_neovim(win)
   return w ~= p.w and w or nil, math.abs(h - text_height(win, p.h)) > 1 and h or nil
 end
 
--- Gives kid `i` of row or column `node` `size` cells along it, as Neovim
--- resizes a window of a split: the kid after it gives them or takes them
--- back, or the one before if it's last, keeping a cell. So `node` keeps its
--- size, as its windows' panes keep theirs between them.
-local function give(node, i, size)
-  local row = node.dir == 'row'
-  local kid = node.kids[i]
-  local other = node.kids[i + 1] or node.kids[i - 1]
-  local old = row and kid.w or kid.h
-  local room = row and other.w or other.h
-  size = math.max(1, math.min(size, old + room - 1))
-  if row then
-    fit_node(kid, size, kid.h)
-    fit_node(other, room + old - size, other.h)
-  else
-    fit_node(kid, kid.w, size)
-    fit_node(other, other.w, room + old - size)
+-- Resizing as Neovim resizes a window of a split: frame_setwidth,
+-- frame_setheight, frame_new_width and frame_new_height in its window.c. It
+-- counts a frame's cells with the separator right of each window, but at the
+-- right edge, and the statusline below it; ours are the windows' alone, so
+-- they're added here. `dir` is 'row' for widths, 'col' for heights. Returns
+-- `set`, which gives the window at the end of `chain`, the nodes from `root`
+-- down, `size` cells along `dir`.
+local function resizer(root)
+  -- node -> { right, bottom }: at the right edge, at the bottom
+  local edges = {}
+  local function mark(node, right, bottom)
+    edges[node] = { right, bottom }
+    for i, kid in ipairs(node.kids or {}) do
+      local last = i == #node.kids
+      mark(kid, right and (node.dir ~= 'row' or last), bottom and (node.dir ~= 'col' or last))
+    end
+  end
+  mark(root, true, true)
+
+  local function least(dir)
+    return math.max(dir == 'row' and vim.go.winminwidth or vim.go.winminheight, 1)
+  end
+  -- the cells of a window's frame along `dir` that aren't the window's
+  local function extra(node, dir)
+    if dir == 'row' then return edges[node][1] and 0 or 1 end
+    local ls = vim.go.laststatus
+    return (edges[node][2] and (ls == 0 or ls == 3)) and 0 or 1
+  end
+  -- a frame's cells along `dir`, and the fewest it can have
+  local function size(node, dir)
+    if not node.kids then return (dir == 'row' and node.w or node.h) + extra(node, dir) end
+    local n = 0
+    for _, kid in ipairs(node.kids) do
+      n = node.dir == dir and n + size(kid, dir) or math.max(n, size(kid, dir))
+    end
+    return n
+  end
+  local function min(node, dir)
+    if not node.kids then return least(dir) + extra(node, dir) end
+    local n = 0
+    for _, kid in ipairs(node.kids) do
+      n = node.dir == dir and n + min(kid, dir) or math.max(n, min(kid, dir))
+    end
+    return n
+  end
+
+  -- frame_new_width and frame_new_height: `node` gets `cells`, the last of
+  -- a row or column first, then those before it
+  local function new(node, dir, cells)
+    if not node.kids then
+      local n = math.max(cells - extra(node, dir), 1)
+      if dir == 'row' then node.w = n else node.h = n end
+      return
+    end
+    if node.dir ~= dir then
+      for _, kid in ipairs(node.kids) do new(kid, dir, cells) end
+    else
+      local more = cells - size(node, dir)
+      local i = #node.kids
+      if more > 0 then new(node.kids[i], dir, size(node.kids[i], dir) + more) end
+      while more < 0 and i >= 1 do
+        local kid = node.kids[i]
+        local old = size(kid, dir)
+        new(kid, dir, math.max(old + more, min(kid, dir)))
+        more = more + old - size(kid, dir)
+        i = i - 1
+      end
+    end
+    node.w, node.h = extent(node.dir, node.kids)
+  end
+
+  -- frame_setwidth and frame_setheight: node `at` of `chain` gets `cells`,
+  -- from the frames after it in its row or column, then those before it;
+  -- across one, the whole of it does
+  local function set(chain, at, dir, cells)
+    local node = chain[at]
+    if at == 1 or size(node, dir) == cells then return end
+    local parent = chain[at - 1]
+    if parent.dir ~= dir then return set(chain, at - 1, dir, math.max(cells, min(parent, dir))) end
+    local i
+    for k, kid in ipairs(parent.kids) do
+      if kid == node then i = k end
+    end
+    local room
+    for run = 1, 2 do
+      room = 0
+      for _, kid in ipairs(parent.kids) do
+        room = room + size(kid, dir) - (kid == node and 0 or min(kid, dir))
+      end
+      if cells <= room then break end
+      if run == 2 then
+        cells = room
+        break
+      end
+      -- not enough room: make the row or column holding it bigger first
+      set(chain, at - 1, dir, cells + min(parent, dir) - least(dir) - 1)
+    end
+    local take = cells - size(node, dir)
+    new(node, dir, cells)
+    for _, step in ipairs({ 1, -1 }) do
+      local k = i + step
+      while parent.kids[k] and take ~= 0 do
+        local kid = parent.kids[k]
+        local has, fewest = size(kid, dir), min(kid, dir)
+        if has - take < fewest then
+          take = take - (has - fewest)
+          new(kid, dir, fewest)
+        else
+          new(kid, dir, has - take)
+          take = 0
+        end
+        k = k + step
+      end
+    end
+    parent.w, parent.h = extent(parent.dir, parent.kids)
+  end
+
+  return function(chain, dir, cells)
+    local win = chain[#chain]
+    set(chain, #chain, dir, cells + extra(win, dir))
+    for at = #chain - 1, 1, -1 do
+      chain[at].w, chain[at].h = extent(chain[at].dir, chain[at].kids)
+    end
   end
 end
 
--- Gives the window at the end of `path`, a list of { node, i } from the
--- root, the kid `i` of each `node` leading to it, `size` cells along `dir`:
--- through the nearest row or column `dir` holding it, else on its own.
-local function give_window(path, dir, size)
-  for at = #path, 1, -1 do
-    if path[at].node.dir == dir then return give(path[at].node, path[at].i, size) end
-  end
-  local win = path[#path] and path[#path].node.kids[path[#path].i]
-  if win and dir == 'row' then win.w = size elseif win then win.h = size end
-end
-
--- Takes the sizes Neovim gave the external windows in `node` since, each
--- from the window beside it (see `give`). `path` leads to `node` from the
--- root of the layout, as `give_window` has it.
-local function take_sizes(node, path)
+-- Takes the sizes Neovim gave the external windows in `node` since, as
+-- Neovim would have resized them were they in its layout (see `resizer`).
+-- `chain` holds the nodes from the root of the layout down to `node`.
+local function take_sizes(node, chain, set)
+  chain = chain or { node }
+  set = set or resizer(node)
   if not node.kids then
     if not api.nvim_win_get_config(node.win).external then return end
     -- only along the sizes Neovim gave: the other may be a pane's that differs
     local w, h = sized_by_neovim(node.win)
-    if not path or #path == 0 then
+    if #chain == 1 then
       node.w, node.h = w or node.w, h or node.h
       return
     end
-    if w and w ~= node.w then give_window(path, 'row', w) end
-    if h and h ~= node.h then give_window(path, 'col', h) end
+    if w and w ~= node.w then set(chain, 'row', w) end
+    if h and h ~= node.h then set(chain, 'col', h) end
     return
   end
-  path = path or {}
-  for i, kid in ipairs(node.kids) do
-    path[#path + 1] = { node = node, i = i }
-    take_sizes(kid, path)
-    path[#path] = nil
+  for _, kid in ipairs(node.kids) do
+    chain[#chain + 1] = kid
+    take_sizes(kid, chain, set)
+    chain[#chain] = nil
   end
   node.w, node.h = extent(node.dir, node.kids)
 end
