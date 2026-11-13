@@ -4181,6 +4181,37 @@ mod tests {
     }
 
     #[test]
+    fn a_window_resized_across_keeps_the_height_told_though_its_pane_has_another() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        // left | (top over bottom)
+        h.lua("vim.cmd('vsplit')\nvim.cmd('wincmd l')\nvim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 3));
+        let [(left, lw, lh), (top, tw, th), (bottom, bw, bh)] = window_sizes(&h)[..] else {
+            panic!("{:?}", window_sizes(&h))
+        };
+        // panes 11 rows high, none as high as its window was laid out: the
+        // heights told are still the layout's, Neovim having sized none
+        for (win, w) in [(left, lw), (top, tw), (bottom, bw)] {
+            adopt(&mut h.nvim, win, 1, 1);
+            size(&mut h.nvim, win, w, 11);
+        }
+        h.sync("");
+        let told = vec![(left, lw, lh), (top, tw, th), (bottom, bw, bh)];
+        assert_eq!(told, window_sizes(&h));
+
+        // `:vertical resize`: the heights stay as they were told
+        h.lua(&format!("vim.api.nvim_win_set_width({top}, 50)"));
+        let want = vec![(left, 69, lh), (top, 50, th), (bottom, 50, bh)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+    }
+
+    #[test]
     fn a_window_closing_while_another_tab_page_is_current_reports_its_own_tab_pages_layout() {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;

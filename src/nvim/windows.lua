@@ -470,13 +470,15 @@ local function prune(node, tab, drop)
   return node
 end
 
--- Whether Neovim sized external `win`, not us fitting it to its pane
+-- The width and the height Neovim gave external `win`, not us fitting it to
+-- its pane: each nil where it's the pane's
 local function sized_by_neovim(win)
   local p = panes[win]
   -- one waiting to be put back isn't fitted to its pane, whatever size it has
-  if not p or not p.w or waiting(win) then return false end
-  -- the pane's rows are the text and a statusline
-  return api.nvim_win_get_width(win) ~= p.w or math.abs(api.nvim_win_get_height(win) - text_height(win, p.h)) > 1
+  if not p or not p.w or waiting(win) then return end
+  local w, h = api.nvim_win_get_width(win), api.nvim_win_get_height(win)
+  -- the pane's rows are the text and a statusline, which may come or go
+  return w ~= p.w and w or nil, math.abs(h - text_height(win, p.h)) > 1 and h or nil
 end
 
 -- Gives kid `i` of row or column `node` `size` cells along it, as Neovim
@@ -515,15 +517,15 @@ end
 -- root of the layout, as `give_window` has it.
 local function take_sizes(node, path)
   if not node.kids then
-    if api.nvim_win_get_config(node.win).external and sized_by_neovim(node.win) then
-      local w, h = api.nvim_win_get_width(node.win), api.nvim_win_get_height(node.win)
-      if not path or #path == 0 then
-        node.w, node.h = w, h
-        return
-      end
-      if w ~= node.w then give_window(path, 'row', w) end
-      if h ~= node.h then give_window(path, 'col', h) end
+    if not api.nvim_win_get_config(node.win).external then return end
+    -- only along the sizes Neovim gave: the other may be a pane's that differs
+    local w, h = sized_by_neovim(node.win)
+    if not path or #path == 0 then
+      node.w, node.h = w or node.w, h or node.h
+      return
     end
+    if w and w ~= node.w then give_window(path, 'row', w) end
+    if h and h ~= node.h then give_window(path, 'col', h) end
     return
   end
   path = path or {}
