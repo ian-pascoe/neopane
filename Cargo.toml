@@ -6,7 +6,7 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "One Neovim in the background, shown in every terminal attached to it: panes for Neovim"
-repository = "https://github.com/ian-pascoe/neorex"
+repository = "https://github.com/ian-pascoe/neopane"
 publish = false
 
 [dependencies]
