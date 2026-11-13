@@ -43,6 +43,9 @@ pub(crate) struct Lifetime {
     pub(crate) unsaved_file: Option<crate::daemon::dir::Unsaved>,
     /// The window an unattached daemon keeps, unshown, for the next attach.
     pub(super) kept: Option<i64>,
+    /// The tab page the kept window's pane held it in, as split notes name
+    /// it: the next pane to take it shows that tab page.
+    pub(super) kept_tab: i64,
 }
 
 impl Default for Lifetime {
@@ -53,6 +56,7 @@ impl Default for Lifetime {
             ask: 0,
             unsaved_file: None,
             kept: None,
+            kept_tab: 0,
         }
     }
 }
@@ -92,6 +96,8 @@ impl Daemon {
             } else {
                 p.neovim_window_handle.filter(|w| wins.contains(w))
             };
+            let kept_tab = kept.and_then(|w| p.tab_of(w));
+            self.lifetime.kept_tab = kept_tab.unwrap_or(0);
             self.panes.remove(i, &self.event_loop);
             for &win in wins.iter().filter(|&&w| Some(w) != kept) {
                 self.changes.mark_closing(win);

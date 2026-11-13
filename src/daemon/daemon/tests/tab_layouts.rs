@@ -16,7 +16,7 @@ struct Lone {
 impl Lone {
     /// None without Neovim.
     fn new() -> Option<Lone> {
-        let (mut d, live, reader) = started_with("-n", None)?;
+        let (mut d, live, reader) = started_with(&[], None)?;
         pump(&mut d, |d| {
             d.nvim.ready
                 && d.nvim.current_win != 0

@@ -1052,11 +1052,8 @@ impl Daemon {
         if self.tabs_in_panes.contains(&sp.tab) {
             return true;
         }
-        let has_area = self.panes.list.iter().any(|p| {
-            p.tab == sp.tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed)
-        });
         let p = self.provider.as_deref();
-        !has_area && (!self.asks.may_ask(p, Capability::OpenTabPage) || !self.in_reach(sp))
+        !self.has_area_pane(sp.tab) && (!self.asks.may_ask(p, Capability::OpenTabPage) || !self.in_reach(sp))
     }
 
     /// Whether `give_focus_back` can have the pane provider focus the
@@ -1084,9 +1081,9 @@ impl Daemon {
 
     /// The pane a window split off as `sp` is drawn in when it has no
     /// terminal of its own: its origin window's, else the current one's, else
-    /// the first that can take it. Only a pane of the first tab page, with no
-    /// floats, already showing a window to split, and not one still waiting
-    /// for a terminal of its own.
+    /// the first that can take it. Only a window pane in no tab page area,
+    /// whatever tab pages it holds, already showing a window, and not one
+    /// still waiting for a terminal of its own.
     fn origin_pane(&self, sp: windows::Split) -> Option<u32> {
         let takes = |p: &&Pane| {
             p.layer.is_none()
@@ -1123,35 +1120,7 @@ impl Daemon {
         }
         let equalalways = self.split_options.equalalways;
         let p = self.panes.by_id_mut(id).unwrap();
-        let shown = p
-            .neovim_window_handle
-            .expect("an origin pane shows a window");
-        if p.shown_tab == sp.tab {
-            let origin = if p.shows(sp.from) { sp.from } else { shown };
-            p.layout
-                .get_or_insert_with(|| PaneLayout::new(shown))
-                .split(win, origin, sp.side_by_side, sp.before, equalalways);
-        } else if let Some(h) = p.held.iter_mut().find(|h| h.tab == sp.tab) {
-            let last = h.win;
-            let layout = h.layout.get_or_insert_with(|| PaneLayout::new(last));
-            let origin = if layout.contains(sp.from) {
-                sp.from
-            } else {
-                last
-            };
-            layout.split(win, origin, sp.side_by_side, sp.before, equalalways);
-        } else {
-            // a tab page that came into the pane: shown before any it held
-            p.held.insert(
-                0,
-                pane::Held {
-                    tab: sp.tab,
-                    win,
-                    layout: None,
-                    layout_asked: Vec::new(),
-                },
-            );
-        }
+        p.join(windows::Split { win, ..sp }, equalalways);
         // Neovim said it was current before it was drawn
         if self.nvim.current_win == win {
             p.show_tab_of(win);
@@ -1643,34 +1612,8 @@ impl Daemon {
             splitbelow: self.split_options.splitbelow,
             splitright: self.split_options.splitright,
         };
-        let p = &mut self.panes.list[i];
         let gone = |w: i64| self.grids.grid_of(w).is_none() && !self.changes.awaits_drawing(w);
-        let Some(layout) = &mut p.layout else {
-            return p.close_held(gone, opts);
-        };
-        for w in layout.windows() {
-            if gone(w) && !layout.close(w, opts) {
-                // its last window: the pane ends with it, unless it holds
-                // another tab page's
-                p.neovim_window_handle = Some(w);
-                p.layout = None;
-                p.layout_asked.clear();
-                return p.close_held(gone, opts);
-            }
-        }
-        let left = layout.windows();
-        if !p.neovim_window_handle.is_some_and(|w| left.contains(&w)) {
-            p.neovim_window_handle = left.first().copied();
-        }
-        p.layout_asked.retain(|(w, _)| left.contains(w));
-        if !layout.is_split() {
-            // one window again: it fills the pane
-            p.layout = None;
-            p.layout_asked.clear();
-            p.last_asked_win_size = LastAskedWinSize::default();
-        }
-        p.close_held(gone, opts);
-        true
+        self.panes.list[i].close_gone(gone, opts)
     }
 
     /// Neovim has a new layout for a tab page's windows, or none. Only a tab
@@ -1782,11 +1725,15 @@ impl Daemon {
         if tab == 0 || self.tabs_in_panes.contains(&tab) {
             return false;
         }
-        let panes =
-            self.panes.list.iter().any(|p| {
-                p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed)
-            });
-        panes || self.changes.splits.values().any(|s| s.split.tab == tab)
+        self.has_area_pane(tab) || self.changes.splits.values().any(|s| s.split.tab == tab)
+    }
+
+    /// Whether a window pane of tab page `tab`'s tab page area is there or
+    /// on its way: one whose request failed isn't.
+    fn has_area_pane(&self, tab: i64) -> bool {
+        self.panes.list.iter().any(|p| {
+            p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed)
+        })
     }
 
     /// The terminals of the panes a move is between, if both have one.
@@ -2223,12 +2170,12 @@ impl Daemon {
             self.act(asks::close(t));
         }
         let p = self.panes.by_id(id).unwrap();
-        let area_left = self
-            .panes
-            .list
-            .iter()
-            .any(|q| q.id != id && q.tab == p.tab && q.layer.is_none() && q.closing.is_none());
-        if p.layer.is_none() && p.tab != 0 && !area_left && !self.tabs_in_panes.contains(&p.tab) {
+        // given up as closing, it's no pane of its tab page area
+        if p.layer.is_none()
+            && p.tab != 0
+            && !self.has_area_pane(p.tab)
+            && !self.tabs_in_panes.contains(&p.tab)
+        {
             self.tabs_in_panes.push(p.tab);
         }
         let alone = p.layer.is_none()

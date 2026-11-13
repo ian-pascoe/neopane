@@ -393,15 +393,16 @@ pub(super) fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
     }
 }
 
-/// A daemon over a real Neovim started with `flag`, such as `-o3`, and
+/// A daemon over a real Neovim started with `flags`, such as `-o3`, and
 /// `provider`, its first pane attached in terminal t0 and read: the daemon,
 /// the terminal's other ends, and its reader. None without Neovim.
 pub(super) fn started_with(
-    flag: &str,
+    flags: &[&str],
     provider: Option<Box<dyn PaneProvider>>,
 ) -> Option<(Daemon, Live, std::thread::JoinHandle<()>)> {
     use crate::nvim::nvim::spawn_for_test_with;
-    let nvim = spawn_for_test_with(&["nvim", "--clean", "--embed", "-n", flag])?;
+    let argv = [&["nvim", "--clean", "--embed", "-n"][..], flags].concat();
+    let nvim = spawn_for_test_with(&argv)?;
     let event_loop = Loop::init().unwrap();
     event_loop
         .add_read(nvim.read_fd(), Token::NvimChannel as usize)
@@ -438,7 +439,7 @@ pub(super) fn started_with(
 fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_first_pane_as_neovim_had_them()
  {
     for (flag, across) in [("-o3", false), ("-O3", true)] {
-        let Some((mut d, live, reader)) = started_with(flag, None) else {
+        let Some((mut d, live, reader)) = started_with(&[flag], None) else {
             return;
         };
         pump(&mut d, |d| {
@@ -474,7 +475,7 @@ fn with_a_pane_provider_windows_opened_with_o_or_capital_o_open_where_neovims_la
     for (flag, want) in [("-o3", Direction::Down), ("-O3", Direction::Right)] {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::Focus);
-        let Some((mut d, live, reader)) = started_with(flag, Some(Box::new(f))) else {
+        let Some((mut d, live, reader)) = started_with(&[flag], Some(Box::new(f))) else {
             return;
         };
         let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });

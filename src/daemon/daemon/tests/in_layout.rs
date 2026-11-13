@@ -17,7 +17,7 @@ struct Three {
 
 impl Three {
     fn new(provider: Option<Box<dyn PaneProvider>>) -> Option<Three> {
-        let (mut d, live, reader) = started_with("-O3", provider)?;
+        let (mut d, live, reader) = started_with(&["-O3"], provider)?;
         pump(&mut d, |d| {
             d.nvim.ready && d.panes.list.len() == 1 && d.panes.list[0].windows().len() == 3
         });

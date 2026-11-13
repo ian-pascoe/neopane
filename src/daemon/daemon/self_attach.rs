@@ -70,9 +70,15 @@ impl Daemon {
         else {
             return Ok(());
         };
+        // in the current tab page, the current pane's
+        let tab = self
+            .current_pane()
+            .filter(|q| q.id != pane)
+            .map_or(0, |q| q.shown_tab);
         match self.panes.by_id_mut(pane) {
             Some(p) => {
                 p.neovim_window_handle = Some(win);
+                p.shown_tab = tab;
                 p.opening = None;
                 self.changes.mark_taken(win);
             }
@@ -193,7 +199,15 @@ impl Daemon {
         let [cols, rows] = self.window_size_of(id);
         let (req, kind) = match picked {
             Some(win) => {
-                self.panes.by_id_mut(id).unwrap().neovim_window_handle = Some(win);
+                // its tab page, as split notes name it
+                let tab = if self.lifetime.kept == Some(win) {
+                    self.lifetime.kept_tab
+                } else {
+                    self.changes.split_of(win).tab
+                };
+                let p = self.panes.by_id_mut(id).unwrap();
+                p.neovim_window_handle = Some(win);
+                p.shown_tab = tab;
                 self.changes.mark_taken(win);
                 let req = windows::show(&mut self.nvim.client, win, cols, rows);
                 (req, AskKind::Show(win))

@@ -881,11 +881,13 @@ end
 -- window -> when it was last current, counted: reported current, or current
 -- as its tab page was left, as Neovim keeps a tab page's last current window
 local current_at, current_count = {}, 0
+-- how often the closed windows' counts go
+local prune_every = 256
 local function was_current(win)
   current_count = current_count + 1
   current_at[win] = current_count
   -- now and then, the closed ones go; a window reopened takes its own on
-  if current_count % 256 == 0 then
+  if current_count % prune_every == 0 then
     for w in pairs(current_at) do
       if not api.nvim_win_is_valid(w) then current_at[w] = nil end
     end
@@ -952,7 +954,8 @@ local function report()
   if entered and cur ~= chosen then
     local stray = is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)
     local here = last and pane_holding(last)
-    local elsewhere = (in_panes and in_panes[cur] or pane_holding(cur)) and pane_holding(cur) ~= here
+    local its = pane_holding(cur)
+    local elsewhere = its ~= here and (its or (in_panes and in_panes[cur]))
     local to
     if here and (stray or elsewhere) then to = last_current_of(here, tab) end
     if not to and stray then to = own_window(tab) end
