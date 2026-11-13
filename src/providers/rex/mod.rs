@@ -327,8 +327,6 @@ impl RexProvider {
         Ok(true)
     }
 
-    /// The Rex window of terminal `origin`, as the last view had it, where
-    /// a new layer opens; None, Rex's active window, if it didn't.
     /// The border `session.resize_pane` moves to give `terminal` the share
     /// `ratio` of the room it splits with `origin`: the blocks before and
     /// after it, and the share of the one before. Rex's splits are where its
@@ -361,6 +359,8 @@ impl RexProvider {
         })
     }
 
+    /// The Rex window of terminal `origin`, as the last view had it, where
+    /// a new layer opens; None, Rex's active window, if it didn't.
     fn window_of(&self, origin: &TerminalId) -> Option<String> {
         let l = self.layout.as_ref()?;
         let area = l
