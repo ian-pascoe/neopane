@@ -119,6 +119,7 @@ impl Daemon {
         for c in std::mem::take(&mut self.nested_checks) {
             attach_conn::refuse_stopping(c.arrived.stream);
         }
+        self.stop_opens();
         // the acts not yet asked are for panes that are going
         let dropped = self.asks.drop_waiting();
         if dropped > 0 {

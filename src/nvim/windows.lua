@@ -720,6 +720,56 @@ function M.open(file, line, w, h)
   return win
 end
 
+-- Waited files' buffers, each told done once (`<tool>_done`): buffer ->
+-- true.
+local watched = {}
+
+-- Buffer `buf` is done with; `by_pane` if its last window went because its
+-- pane did.
+local function done(buf, by_pane)
+  if not watched[buf] then return end
+  watched[buf] = nil
+  -- as Neovim exits, its channel to the daemon may be closed
+  pcall(note, 'done', buf, by_pane)
+end
+
+-- Done once no window shows it, as the turn after it left one tells: the
+-- command that hid it may show it again, as :edit! does.
+api.nvim_create_autocmd('BufWinLeave', {
+  group = group,
+  callback = function(ev)
+    local buf = ev.buf
+    if not watched[buf] then return end
+    local by_pane = closing_ours
+    vim.schedule(function()
+      if api.nvim_buf_is_valid(buf) and #vim.fn.win_findbuf(buf) > 0 then return end
+      done(buf, by_pane)
+    end)
+  end,
+})
+api.nvim_create_autocmd({ 'BufUnload', 'BufDelete', 'BufWipeout' }, {
+  group = group,
+  callback = function(ev) done(ev.buf, closing_ours) end,
+})
+
+--- A file a control request opens: in a new window split off the current
+--- one, or the window last current if a pane doesn't show that, with the
+--- cursor on `line` if given. Watched with `watch`, until it's done. Returns
+--- { buffer, its full name, whether it's still watched }; an error if it
+--- can't be opened.
+function M.edit(file, line, watch)
+  if line == vim.NIL then line = nil end
+  if not shown(api.nvim_get_current_win()) and last and shown(last) then api.nvim_set_current_win(last) end
+  vim.cmd.split({ args = { file }, magic = { file = false } })
+  local win = api.nvim_get_current_win()
+  local buf = api.nvim_win_get_buf(win)
+  if line then
+    api.nvim_win_set_cursor(win, { math.min(line, api.nvim_buf_line_count(buf)), 0 })
+  end
+  if watch then watched[buf] = true end
+  return { buf, api.nvim_buf_get_name(buf), watched[buf] == true }
+end
+
 --- Fits the floats hanging from editor floats `tops` to `w` x `h` at `row`,
 --- `col` on the screen, as their float group pane was resized to. `cur` is
 --- where they are now: row, col, width, height. Returns whether it moved
