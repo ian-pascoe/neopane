@@ -120,7 +120,7 @@ A Neovim window no Neovim pane holds and no pane is on its way for, such as one 
 _Avoid_: hidden window, paneless window, detached window
 
 **Layout area**:
-The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's.
+The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's. Terminals hidden while another is zoomed are reported in a layout area of their own, such as tmux's `@N~hidden`: to the daemon an ordinary layout area, though none of it is on screen.
 _Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
 
 **Foreign pane**:

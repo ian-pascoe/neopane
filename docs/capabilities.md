@@ -281,6 +281,10 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
   before it with no split of the same kind of its own, else on one of the
   part after it, when that part is the split's last. Where neither exists,
   as for `((P | A) / (X | Y)) | C | D`'s border before `C`, it exits 1.
+  Under a top or bottom `pane-border-status`, `-y` on a pane by the status
+  line sizes that pane's content, not its cell: when the pane resized is
+  the other side's, the terminal's content comes a row short of `SIZE`,
+  within the one cell.
 - `focus`: `select-window` and `select-pane` on the terminal, in one tmux
   call, so every client on its session moves; never `switch-client`,
   which moves the most recently active client, whatever its session.
