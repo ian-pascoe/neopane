@@ -41,7 +41,7 @@ use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
-use crate::providers::choose::{self, Chosen, ConfigRun};
+use crate::providers::choose::{self, ChooseBy, Chosen, ConfigRun};
 
 /// `serve` is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -619,13 +619,18 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // starts
     let mut config_run = None;
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
-        Some(h) => match choose::config_for(config_file.as_deref(), h.hint.as_deref()) {
-            // one that can't start is tried again, and warned of, at `start`
-            Some(file) => {
-                config_run = ConfigRun::start(Path::new(&exe), file, h.for_config(&name)).ok();
+        Some(h) => match choose::choose_by(config_file.as_ref(), h.hint.as_deref()) {
+            ChooseBy::Config(file) => {
+                match ConfigRun::start(Path::new(&exe), file, h.for_config(&name)) {
+                    Ok(run) => config_run = Some(run),
+                    // tried again, and warned of, at `start`
+                    Err(e) => log_warn!("{NAME} daemon: config: can't run {}: {e}", file.display()),
+                }
                 None
             }
-            None => Some(choose::choose(
+            // warned of at `start`
+            ChooseBy::Missing(_) => None,
+            ChooseBy::Default => Some(choose::choose(
                 &h.env,
                 h.hint.as_deref(),
                 &mut choose::connect(),
@@ -700,7 +705,7 @@ fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::S
 struct FirstChoice {
     chosen: Option<Chosen>,
     config_run: Option<ConfigRun>,
-    config_file: Option<std::path::PathBuf>,
+    config_file: Option<choose::ConfigFile>,
 }
 
 /// Starts Neovim, and the daemon over it, which takes the `first` attach

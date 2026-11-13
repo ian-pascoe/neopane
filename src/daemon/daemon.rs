@@ -156,11 +156,11 @@ pub(crate) struct Daemon {
     just_opened: Vec<(TerminalId, Instant)>,
     /// The choice running, while its `find` hasn't confirmed it.
     choosing: Option<choosing::Choosing>,
-    /// The config file, as found at start: `init.lua` chooses if it is
+    /// The config file, as found at start: the config chooses if it is
     /// there at a choice (ADR 0007).
-    pub config_file: Option<std::path::PathBuf>,
-    /// The config running for a choice, and the choosing pane, until it
-    /// answers.
+    pub config_file: Option<crate::providers::choose::ConfigFile>,
+    /// The config running for a choice, and the pane of the choosing
+    /// attach, until it answers.
     config_run: Option<(u32, crate::providers::choose::ConfigRun)>,
     /// Self-attaches that came while a choice ran, waiting their turn.
     waiting_choice: Vec<u32>,
@@ -983,23 +983,21 @@ impl Daemon {
             let any = || self.any_terminal(|q| q.layer.is_none() && q.tab == 0);
             (from.or_else(any), true)
         };
-        // a terminal opened and never placed needs no origin
         let p = self.provider.as_deref();
-        let unplaced = beside
-            && !self.asks.may_ask(p, Capability::OpenBeside)
-            && !self.asks.may_ask(p, Capability::PlaceBeside);
-        if unplaced && origin.is_none() {
-            return self.open_unplaced(win, sp);
-        }
-        let Some(origin) = origin else {
+        let open_beside = self.asks.may_ask(p, Capability::OpenBeside);
+        let opens = self.asks.may_ask(p, Capability::Open);
+        let places = self.asks.may_ask(p, Capability::PlaceBeside);
+        // a terminal opened and never placed needs no origin
+        let unplaced = beside && !open_beside && !places;
+        if origin.is_none() && !unplaced {
             return Ok(()); // no origin yet: next flush
-        };
+        }
         // starts at the guess, not Rex's default
         let size = self.new_pane_size(win);
         let [cols, rows] = size;
-        let origin_size = self
-            .panes
-            .by_terminal(origin.as_str())
+        let origin_size = origin
+            .as_ref()
+            .and_then(|o| self.panes.by_terminal(o.as_str()))
             .and_then(|f| f.terminal_surface.as_ref())
             .map(|s| [s.view.cols, s.view.rows]);
         let pane = self.panes.add_for_window(win);
@@ -1016,7 +1014,7 @@ impl Daemon {
                 pane: id,
                 attach,
                 title,
-                origin,
+                origin: origin.expect("a tab page's origin"),
                 cols,
                 rows,
             });
@@ -1033,10 +1031,9 @@ impl Daemon {
             Some(o) if o[axis] > 0 => (f64::from(along) / f64::from(o[axis])).clamp(0.0, 1.0),
             _ => 0.5,
         };
-        let p = self.provider.as_deref();
-        if !self.asks.may_ask(p, Capability::OpenBeside) && self.asks.may_ask(p, Capability::Open) {
-            // opened, then placed once it attaches (ADR 0006)
-            if self.asks.may_ask(p, Capability::PlaceBeside) {
+        if !open_beside && opens {
+            // opened, then placed once it attaches (ADR 0006), if it can be
+            if let Some(origin) = origin.filter(|_| places) {
                 self.panes.by_id_mut(pane_id).unwrap().placing = Some(Placing {
                     origin,
                     dir,
@@ -1058,32 +1055,10 @@ impl Daemon {
             pane: id,
             attach,
             title,
-            origin,
+            origin: origin.expect("an origin to open beside"),
             dir,
             size: along,
             ratio,
-            cols,
-            rows,
-        });
-        log::trace(Point::Split, u64::from(pane_id));
-        Ok(())
-    }
-
-    /// Opens a terminal for window `win`, split off as `sp`, that nothing
-    /// will place: the pane provider can only `open`, and no pane has a
-    /// terminal id to start it beside, as when it has no `find`.
-    fn open_unplaced(&mut self, win: i64, sp: windows::Split) -> Result<()> {
-        let [cols, rows] = self.new_pane_size(win);
-        let pane = self.panes.add_for_window(win);
-        pane.split = Some(sp);
-        let (pane_id, id) = (pane.id, pane.attach_id.expect("a requested pane"));
-        let attach = pane::attach_words(&self.exe, &self.sock, self.transport, pane);
-        let title = pane::title(&id);
-        self.changes.forget_split(win);
-        self.act(Ask::Open {
-            pane: id,
-            attach,
-            title,
             cols,
             rows,
         });
@@ -3297,6 +3272,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     mod choosing;
+    mod config;
     mod control;
     mod fallback;
     mod floats_in_panes;

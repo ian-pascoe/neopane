@@ -2,11 +2,11 @@
 //! 0007, #92 decisions 24–28).
 //!
 //! A self-attach chooses when the daemon has no pane provider: the user's
-//! `init.lua`, run in the config child while the loop goes on, or with no
+//! config, run in the config child while the loop goes on, or with no
 //! file the built-in default, from its hello (`providers::choose`). A
 //! config error means none for that choice, with one warning. The chosen
 //! pane provider is held at once, unconfirmed, and its `find` for the
-//! choosing pane confirms it: in reach keeps it; anything else, or the
+//! choosing attach's pane confirms it: in reach keeps it; anything else, or the
 //! choice's 3 s running out, drops it with a warning. Nothing waits for that but what
 //! needs the pane provider: the windows Neovim has with no pane of their own
 //! wait unshown, then open as new windows do, and self-attaches that arrive
@@ -28,14 +28,15 @@ use super::*;
 use crate::attach::{PaneId, env_value};
 use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
-use crate::providers::choose::{self, Chosen, ConfigRun, Env};
+use crate::providers::choose::{self, ChooseBy, Chosen, ConfigRun, Env};
 
-/// The choice running: the choosing pane, the pane id its `find` carries,
-/// and when the choice runs out of time.
+/// The choice running: the choosing attach's pane, the pane id its `find`
+/// carries, when the choice runs out of time, and the time it had.
 pub(crate) struct Choosing {
     pub(super) id: u32,
     attach: PaneId,
     due: Instant,
+    time: Duration,
 }
 
 impl Daemon {
@@ -93,12 +94,29 @@ impl Daemon {
             let chosen = choose(hello);
             return self.take_choice(id, chosen);
         }
-        if let Some(file) = choose::config_for(self.config_file.as_deref(), hello.hint.as_deref()) {
-            let file = file.to_path_buf();
-            return self.run_config(id, &file);
+        match choose::choose_by(self.config_file.as_ref(), hello.hint.as_deref()) {
+            ChooseBy::Config(file) => {
+                let file = file.to_path_buf();
+                self.run_config(id, &file)
+            }
+            ChooseBy::Missing(file) => {
+                let line = choose::missing_line(file);
+                self.config_failed(id, line)
+            }
+            ChooseBy::Default => {
+                let chosen =
+                    choose::choose(&hello.env, hello.hint.as_deref(), &mut choose::connect());
+                self.take_choice(id, chosen)
+            }
         }
-        let chosen = choose::choose(&hello.env, hello.hint.as_deref(), &mut choose::connect());
-        self.take_choice(id, chosen)
+    }
+
+    /// Self-attached pane `id`'s config failed before it could run, as
+    /// `line` says: no pane provider, with that one warning.
+    fn config_failed(&mut self, id: u32, line: String) -> Result<()> {
+        log_warn!("{NAME} daemon: {line}");
+        self.warn_when_ready(format!("{NAME}: {line}"));
+        self.take_choice(id, Chosen::ConfigError)
     }
 
     /// Whether a choice runs: the config, or a chosen pane provider's
@@ -117,9 +135,7 @@ impl Daemon {
             Ok(run) => self.wait_for_config(id, run),
             Err(e) => {
                 let line = format!("config: can't run {}: {e}", file.display());
-                log_warn!("{NAME} daemon: {line}");
-                self.warn_when_ready(format!("{NAME}: {line}"));
-                self.take_choice(id, Chosen::ConfigError)
+                self.config_failed(id, line)
             }
         }
     }
@@ -148,9 +164,8 @@ impl Daemon {
             log_info!("{NAME} daemon: pane {id} went before its config answered");
             return self.reach_decided();
         };
-        let (env, cwd) = (hello.env.clone(), hello.cwd.clone());
         let (chosen, warning) =
-            choose::by_config(&outcome, &run.file, &env, &cwd, &mut choose::connect());
+            choose::by_config(&outcome, &run.file, hello, &mut choose::connect());
         if let Some(warning) = warning {
             self.warn_when_ready(warning);
         }
@@ -204,7 +219,7 @@ impl Daemon {
         let Some(p) = self.panes.by_id(id) else {
             return Ok(());
         };
-        let hello = p.hello.as_deref().expect("a choosing pane has a hello");
+        let hello = p.hello.as_deref().expect("a choosing attach has a hello");
         let attach = p.attach_id.expect("a self-attached pane has an id");
         log_info!("{NAME} daemon: pane {id} chose {}", held.name());
         let held_find_time = held.timeout(Capability::Find);
@@ -220,11 +235,16 @@ impl Daemon {
         // the panes attached before are out of reach, their windows theirs,
         // until the choice is confirmed: then they rejoin as `find` says
         self.out_of_reach_but(Some(id));
-        // the whole choice has the time, or `find`'s if longer: connecting,
-        // before, counts
+        // the choice has 3 s, or `find`'s time if longer: connecting,
+        // before, counts; a config had 3 s of its own before
         let time = crate::config::TIME.max(held_find_time);
         let due = Instant::now() + time.saturating_sub(spent);
-        self.choosing = Some(Choosing { id, attach, due });
+        self.choosing = Some(Choosing {
+            id,
+            attach,
+            due,
+            time,
+        });
         self.arm_choice_timer(due)?;
         self.find(id)
     }
@@ -270,7 +290,7 @@ impl Daemon {
             p.reach = Reach::Out;
         }
         // stalled anywhere: connecting, `session.attach` or `find`
-        let secs = crate::util::seconds(crate::config::TIME);
+        let secs = crate::util::seconds(c.time);
         let what = format!("no answer within {secs} s");
         self.refuse_choice(&what)
     }

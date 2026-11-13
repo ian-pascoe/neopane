@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use super::child::{ANSWER_FD, REQUEST_FD};
@@ -27,6 +28,9 @@ pub struct Spawn<'a> {
     pub exe: &'a Path,
     /// The commands' environment, exactly.
     pub env: &'a [(OsString, OsString)],
+    /// Set to the child's process group while it runs, and to 0 before it
+    /// is killed and reaped: for a caller on another thread to kill it.
+    pub group: Option<&'a AtomicI32>,
 }
 
 /// What running the config came to.
@@ -91,7 +95,12 @@ pub fn run(spawn: Spawn<'_>, request: &Request) -> Outcome {
     let deadline = started + request.time;
     let mut printed = Printed::default();
     let answer = match start(spawn, request) {
-        Ok(running) => running.wait(deadline, request.time, &mut printed),
+        Ok(running) => {
+            if let Some(g) = spawn.group {
+                g.store(running.child.id() as i32, Ordering::SeqCst);
+            }
+            running.wait(deadline, request.time, &mut printed, spawn.group)
+        }
         Err(e) => Err(Failure::CantStart(e.to_string())),
     };
     Outcome {
@@ -181,6 +190,7 @@ impl Running {
         deadline: Instant,
         time: Duration,
         printed: &mut Printed,
+        group: Option<&AtomicI32>,
     ) -> Result<Answer, Failure> {
         for fd in [self.answer.as_raw_fd(), self.output.as_raw_fd()] {
             set_nonblocking(fd);
@@ -214,6 +224,10 @@ impl Running {
                 output_open = drain(&mut self.output, |b| printed.add(b));
             }
         };
+        // from here, only this thread kills it
+        if let Some(g) = group {
+            g.store(0, Ordering::SeqCst);
+        }
         let status = match &got {
             // answered, or out of time: nothing it started may outlive it
             Ok(_) | Err(Some(_)) => self.kill_group(),

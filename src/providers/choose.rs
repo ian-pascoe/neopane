@@ -1,5 +1,5 @@
 //! Choosing a pane provider for a self-attach (ADR 0007, #87 decisions
-//! D5–D7, #92 decisions 24 and 25). The user's `init.lua`, if there is
+//! D5–D7, #92 decisions 24 and 25). The user's config, if there is
 //! one, chooses: it runs in the config child, on a thread of its own so the
 //! daemon's loop never waits for it (`ConfigRun`), and what it returned is
 //! checked by the daemon (`by_config`). With no file, the built-in
@@ -16,7 +16,8 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use super::command::{CommandProvider, Spec, commands_env};
@@ -24,6 +25,7 @@ use super::rex::RexProvider;
 use crate::attach::env_value;
 use crate::config::check::Severity;
 use crate::config::{self, Builtin, Choice, Problems};
+use crate::daemon::pane::AttachHello;
 use crate::daemon::provider::PaneProvider;
 use crate::log::{log_info, log_warn};
 use crate::name::NAME;
@@ -119,20 +121,54 @@ fn start_rex(env: &Env, connect: &mut Connect, since: Instant) -> Chosen {
 /// working directory `cwd` (#94 decisions 33 and 39): `$<NAME>_CONFIG`,
 /// made absolute against `cwd`, else `$XDG_CONFIG_HOME/<name>/init.lua`,
 /// else `~/.config/<name>/init.lua`. None without `HOME`.
-pub(crate) fn config_path(env: &[(OsString, OsString)], cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn config_path(env: &[(OsString, OsString)], cwd: &Path) -> Option<ConfigFile> {
     let var = |name: &str| {
         env.iter()
             .find(|(k, _)| k.as_bytes() == name.as_bytes())
             .map(|(_, v)| v.clone())
     };
-    config::default_file(var, cwd)
+    let named = var(&config::config_var()).is_some_and(|v| !v.is_empty());
+    config::default_file(var, cwd).map(|path| ConfigFile { path, named })
 }
 
-/// The config file that chooses for a self-attach with `hint`: `file`, if
-/// it's there, unless the hint is `none`. Without it, the built-in default
-/// chooses.
-pub(crate) fn config_for<'a>(file: Option<&'a Path>, hint: Option<&str>) -> Option<&'a Path> {
-    file.filter(|f| hint != Some(HINT_NONE) && f.exists())
+/// The config file a daemon reads, and whether `$<NAME>_CONFIG` named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigFile {
+    pub path: PathBuf,
+    pub named: bool,
+}
+
+/// How a self-attach chooses.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChooseBy<'a> {
+    /// The built-in default, in the daemon: there's no config file, or the
+    /// hint is `none`.
+    Default,
+    /// The config file, which is there.
+    Config(&'a Path),
+    /// The file `$<NAME>_CONFIG` names, which isn't there: a config error.
+    Missing(&'a Path),
+}
+
+/// How a self-attach with `hint` chooses, the daemon's config file being
+/// `file`: only the default places being empty means the default chooses.
+pub(crate) fn choose_by<'a>(file: Option<&'a ConfigFile>, hint: Option<&str>) -> ChooseBy<'a> {
+    match file {
+        _ if hint == Some(HINT_NONE) => ChooseBy::Default,
+        Some(f) if f.path.exists() => ChooseBy::Config(&f.path),
+        Some(f) if f.named => ChooseBy::Missing(&f.path),
+        _ => ChooseBy::Default,
+    }
+}
+
+/// What the log and the Neovim warning say of a config file
+/// `$<NAME>_CONFIG` names that isn't there.
+pub(crate) fn missing_line(file: &Path) -> String {
+    format!(
+        "config: {} isn't there ({} names it); no pane provider",
+        file.display(),
+        config::config_var()
+    )
 }
 
 /// The config running for a choice: the blocking runner, on a thread of
@@ -141,6 +177,8 @@ pub(crate) struct ConfigRun {
     /// Its end comes when the thread is done.
     done: PipeReader,
     outcome: mpsc::Receiver<config::Outcome>,
+    /// The child's process group while it runs, else 0.
+    group: Arc<AtomicI32>,
     /// The config file.
     pub file: PathBuf,
 }
@@ -163,12 +201,15 @@ impl ConfigRun {
             time: config::TIME,
         };
         let exe = exe.to_path_buf();
+        let group = Arc::new(AtomicI32::new(0));
+        let its_group = group.clone();
         std::thread::Builder::new()
             .name("config".into())
             .spawn(move || {
                 let spawn = config::Spawn {
                     exe: &exe,
                     env: &env,
+                    group: Some(&its_group),
                 };
                 let _ = tell.send(config::run(spawn, &request));
                 // closing it wakes the loop
@@ -177,6 +218,7 @@ impl ConfigRun {
         Ok(ConfigRun {
             done,
             outcome,
+            group,
             file: file.to_path_buf(),
         })
     }
@@ -201,16 +243,27 @@ impl ConfigRun {
     }
 }
 
-/// What the config's `outcome` chooses for a self-attach with environment
-/// `env` and working directory `cwd`, connecting to Rex through `connect`
-/// if that's the choice; and the Neovim warning its problems make, if any
+impl Drop for ConfigRun {
+    /// The daemon ends mid-choice: nothing the config started outlives it.
+    fn drop(&mut self) {
+        let group = self.group.swap(0, Ordering::SeqCst);
+        if group > 0 {
+            // SAFETY: a plain syscall; the runner hasn't reaped the child,
+            // or it would have cleared `group` first.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+    }
+}
+
+/// What the config's `outcome` chooses for the choosing attach, whose
+/// hello is `hello`, connecting to Rex through `connect` if that's the
+/// choice; and the Neovim warning its problems make, if any
 /// (#93 decision 20). Any error means none, never the default. What it
 /// printed and its problems go to the log.
 pub(crate) fn by_config(
     outcome: &config::Outcome,
     file: &Path,
-    env: &Env,
-    cwd: &[u8],
+    hello: &AttachHello,
     connect: &mut Connect,
 ) -> (Chosen, Option<String>) {
     let file_name = file
@@ -230,7 +283,7 @@ pub(crate) fn by_config(
         Ok(chosen) => {
             log_problems(&chosen.warnings);
             let warning = chosen.warnings.message();
-            (of_choice(&chosen.choice, env, cwd, connect), warning)
+            (of_choice(&chosen.choice, hello, connect), warning)
         }
     }
 }
@@ -245,20 +298,20 @@ fn log_problems(problems: &Problems) {
     }
 }
 
-/// The pane provider for the config's `choice`, for an attach with
-/// environment `env` and working directory `cwd`.
-fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], connect: &mut Connect) -> Chosen {
+/// The pane provider for the config's `choice`, for the choosing attach,
+/// whose hello is `hello`.
+fn of_choice(choice: &Choice, hello: &AttachHello, connect: &mut Connect) -> Chosen {
     let started = Instant::now();
     match choice {
         Choice::None => Chosen::None {
             why: "the config chose none".into(),
             warn: false,
         },
-        Choice::Builtin(Builtin::Rex) => start_rex(env, connect, started),
+        Choice::Builtin(Builtin::Rex) => start_rex(&hello.env, connect, started),
         Choice::Whole(_) | Choice::Pair(_) => {
             let spec = Spec::of(choice).expect("a table or a pair has a spec");
             let name = spec.name.clone();
-            match CommandProvider::new(spec, env, cwd) {
+            match CommandProvider::new(spec, &hello.env, &hello.cwd) {
                 Ok(p) => Chosen::Provider {
                     held: Box::new(p),
                     spent: started.elapsed(),
@@ -320,7 +373,7 @@ mod tests {
         };
         let cwd = Path::new("/launch");
         let home = ("HOME", "/home/u");
-        let at = |vars: &[(&str, &str)]| config_path(&os(vars), cwd);
+        let at = |vars: &[(&str, &str)]| config_path(&os(vars), cwd).map(|f| f.path);
         // made absolute once, against where the daemon started
         assert_eq!(
             Some(PathBuf::from("/launch/my.lua")),
@@ -339,6 +392,77 @@ mod tests {
         let dotconfig = format!("/home/u/.config/{NAME}/init.lua");
         assert_eq!(Some(PathBuf::from(&dotconfig)), at(&[home]));
         assert_eq!(None, at(&[]));
+        // named, or found at a default place
+        let named = |vars: &[(&str, &str)]| config_path(&os(vars), cwd).map(|f| f.named);
+        assert_eq!(Some(true), named(&[home, (&var, "my.lua")]));
+        assert_eq!(Some(false), named(&[home, (&var, "")]));
+    }
+
+    #[test]
+    fn a_config_run_dropped_mid_choice_takes_what_it_started_with_it() {
+        // the built binary runs the config child; skipped without it
+        let exe = std::env::current_exe().unwrap();
+        let bin = exe.parent().unwrap().parent().unwrap().join(NAME);
+        if !bin.is_file() {
+            assert!(std::env::var_os("CI").is_none(), "no {}", bin.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("{NAME}-cfg-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let source = format!(
+            "os.execute('echo $$ > {} && exec sleep 30')\nreturn {{ provider = function() end }}\n",
+            pid_file.display()
+        );
+        std::fs::write(dir.join("init.lua"), source).unwrap();
+        let attach = config::Attach {
+            cwd: b"/".to_vec(),
+            ..Default::default()
+        };
+        let run = ConfigRun::start(&bin, &dir.join("init.lua"), attach).unwrap();
+        let due = Instant::now() + Duration::from_secs(10);
+        let pid = loop {
+            let read = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            if let Ok(pid) = read.trim().parse::<i32>() {
+                break pid;
+            }
+            assert!(Instant::now() < due, "the config never ran its command");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drop(run);
+        // SAFETY: signal 0 only checks the process is there.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        // well within the config's 3 s, after which the runner kills it
+        let due = Instant::now() + Duration::from_secs(1);
+        while alive() && Instant::now() < due {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!alive(), "the config's sleep outlived its run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_named_config_that_isnt_there_is_an_error() {
+        let here = ConfigFile {
+            path: std::env::current_exe().unwrap(),
+            named: false,
+        };
+        let gone = |named| ConfigFile {
+            path: PathBuf::from("/nowhere/init.lua"),
+            named,
+        };
+        assert_eq!(ChooseBy::Config(&here.path), choose_by(Some(&here), None));
+        assert_eq!(ChooseBy::Default, choose_by(Some(&gone(false)), None));
+        let named = gone(true);
+        assert_eq!(
+            ChooseBy::Missing(&named.path),
+            choose_by(Some(&named), None)
+        );
+        assert_eq!(ChooseBy::Default, choose_by(None, Some("tmux")));
+        // the hint none skips the file, there or not
+        assert_eq!(ChooseBy::Default, choose_by(Some(&here), Some("none")));
+        assert_eq!(ChooseBy::Default, choose_by(Some(&named), Some("none")));
     }
 
     #[test]

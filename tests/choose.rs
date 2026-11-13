@@ -81,9 +81,17 @@ impl Work {
         }
     }
 
-    /// Neovim's messages.
-    fn messages(&self) -> String {
-        remote_expr(&self.sock, "execute('messages')").unwrap_or_default()
+    /// Waits up to 10 s for Neovim's messages to hold `message`, and returns
+    /// them as they last were.
+    fn until_message(&self, message: &str) -> String {
+        let due = Instant::now() + Duration::from_secs(10);
+        loop {
+            let messages = remote_expr(&self.sock, "execute('messages')").unwrap_or_default();
+            if messages.contains(message) || Instant::now() > due {
+                return messages;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// The `list` row's PROVIDER column.
@@ -195,12 +203,7 @@ fn a_config_error_warns_once_and_list_shows_it() {
     assert_eq!(work.listed_provider(), "none (config error)");
     let warning =
         format!("{NAME}: config: provider() returned \"tmux\"; the only built-in name is \"rex\"");
-    let due = Instant::now() + Duration::from_secs(10);
-    let mut messages = work.messages();
-    while !messages.contains(&warning) && Instant::now() < due {
-        std::thread::sleep(Duration::from_millis(100));
-        messages = work.messages();
-    }
+    let messages = work.until_message(&warning);
     assert_eq!(messages.matches(&warning).count(), 1, "{messages}");
 }
 
@@ -224,12 +227,7 @@ fn a_find_that_refuses_the_terminal_means_no_pane_provider() {
     assert_eq!(s["provider"], "none (find refused)");
     let warning =
         format!("{NAME}: fake: find didn't confirm this terminal (exit 1); no pane provider");
-    let due = Instant::now() + Duration::from_secs(10);
-    let mut messages = work.messages();
-    while !messages.contains(&warning) && Instant::now() < due {
-        std::thread::sleep(Duration::from_millis(100));
-        messages = work.messages();
-    }
+    let messages = work.until_message(&warning);
     assert_eq!(messages.matches(&warning).count(), 1, "{messages}");
 }
 
@@ -238,14 +236,14 @@ fn two_self_attaches_in_quick_succession_choose_once() {
     if !have_nvim() {
         return;
     }
-    // each run notes itself, then takes a while: the second attach comes
-    // while the first's runs
+    // each run notes itself, then waits for the test's go: the second
+    // attach comes while the first's runs
     let mut work = Work::new(
         "twice",
         r#"local f = io.open("{dir}/runs", "a")
 f:write("ran\n")
 f:close()
-os.execute("sleep 1")
+while not io.open("{dir}/go") do os.execute("sleep 0.02") end
 return {
   provider = function(attach)
     return { name = "fake", find = { "true" } }
@@ -254,9 +252,16 @@ return {
 "#,
     );
     work.attach();
-    until_lines(&work.path("runs"), 1);
+    assert_eq!(until_lines(&work.path("runs"), 1), ["ran"]);
     work.attach();
-    let s = work.until_status(|s| s["provider"] == "fake" && s["panes"] == 2);
+    // both attached, the first's choice still running
+    let s = work.until_status(|s| s["panes"] == 2);
+    assert_eq!(
+        (&s["provider"], &s["panes"]),
+        (&"(choosing)".into(), &2.into())
+    );
+    std::fs::write(work.path("go"), "").unwrap();
+    let s = work.until_status(|s| s["provider"] == "fake");
     assert_eq!((&s["provider"], &s["panes"]), (&"fake".into(), &2.into()));
     assert_eq!(lines_of(&work.path("runs")), ["ran"]);
 }

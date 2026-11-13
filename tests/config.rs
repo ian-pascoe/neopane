@@ -78,6 +78,7 @@ impl Fixture {
         let spawn = Spawn {
             exe: &exe(),
             env: &self.env,
+            group: None,
         };
         config::run(spawn, &request)
     }

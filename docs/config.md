@@ -11,17 +11,19 @@ The daemon reads `$NEOPANE_CONFIG` if it is set and not empty, made absolute
 against the directory `neopane` started in (`~` isn't expanded), else
 `$XDG_CONFIG_HOME/neopane/init.lua` (an absolute `XDG_CONFIG_HOME` only),
 else `~/.config/neopane/init.lua`, on macOS too. It reads
-`$NEOPANE_CONFIG` once, as it starts: a later attach's never counts.
+`$NEOPANE_CONFIG` once, as it starts: a later attach's never counts. With
+no file at the default places, the built-in default chooses; a file
+`$NEOPANE_CONFIG` names that isn't there is an error (see [Errors](#errors)).
 
 The file runs afresh each time a terminal chooses the pane provider: when
 a terminal attaches by itself (as `neopane` or `neopane attach` does) and the
 daemon has none. Each run is a child process of the daemon's own binary,
-in the choosing terminal's working directory (`/` if it has gone), with the
+in the choosing attach's working directory (`/` if it has gone), with the
 environment its commands get (`docs/capabilities.md`, "Running a command").
 It has 3 s to answer; once it has answered, or its time is up, its process
 group is killed, so nothing it started outlives the choice. A fix to the
 file applies at the next choice, and a file made after the daemon started is
-read then too. `--provider none` (or `NEOPANE_PROVIDER=none`) chooses none
+read then too, wherever it is. `--provider none` (or `NEOPANE_PROVIDER=none`) chooses none
 without running it.
 
 It returns a table whose only key is `provider`, a function called with the
@@ -54,7 +56,7 @@ new windows, and the terminals that attach meanwhile, wait for the choice.
 
 | Field | |
 |---|---|
-| `env` | The choosing terminal's environment, as it attached: names to values, raw bytes |
+| `env` | The choosing attach's environment, as it attached: names to values, raw bytes |
 | `cwd` | Its working directory, absolute |
 | `tty` | Its tty, such as `/dev/ttys014`; `""` when it has none |
 | `pid` | The attaching helper's pid |
@@ -80,10 +82,11 @@ neopane, and the file doesn't run for it.
   `name` names the pair, `"<T's name>+<L's name>"` by default.
 
 The chosen pane provider's `find` (its own, or its layout side's) then
-confirms the choice for the choosing terminal: exit 0 or 69, or no `find`,
+confirms the choice for the choosing attach: exit 0 or 69, or no `find`,
 accepts it; anything else means no pane provider, with a warning, so a
 `TMUX` leaked into a Ghostty window doesn't send new windows to a tmux pane
-nobody sees.
+nobody sees. The file's 3 s are its own: `find` then has 3 s to confirm the
+choice, or its own timeout (`timeouts.find`) if that is longer.
 
 `list` and `status` show the result as the pane provider's name (a pair's
 as `T+L`), `(choosing)` while the file runs or `find` hasn't answered, or
@@ -136,7 +139,7 @@ Also `require("neopane")`.
 ## Errors
 
 Any error means no pane provider for that choice, never the default: the
-file fails to load or raises, runs out its 3 s, ends without answering, or
+file `$NEOPANE_CONFIG` names isn't there, fails to load or raises, runs out its 3 s, ends without answering, or
 returns something malformed, such as a wrong type, an argv with a hole (is a
 variable nil?), a side with no usable capability, a paired `"rex"`, or no
 protocol number shared with neopane. Anything unknown, such as a key, a
@@ -154,7 +157,13 @@ neopane: config: provider().layout.focus[2]: expected string, got number (wrap n
 The daemon's log has every one, and `list` shows `none (config error)`.
 The next terminal that attaches by itself runs the file again.
 
-A `find` that refuses the choosing terminal warns too:
+A file `$NEOPANE_CONFIG` names that isn't there warns with its path:
+
+```text
+neopane: config: /home/me/my.lua isn't there (NEOPANE_CONFIG names it); no pane provider
+```
+
+A `find` that refuses the choosing attach warns too:
 
 ```text
 neopane: aerospace: find didn't confirm this terminal (exit 1); no pane provider
