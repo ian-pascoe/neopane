@@ -94,6 +94,20 @@ fn tmux_version() -> Option<(u32, u32)> {
 
 #[test]
 fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
+    a_float_lands_on_its_group("off");
+}
+
+/// With the status line on top, `%0`'s rect starts on the window's top
+/// row, above its content, and the group is placed from it.
+#[test]
+fn under_a_top_status_line_a_float_still_lands_on_its_group() {
+    a_float_lands_on_its_group("top");
+}
+
+/// A float opened in a daemon in a tmux window whose
+/// `pane-border-status` is `border_status` gets a tmux floating pane on
+/// its group, and Neovim leaves the float where it opened it.
+fn a_float_lands_on_its_group(border_status: &str) {
     if !have_nvim() || !have_tmux() {
         return;
     }
@@ -101,7 +115,7 @@ fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
     if tmux_version().is_some_and(|v| v < (3, 7)) {
         return;
     }
-    let tmp = scratch("tmux-fl");
+    let tmp = scratch(&format!("tmux-fl-{border_status}"));
     let exe = exe();
     let tmux = TmuxServer::start(
         &tmp,
@@ -112,6 +126,7 @@ fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
         ],
         &[exe.to_str().unwrap(), "--name", "fl"],
     );
+    tmux.run(&["set", "-g", "pane-border-status", border_status]);
     let sock = base_of(&tmp).join("fl/nvim.sock");
     let ending = Ending {
         sock: sock.clone(),
@@ -148,8 +163,8 @@ fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
     let now = until(|f: &Vec<String>| f.len() == 1, floats);
     assert_eq!(now.len(), 1, "no float opened: {}", log());
     let float = now[0].split(' ').collect::<Vec<_>>();
-    // its content lands on the group: %0 is at the window's top left
-    assert_eq!(float[2..], ["10", "3", "20", "5"], "{now:?}");
+    // its content lands on the group: %0's rect is at the window's top left
+    assert_eq!(float[2..], ["10", "3", "20", "5"], "{now:?}: {}", log());
     let started = tmux.run(&[
         "display-message",
         "-p",
@@ -160,6 +175,13 @@ fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
     assert!(started.contains(" attach --address "), "{started}");
     let s = until(|s: &serde_json::Value| s["panes"] == 2, status);
     assert_eq!(s["panes"], 2, "its attach never came: {}", log());
+    // and Neovim's float stays where it was opened: its group followed no move
+    std::thread::sleep(Duration::from_millis(500));
+    let at = remote_expr(
+        &sock,
+        &format!("luaeval('vim.api.nvim_win_get_config({win}).row')"),
+    );
+    assert_eq!(at.as_deref(), Some("3"), "{}", log());
 
     // closing the float closes its pane
     remote_expr(

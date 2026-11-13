@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 
 use super::Failure;
+use super::layout::{PANES, reported_corner};
 use super::panes::{attach_words, pane_id, printed_pane};
 use super::server::{Server, older_than};
 use crate::providers::builtin::Given;
@@ -30,23 +31,8 @@ pub(super) fn open_float(given: &Given) -> Result<String, Failure> {
     let words = attach_words(given)?;
     let at = [number(given, "x")?, number(given, "y")?];
     let size = [cells(given, "cols")?, cells(given, "rows")?];
-    let shown = server.run(&[
-        "display-message",
-        "-p",
-        "-t",
-        &origin,
-        "#{pane_left} #{pane_top} #{window_width} #{window_height}",
-    ])?;
-    let shown = String::from_utf8_lossy(&shown);
-    let numbers: Vec<i64> = shown
-        .split_whitespace()
-        .map_while(|n| n.parse().ok())
-        .collect();
-    let &[left, top, width, height] = numbers.as_slice() else {
-        return Err(format!("tmux gave {origin}'s place as {:?}", shown.trim()).into());
-    };
-    let window = [width, height].map(|n| u32::try_from(n).unwrap_or(0));
-    let [x, y, ox, oy] = flags(geometry, at, size, [left, top], window);
+    let shown = server.run(&["display-message", "-p", "-t", &origin, PANES])?;
+    let [x, y, ox, oy] = placement(geometry, at, size, &shown)?;
     let mut args: Vec<OsString> = vec!["new-pane".into(), "-d".into()];
     for (flag, n) in [("-x", x), ("-y", y), ("-X", ox), ("-Y", oy)] {
         args.extend([flag.into(), n.to_string().into()]);
@@ -55,6 +41,25 @@ pub(super) fn open_float(given: &Given) -> Result<String, Failure> {
     args.extend(["-P".into(), "-F".into(), "#{pane_id}".into()]);
     args.extend(words);
     Ok(printed_pane(&server.run(&args)?, "new-pane")?)
+}
+
+/// `new-pane`'s `-x -y -X -Y` for a float group of `size` cells at `at`
+/// cells from the top left of the origin's rect, as `report_layout` gives
+/// it, the origin being `shown`, its line of `PANES`; or why it can't
+/// read it.
+fn placement(
+    geometry: Geometry,
+    at: [i64; 2],
+    size: [u32; 2],
+    shown: &[u8],
+) -> Result<[i64; 4], String> {
+    let (corner, window) = reported_corner(shown).ok_or_else(|| {
+        format!(
+            "tmux gave the origin's place as {:?}",
+            String::from_utf8_lossy(shown).trim()
+        )
+    })?;
+    Ok(flags(geometry, at, size, corner, window))
 }
 
 /// Input `name`, an integer, or why not.
@@ -109,7 +114,7 @@ impl Geometry {
 }
 
 /// `new-pane`'s `-x -y -X -Y` for a float group of `size` cells, cols and
-/// rows, at `at` cells from the origin's top left, the origin's content
+/// rows, at `at` cells from the origin's top left, the origin's rect
 /// being at `origin` in its window of `window` cells: the content lands
 /// on the group, but for 3.7's, which can't be as big as the window.
 fn flags(
@@ -156,6 +161,24 @@ mod tests {
         let flags = |g| flags(g, [10, 4], [20, 6], [41, 0], [80, 24]);
         assert_eq!(flags(Geometry::Content), [20, 6, 51, 4]);
         assert_eq!(flags(Geometry::Frame), [22, 8, 50, 3]);
+    }
+
+    /// Recorded from tmux 3.8, `pane-border-status top`: `%0` is the left
+    /// half of an 80x24 window, its content from row 1, the status line
+    /// on row 0. `report_layout` gives its rect from row 0, and the group's
+    /// `X`,`Y` are from that rect's top left: the content lands at 10,3,
+    /// not a row lower.
+    #[test]
+    fn under_a_top_status_line_the_group_is_placed_from_the_reported_rect() {
+        let line = b"@0 80 24 %0 0 1 40 23 1 top 0\n";
+        let at = |g| placement(g, [10, 3], [20, 5], line).unwrap();
+        assert_eq!(at(Geometry::Content), [20, 5, 10, 3]);
+        assert_eq!(at(Geometry::Frame), [22, 7, 9, 2]);
+        // without the status line, the content's top left is the rect's
+        let line = b"@0 80 24 %1 41 0 39 24 1 off 0\n";
+        let at = |g| placement(g, [10, 4], [20, 6], line).unwrap();
+        assert_eq!(at(Geometry::Content), [20, 6, 51, 4]);
+        assert!(placement(Geometry::Frame, [0, 0], [1, 1], b"%0 0 1\n").is_err());
     }
 
     /// A group may start left of or above its origin, and its frame off

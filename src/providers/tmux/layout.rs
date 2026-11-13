@@ -22,8 +22,8 @@ use super::server::Server;
 use crate::providers::builtin::Given;
 
 /// One line per pane of the server, a window linked into several sessions
-/// listing its panes once for each.
-const PANES: &str = "#{window_id} #{window_width} #{window_height} #{pane_id} #{pane_left} \
+/// listing its panes once for each; for `display-message`, the pane's.
+pub(super) const PANES: &str = "#{window_id} #{window_width} #{window_height} #{pane_id} #{pane_left} \
                      #{pane_top} #{pane_width} #{pane_height} #{pane_at_top} \
                      #{pane-border-status} #{?pane_floating_flag,1,0}";
 
@@ -87,6 +87,17 @@ fn focus(clients: &[u8]) -> Option<String> {
     latest.map(|(_, pane)| pane.to_string())
 }
 
+/// The top left of the pane `line`, a line of `PANES`, describes, in
+/// cells of its window, as `report_layout` gives its rect; and its
+/// window's size. None if it can't read it.
+pub(super) fn reported_corner(line: &[u8]) -> Option<([i64; 2], [u32; 2])> {
+    let line = std::str::from_utf8(line).ok()?;
+    let p = Pane::parse(line.lines().next()?)?;
+    let ([x, y, _, _], _) = p.reported();
+    let [ww, wh] = p.window_size;
+    Some(([x as i64, y as i64], [ww as u32, wh as u32]))
+}
+
 /// One line of `list-panes -a -F PANES`.
 struct Pane {
     window: String,
@@ -136,36 +147,31 @@ impl Pane {
         })
     }
 
-    /// As `report_layout` gives it. A float is its frame, a cell outside
-    /// its content on each side, whatever the border status.
-    fn terminal(&self) -> Value {
-        let [mut x, mut y, mut w, mut h] = self.cells;
+    /// Its rect, in cells of its window, and its inset, as `report_layout`
+    /// gives them. A float is its frame, a cell outside its content on
+    /// each side, whatever the border status. A tiled pane on the top row
+    /// under `pane-border-status top` takes the status line's row.
+    fn reported(&self) -> ([f64; 4], [u16; 4]) {
+        let [x, y, w, h] = self.cells;
         if self.floating {
-            let [ww, wh] = self.window_size;
-            let rect = [
-                (x - 1.0) / ww,
-                (y - 1.0) / wh,
-                (w + 2.0) / ww,
-                (h + 2.0) / wh,
-            ];
-            return json!({
-                "terminal": self.id,
-                "rect": rect,
-                "floating": true,
-                "inset": [1, 1, 1, 1],
-            });
+            ([x - 1.0, y - 1.0, w + 2.0, h + 2.0], [1; 4])
+        } else if self.status_top && self.at_top && y >= 1.0 {
+            ([x, y - 1.0, w, h + 1.0], [0, 1, 0, 0])
+        } else {
+            (self.cells, [0; 4])
         }
-        let status_row = self.status_top && self.at_top && y >= 1.0;
-        if status_row {
-            y -= 1.0;
-            h += 1.0;
-        }
+    }
+
+    /// As `report_layout` gives it.
+    fn terminal(&self) -> Value {
+        let ([x, y, w, h], inset) = self.reported();
         let [ww, wh] = self.window_size;
-        (x, w) = (x / ww, w / ww);
-        (y, h) = (y / wh, h / wh);
-        let mut t = json!({ "terminal": self.id, "rect": [x, y, w, h] });
-        if status_row {
-            t["inset"] = json!([0, 1, 0, 0]);
+        let mut t = json!({ "terminal": self.id, "rect": [x / ww, y / wh, w / ww, h / wh] });
+        if self.floating {
+            t["floating"] = true.into();
+        }
+        if inset != [0; 4] {
+            t["inset"] = json!(inset);
         }
         t
     }
