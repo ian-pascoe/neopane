@@ -33,7 +33,9 @@ mod float;
 mod inside;
 mod layout;
 mod panes;
+mod resize;
 mod server;
+mod window_layout;
 
 pub(crate) use inside::inside;
 
@@ -65,6 +67,8 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Close => finish(cap, panes::close(given).map(|()| None)),
         Capability::ReportLayout => finish(cap, layout::report_layout(given).map(Some)),
         Capability::Events => finish(cap, Err::<Option<String>, _>(events::events(given))),
+        Capability::Resize => finish(cap, resize::resize(given).map(|()| None)),
+        Capability::PlaceBeside => finish(cap, resize::place_beside(given).map(|()| None)),
         _ => UNSUPPORTED,
     }
 }

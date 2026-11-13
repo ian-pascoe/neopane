@@ -45,6 +45,8 @@ impl BuiltinTable {
                 Capability::OpenBeside,
                 Capability::OpenFloat,
                 Capability::Events,
+                Capability::PlaceBeside,
+                Capability::Resize,
             ],
         }
     }
@@ -187,6 +189,11 @@ mod tests {
                     "{exe} provider builtin tmux open_float".to_string()
                 ),
                 ("events", "{exe} provider builtin tmux events".to_string()),
+                (
+                    "place_beside",
+                    "{exe} provider builtin tmux place_beside".to_string()
+                ),
+                ("resize", "{exe} provider builtin tmux resize".to_string()),
             ]
         );
         assert!(t.settings.is_empty());
