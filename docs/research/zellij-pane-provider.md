@@ -54,11 +54,12 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
   `zellij-utils/src/data.rs:3591`).
 - zellij in tmux: a pane inherits whatever the server's starting client had, so
   `TMUX` and `TMUX_PANE` of the tmux pane that started the zellij server leak
-  into every zellij pane, whichever terminal later attaches. Runtime (tmux is
-  not installed, so `TMUX` was faked): `TMUX=/fake/tmux,1,0 zellij attach -c
-  inner` gave the inner pane `TMUX=/fake/tmux,1,0`.
-- tmux in zellij: *unconfirmed* (tmux not installed). Expect the mirror image:
-  the tmux server keeps the `ZELLIJ_PANE_ID` of the zellij pane that started it.
+  into every zellij pane, whichever terminal later attaches. Runtime with a
+  faked `TMUX`, then with real tmux 3.8: see
+  [Nested environment](#nested-environment-with-tmux-38).
+- tmux in zellij: the tmux server keeps the `ZELLIJ*` variables of the zellij
+  pane that started it. Runtime: see
+  [Nested environment](#nested-environment-with-tmux-38).
 
 ## Targeting a session from outside
 
@@ -122,7 +123,9 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
   --near-current-pane -d right -- sleep 100000` split `terminal_1` in half; with
   the client on tab 0, `ZELLIJ_PANE_ID=11 ... --near-current-pane -d down` split
   `terminal_11` in tab 1 and no client moved. `--near-current-pane` exists at
-  `v0.44.0`; `--no-focus` came in 0.45.0 (`CHANGELOG.md:88`).
+  `v0.44.0` but with a direction it did not work there; `--no-focus` came in
+  0.45.0 (`CHANGELOG.md:88`). See
+  [Splitting a given pane](#splitting-a-given-pane-near-current-pane-and-no-focus).
 - No size option for tiled splits: the split halves the target pane
   (runtime: 60 → 30 + 30; 60x13 → 60x6 + 60x6 with a neighbour shrinking by a
   row). There is no "before"/left/above placement.
@@ -161,7 +164,8 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
   line, and ignores OSC 2 (runtime: a command pane printing `OSC 2
   neopane-late` after 1 s kept the title `sh -c sleep 1; ...`; with `-n named`
   it stayed `named`). A shell pane takes OSC 2 (runtime: title became
-  `neopane-xyz`).
+  `neopane-xyz`). `--name ''` makes a command pane take OSC 2; see
+  [Title proof](#title-proof).
 
 ## Tabs
 
@@ -310,10 +314,10 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
 
 - `zellij attach --create-background NAME [-- CMD ARGS]` starts a session with
   no client (`-b`; the initial command is 0.45.1, `CHANGELOG.md:70`). Runtime: it
-  exited 0, and `new-pane`, `new-tab`, `list-panes`, `close-pane`, `resize`,
-  `move-pane`, floats and `subscribe` all worked without a client. The
-  headless size was 50x50 (viewport 50x48). How to set another size is
-  *unconfirmed*.
+  exited 0, and `new-pane`, `list-panes`, `close-pane`, `resize`,
+  `move-pane`, floats and `subscribe` all worked without a client. **`new-tab`
+  did not**: see [Headless size](#headless-size). The headless size is 50x50
+  (viewport 50x48) until a client attaches.
 - Focus needs a client: `move-focus` exits 2 headless (above). A PTY client
   (`zellij attach NAME` in a PTY) is enough; to have CLI focus actions move it,
   it must have pressed a key first.
@@ -324,24 +328,205 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
 - `zellij kill-session NAME` and `kill-all-sessions -y` end servers (runtime);
   killed sessions stay listed as resurrectable in the cache dir.
 
+## Follow-ups
+
+A second round against the same 0.46.0 binary (`zellij 0.46.0`), plus the
+0.44.0 release binary (`zellij-aarch64-apple-darwin.tar.gz` at `v0.44.0`,
+`zellij --version` printed `zellij 0.44.0`) for one version check, and tmux 3.8
+(`tmux -V` printed `tmux 3.8`) on private `-L` servers. The same private `HOME`,
+`TMPDIR`, `ZELLIJ_SOCKET_DIR` and config dir were used; every session and tmux
+server was killed at the end.
+
+### Title proof
+
+- What `list-panes` reports as `title` is the pane's *name* if it has one,
+  else the last OSC 0/2 title, else the initial title (`Pane #N`)
+  (`zellij-server/src/panes/terminal_pane.rs:1304-1314`;
+  `pane_info.title = pane.current_title()`, `zellij-server/src/tab/mod.rs:10080`).
+- A command pane gets the command line as its name unless `--name` is given
+  (`zellij-server/src/pty.rs:277-288`; the name is passed into
+  `TerminalPane::new` as `pane_name`, `tab/mod.rs:3456-3470`,
+  `terminal_pane.rs:1682-1684`), so **a pane opened with `new-pane -- cmd`
+  never shows OSC 2**. `use_terminal_title` would lift that but only plugin
+  APIs set it (`zellij-server/src/plugins/zellij_exports.rs:2508` and others);
+  no CLI flag does. Runtime: `new-pane -- sh -c 'sleep 2; printf
+  "\033]2;neopane-abc123\007"; exec sleep 100000'` kept the command line as
+  its title; `undo-rename-pane -p terminal_1` did not change that (it restores
+  the initial name, `terminal_pane.rs:1096-1100`).
+- `--name ''` (or `rename-pane -p ID ''`) leaves the name empty, so OSC 2
+  shows. Runtime: `rename-pane -p terminal_1 ''` made that pane's title
+  `neopane-abc123`, the OSC 2 it had printed earlier.
+- Timing: no delay was seen. Runtime: a command pane opened with `--name ''`
+  ran a loop that printed `OSC 2 neopane-r$i` and at once ran `zellij action
+  list-panes --json` from inside the pane; the new title was there 20 times out
+  of 20. From outside, after `write-chars` made a shell pane print it, the first
+  `list-panes` (about 40 ms later) already had it. Ordering between the pty
+  reader and the action is not promised by anything found in the source.
+- A name wins over OSC 2. Runtime: after `rename-pane -p terminal_5 userName` on a shell pane,
+  the shell printed `OSC 2 neopane-after-rename` and the title stayed
+  `userName`; `undo-rename-pane` then showed `neopane-after-rename`, so the
+  OSC title is kept underneath. A `--name named` pane stayed `named` (first
+  round).
+- Titles are capped at 4096 bytes (`zellij-server/src/panes/grid.rs:40`,
+  `:4304-4312`). The title stack works: `CSI 22;2 t` pushes and `CSI 23;2 t`
+  pops (`grid.rs:4314-4326`). Runtime: `OSC 2 outer`, push, `OSC 2
+  neopane-stack` gave `neopane-stack`; `OSC 2` empty, then pop, gave `outer`.
+- Shell prompts overwrite it, last writer wins. Runtime, bash 5.3 with
+  `PROMPT_COMMAND` printing `OSC 0 bash-prompt`: idle title `bash-prompt`;
+  during `printf OSC2 neopane-abc123; sleep 3` it was `neopane-abc123`; after
+  the command it was `bash-prompt` again. zsh with `precmd` (`zsh-prompt`) and
+  `preexec` (`zsh-running`) behaved the same: `neopane-abc123` while the
+  command ran, `zsh-prompt` after. So a title written by a foreground attach
+  holds while that attach runs.
+
+### Splitting a given pane: `--near-current-pane` and `--no-focus`
+
+- 0.46.0, one client attached on tab 0 that had pressed keys (runtime):
+  - `ZELLIJ_PANE_ID=7 new-pane --near-current-pane -d down`, origin
+    `terminal_7` in tab 1 (not active): gave `terminal_8` below it; tab 1 stayed
+    inactive, the client stayed on `terminal_0`.
+  - `ZELLIJ_PANE_ID=7 new-pane --no-focus -d right`: gave `terminal_9` right of
+    `terminal_7`; same, no tab switch, no focus move.
+  - `ZELLIJ_PANE_ID=0 new-pane --near-current-pane -d right`, origin in the
+    active tab: split `terminal_0`, focus stayed on `terminal_0`.
+  - Without `ZELLIJ_PANE_ID`: `--near-current-pane -d right` split the client's
+    focused pane and **focused the new one**; `--no-focus -d down` split the
+    client's focused pane and did not move focus. That is `new_pane_routing`
+    (`route.rs:243-264`): only an issuing pane id selects the never-focus path.
+- Source for the no-focus, no-tab-switch path: `screen.rs:11239-11272`
+  (`should_focus_pane = false`, splits that pane wherever it is).
+- 0.44.0 (runtime, one client attached): `ZELLIJ_PANE_ID=1 new-pane
+  --near-current-pane -d down` and `-d right` each printed an id
+  (`terminal_4`, `terminal_6`) and exited 0, **but no pane appeared**; without
+  `-d` it split `terminal_1` (rect `50,1 50x28` became `50x14` with
+  `terminal_5` below). At `v0.44.0` that path calls `tab.new_pane` with no
+  client id (`screen.rs` at `v0.44.0`, lines 4945-4965). `--no-focus` is
+  rejected by 0.44.0 ("Found argument '--no-focus' which wasn't expected").
+  0.45.x was not run.
+- A directional split also fails while the tab's floating panes are visible:
+  exit 2, "Cannot split a pane while floating panes are visible" (runtime).
+
+### left and up: open right or down, then `move-pane`
+
+- `move-pane -p NEW left` after `new-pane -d right` beside the origin swaps
+  the two panes' rects and keeps both ids and processes
+  (`panes/tiled_panes/mod.rs:2621`, `:2710-2719`). Runtime: origin `terminal_13`
+  `0,1 48x38` (pid 56920), new `terminal_14` `48,1 72x38` (pid 56926); after
+  `move-pane -p terminal_14 left` (exit 0), `terminal_14` was `0,1 48x38` and
+  `terminal_13` `48,1 72x38`, same pids, `terminal_14` still showing its own
+  output (`dump-screen` printed `new`). **Sizes swap with the rects**, so after
+  an unequal split a `resize` must follow.
+- `up` works the same. Runtime: `terminal_15` opened below `terminal_14`
+  (`0,20`), then `move-pane -p terminal_15 up` put `terminal_15` at `0,1` and
+  `terminal_14` at `0,20`.
+- Neither moved the client's focus (it stayed on `terminal_0` in another tab).
+  A freshly split pane's only neighbour on the origin's side is the origin,
+  because it spans exactly half of the origin's rect.
+
+### Focus reports (DECSET 1004)
+
+- Runtime: a pane app (Python, raw mode) wrote `CSI ? 1004 h` and logged its
+  input with timestamps. Client focus moves made with the CLI:
+  - `focus-pane-id` onto it: received `ESC [ I ESC [ I` (twice) about 26 ms
+    later.
+  - `focus-pane-id terminal_0` (away): received `ESC [ O`.
+  - `go-to-tab-by-id 1` (switching away to another tab): **nothing**.
+  - `go-to-tab-by-id 0` (back): received `ESC [ O ESC [ I`.
+- Outer terminal focus: the zellij client enables focus reporting on the host
+  (runtime: the client's output to its PTY contained `ESC [ ? 1004 h`). With a
+  client focused on that pane, writing `ESC [ O` to the client's PTY gave the
+  pane `ESC [ O` within 1 ms, and `ESC [ I` gave `ESC [ I`. Forwarding host
+  focus is 0.45.0 (`CHANGELOG.md:107`).
+- A client attaching with that pane focused sent it `ESC [ I` (runtime).
+- So an app sees focus-in reliably, sometimes doubled, but a tab switch away
+  does not send focus-out.
+
+### Nested environment with tmux 3.8
+
+- zellij inside tmux (runtime): a private server, `tmux -L zjres-outer -f
+  /dev/null new-session -d`, whose pane ran `zellij attach -c zt`. The tmux pane
+  had `TERM=tmux-256color`, `TERM_PROGRAM=tmux`, `TERM_PROGRAM_VERSION=3.8`,
+  `TMUX=/private/tmp/tmux-501/zjres-outer,65037,0`, `TMUX_PANE=%0`,
+  `COLORTERM=truecolor`. A zellij pane opened with `new-pane` had **all of
+  them unchanged**, plus `ZELLIJ=0`, `ZELLIJ_PANE_ID=1`,
+  `ZELLIJ_SESSION_NAME=zt`. zellij overrides none of `TERM`, `TERM_PROGRAM`,
+  `TMUX`, `TMUX_PANE`.
+- tmux inside zellij (runtime): a zellij command pane (`terminal_17` of a
+  server started without tmux) ran `tmux -L zjres-inner -f /dev/null
+  new-session -d`. Its tmux pane had `TERM=tmux-256color`,
+  `TERM_PROGRAM=tmux`, `TMUX=...zjres-inner,66062,0`, `TMUX_PANE=%0`, and
+  `ZELLIJ=0`, `ZELLIJ_PANE_ID=17`, `ZELLIJ_SESSION_NAME=zr1`,
+  `ZELLIJ_SOCKET_DIR=...`. A second tmux window created from **outside**
+  zellij (`env -u ZELLIJ -u ZELLIJ_PANE_ID tmux -L zjres-inner new-window`)
+  still had `ZELLIJ_PANE_ID=17`, because tmux's global environment held it
+  (`show-environment -g` listed `ZELLIJ_PANE_ID=17`).
+- So in both directions the inner multiplexer's panes carry the outer one's
+  variables, and those values describe the pane where the inner *server*
+  started, not where the terminal is now.
+
+### Frame geometry
+
+- Default frames, a client of 80x24, three tiled panes and a float
+  (runtime). `list-tabs`: `viewport_columns 80`, `viewport_rows 22`,
+  `display_area 80x24`; tab bar at `0,0 80x1`, status bar at `0,23 80x1`.
+
+  | pane | rect (x,y w x h) | content | inset l,t,r,b |
+  |---|---|---|---|
+  | `terminal_0` left | `0,1 40x22` | `0,2 39x21` | 0,1,1,0 |
+  | `terminal_1` top right | `40,1 40x11` | `40,2 40x9` | 0,1,0,1 |
+  | `terminal_2` bottom right | `40,12 40x11` | `40,13 40x10` | 0,1,0,0 |
+  | `terminal_3` float | `5,5 20x8` | `6,6 18x6` | 1,1,1,1 |
+
+  The tiled rects tile the viewport exactly (x 0-39 and 40-79, y 1-11 and
+  12-22), so **no cell is shared**. Each pane's frame is its own top title row;
+  a separator belongs to one pane only: the `│` column is the left pane's
+  last column (x 39) and the `├───` row is the top pane's last row (y 11), as
+  the screen showed. A float has a full box. A lone tiled pane has no frame
+  (content = rect, first round).
+- `pane_frames false` (headless, 50x50): `terminal_0` `0,1 25x48` content
+  `0,1 24x48`; `terminal_1` `25,1 25x24` content `25,1 25x23`; `terminal_2`
+  `25,25 25x24` content `25,25 25x24`; the float kept `1,1,1,1`. The title row
+  goes, the separators stay, still owned by one pane each.
+- 0.44.0 drew full boxes on tiled panes: content was inset 1 on every side
+  (runtime: `0,1 25x48` had content `1,2 23x46`). The title-only frames are
+  0.45.0 (`CHANGELOG.md:80`).
+
+### Headless size
+
+- A background session starts at 50x50, "static number until a client
+  connects" (`zellij-client/src/lib.rs:1863`, `:1923`). Neither `attach` nor
+  `options` has a size flag (help).
+- Attaching a client sets it, and it stays after the client leaves. Runtime:
+  a client in an 80x24 PTY attached to a 50x50 background session; after it
+  detached, `list-tabs` still gave viewport 80x22, display 80x24, and the
+  panes kept their 80x24 rects.
+- **`new-tab` with no client attached fails but exits 0 and prints an id.**
+  Runtime: in a session never attached, and in one whose client had left,
+  `new-tab -- sleep 100000` and plain `new-tab` printed `1`, exit 0, and
+  `list-tabs` still showed only tab 0; the log said "Failed to apply layout:
+  Not enough room for panes" (`zellij-server/src/tab/mod.rs:2448`). With a
+  client attached it worked (first round). Why it has no room is
+  *unconfirmed*.
+
 ## Not confirmed
 
-- tmux inside zellij, and zellij inside a real tmux (tmux not installed; `TMUX`
-  was faked).
 - Whether `override-layout` can rearrange live panes with exact sizes.
 - A plugin-based `events` or `focus`; nothing was built.
-- Setting a headless session's size.
 - Why `list-clients` once listed a client that was not attached.
+- `--near-current-pane -d` and `--no-focus -d` on 0.45.x.
+- Why headless `new-tab` finds no room.
 
 ## What this means for the pane provider interface
 
 - One-shot commands cover most capabilities: `open` and `open_beside`
   (`new-pane -- {attach}` prints `terminal_N`; argv, no shell), `open_float`
   (`--floating -x -y --width --height`, cells), `open_tab_page` (`new-tab --
-  {attach}`, then the pane id from `list-panes`), `close` (`close-pane -p`,
+  {attach}`, then the pane id from `list-panes`; it needs a client attached,
+  and its printed id must be checked against `list-tabs`), `close` (`close-pane -p`,
   idempotent), `report_layout` (`list-panes --json` plus `list-tabs --json`).
 - `open_beside` is possible only for `right` and `down`. `left` and `up` need
-  an open to the right/below, then `move-pane` to swap, which swaps sizes too.
+  an open to the right/below, then `move-pane -p NEW left|up` to swap, which
+  keeps ids and processes but swaps sizes too.
   Splitting a given origin needs `ZELLIJ_PANE_ID={origin's id}` in the
   command's environment with `--near-current-pane` or `--no-focus`; a command
   provider would wrap the call (`env ZELLIJ_PANE_ID=... zellij ...`).
@@ -361,11 +546,19 @@ the `v0.43.1`, `v0.44.0` and `v0.45.0` tags where the changelog is silent.
 - `events` has no CLI source. `subscribe` reports closes of known ids only;
   anything more needs a zellij plugin piping out through `zellij pipe`. Without
   it, the daemon's run-after-each-act `report_layout` is the route.
+- `find` by title works for a self-attach in a shell pane (OSC 2 shows at
+  once and holds while the attach runs), not for a pane `open` made with
+  `new-pane -- {attach}` unless it passes `--name {title}` (title exact) or
+  `--name ''` (OSC 2 shows). A pane the user renamed hides OSC 2.
 - `find` and reach: `find_vars` `ZELLIJ_PANE_ID` gives the id directly
-  (`terminal_$ZELLIJ_PANE_ID`); `context_vars` should be `ZELLIJ_SESSION_NAME`,
+  (`terminal_$ZELLIJ_PANE_ID`), but inside tmux-in-zellij it names the pane
+  where the tmux server started, so it proves nothing there; `context_vars` should be `ZELLIJ_SESSION_NAME`,
   and the provider must run with the session's `ZELLIJ_SOCKET_DIR` and cache
   dir. `ZELLIJ` alone is always `0` and proves nothing. `TMUX` in a zellij
   pane can be stale, so a tmux provider's reach must not trust it there.
 - `--no-focus` (0.45.0+) keeps opens from stealing focus; the rest needs 0.44.1
-  (`focus-pane-id`), and 0.46 changed socket naming, so a provider should
-  require at least 0.44.1 and treat sessions by name as needing 0.46's index.
+  (`focus-pane-id`), and 0.46 changed socket naming. Splitting a given origin
+  in a direction failed silently on 0.44.0 and works on 0.46.0, so a provider
+  should require 0.46.0 until 0.45.x is checked.
+- Focus reports reach Neovim on focus-in (sometimes doubled) and on host focus
+  changes, but a tab switch away sends no focus-out.
