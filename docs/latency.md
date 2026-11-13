@@ -189,3 +189,19 @@ The first attach starts connecting to Rex before Neovim starts, so the
 connection and the upgrade's answer are behind Neovim's start, outside L7.
 L7 is the hello and welcome, `session.attach` and `terminal.process`, each
 waiting for Rex's answer. The Linux numbers are #133's.
+
+With a config file (SPI-667, #129), L7 is informational: the config child
+and its Lua, from starting the child to its answer, as the log's
+`config: ran FILE in N ms` lines time it. A config returning `"rex"`, with
+`scripts/latency.sh exec 55` and `NEOPANE_CONFIG` set in its shell, once the
+1-minute load was at most 4:
+
+| Measure | N | Median | p95 |
+|---|---|---|---|
+| Config child + Lua | 55 | 4.1 | 4.5 |
+| L7 | 55 | 1.048 | 1.169 |
+| L6 first | 55 | 17.145 | 19.435 |
+
+The first attach starts the config child before Neovim starts, as it starts
+connecting to Rex without one, so the child runs behind Neovim's start;
+Rex's connection starts once it has answered.
