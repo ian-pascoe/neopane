@@ -15,8 +15,11 @@ across the pane in the split's direction, as Neovim does, rather than only
 the row or column split. A size Neovim gives a window is kept as its share
 of the pane.
 
-Amended by #138: a statusline neorex draws, at `'laststatus'` 0, shows the
-text and highlights Neovim would draw it with.
+Amended by #138: a statusline neopane draws, at `'laststatus'` 0, shows the
+text and highlights Neovim would draw it with. Neovim evaluates it after each
+redraw, and when an option, the mode, the current window or buffer, or a
+buffer's modified flag changes. Text that changes only with time, such as a
+clock, waits for the next of those.
 
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal
@@ -67,9 +70,8 @@ resizes and draws as Neovim would.
   - Side-by-side windows get a separator, drawn with `'fillchars'` in
     WinSeparator.
   - A window with another below it always has a statusline, whatever
-    `'laststatus'` says. Where Neovim draws it none, neorex draws one, as
-    Neovim would: Neovim evaluates its text after each redraw, only while
-    some window has one.
+    `'laststatus'` says. Where Neovim draws it none, neopane draws one, as
+    Neovim would draw it, evaluated by Neovim only while some window has one.
   - `<C-w>h`, `j`, `k` and `l` move within the pane first, then to the pane
     that way when the layout provider can focus in a direction.
   - A click goes to the window under it.

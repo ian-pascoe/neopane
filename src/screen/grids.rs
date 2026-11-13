@@ -165,11 +165,21 @@ impl Grids {
         None
     }
 
-    /// Sets the statuslines neopane draws: `attrs` are their highlights, from
-    /// `STATUSLINE_BASE`, and `lines` each window's grid and cells. Replaces
-    /// the last ones whole, marking those that changed. Whether any did.
+    /// Sets the statuslines neopane draws: `attrs` are their highlights, and
+    /// `lines` each window's grid and cells, whose `hl` is an index into
+    /// `attrs`. They're kept highlighted from `STATUSLINE_BASE`. Replaces the
+    /// last ones whole, marking those that changed. Whether any did.
     #[doc(hidden)]
-    pub fn set_statuslines(&mut self, attrs: Vec<Attr>, lines: IndexMap<u32, Vec<Cell>>) -> bool {
+    pub fn set_statuslines(
+        &mut self,
+        attrs: Vec<Attr>,
+        mut lines: IndexMap<u32, Vec<Cell>>,
+    ) -> bool {
+        for cells in lines.values_mut() {
+            for c in cells.iter_mut() {
+                c.hl = STATUSLINE_BASE + c.hl.min(attrs.len().saturating_sub(1) as u32);
+            }
+        }
         let all = attrs != self.style.statusline_attrs;
         let mut changed = all || lines.len() != self.statuslines.len();
         for (grid, cells) in &lines {
@@ -185,43 +195,10 @@ impl Grids {
         changed
     }
 
-    /// Reads the answer to `windows::statuslines` and sets the statuslines it
-    /// gives (`set_statuslines`); a window with no grid is skipped. Whether
-    /// any changed.
-    pub(crate) fn apply_statuslines(&mut self, result: &mut Decoder<'_>) -> rpc::Result<bool> {
-        // [attrs, [[win, [[text, attr], ...]], ...]]
-        if rpc::expect_array(result)? < 2 {
-            return Err(rpc::Error::BadMessage);
-        }
-        let n = rpc::expect_array(result)?;
-        let mut attrs = Vec::with_capacity(n as usize);
-        for _ in 0..n {
-            attrs.push(style::read_attr(result)?);
-        }
-        let mut lines = IndexMap::new();
-        for _ in 0..rpc::expect_array(result)? {
-            if rpc::expect_array(result)? < 2 {
-                return Err(rpc::Error::BadMessage);
-            }
-            let win = rpc::expect_handle(result)?;
-            let n = rpc::expect_array(result)?;
-            let mut cells = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                if rpc::expect_array(result)? < 2 {
-                    return Err(rpc::Error::BadMessage);
-                }
-                let text = rpc::expect_str(result)?;
-                let a: u32 = expect_int(result)?;
-                if a as usize >= attrs.len() {
-                    return Err(rpc::Error::BadMessage);
-                }
-                cells.push(Cell::init(text, STATUSLINE_BASE + a));
-            }
-            if let Some(grid) = self.grid_of(win) {
-                lines.insert(grid, cells);
-            }
-        }
-        Ok(self.set_statuslines(attrs, lines))
+    /// Forgets the statuslines of all grids but `keep`.
+    pub(crate) fn keep_statuslines(&mut self, keep: &[u32]) {
+        self.statuslines.retain(|g, _| keep.contains(g));
+        self.statuslines_dirty.retain(|g| keep.contains(g));
     }
 
     /// Makes grid `grid` window `win`'s, floating on the screen with its

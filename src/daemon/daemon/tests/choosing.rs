@@ -367,7 +367,7 @@ fn a_hint_from_a_self_attach_that_chooses_isnt_logged_as_ignored() {
 }
 
 /// Neovim's redraw batch ends: a `flush`, as it sends one.
-fn nvim_flushes(fx: &mut Fixture) {
+pub(super) fn nvim_flushes(fx: &mut Fixture) {
     let mut buf = Vec::new();
     msgpack::write_array_header(&mut buf, 3);
     msgpack::write_int(&mut buf, 2);

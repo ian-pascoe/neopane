@@ -272,13 +272,21 @@ local attr_names = {
   dim = 'dim', blink = 'blink', conceal = 'conceal', overline = 'overline',
 }
 
+-- what a group with `nocombine` keeps of the groups under it
+local colors = { foreground = true, background = true, special = true, blend = true }
+
 -- The highlight groups `names` make, lowest first, combined as a statusline
--- combines them, in hl_attr_define's terms
+-- combines them, in hl_attr_define's terms. A group with `nocombine` replaces
+-- the flags under it, bold and the like, but not the colours it sets none of.
 local function combined_hl(names)
   local a = vim.empty_dict()
   for _, name in ipairs(names) do
     local hl = api.nvim_get_hl(0, { name = name, link = false })
-    if hl.nocombine then a = vim.empty_dict() end
+    if hl.nocombine then
+      for k in pairs(a) do
+        if not colors[k] then a[k] = nil end
+      end
+    end
     for k, v in pairs(hl) do
       if attr_names[k] then a[attr_names[k]] = v end
     end
@@ -297,7 +305,9 @@ end
 -- it draws none for and the daemon does (ADR 0009). Returns { attrs, lines }:
 -- `attrs` the highlights, in hl_attr_define's terms, and each line { win,
 -- cells }, its cells { text, its highlight's index in `attrs` from 0 } as
--- many as the window is wide, "" the right half of a wide character.
+-- many as the window is wide, "" the right half of a wide character. As
+-- Neovim draws them, the text is made printable, and the highlight in effect
+-- at its end fills the rest.
 function M.statuslines(wins)
   local attrs, ids = {}, {}
   local function id_of(names)
@@ -318,26 +328,50 @@ function M.statuslines(wins)
       if fmt == '' then fmt = api.nvim_get_option_info2('statusline', {}).default end
       local ok, st = pcall(api.nvim_eval_statusline, fmt, { winid = win, maxwidth = w, highlights = true })
       if not ok then st = { str = '', highlights = {} } end
-      local cells, hls, h, at, hl = {}, st.highlights, 0, 0, base
-      for _, ch in ipairs(vim.fn.split(st.str, '\\zs')) do
-        while hls[h + 1] and hls[h + 1].start <= at do
-          h = h + 1
-          hl = id_of(hls[h].groups or { hls[h].group })
-        end
-        at = at + #ch
-        local cw = api.nvim_strwidth(ch)
-        if cw > 0 and #cells + cw <= w then
-          cells[#cells + 1] = { ch, hl }
-          if cw == 2 then cells[#cells + 1] = { '', hl } end
+      local cells, hl = {}, base
+      -- the text from byte `from` to `to` in highlight `hl`, printable
+      local function put(from, to)
+        for _, ch in ipairs(vim.fn.split(vim.fn.strtrans(st.str:sub(from + 1, to)), '\\zs')) do
+          local cw = api.nvim_strwidth(ch)
+          if cw > 0 and #cells + cw <= w then
+            cells[#cells + 1] = { ch, hl }
+            if cw == 2 then cells[#cells + 1] = { '', hl } end
+          end
         end
       end
-      local fill = { stl_fill(win, win == cur), base }
+      local at = 0
+      for _, h in ipairs(st.highlights) do
+        if h.start > at then
+          put(at, h.start)
+          at = h.start
+        end
+        hl = id_of(h.groups or { h.group })
+      end
+      put(at, #st.str)
+      local fill = { stl_fill(win, win == cur), hl }
       while #cells < w do cells[#cells + 1] = fill end
       lines[#lines + 1] = { win, cells }
     end
   end
   return { attrs, lines }
 end
+
+-- At 'laststatus' 0 Neovim redraws nothing when a statusline only the daemon
+-- draws changes: it's told, and asks for them again. A clock in one waits
+-- for the next redraw.
+api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'statusline', 'fillchars', 'laststatus' },
+  callback = function()
+    if vim.go.laststatus == 0 then note('statuslines') end
+  end,
+})
+api.nvim_create_autocmd({ 'WinEnter', 'BufEnter', 'ModeChanged', 'BufModifiedSet' }, {
+  group = group,
+  callback = function()
+    if vim.go.laststatus == 0 then note('statuslines') end
+  end,
+})
 
 --- Sizes external `win` to fill `w` x `h`, statusline included.
 function M.size(win, w, h)

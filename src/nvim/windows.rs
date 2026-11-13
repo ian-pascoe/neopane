@@ -7,6 +7,8 @@ use super::nvim::Nvim;
 use super::rpc;
 use crate::attach::OpenFile;
 use crate::name::{self, NAME};
+use crate::screen::grid::Cell;
+use crate::screen::style::{self, Attr};
 
 const LUA: &str = include_str!("windows.lua");
 
@@ -174,11 +176,56 @@ pub(crate) fn resized_again(nvim: &mut Nvim, wins: &[i64]) {
 
 /// Asks for the statuslines Neovim would draw windows `wins`, which at
 /// `'laststatus'` 0 it draws none for: their text and highlights, as wide as
-/// each window. `Grids::apply_statuslines` reads the response.
+/// each window. `parse_statuslines` reads the response.
 pub(crate) fn statuslines(nvim: &mut Nvim, wins: &[i64]) -> u32 {
     let id = nvim.exec_lua(&format!("return {NAME}.statuslines(...)"), 1);
     write_wins(nvim, wins);
     id
+}
+
+/// The statuslines `statuslines` answers: their highlights, and each window's
+/// cells, as many as it is wide, whose `hl` is an index into `attrs`. A
+/// window that's gone has none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Statuslines {
+    pub(crate) attrs: Vec<Attr>,
+    pub(crate) lines: Vec<(i64, Vec<Cell>)>,
+}
+
+/// `statuslines`' response.
+pub(crate) fn parse_statuslines(result: &mut Decoder<'_>) -> rpc::Result<Statuslines> {
+    // [attrs, [[win, [[text, attr], ...]], ...]]
+    if rpc::expect_array(result)? < 2 {
+        return Err(rpc::Error::BadMessage);
+    }
+    let n = rpc::expect_array(result)?;
+    let mut attrs = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        attrs.push(style::read_attr(result)?);
+    }
+    let n = rpc::expect_array(result)?;
+    let mut lines = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        if rpc::expect_array(result)? < 2 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let win = rpc::expect_handle(result)?;
+        let n = rpc::expect_array(result)?;
+        let mut cells = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            if rpc::expect_array(result)? < 2 {
+                return Err(rpc::Error::BadMessage);
+            }
+            let text = rpc::expect_str(result)?;
+            let hl = rpc::expect_int(result)?;
+            if hl < 0 || hl as usize >= attrs.len() {
+                return Err(rpc::Error::BadMessage);
+            }
+            cells.push(Cell::init(text, hl as u32));
+        }
+        lines.push((win, cells));
+    }
+    Ok(Statuslines { attrs, lines })
 }
 
 fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
@@ -268,6 +315,11 @@ pub enum Note {
     /// was unloaded or deleted. `by_pane` if its last window went because
     /// its pane did.
     Done { buf: i64, by_pane: bool },
+    /// The statuslines neopane draws for Neovim may have changed with no
+    /// redraw to show it: `'statusline'`, `'fillchars'` or the mode, the
+    /// current window or buffer, or a buffer's modified flag changed, at
+    /// `'laststatus'` 0.
+    Statuslines,
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -530,6 +582,9 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
             return Err(rpc::Error::BadMessage);
         }
         return Ok(Some(Note::Cwd(rpc::expect_str(params)?.to_vec())));
+    }
+    if method == b"statuslines" {
+        return Ok(Some(Note::Statuslines));
     }
     if method == b"done" {
         if rpc::expect_array(params)? < 2 {
@@ -965,7 +1020,13 @@ mod tests {
                             } else if id == self.setup_id {
                                 self.wins = parse_setup(&mut result).unwrap().wins;
                             } else if self.statuslines_ask == Some(id) {
-                                self.grids.apply_statuslines(&mut result).unwrap();
+                                let answer = parse_statuslines(&mut result).unwrap();
+                                let lines = answer
+                                    .lines
+                                    .into_iter()
+                                    .filter_map(|(w, c)| Some((self.grids.grid_of(w)?, c)))
+                                    .collect();
+                                self.grids.set_statuslines(answer.attrs, lines);
                                 self.statuslines_ask = None;
                             } else if self.awaiting == Some(id) {
                                 self.reply = rpc::expect_str(&mut result)
@@ -3898,6 +3959,64 @@ mod tests {
         assert_eq!(b" ", cells[19].str());
         assert_ne!(nc, h.grids.style.attr(cells[0].hl));
         assert_eq!(2, h.grids.statuslines.len());
+    }
+
+    impl Harness {
+        /// Asks for the statuslines of `wins` and waits for them in `grids`.
+        fn eval_statuslines(&mut self, wins: &[i64]) {
+            self.statuslines_ask = Some(statuslines(&mut self.nvim, wins));
+            self.nvim.flush().unwrap();
+            assert!(self.until(|x| x.statuslines_ask.is_none()));
+        }
+
+        /// Window `win`'s statusline cells, as last evaluated.
+        fn statusline_of(&self, win: i64) -> &[Cell] {
+            &self.grids.statuslines[&self.grids.grid_of(win).unwrap()]
+        }
+    }
+
+    #[test]
+    fn a_statusline_drawn_for_neovim_is_printable_filled_and_combined_as_neovim_draws_it() {
+        let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
+            return;
+        };
+        assert!(h.until(|x| x.wins[0] != 0 && x.grid_height(x.wins[0]) == 9));
+        let first = h.wins[0];
+        let split = h.adopt_split();
+        h.sync(
+            "vim.o.laststatus = 0\n\
+             vim.api.nvim_set_hl(0, 'StatusLine', { bg = '#00ff00', bold = true })\n\
+             vim.api.nvim_set_hl(0, 'User1', { nocombine = true, fg = '#ff0000' })",
+        );
+
+        // set with no redraw to show it, as RPC or a timer does: windows.lua
+        // says the statuslines may have changed
+        h.notes.clear();
+        h.sync("vim.o.statusline = 'a%#PmenuSel#b%{nr2char(9)}%{nr2char(27)}'");
+        assert!(h.notes.contains(&Note::Statuslines), "{:?}", h.notes);
+        // a tab and an ESC made printable; the highlight in effect at the
+        // end fills the rest
+        h.eval_statuslines(&[first]);
+        let cells = h.statusline_of(first);
+        let text: String = cells
+            .iter()
+            .map(|c| String::from_utf8_lossy(c.str()).into_owned())
+            .collect();
+        assert_eq!(format!("ab^I^[{}", " ".repeat(34)), text);
+        assert_ne!(cells[0].hl, cells[1].hl);
+        assert!(cells[1..].iter().all(|c| c.hl == cells[1].hl));
+
+        // nocombine drops the flags under it, not the colours it sets none of
+        h.sync(&format!(
+            "vim.api.nvim_set_option_value('statusline', '%1*x%*', {{ win = {split}, scope = 'local' }})"
+        ));
+        h.eval_statuslines(&[split]);
+        let user1 = h.grids.style.attr(h.statusline_of(split)[0].hl);
+        assert_eq!(Some(0xff0000), user1.fg);
+        assert_eq!(Some(0x00ff00), user1.bg);
+        assert!(!user1.bold);
+        let stl = h.grids.style.attr(h.statusline_of(split)[1].hl);
+        assert!(stl.bold);
     }
 
     /// The windows of `layout`, left to right, if it's one row of them: into `out`.

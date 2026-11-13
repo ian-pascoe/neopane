@@ -676,7 +676,8 @@ impl Multi {
                                 | Note::Cwd(_)
                                 | Note::Terminals(_)
                                 | Note::Opened(_)
-                                | Note::Done { .. } => {}
+                                | Note::Done { .. }
+                                | Note::Statuslines => {}
                             }
                         }
                     }
@@ -1408,9 +1409,9 @@ fn with_laststatus_0_the_window_above_shows_its_statusline_text_drawn_for_it() -
         gs.get_mut(id).unwrap().resize(8, 2);
     }
     gs.cursor_grid = 3;
-    // the statusline Neovim would draw the window above, `%f %1*%m`, not
+    // the statusline Neovim would draw the window above, `%f%1*%m%*`, not
     // current: StatusLineNC, then User1 combined with it, as Neovim evaluates
-    // it, to the window's width but the fill
+    // it, to the window's width but the fill; highlights by index
     let nc = Attr {
         reverse: true,
         ..Attr::default()
@@ -1424,7 +1425,7 @@ fn with_laststatus_0_the_window_above_shows_its_statusline_text_drawn_for_it() -
             .enumerate()
             .map(|(i, c)| {
                 let a = if i < user1_from { 0 } else { 1 };
-                Cell::init(c.to_string(), STATUSLINE_BASE + a)
+                Cell::init(c.to_string(), a)
             })
             .collect()
     };

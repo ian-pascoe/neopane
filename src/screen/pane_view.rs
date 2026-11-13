@@ -1222,7 +1222,7 @@ fn blend_cell(style: &mut Style, cell: Cell, line: &[Cell], i: usize) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::style::{self, Attr};
+    use crate::screen::style::Attr;
 
     #[test]
     fn a_windows_runs_and_rect_rows_follow_the_rows_it_shows() {
@@ -1321,11 +1321,8 @@ mod tests {
 
         // a wide character cut by the window's edge loses its left half
         let cells = |text: &str| -> Vec<Cell> {
-            let mut v: Vec<Cell> = text
-                .chars()
-                .map(|c| Cell::init(c.to_string(), style::STATUSLINE_BASE))
-                .collect();
-            v.push(Cell::init("\u{754c}", style::STATUSLINE_BASE));
+            let mut v: Vec<Cell> = text.chars().map(|c| Cell::init(c.to_string(), 0)).collect();
+            v.push(Cell::init("\u{754c}", 0));
             v.push(Cell {
                 len: 0,
                 ..Cell::default()
