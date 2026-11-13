@@ -14,7 +14,7 @@ use crate::daemon::provider::{Answer, Outcome};
 /// `charlie`, and `fake` the pane provider; once Neovim is set up and the
 /// first window shows. The window on each file. None when Neovim isn't
 /// installed.
-fn tabs(tag: &str, n: usize, fake: FakeProvider) -> Option<(Rig, Vec<i64>)> {
+pub(super) fn tabs(tag: &str, n: usize, fake: FakeProvider) -> Option<(Rig, Vec<i64>)> {
     let (mut rig, files) = Rig::tabs(tag, n, Some(Box::new(fake)))?;
     rig.pump(|r| r.d.nvim.ready);
     rig.win_of(1);
@@ -24,21 +24,21 @@ fn tabs(tag: &str, n: usize, fake: FakeProvider) -> Option<(Rig, Vec<i64>)> {
 
 /// Runs Lua `code` in Neovim and waits until it has run, failing on an
 /// error in it.
-fn lua(rig: &mut Rig, code: &str) {
+pub(super) fn lua(rig: &mut Rig, code: &str) {
     rig.ints(&format!("{code}\nreturn {{}}"));
 }
 
-fn asked(rig: &Rig) -> Vec<Ask> {
+pub(super) fn asked(rig: &Rig) -> Vec<Ask> {
     rig.d.provider.as_ref().unwrap().fake_ref().asked()
 }
 
 /// The capabilities asked, in order.
-fn capabilities(rig: &Rig) -> Vec<&'static str> {
+pub(super) fn capabilities(rig: &Rig) -> Vec<&'static str> {
     asked(rig).iter().map(|a| a.capability().name()).collect()
 }
 
 /// Pumps until `n` asks were asked.
-fn until_asked(rig: &mut Rig, n: usize) {
+pub(super) fn until_asked(rig: &mut Rig, n: usize) {
     rig.pump(|r| r.d.provider.as_ref().unwrap().fake_ref().asks.len() >= n);
 }
 

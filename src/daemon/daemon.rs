@@ -1025,6 +1025,11 @@ impl Daemon {
             self.lay_out_in_origin(win, sp, size);
             return Ok(());
         }
+        // split off a window of its tab page made in the same flush: it opens
+        // beside that one's terminal once it's answered
+        if self.split_origin_on_its_way(sp) {
+            return Ok(());
+        }
         // a window opens beside its origin pane's terminal: the pane it came
         // from, else any with a terminal. A tab page's first window opens its
         // Rex floating pane (`open_tab_page`) from the pane it came from.
@@ -1034,10 +1039,8 @@ impl Daemon {
                 None => {
                     // its tab page's Rex floating pane is on its way: open
                     // beside that once it's made, or ask for its own if the
-                    // open failed. Split off a window of its tab page with
-                    // no pane yet, made in the same flush: that one opens it.
-                    if self.tab_floating_pane_pending(sp.tab) || self.split_origin_awaiting_pane(sp)
-                    {
+                    // open failed
+                    if self.tab_floating_pane_pending(sp.tab) {
                         return Ok(());
                     }
                     let from = self.split_from(sp).and_then(|f| f.terminal.clone());
@@ -1278,13 +1281,42 @@ impl Daemon {
     }
 
     /// Whether a window split off as `sp` waits for the window it was split
-    /// off: a drawn window of the same tab page that has no pane yet. That
-    /// one opens the tab page area, as after `:tabnew | vsplit`.
-    fn split_origin_awaiting_pane(&self, sp: windows::Split) -> bool {
-        sp.from != 0
-            && self.split_origin(sp).is_none()
-            && self.grids.grid_of(sp.from).is_some()
-            && self.changes.split_of(sp.from).tab == sp.tab
+    /// off, of the same tab page, as if the two were made one at a time:
+    /// - for its pane, while it has none and is to get one, as after
+    ///   `:tabnew | vsplit`, where that one opens the tab page area;
+    /// - for its pane's terminal, while that is on its way, as after
+    ///   `:vsplit | split`.
+    ///
+    /// It waits no more once that window closes, or its open fails.
+    fn split_origin_on_its_way(&self, sp: windows::Split) -> bool {
+        if sp.from == 0 {
+            return false;
+        }
+        match self.split_origin(sp) {
+            Some(p) => p.tab == sp.tab && p.terminal_on_its_way(),
+            None => {
+                self.is_external(sp.from)
+                    && !self.gets_no_pane(sp.from)
+                    && self.changes.split_of(sp.from).tab == sp.tab
+            }
+        }
+    }
+
+    /// Whether window `win` is drawn, and external.
+    fn is_external(&self, win: i64) -> bool {
+        self.grids
+            .wins
+            .values()
+            .any(|w| w.win == win && w.kind == WinKind::External)
+    }
+
+    /// Whether external window `win`, with no pane, gets none for now: it is
+    /// the window kept for the next attach, is closing, or waits unshown for
+    /// a pane to take it.
+    fn gets_no_pane(&self, win: i64) -> bool {
+        self.lifetime.kept.is_some_and(|k| k.win == win)
+            || self.changes.is_closing(win)
+            || self.unshown_awaiting_origin.iter().any(|&(a, _)| a == win)
     }
 
     /// The terminal of the first pane `keep` keeps that has one.
@@ -1818,14 +1850,7 @@ impl Daemon {
                 }
                 WinKind::External => {
                     self.changes.became_external(w.win);
-                    if self.panes.by_win(w.win).is_some()
-                        || self.lifetime.kept.is_some_and(|k| k.win == w.win)
-                        || self.changes.is_closing(w.win)
-                        || self
-                            .unshown_awaiting_origin
-                            .iter()
-                            .any(|&(a, _)| a == w.win)
-                    {
+                    if self.panes.by_win(w.win).is_some() || self.gets_no_pane(w.win) {
                         continue;
                     }
                     self.new_pane(w.win)?;
@@ -2319,6 +2344,7 @@ impl Daemon {
             if attaching {
                 self.arm_attach_timer()?;
             }
+            self.wake_splits_of(pane_id)?;
             return self.place_tab_pages();
         }
         p.terminal = Some(t.clone());
@@ -2346,6 +2372,7 @@ impl Daemon {
                 if handle == Some(self.nvim.current_win) {
                     self.focus_terminal(Some(&t));
                 }
+                self.wake_splits_of(pane_id)?;
                 self.place_tab_pages()
             }
             Ask::OpenTabPage { .. } => {
@@ -2388,6 +2415,26 @@ impl Daemon {
         let (id, attached) = (p.id, p.terminal_surface.is_some());
         if attached && !self.is_pair() {
             self.find_requested(id)?;
+        }
+        self.wake_splits_of(id)
+    }
+
+    /// Pane `id`'s open was answered: a window split off one it holds,
+    /// waiting with no pane for its terminal, gets its pane now, without
+    /// waiting for Neovim's next flush.
+    fn wake_splits_of(&mut self, id: u32) -> Result<()> {
+        let Some(p) = self.panes.by_id(id) else {
+            return Ok(());
+        };
+        let waits = self.grids.wins.values().any(|w| {
+            let from = self.changes.split_of(w.win).from;
+            from != 0
+                && p.holds(from)
+                && self.is_external(w.win)
+                && self.panes.by_win(w.win).is_none()
+        });
+        if waits {
+            self.reconcile()?;
         }
         Ok(())
     }
@@ -3429,6 +3476,8 @@ fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
 mod self_attach_tests;
 #[cfg(test)]
 mod slow_terminal_tests;
+#[cfg(test)]
+mod split_origin_tests;
 #[cfg(test)]
 mod tab_area_tests;
 #[cfg(test)]
