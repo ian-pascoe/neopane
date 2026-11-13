@@ -53,7 +53,7 @@ use indexmap::IndexMap;
 
 mod attaches;
 mod choosing;
-mod control;
+pub(crate) mod control;
 mod lifetime;
 mod self_attach;
 use attaches::PENDING_BASE;
@@ -123,7 +123,7 @@ pub(crate) struct Daemon {
     stopping: bool,
     /// What `status` shows while there's no pane provider: `none`, and why
     /// if it was refused or skipped.
-    no_provider: &'static str,
+    no_provider: control::NoProvider,
     /// Neovim's exit status, once it has quit and exited: the self-attached
     /// panes' helpers exit with it.
     pub quit_status: Option<u8>,
@@ -253,9 +253,6 @@ impl Token {
 // the fixed tokens must stay below the pane tokens
 const _: () = assert!((Token::StopTimer as usize) < pane::TOKEN_BASE);
 
-/// What `status` shows with no pane provider, nothing said why.
-const NO_PROVIDER: &str = "none";
-
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
 /// out then an in, and shouldn't fire FocusLost and FocusGained.
@@ -383,7 +380,7 @@ impl Daemon {
             lifetime: lifetime::Lifetime::default(),
             told: control::Told::default(),
             stopping: false,
-            no_provider: NO_PROVIDER,
+            no_provider: control::NoProvider::None,
             quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
@@ -1538,7 +1535,8 @@ impl Daemon {
     /// Matches panes to windows: new external windows get panes, ordinary ones
     /// are made external, and panes whose windows closed hang up.
     fn reconcile(&mut self) -> Result<()> {
-        if !self.nvim.ready {
+        // stopping, its panes are gone already, and it gets no more
+        if !self.nvim.ready || self.stopping {
             return Ok(());
         }
         // this flush has the refitted floats
@@ -1940,7 +1938,7 @@ impl Daemon {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
-        self.no_provider = NO_PROVIDER;
+        self.no_provider = control::NoProvider::None;
         self.provider_writes = false;
         self.context.clear();
         // dropped before it was confirmed: none was chosen after all

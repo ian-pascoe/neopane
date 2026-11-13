@@ -159,8 +159,13 @@ pub enum Killed {
     Gone,
     /// It refused, with its message: unsaved changes.
     Refused(String),
-    /// It agreed, but is still there after `within`: its name and pid.
-    StillEnding { name: String, pid: u32 },
+    /// It agreed, but is still there `after` it was asked: its name and
+    /// pid.
+    StillEnding {
+        name: String,
+        pid: u32,
+        after: Duration,
+    },
     /// It didn't answer.
     NoAnswer(Failure),
 }
@@ -186,11 +191,45 @@ pub fn kill(address: &Address, force: bool, within: Duration) -> Killed {
             return Killed::StillEnding {
                 name: reply.name,
                 pid: reply.pid,
+                after: within,
             };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     Killed::Gone
+}
+
+/// The daemon at `address`, for messages: its name, else its address.
+pub fn who(address: &Address) -> String {
+    address.daemon_name().unwrap_or_else(|| address.to_string())
+}
+
+/// Why the daemon at `address` gave no reply, as one line after
+/// `<name>: `.
+pub fn no_reply(address: &Address, e: &Failure) -> String {
+    let who = who(address);
+    match e {
+        Failure::NoAnswer(_) => match address.log() {
+            Some(log) => format!("{who} {e} (log: {})", log.display()),
+            None => format!("{who} {e}"),
+        },
+        Failure::Refused(z) => format!("{who} refused: {}", z.message),
+        Failure::Failed(why) => format!("{who}: {why}"),
+    }
+}
+
+/// How a `kill` of the daemon at `address` went, as one line after
+/// `<name>: `; None once it's gone.
+pub fn killed_line(address: &Address, killed: &Killed) -> Option<String> {
+    Some(match killed {
+        Killed::Gone => return None,
+        Killed::Refused(why) => why.clone(),
+        Killed::StillEnding { name, pid, after } => format!(
+            "{name} is still ending after {} s (pid {pid})",
+            crate::util::seconds(*after)
+        ),
+        Killed::NoAnswer(e) => no_reply(address, e),
+    })
 }
 
 /// `dir` as a person reads it: `~` for `home`, and what's under it.
@@ -268,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_listening_is_no_answer() {
+    fn nothing_listening_fails_to_connect() {
         let at = std::env::temp_dir().join(format!(
             "{}-control-none-{}.sock",
             crate::name::NAME,
@@ -297,5 +336,65 @@ mod tests {
         assert_eq!("didn't answer in 0.2 s", got.unwrap_err().to_string());
         drop(server);
         let _ = std::fs::remove_file(&at);
+    }
+
+    /// A live daemon `work` in a scratch base: its directory claimed and
+    /// its address listening, answering nothing.
+    fn live_work() -> (
+        crate::daemon::dir::testing::Scratch,
+        super::super::dir::Claimed,
+        std::os::unix::net::UnixListener,
+    ) {
+        let scratch = crate::daemon::dir::testing::Scratch::new();
+        let claimed = super::super::dir::claim(&scratch.base(), "work").unwrap();
+        let server = claimed.bind().unwrap();
+        (scratch, claimed, server)
+    }
+
+    #[test]
+    fn no_answer_names_the_log() {
+        let (scratch, claimed, _server) = live_work();
+        let within = Duration::from_millis(100);
+        let e = ask(&claimed.address(), status_purpose(), within).unwrap_err();
+        assert_eq!(
+            format!(
+                "work didn't answer in 0.1 s (log: {})",
+                scratch.base().log("work").display()
+            ),
+            no_reply(&claimed.address(), &e)
+        );
+        // an address in no daemon's directory has no log to name
+        let elsewhere = Address::from_arg("/x/y.sock".into());
+        assert_eq!("/x/y.sock didn't answer in 0.1 s", no_reply(&elsewhere, &e));
+    }
+
+    #[test]
+    fn a_daemon_still_there_after_agreeing_to_stop_is_still_ending() {
+        use crate::attach::{ATTACH_PROTOCOL_VERSION, Message, Reply};
+        let (_scratch, claimed, server) = live_work();
+        let answering = std::thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let reply = Message::Reply(Reply {
+                ok: true,
+                message: None,
+                v: ATTACH_PROTOCOL_VERSION,
+                build: "b".into(),
+                name: "work".into(),
+                pid: 4242,
+                status: None,
+                waited: None,
+            });
+            s.write_all(&reply.encode().unwrap()).unwrap();
+            server
+        });
+        let killed = kill(&claimed.address(), false, Duration::from_millis(300));
+        let _server = answering.join().unwrap();
+        assert_eq!(
+            Some("work is still ending after 0.3 s (pid 4242)".to_string()),
+            killed_line(&claimed.address(), &killed)
+        );
+        assert_eq!(None, killed_line(&claimed.address(), &Killed::Gone));
     }
 }

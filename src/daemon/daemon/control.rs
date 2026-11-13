@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 use super::*;
-use crate::attach::{ATTACH_PROTOCOL_VERSION, End, Hello, Purpose, Refusal, Status};
+use crate::attach::{ATTACH_PROTOCOL_VERSION, Hello, Purpose, Status};
 use crate::daemon::attach_conn;
 use crate::daemon::control::shown_files;
 use crate::daemon::provider::Capability;
@@ -17,6 +17,28 @@ use crate::daemon::provider::Capability;
 /// How long a stopping daemon waits for the pane provider to close the
 /// terminals it requested.
 const STOP_WAIT_MS: u32 = 2000;
+
+/// Why there's no pane provider, as `status` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoProvider {
+    /// None was chosen, or the one chosen went.
+    None,
+    /// The hint `none` skipped choosing.
+    HintNone,
+    /// The choice was refused: `find` didn't confirm it in time.
+    FindRefused,
+    // `none (config error)` comes with the config's states (#129)
+}
+
+impl std::fmt::Display for NoProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NoProvider::None => "none",
+            NoProvider::HintNone => "none (hint none)",
+            NoProvider::FindRefused => "none (find refused)",
+        })
+    }
+}
 
 /// What Neovim told of itself, for `status`.
 #[derive(Debug, Default)]
@@ -90,10 +112,10 @@ impl Daemon {
         // hellos not yet answered
         for (_, p) in std::mem::take(&mut self.pending) {
             self.event_loop.remove(p.stream.as_raw_fd())?;
-            refuse_stopping(p.stream);
+            attach_conn::refuse_stopping(p.stream);
         }
         for c in std::mem::take(&mut self.nested_checks) {
-            refuse_stopping(c.arrived.stream);
+            attach_conn::refuse_stopping(c.arrived.stream);
         }
         // the acts not yet asked are for panes that are going
         let dropped = self.asks.drop_waiting();
@@ -148,19 +170,16 @@ impl Daemon {
         };
         let caps = self.provider.as_ref().map(|p| p.capabilities());
         Status {
-            address: self.sock.as_arg().as_encoded_bytes().to_vec(),
             panes: self.attached_panes(),
             unsaved: self.lifetime.unsaved().to_vec(),
             provider: self.provider_shown(),
             dir: self.told.dir.clone(),
-            // until #124
-            kept: Some(false),
             capabilities: Some(names(&|c| caps.is_some_and(|s| s.has(c)))),
             unsupported: Some(names(&|c| {
                 self.provider.is_some() && self.asks.unsupported(c)
             })),
-            log: Some(self.log.as_bytes().to_vec()),
             terminals: Some(self.told.terminals.clone()),
+            ..attach_conn::idle_status(&self.sock, &self.log)
         }
     }
 
@@ -185,12 +204,4 @@ impl Daemon {
             None => self.no_provider.to_string(),
         }
     }
-}
-
-/// Refuses an attach that came as the daemon stops.
-fn refuse_stopping(stream: UnixStream) {
-    attach_conn::refuse(
-        stream,
-        End::refusal(Refusal::Stopping, "the daemon is ending"),
-    );
 }

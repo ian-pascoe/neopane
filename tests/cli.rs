@@ -993,17 +993,16 @@ fn list_asks_every_daemon_skips_stale_ones_and_kill_all_ends_them() {
 
 /// A daemon of attach protocol version 0, named `old`, faked: its
 /// directory locked and its address answering every request with only the
-/// frozen fields, for the rest of the test.
-fn older_daemon(tmpdir: &Path) {
+/// frozen fields, for the rest of the test. With `refusal`, it refuses
+/// everything with that message.
+fn older_daemon(tmpdir: &Path, refusal: Option<&'static str>) {
     use neopane::attach::{Message, Reply};
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::DirBuilderExt;
     let base = base_of(tmpdir);
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&base)
-        .unwrap();
+    // the daemons started first made it
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&base);
     let dir = base.join("old");
     std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
     let lock = File::open(&dir).unwrap();
@@ -1019,8 +1018,8 @@ fn older_daemon(tmpdir: &Path) {
                 continue;
             }
             let reply = Message::Reply(Reply {
-                ok: true,
-                message: None,
+                ok: refusal.is_none(),
+                message: refusal.map(String::from),
                 v: 0,
                 build: format!("{NAME} 0.0.9"),
                 name: "old".into(),
@@ -1036,7 +1035,7 @@ fn older_daemon(tmpdir: &Path) {
 #[test]
 fn a_daemon_of_another_version_shows_only_its_frozen_fields() {
     let tmp = scratch("older");
-    older_daemon(&tmp);
+    older_daemon(&tmp, None);
     let out = under(&tmp, &["list"]);
     assert_eq!(
         text(&out.stdout),
@@ -1062,6 +1061,23 @@ fn a_daemon_of_another_version_shows_only_its_frozen_fields() {
             "pid": 77, "build": format!("{NAME} 0.0.9"), "v": 0, "same_version": false,
         })
     );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn kill_all_ends_those_it_can_and_exits_1_naming_the_rest() {
+    let tmp = scratch("killall");
+    let (mut work, said) = listening_daemon(&tmp, &["work", "--"]);
+    assert_eq!(said, "ok work\n");
+    older_daemon(&tmp, Some("old has unsaved changes: x"));
+    let out = under(&tmp, &["kill", "--all"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: old has unsaved changes: x\n")
+    );
+    let status = work.wait().unwrap();
+    assert_eq!(None, std::os::unix::process::ExitStatusExt::signal(&status));
     std::fs::remove_dir_all(&tmp).unwrap();
 }
 

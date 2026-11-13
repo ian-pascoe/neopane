@@ -216,6 +216,33 @@ pub(crate) fn reply(
     }
 }
 
+/// What `status` says of the daemon at `address`, logging to `log`, while
+/// it has nothing more to tell: no pane, no pane provider, nothing unsaved,
+/// and Neovim's directory unknown.
+pub(crate) fn idle_status(address: &super::dir::Address, log: &str) -> attach::Status {
+    attach::Status {
+        address: address.as_arg().as_encoded_bytes().to_vec(),
+        panes: 0,
+        unsaved: Vec::new(),
+        provider: super::daemon::control::NoProvider::None.to_string(),
+        dir: None,
+        // until #124
+        kept: Some(false),
+        capabilities: Some(Vec::new()),
+        unsupported: Some(Vec::new()),
+        log: Some(log.as_bytes().to_vec()),
+        terminals: Some(Vec::new()),
+    }
+}
+
+/// Refuses an attach that came as the daemon ends, `stopping`.
+pub(crate) fn refuse_stopping(stream: UnixStream) {
+    refuse(
+        stream,
+        End::refusal(Refusal::Stopping, "the daemon is ending"),
+    );
+}
+
 /// How long a control request's reply may wait for room in its socket: a
 /// status naming many files may not fit at once.
 const REPLY_WITHIN: Duration = Duration::from_millis(500);

@@ -19,6 +19,7 @@
 //! matches the pane title, unlike Rex's, has the daemon write it into the
 //! terminal, and a new `u` tells the helper how to put the old one back.
 
+use super::control::NoProvider;
 use super::*;
 use crate::attach::{PaneId, env_value};
 use crate::daemon::pane::{AttachHello, Reach};
@@ -105,8 +106,8 @@ impl Daemon {
                     .and_then(|p| p.hello.as_deref())
                     .and_then(|h| h.hint.as_deref());
                 self.no_provider = match hint {
-                    Some(choose::HINT_NONE) => "none (hint none)",
-                    _ => NO_PROVIDER,
+                    Some(choose::HINT_NONE) => NoProvider::HintNone,
+                    _ => NoProvider::None,
                 };
                 if warn {
                     let line = format!("{why}; no pane provider");
@@ -429,7 +430,7 @@ impl Daemon {
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
         self.choosing = None;
         self.provider_gone(why)?;
-        self.no_provider = "none (find refused)";
+        self.no_provider = NoProvider::FindRefused;
         self.reach_decided()
     }
 

@@ -131,18 +131,19 @@ impl Daemon {
                 attach_conn::refuse(a.stream, z);
                 Ok(())
             }
-            Ok(Hello {
-                purpose: Purpose::Status { .. } | Purpose::Stop { .. },
-                ..
-            }) => {
-                let Ok(hello) = a.hello else { unreachable!() };
+            Ok(
+                hello @ Hello {
+                    purpose: Purpose::Status { .. } | Purpose::Stop { .. },
+                    ..
+                },
+            ) => {
+                let hello = hello.clone();
                 self.on_control(a.stream, hello)
             }
             // ending: no attach is taken
             Ok(_) if self.stopping => {
-                let z = End::refusal(Refusal::Stopping, "the daemon is ending");
-                log_info!("{NAME} daemon: refused a hello: {}", z.message);
-                attach_conn::refuse(a.stream, z);
+                log_info!("{NAME} daemon: refused a hello: the daemon is ending");
+                attach_conn::refuse_stopping(a.stream);
                 Ok(())
             }
             Ok(Hello {

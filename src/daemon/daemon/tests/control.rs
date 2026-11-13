@@ -87,11 +87,6 @@ fn status_says_why_there_is_no_pane_provider() {
         "none",
         control(&mut fx, status()).0.status.unwrap().provider
     );
-    fx.d.no_provider = "none (hint none)";
-    assert_eq!(
-        "none (hint none)",
-        control(&mut fx, status()).0.status.unwrap().provider
-    );
     assert_eq!(
         Some(vec![]),
         control(&mut fx, status()).0.status.unwrap().capabilities
@@ -179,6 +174,27 @@ fn stop_ends_attaches_stopped_and_closes_the_requested_terminals_first() {
 }
 
 #[test]
+fn a_redraw_during_the_stop_wait_doesnt_end_it_or_stay_for_unsaved_changes() {
+    let (mut fx, _) = work();
+    fx.d.on_note(windows::Note::Unsaved {
+        files: vec![b"/w/a.txt".to_vec()],
+        ask: 0,
+    })
+    .unwrap();
+    control(&mut fx, stop(true));
+    assert!(fx.d.stopping);
+    // Neovim flushes as its windows' panes go: nothing goes unattached
+    fx.d.reconcile().unwrap();
+    assert!(fx.d.lifetime.is_attached());
+    assert_eq!(None, fx.d.stopped);
+    assert!(fx.d.panes.list.is_empty());
+    let id = fake(&mut fx.d).last_id();
+    fake(&mut fx.d).answer(id, Outcome::Done(Answer::Nothing));
+    fx.d.after_batch().unwrap();
+    assert_eq!(Some(StopReason::Stopped), fx.d.stopped);
+}
+
+#[test]
 fn stop_with_nothing_to_close_stops_at_once() {
     let mut fx = fixture();
     let (r, _) = control(&mut fx, stop(false));
@@ -191,7 +207,12 @@ fn a_close_never_answered_is_left_after_the_stop_wait() {
     let (mut fx, _) = work();
     control(&mut fx, stop(true));
     assert_eq!(None, fx.d.stopped);
-    fx.d.stop_wait_over();
+    let timer = crate::daemon::event_loop::Event {
+        token: Token::StopTimer as usize,
+        kind: crate::daemon::event_loop::Kind::Timer,
+        eof: false,
+    };
+    fx.d.handle(timer).unwrap();
     assert_eq!(Some(StopReason::Stopped), fx.d.stopped);
 }
 

@@ -188,24 +188,6 @@ fn found(to: &Target) -> std::result::Result<Address, NotFound> {
     find_daemon(dir::base, to, inside.as_deref(), warn)
 }
 
-/// The daemon at `address`, for messages: its name, else its address.
-fn who(address: &Address) -> String {
-    address.daemon_name().unwrap_or_else(|| address.to_string())
-}
-
-/// Why the daemon at `address` gave no reply, as one line.
-fn no_reply(address: &Address, e: &Failure) -> String {
-    let who = who(address);
-    match e {
-        Failure::NoAnswer(_) => match address.log() {
-            Some(log) => format!("{who} {e} (log: {})", log.display()),
-            None => format!("{who} {e}"),
-        },
-        Failure::Refused(z) => format!("{who} refused: {}", z.message),
-        Failure::Failed(why) => format!("{who}: {why}"),
-    }
-}
-
 /// `status [--name N | --address A] [--json]` (#94 decision 31).
 fn status(to: &Target, json: bool) -> ExitCode {
     let address = match found(to) {
@@ -214,7 +196,7 @@ fn status(to: &Target, json: bool) -> ExitCode {
     };
     let reply = match control::ask(&address, control::status_purpose(), control::STATUS_WITHIN) {
         Ok(r) => r,
-        Err(e) => return fail(&no_reply(&address, &e)),
+        Err(e) => return fail(&control::no_reply(&address, &e)),
     };
     if json {
         let l = Listed {
@@ -265,18 +247,13 @@ fn kill(to: KillTarget, force: bool) -> ExitCode {
         .collect();
     let mut failed = false;
     for (address, thread) in killing {
-        let line = match thread.join() {
-            Ok(Killed::Gone) => continue,
-            Ok(Killed::Refused(why)) => why,
-            Ok(Killed::StillEnding { name, pid }) => {
-                let secs = control::KILL_WITHIN.as_secs();
-                format!("{name} is still ending after {secs} s (pid {pid})")
-            }
-            Ok(Killed::NoAnswer(e)) => no_reply(&address, &e),
-            Err(_) => format!("{}: killing it failed", who(&address)),
-        };
-        eprintln!("{NAME}: {line}");
-        failed = true;
+        let killed = thread
+            .join()
+            .unwrap_or_else(|_| Killed::NoAnswer(Failure::Failed("killing it failed".into())));
+        if let Some(line) = control::killed_line(&address, &killed) {
+            eprintln!("{NAME}: {line}");
+            failed = true;
+        }
     }
     ExitCode::from(u8::from(failed))
 }

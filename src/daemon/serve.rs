@@ -656,10 +656,7 @@ fn refuse_stopping(server: &UnixListener, within: Duration) {
         };
         if let Step::Arrived(a) = pending.read_blocking() {
             log_info!("{NAME} daemon: refused an attach: ending");
-            attach_conn::refuse(
-                a.stream,
-                End::refusal(Refusal::Stopping, "the daemon is ending"),
-            );
+            attach_conn::refuse_stopping(a.stream);
         }
     }
 }
@@ -668,18 +665,10 @@ fn refuse_stopping(server: &UnixListener, within: Duration) {
 /// no pane provider, and Neovim's directory to be this one.
 fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::Status {
     crate::attach::Status {
-        address: address.as_arg().as_encoded_bytes().to_vec(),
-        panes: 0,
-        unsaved: Vec::new(),
-        provider: "none".into(),
         dir: std::env::current_dir()
             .ok()
             .map(|d| d.into_os_string().into_encoded_bytes()),
-        kept: Some(false),
-        capabilities: Some(Vec::new()),
-        unsupported: Some(Vec::new()),
-        log: Some(log.as_bytes().to_vec()),
-        terminals: Some(Vec::new()),
+        ..attach_conn::idle_status(address, log)
     }
 }
 
