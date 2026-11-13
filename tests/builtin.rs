@@ -61,8 +61,23 @@ fn run_by_hand_without_the_variables_it_is_a_usage_error() {
 
 #[test]
 fn it_is_hidden_from_help() {
-    let help = Command::new(exe()).arg("--help").output().unwrap();
-    assert!(!text(&help.stdout).contains("builtin"));
+    for args in [
+        &["--help"][..],
+        &["help"],
+        &["help", "debug"],
+        &["provider", "--help"],
+        &["provider", "-h"],
+        &["provider", "check", "--help"],
+        &["provider", "show", "--help"],
+        &["provider", "types", "--help"],
+        // the usage error that lists provider's words
+        &["provider"],
+    ] {
+        let out = Command::new(exe()).args(args).output().unwrap();
+        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(!shown.is_empty(), "{args:?}");
+        assert!(!shown.contains("builtin"), "{args:?}: {shown}");
+    }
 }
 
 /// A new pty's slave's path: a tty of no tmux server. The pty lives as
