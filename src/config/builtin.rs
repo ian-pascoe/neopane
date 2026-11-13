@@ -43,6 +43,7 @@ impl BuiltinTable {
                 Capability::Close,
                 Capability::ReportLayout,
                 Capability::OpenBeside,
+                Capability::OpenFloat,
             ],
         }
     }
@@ -157,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_runs_the_binary_for_find_close_report_layout_and_open_beside() {
+    fn tmux_runs_the_binary_for_find_close_report_layout_and_its_opens() {
         let t = BuiltinTable::Tmux.table();
         let shown: Vec<(&str, String)> = t
             .capabilities
@@ -179,6 +180,10 @@ mod tests {
                 (
                     "open_beside",
                     "{exe} provider builtin tmux open_beside".to_string()
+                ),
+                (
+                    "open_float",
+                    "{exe} provider builtin tmux open_float".to_string()
                 ),
             ]
         );
