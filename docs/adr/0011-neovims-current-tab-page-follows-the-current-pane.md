@@ -52,8 +52,10 @@ moves into whichever tab page is current (#90).
   (tmux's is `switch-client`: `select-pane` doesn't change window). Without
   `focus`, the next key from the old terminal takes the current pane back
   (ADR 0006). An anchor, or another tab page's window, never stays current.
-  Preferring a window in the current pane comes with a pane showing several
-  tab pages (#118); until then it is the last current window anywhere.
+  The last current window is the one reported current, or current as its
+  tab page was left, as Neovim keeps a tab page's. Neovim's own pick stays
+  if it is in the current pane or in no pane yet, and a window made current
+  by focusing its pane, or by `<C-w>w`, is never redirected (#118).
 - A window made current inside Neovim (`<C-w>w`, `:wincmd p`, a plugin's
   `nvim_set_current_win`) whose home tab page isn't current switches tab
   page, as plain Neovim does for a window in another tab page. `<C-w>w`,

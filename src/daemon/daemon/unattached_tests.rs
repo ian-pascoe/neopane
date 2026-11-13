@@ -65,7 +65,7 @@ fn an_attach_during_the_safestate_wait_keeps_the_daemon_and_takes_the_kept_windo
     let Some(mut rig) = waiting_for_safestate() else {
         return;
     };
-    let kept = rig.d.lifetime.kept.expect("a window kept");
+    let kept = rig.d.lifetime.kept.expect("a window kept").win;
     let second = rig.attach(None, None);
     assert_eq!(kept, rig.win_of(second));
     // Neovim's answer, once it comes, ends nothing

@@ -169,6 +169,13 @@ impl PaneLayout {
         path_to(&self.root, win).is_some()
     }
 
+    /// Window `new` takes `old`'s place, as a window reopened does.
+    pub(crate) fn replace(&mut self, old: i64, new: i64) {
+        if let Some(path) = path_to(&self.root, old) {
+            *node_at_mut(&mut self.root, &path) = Node::Win(new);
+        }
+    }
+
     /// Whether it holds more than one window.
     pub(crate) fn is_split(&self) -> bool {
         matches!(self.root, Node::Split(..))

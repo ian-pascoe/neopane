@@ -90,6 +90,12 @@ pub(crate) struct Pane {
     /// Its window's home tab page, if that tab page gets a tab page area of
     /// its own (ADR 0012), else 0. Its windows share that area.
     pub tab: i64,
+    /// The tab page whose windows it shows, as the window split notes name
+    /// it: 0 for the first.
+    pub shown_tab: i64,
+    /// The pane layouts of the other tab pages whose windows it holds,
+    /// the one shown last, last (ADR 0012).
+    pub held: Vec<Held>,
     /// Set for a float group pane, showing a group of floats, not a window.
     pub layer: Option<Layer>,
     /// Its layout area, as the live layout last said (ADR 0008).
@@ -124,6 +130,67 @@ pub(crate) struct Pane {
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).
     pub attach_due: Option<std::time::Instant>,
+}
+
+/// A tab page's windows a pane holds while it shows another's (ADR 0012):
+/// it shows them again once one of them becomes current.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Held {
+    pub tab: i64,
+    /// Its window last current in the pane.
+    pub win: NeovimWindowHandle,
+    /// Its windows, once there are several.
+    pub layout: Option<PaneLayout>,
+    pub layout_asked: Vec<(NeovimWindowHandle, LastAskedWinSize)>,
+}
+
+impl Held {
+    fn holds(&self, win: NeovimWindowHandle) -> bool {
+        self.win == win || self.layout.as_ref().is_some_and(|l| l.contains(win))
+    }
+
+    /// Its windows, top left first.
+    pub(crate) fn windows(&self) -> Vec<NeovimWindowHandle> {
+        match &self.layout {
+            Some(l) => l.windows(),
+            None => vec![self.win],
+        }
+    }
+}
+
+/// Takes the windows `gone` says closed out of a tab page's windows in a
+/// pane: `layout`, if it has several, `win` the one last current there, and
+/// `asked` the sizes they were asked to be. Whether any is left: then `win`
+/// is one of them, and a layout of one goes; else `win` is the last that
+/// went.
+fn close_in(
+    layout: &mut Option<PaneLayout>,
+    win: &mut NeovimWindowHandle,
+    asked: &mut Vec<(NeovimWindowHandle, LastAskedWinSize)>,
+    gone: &impl Fn(NeovimWindowHandle) -> bool,
+    opts: super::pane_layout::Options,
+) -> bool {
+    let Some(l) = layout else {
+        return !gone(*win);
+    };
+    for w in l.windows() {
+        if gone(w) && !l.close(w, opts) {
+            *win = w;
+            *layout = None;
+            asked.clear();
+            return false;
+        }
+    }
+    let left = l.windows();
+    if !left.contains(win) {
+        *win = left[0];
+    }
+    asked.retain(|(w, _)| left.contains(w));
+    if !l.is_split() {
+        *layout = None;
+        asked.clear();
+    }
+    true
 }
 
 /// A file a self-attach asks for, absolute, and the cursor's line in it.
@@ -277,17 +344,163 @@ fn ending_message(ending: Ending) -> &'static str {
 }
 
 impl Pane {
-    /// Whether it shows window `win`, alone or among others.
+    /// Whether it holds window `win`: shows it, alone or among others, or
+    /// holds it in another tab page's layout.
     pub(crate) fn holds(&self, win: NeovimWindowHandle) -> bool {
+        self.shows(win) || self.held.iter().any(|h| h.holds(win))
+    }
+
+    /// Whether it shows window `win`, alone or among others.
+    pub(crate) fn shows(&self, win: NeovimWindowHandle) -> bool {
         self.neovim_window_handle == Some(win)
             || self.layout.as_ref().is_some_and(|l| l.contains(win))
     }
 
-    /// The windows it shows.
+    /// The windows it holds, those it shows first.
     pub(crate) fn windows(&self) -> Vec<NeovimWindowHandle> {
+        let mut out = self.shown_windows();
+        for h in &self.held {
+            out.extend(h.windows());
+        }
+        out
+    }
+
+    /// The windows it shows.
+    pub(crate) fn shown_windows(&self) -> Vec<NeovimWindowHandle> {
         match &self.layout {
             Some(l) => l.windows(),
             None => self.neovim_window_handle.into_iter().collect(),
+        }
+    }
+
+    /// Shows the tab page of `win`, a window it holds there, if it shows
+    /// another: what it showed is held. Whether it swapped.
+    pub(crate) fn show_tab_of(&mut self, win: NeovimWindowHandle) -> bool {
+        let Some(i) = self.held.iter().position(|h| h.holds(win)) else {
+            return false;
+        };
+        let h = self.held.remove(i);
+        if let Some(was) = self.neovim_window_handle {
+            self.held.push(Held {
+                tab: self.shown_tab,
+                win: was,
+                layout: self.layout.take(),
+                layout_asked: std::mem::take(&mut self.layout_asked),
+            });
+        }
+        self.show_held(h);
+        self.neovim_window_handle = Some(win);
+        true
+    }
+
+    /// Shows `h` in place of what it showed, which is gone.
+    fn show_held(&mut self, h: Held) {
+        self.shown_tab = h.tab;
+        self.neovim_window_handle = Some(h.win);
+        self.layout = h.layout;
+        self.layout_asked = h.layout_asked;
+        self.last_asked_win_size = LastAskedWinSize::default();
+        if let Some(s) = &mut self.terminal_surface {
+            s.view.full = true;
+        }
+    }
+
+    /// Its windows that `gone` says closed come out of its layouts, the one
+    /// it shows and those it holds, and a held tab page left with none goes.
+    /// Whether it still shows a window: of another tab page, the one shown
+    /// last, if none of its own is left. Else `neovim_window_handle` is the
+    /// last window that went, and the pane ends as a pane of one does.
+    pub(crate) fn close_gone(
+        &mut self,
+        gone: impl Fn(NeovimWindowHandle) -> bool,
+        opts: super::pane_layout::Options,
+    ) -> bool {
+        self.held
+            .retain_mut(|h| close_in(&mut h.layout, &mut h.win, &mut h.layout_asked, &gone, opts));
+        let Some(mut win) = self.neovim_window_handle else {
+            return false;
+        };
+        let was_split = self.layout.is_some();
+        let left = close_in(
+            &mut self.layout,
+            &mut win,
+            &mut self.layout_asked,
+            &gone,
+            opts,
+        );
+        self.neovim_window_handle = Some(win);
+        if was_split && self.layout.is_none() {
+            // one window again, or none: it fills the pane
+            self.last_asked_win_size = LastAskedWinSize::default();
+        }
+        if left {
+            return true;
+        }
+        let Some(h) = self.held.pop() else {
+            return false;
+        };
+        self.show_held(h);
+        true
+    }
+
+    /// Window `sp.win`, split off as `sp`, joins the layout of its tab page,
+    /// `sp.tab`, beside its origin window there, else beside the window last
+    /// current there. A tab page new to the pane is held, shown before any
+    /// other it holds.
+    pub(crate) fn join(&mut self, sp: Split, equalalways: bool) {
+        let (layout, last) = if self.shown_tab == sp.tab {
+            let last = self
+                .neovim_window_handle
+                .expect("an origin pane shows a window");
+            (&mut self.layout, last)
+        } else if let Some(h) = self.held.iter_mut().find(|h| h.tab == sp.tab) {
+            (&mut h.layout, h.win)
+        } else {
+            self.held.insert(
+                0,
+                Held {
+                    tab: sp.tab,
+                    win: sp.win,
+                    layout: None,
+                    layout_asked: Vec::new(),
+                },
+            );
+            return;
+        };
+        let layout = layout.get_or_insert_with(|| PaneLayout::new(last));
+        let origin = if layout.contains(sp.from) {
+            sp.from
+        } else {
+            last
+        };
+        layout.split(sp.win, origin, sp.side_by_side, sp.before, equalalways);
+    }
+
+    /// The tab page whose windows it holds `win` among, if it does.
+    pub(crate) fn tab_of(&self, win: NeovimWindowHandle) -> Option<i64> {
+        if self.shows(win) {
+            return Some(self.shown_tab);
+        }
+        self.held.iter().find(|h| h.holds(win)).map(|h| h.tab)
+    }
+
+    /// Window `new` takes the place of `old`, closed, wherever it holds it,
+    /// as a window reopened does.
+    pub(crate) fn replace_window(&mut self, old: NeovimWindowHandle, new: NeovimWindowHandle) {
+        if self.neovim_window_handle == Some(old) {
+            self.neovim_window_handle = Some(new);
+            self.last_asked_win_size = LastAskedWinSize::default();
+        }
+        if let Some(l) = &mut self.layout {
+            l.replace(old, new);
+        }
+        for h in &mut self.held {
+            if h.win == old {
+                h.win = new;
+            }
+            if let Some(l) = &mut h.layout {
+                l.replace(old, new);
+            }
         }
     }
 
@@ -313,6 +526,8 @@ impl Pane {
             terminal_surface: None,
             closing: None,
             tab: 0,
+            shown_tab: 0,
+            held: Vec::new(),
             layer: None,
             area: Area::Unreported,
             report_due: None,
@@ -464,6 +679,81 @@ mod tests {
 
         let without_block = Pane::self_attached(2, attach(None));
         assert!(without_block.terminal.is_none() && without_block.terminal_surface.is_some());
+    }
+
+    /// A pane showing windows 1 and 2 of the first tab page, laid out, and
+    /// holding window 3 of tab page 7.
+    fn two_tab_pages() -> Pane {
+        let mut layout = PaneLayout::new(1);
+        layout.split(2, 1, true, false, true);
+        Pane {
+            neovim_window_handle: Some(1),
+            layout: Some(layout),
+            held: vec![Held {
+                tab: 7,
+                win: 3,
+                layout: None,
+                layout_asked: Vec::new(),
+            }],
+            ..Pane::blank(1)
+        }
+    }
+
+    #[test]
+    fn a_held_window_becoming_current_swaps_the_tab_page_shown() {
+        let mut p = two_tab_pages();
+        assert!(p.holds(3) && !p.shows(3));
+        assert!(!p.show_tab_of(2));
+        assert!(p.show_tab_of(3));
+        assert_eq!(
+            (7, Some(3), None),
+            (p.shown_tab, p.neovim_window_handle, p.layout.as_ref())
+        );
+        assert_eq!(vec![3], p.shown_windows());
+        assert_eq!(vec![3, 1, 2], p.windows());
+
+        assert!(p.show_tab_of(2));
+        assert_eq!((0, Some(2)), (p.shown_tab, p.neovim_window_handle));
+        assert_eq!(vec![1, 2], p.shown_windows());
+        assert_eq!(vec![1, 2, 3], p.windows());
+    }
+
+    #[test]
+    fn swapping_tab_pages_repaints_the_whole_pane() {
+        let mut p = two_tab_pages();
+        p.terminal_surface = Some(Surface::for_test(80, 24));
+        p.terminal_surface.as_mut().unwrap().view.full = false;
+        p.show_tab_of(3);
+        assert!(p.terminal_surface.as_ref().unwrap().view.full);
+    }
+
+    #[test]
+    fn a_pane_whose_tab_page_closed_shows_the_one_it_held() {
+        let opts = super::super::pane_layout::Options::default();
+        let mut p = two_tab_pages();
+        // a held window closing
+        p.held[0].layout = Some(PaneLayout::new(3));
+        p.held[0]
+            .layout
+            .as_mut()
+            .unwrap()
+            .split(4, 3, false, false, true);
+        assert!(p.close_gone(|w| w == 3, opts));
+        assert_eq!((4, None), (p.held[0].win, p.held[0].layout.as_ref()));
+
+        // the window it shows alone closing: on to the tab page held
+        p.show_tab_of(4);
+        p.replace_window(1, 11);
+        assert_eq!(vec![11, 2], p.held[0].layout.as_ref().unwrap().windows());
+        assert!(p.close_gone(|w| w == 4, opts));
+        assert_eq!((0, Some(11)), (p.shown_tab, p.neovim_window_handle));
+        assert!(p.held.is_empty());
+        // and with none held, it ends at its last window
+        assert!(!p.close_gone(|w| w == 11 || w == 2, opts));
+        assert_eq!(
+            (None, true),
+            (p.layout.as_ref(), p.neovim_window_handle.is_some())
+        );
     }
 
     /// A self-attach of an 80×24 terminal, with the pane provider's id

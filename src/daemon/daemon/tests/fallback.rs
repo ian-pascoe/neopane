@@ -393,15 +393,16 @@ pub(super) fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
     }
 }
 
-/// A daemon over a real Neovim started with `flag`, such as `-o3`, and
+/// A daemon over a real Neovim started with `flags`, such as `-o3`, and
 /// `provider`, its first pane attached in terminal t0 and read: the daemon,
 /// the terminal's other ends, and its reader. None without Neovim.
 pub(super) fn started_with(
-    flag: &str,
+    flags: &[&str],
     provider: Option<Box<dyn PaneProvider>>,
 ) -> Option<(Daemon, Live, std::thread::JoinHandle<()>)> {
     use crate::nvim::nvim::spawn_for_test_with;
-    let nvim = spawn_for_test_with(&["nvim", "--clean", "--embed", "-n", flag])?;
+    let argv = [&["nvim", "--clean", "--embed", "-n"][..], flags].concat();
+    let nvim = spawn_for_test_with(&argv)?;
     let event_loop = Loop::init().unwrap();
     event_loop
         .add_read(nvim.read_fd(), Token::NvimChannel as usize)
@@ -438,7 +439,7 @@ pub(super) fn started_with(
 fn with_no_pane_provider_windows_opened_with_o_or_capital_o_are_laid_out_in_the_first_pane_as_neovim_had_them()
  {
     for (flag, across) in [("-o3", false), ("-O3", true)] {
-        let Some((mut d, live, reader)) = started_with(flag, None) else {
+        let Some((mut d, live, reader)) = started_with(&[flag], None) else {
             return;
         };
         pump(&mut d, |d| {
@@ -474,7 +475,7 @@ fn with_a_pane_provider_windows_opened_with_o_or_capital_o_open_where_neovims_la
     for (flag, want) in [("-o3", Direction::Down), ("-O3", Direction::Right)] {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::Focus);
-        let Some((mut d, live, reader)) = started_with(flag, Some(Box::new(f))) else {
+        let Some((mut d, live, reader)) = started_with(&[flag], Some(Box::new(f))) else {
             return;
         };
         let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });
@@ -556,4 +557,89 @@ fn giving_up_the_last_pane_goes_unattached_as_its_last_pane_gone() {
     fx.d.give_up(id).unwrap();
     assert!(fx.d.panes.list.is_empty());
     assert!(deciding(&fx.d));
+}
+
+#[test]
+fn a_pane_taking_the_window_kept_from_a_later_tab_page_lays_its_splits_out_beside_it() {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    // the last pane, showing tab page 7's window, goes: its window is kept
+    let (last, _a) = live_pane(&mut fx, 50, 1001, None);
+    fx.d.panes.by_id_mut(last).unwrap().shown_tab = 7;
+    fx.d.nvim.current_win = 1001;
+    fx.d.go_unattached(Some(last)).unwrap();
+    let kept = super::lifetime::Kept { win: 1001, tab: 7 };
+    assert_eq!(Some(kept), fx.d.lifetime.kept);
+
+    // the next self-attach takes it, and shows its tab page
+    let (id, _b) = windowless_pane(&mut fx, "t0");
+    fx.d.take_unshown(id, 1001, &[1001]);
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((7, Some(1001)), (p.shown_tab, p.neovim_window_handle));
+
+    // `:vsplit` there: side by side, not another tab page's layout
+    draw_external(&mut fx.d, 102, 1002, 80, 23);
+    fx.d.changes.note_split(crate::nvim::windows::Split {
+        win: 1002,
+        side_by_side: true,
+        before: true,
+        from: 1001,
+        tab: 7,
+    });
+    fx.d.new_pane(1002).unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert!(p.held.is_empty(), "{:?}", p.held);
+    assert_eq!(vec![1002, 1001], p.layout.as_ref().unwrap().windows());
+}
+
+/// Window `win`, drawn, split off `from` side by side in tab page `tab`
+/// (as split notes name it), with no pane yet.
+fn split_in_tab(fx: &mut Fixture, win: i64, from: i64, tab: i64) {
+    draw_external(&mut fx.d, win as u32 - 900, win, 80, 23);
+    fx.d.changes.note_split(crate::nvim::windows::Split {
+        win,
+        side_by_side: true,
+        before: false,
+        from,
+        tab,
+    });
+}
+
+#[test]
+fn a_self_attach_opening_a_file_on_a_daemon_kept_on_a_later_tab_page_lays_its_splits_out_beside_it()
+{
+    use super::self_attach::{AskKind, WindowAsk};
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    draw_external(&mut fx.d, 101, 1001, 80, 23);
+    fx.d.lifetime.kept = Some(super::lifetime::Kept { win: 1001, tab: 2 });
+    fx.d.nvim.current_win = 1001;
+    // its file opens in a new window, in the current tab page
+    let (id, _live) = windowless_pane(&mut fx, "t0");
+    fx.d.window_ask = Some(WindowAsk {
+        pane: id,
+        req: 1,
+        kind: AskKind::Open,
+    });
+    fx.d.on_note(crate::nvim::windows::Note::Opened(1002))
+        .unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((2, Some(1002)), (p.shown_tab, p.neovim_window_handle));
+
+    split_in_tab(&mut fx, 1003, 1002, 2);
+    fx.d.new_pane(1003).unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert!(p.held.is_empty(), "{:?}", p.held);
+    assert_eq!(vec![1002, 1003], p.layout.as_ref().unwrap().windows());
+}
+
+#[test]
+fn a_self_attach_taking_an_unshown_window_shows_the_tab_page_its_split_note_names() {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    split_in_tab(&mut fx, 1005, 0, 4);
+    let (id, _live) = windowless_pane(&mut fx, "t0");
+    fx.d.take_unshown(id, 1005, &[1005]);
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((4, Some(1005)), (p.shown_tab, p.neovim_window_handle));
 }

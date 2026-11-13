@@ -181,6 +181,17 @@ pub(crate) fn carry(nvim: &mut Nvim, groups: &[Vec<i64>]) {
     }
 }
 
+/// Tells Neovim the windows of each pane holding several tab pages: `gt` and
+/// the like go to the tab page's window last current in the current pane
+/// (ADR 0011).
+pub(crate) fn panes_hold(nvim: &mut Nvim, panes: &[Vec<i64>]) {
+    nvim.exec_lua(&format!("{NAME}.panes_hold(...)"), 1);
+    msgpack::write_array_header(nvim.writer(), panes.len() as u32);
+    for p in panes {
+        write_wins(nvim, p);
+    }
+}
+
 /// Asks for our channel id: the response to the returned id starts with it.
 #[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {
@@ -1601,12 +1612,14 @@ mod tests {
         let tab = h.last_current();
         let tab_note = h.split_note(tab).unwrap();
         assert!(tab_note.tab != 0);
+        // from the window current before, whose pane it opens in when it
+        // gets no tab page area
         assert_eq!(
             Split {
                 win: tab,
                 side_by_side: false,
                 before: false,
-                from: 0,
+                from: first,
                 tab: tab_note.tab
             },
             tab_note
@@ -4363,6 +4376,84 @@ mod tests {
                 .parse::<i64>()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn gt_tabnext_and_a_tabline_click_go_to_the_tab_pages_last_current_window_in_the_current_pane()
+    {
+        for how in ["gt", ":tabnext<CR>", "click"] {
+            let Some(mut h) = Harness::start() else {
+                return;
+            };
+            let [a, b, c] = two_tab_pages(&mut h);
+            // one pane shows c and holds a, last current there of the first
+            // tab page; b, in another, was current after it
+            panes_show(&mut h.nvim, &[b, c]);
+            panes_hold(&mut h.nvim, &[vec![c, a]]);
+            h.focus_pane(b);
+            h.focus_pane(c);
+            h.notes.clear();
+            if how == "click" {
+                h.click("left", 1, 1);
+            } else {
+                h.input(how);
+            }
+            h.want = a;
+            assert!(h.until(Harness::is_current), "{how}");
+            h.barrier();
+            assert_eq!("1", h.tabpagenr(), "{how}");
+            assert_eq!(a, h.current(), "{how}");
+        }
+    }
+
+    #[test]
+    fn gt_goes_to_the_tab_pages_last_current_window_anywhere_if_the_current_pane_holds_none() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        h.sync(&format!("vim.cmd('tabnew')\n{}", adopt_all()));
+        let d = h.current();
+        // the current pane shows d and holds c; a and b are in panes of
+        // their own, b current after a
+        panes_show(&mut h.nvim, &[a, b, d]);
+        panes_hold(&mut h.nvim, &[vec![d, c]]);
+        h.focus_pane(a);
+        h.focus_pane(b);
+        h.focus_pane(d);
+        h.notes.clear();
+        // from the third tab page on to the first
+        h.input("gt");
+        h.want = b;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!(("1", b), (h.tabpagenr().as_str(), h.current()));
+    }
+
+    #[test]
+    fn focusing_a_pane_of_another_tab_page_goes_to_its_window_though_the_current_pane_holds_another()
+     {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        panes_show(&mut h.nvim, &[b, c]);
+        panes_hold(&mut h.nvim, &[vec![c, a]]);
+        h.focus_pane(c);
+        h.notes.clear();
+        // b's pane focused: b, not the current pane's a
+        h.focus_pane(b);
+        h.barrier();
+        assert_eq!(("1", b), (h.tabpagenr().as_str(), h.current()));
+    }
+
+    impl Harness {
+        /// Neovim's current window.
+        fn current(&mut self) -> i64 {
+            self.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse()
+                .unwrap()
+        }
     }
 
     #[test]
