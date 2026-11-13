@@ -905,6 +905,17 @@ mod tests {
         bare: bool,
     }
 
+    impl Drop for Harness {
+        /// Neovim exits as its stdin closes. One that doesn't, stuck at a
+        /// prompt as it exits, fails the test rather than hanging it.
+        fn drop(&mut self) {
+            let exited = self.nvim.close_within(std::time::Duration::from_secs(10));
+            if !exited && !std::thread::panicking() {
+                panic!("Neovim didn't exit within 10 s of its stdin closing");
+            }
+        }
+    }
+
     impl Harness {
         /// Spawns Neovim with `argv`, attaches the UI and asks for our
         /// channel. None (the test skips) without `nvim`.
@@ -3959,6 +3970,20 @@ mod tests {
         assert_eq!(b" ", cells[19].str());
         assert_ne!(nc, h.grids.style.attr(cells[0].hl));
         assert_eq!(2, h.grids.statuslines.len());
+    }
+
+    #[test]
+    fn neovim_still_exits_when_a_statusline_changes_as_it_does() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // at 'laststatus' 0 the note goes as 'statusline' is set, here as
+        // Neovim exits, the daemon's channel gone (as a refit scheduled
+        // before does): dropped, not an error at a prompt no one answers
+        h.sync(
+            "vim.o.laststatus = 0\n\
+             vim.api.nvim_create_autocmd('VimLeavePre', { callback = function() vim.schedule(function() vim.o.statusline = 'late' end) end })",
+        );
     }
 
     impl Harness {

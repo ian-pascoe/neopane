@@ -7,9 +7,11 @@ local api = vim.api
 local M = {}
 _G[tool] = M
 
--- tells the daemon: the note `<tool>_<method>`
+-- tells the daemon: the note `<tool>_<method>`. Dropped once its channel is
+-- gone, as Neovim exits: an error then waits at a prompt no one answers, and
+-- Neovim never exits.
 local function note(method, ...)
-  vim.rpcnotify(chan, tool .. '_' .. method, ...)
+  pcall(vim.rpcnotify, chan, tool .. '_' .. method, ...)
 end
 
 -- tab page -> anchor window
