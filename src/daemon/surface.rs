@@ -345,4 +345,26 @@ mod tests {
         assert!(!said.iter().any(|m| matches!(m, Message::End(_))));
         assert!(!rest.is_empty(), "the `o` in flight is cut off");
     }
+
+    // Relayed, the new `u` goes between whole frames, before the title.
+    #[test]
+    fn a_relayed_pane_title_follows_its_u_on_the_helper_socket() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        assert_eq!(Sent::All, surface.write_title("np-abcdefghij").unwrap());
+        surface.destroy(Ending::Closed, "");
+        let (said, _) = frames_and_rest(&helper);
+        let [Message::Undo(u), Message::Output(o), Message::End(_)] = &said[..] else {
+            panic!("{said:?}");
+        };
+        assert_eq!(&modes::undo_with_title(), u);
+        assert!(u.ends_with(b"\x1b]2;\x1b\\\x1b[23;2t"));
+        assert_eq!(
+            b"\x1b[22;2t\x1b]2;np-abcdefghij\x1b\\".as_slice(),
+            o.as_slice()
+        );
+    }
 }
