@@ -28,6 +28,13 @@
 //!   it prints is told as `ProviderEvent::LayoutChanged`, for the daemon to
 //!   ask `report_layout` through its layout queue; a JSON object line's
 //!   `focus` and `closed` are told as `Focused` and `Closed` before it.
+//!   With `report_layout`, a line's `focus` waits instead: it may have
+//!   been read before a focus act landed and come after its answer, and
+//!   `provider_focus.rs` takes no report to be older than the focus
+//!   answered (SPI-1159). The first report started
+//!   after the line, and after the last focus act ended, tells where
+//!   focus is in its place; one that read none, failed or is unsupported,
+//!   the line's own.
 //!   Lines over 64 KiB are dropped. Once it ends, or a restart can't start,
 //!   it starts again after 1 s, then 2 s, doubling up to 60 s; one that ran
 //!   60 s waits 1 s again. Exit 69, or a first start that fails, ends it for
@@ -238,6 +245,8 @@ struct Running {
     timed_out: bool,
     /// `focus_acts_ended` as it started.
     focus_acts_before: u64,
+    /// `focus_lines` as it started.
+    focus_lines_before: u64,
 }
 
 /// `events`, while the runner has it.
@@ -281,6 +290,15 @@ pub(crate) struct CommandProvider {
     /// before it landed: its `focus` is dropped, as `provider_focus.rs`
     /// takes a reported focus after the act for the user's own move.
     focus_acts_ended: u64,
+    /// The focus the last `events` line that named one named, not told
+    /// yet, and how many such lines have come. It may have been read
+    /// before a focus act landed: the first report started after it, and
+    /// after the last focus act ended, tells where focus is instead.
+    line_focus: Option<TerminalId>,
+    focus_lines: u64,
+    /// Whether `report_layout` may tell an `events` line's focus: it has
+    /// one, not found unsupported.
+    reports: bool,
     /// Timed-out runs' groups, and when they get SIGKILL.
     kills: Vec<(libc::pid_t, Instant)>,
     events: VecDeque<ProviderEvent>,
@@ -331,10 +349,14 @@ impl CommandProvider {
             inner_loop,
             running: Vec::new(),
             focus_acts_ended: 0,
+            line_focus: None,
+            focus_lines: 0,
+            reports: false,
             kills: Vec::new(),
             events: VecDeque::new(),
             answers_due: Vec::new(),
         };
+        p.reports = p.command(Capability::ReportLayout).is_some();
         if p.command(Capability::Events).is_some() {
             p.start_events(true);
         }
@@ -510,7 +532,8 @@ impl CommandProvider {
     }
 
     /// One line `events` printed: a JSON object's `focus` and `closed` are
-    /// told, then that the layout changed.
+    /// told, then that the layout changed. Its `focus` is told as the
+    /// report the change asks for tells it, if `report_layout` may.
     fn on_events_line(&mut self, line: &[u8]) {
         let Ok(serde_json::Value::Object(o)) = serde_json::from_slice(line.trim_ascii()) else {
             self.events.push_back(ProviderEvent::LayoutChanged);
@@ -523,7 +546,12 @@ impl CommandProvider {
                 .map(TerminalId::from)
         };
         if let Some(t) = id("focus") {
-            self.events.push_back(ProviderEvent::Focused(t));
+            if self.reports {
+                self.line_focus = Some(t);
+                self.focus_lines += 1;
+            } else {
+                self.events.push_back(ProviderEvent::Focused(t));
+            }
         }
         if let Some(t) = id("closed") {
             self.events.push_back(ProviderEvent::Closed(t));
@@ -584,10 +612,17 @@ impl CommandProvider {
             .count() as u64;
         for (r, end) in ended {
             let mut outcome = self.outcome(r.cap, &end);
+            let after_acts = r.focus_acts_before == self.focus_acts_ended;
             if let Outcome::Done(Answer::Layout(l)) = &mut outcome
-                && r.focus_acts_before < self.focus_acts_ended
+                && !after_acts
             {
                 l.current = None;
+            }
+            if r.cap == Capability::ReportLayout
+                && !r.timed_out
+                && r.focus_lines_before == self.focus_lines
+            {
+                self.tell_line_focus(&outcome, after_acts);
             }
             if !r.timed_out {
                 self.events
@@ -606,6 +641,29 @@ impl CommandProvider {
             false
         });
         self.arm_timer(now);
+    }
+
+    /// A report that started after the last `events` line naming a focus
+    /// ended as `outcome`, having started after the last focus act ended
+    /// if `after_acts`: the focus it read is told for the line's, or, if it
+    /// read none, failed or is unsupported, the line's own. One that may
+    /// have read focus before a focus act landed tells nothing: the line
+    /// waits for the next.
+    fn tell_line_focus(&mut self, outcome: &Outcome, after_acts: bool) {
+        let Some(line) = &self.line_focus else {
+            return;
+        };
+        let t = match outcome {
+            Outcome::Done(Answer::Layout(_)) if !after_acts => return,
+            Outcome::Done(Answer::Layout(l)) => l.current.clone().unwrap_or_else(|| line.clone()),
+            Outcome::Unsupported => {
+                self.reports = false;
+                line.clone()
+            }
+            _ => line.clone(),
+        };
+        self.line_focus = None;
+        self.events.push_back(ProviderEvent::Focused(t));
     }
 
     /// Sets the timer for the soonest deadline, kill or start of `events`,
@@ -678,6 +736,7 @@ impl PaneProvider for CommandProvider {
             due: now + timeout,
             timed_out: false,
             focus_acts_before: self.focus_acts_ended,
+            focus_lines_before: self.focus_lines,
         });
         self.arm_timer(now);
     }

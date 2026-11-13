@@ -614,6 +614,88 @@ fn an_events_line_over_64_kib_is_dropped() {
     assert_eq!(2, changes(&told));
 }
 
+/// A runner with `focus`, which does nothing, `report_layout`, which
+/// reports `reported` focused, and `events`, which prints `{"focus":
+/// LINE}` once the test writes to the FIFO `go` in `dir`.
+fn focusing(dir: &Scratch, line: &str, reported: &str) -> CommandProvider {
+    let go = dir.join("go");
+    let path = std::ffi::CString::new(go.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(0, unsafe { libc::mkfifo(path.as_ptr(), 0o600) });
+    let events = format!(
+        r#"read _ < '{}'; echo '{{"focus":"{line}"}}'; exec sleep 30"#,
+        go.display()
+    );
+    let report = format!(
+        r#"echo '{{"areas":[{{"id":"w","terminals":[{{"terminal":"{line}","rect":[0,0,1,1]}},
+           {{"terminal":"{reported}","rect":[0,0,1,1]}}]}}],"focus":"{reported}"}}'"#
+    );
+    runner(
+        &[
+            (Capability::Focus, &["true"]),
+            (Capability::ReportLayout, &["sh", "-c", &report]),
+            (Capability::Events, &["sh", "-c", &events]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+/// Has `p` focus `b`, waits for its answer, then lets `events` print its
+/// line, and asks `report_layout` for each layout change after, as the
+/// daemon does: what it tells after the answer, until it tells a focus.
+fn after_focusing_b(p: &mut CommandProvider, dir: &Scratch) -> Vec<ProviderEvent> {
+    p.ask(
+        AskId(1),
+        Ask::Focus {
+            terminal: TerminalId::from("b"),
+        },
+    );
+    told(p, |t| {
+        t.iter()
+            .any(|e| matches!(e, ProviderEvent::Answered { id: AskId(1), .. }))
+    });
+    std::fs::write(dir.join("go"), "\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut told, mut asked) = (Vec::new(), 1);
+    loop {
+        while let Some(e) = p.next() {
+            if e == ProviderEvent::LayoutChanged {
+                asked += 1;
+                p.ask(AskId(asked), Ask::ReportLayout);
+            }
+            told.push(e);
+        }
+        if told.iter().any(|e| matches!(e, ProviderEvent::Focused(_))) {
+            return told;
+        }
+        assert!(Instant::now() < deadline, "only told {told:?}");
+        wait_ready(p, Duration::from_millis(100));
+    }
+}
+
+/// The races SPI-1159 found: `events` read focus before the focus act
+/// landed, and its line came after the act's answer. Told as it came, the
+/// daemon would take it for the user's move and undo its own.
+#[test]
+fn an_events_focus_read_before_a_focus_act_landed_never_undoes_it() {
+    let dir = Scratch::new("stale-focus");
+    let mut p = focusing(&dir, "a", "b");
+    let told = after_focusing_b(&mut p, &dir);
+    assert!(!told.contains(&focused("a")), "{told:?}");
+    // where focus is, as a report started after the line reads it
+    assert!(told.contains(&focused("b")), "{told:?}");
+}
+
+#[test]
+fn the_users_move_after_a_focus_act_is_still_followed() {
+    let dir = Scratch::new("user-focus");
+    let mut p = focusing(&dir, "c", "c");
+    let told = after_focusing_b(&mut p, &dir);
+    assert!(told.contains(&focused("c")), "{told:?}");
+}
+
 /// A runner whose `events` is `argv`, its time told by the returned cell.
 fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Cell<Instant>>) {
     let now = std::rc::Rc::new(std::cell::Cell::new(Instant::now()));
