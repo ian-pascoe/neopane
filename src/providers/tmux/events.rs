@@ -76,7 +76,7 @@ pub(super) fn events(given: &Given) -> Failure {
             "tmux {version} can't wait for events: that needs {major}.{minor} or newer"
         ));
     }
-    let mut waiters = Tmux::on(server);
+    let mut waiters = TmuxWaiters::on(server);
     watch(&mut waiters, |line| print_line(line.as_bytes()) == DONE)
 }
 
@@ -171,7 +171,7 @@ fn settle(waiters: &mut impl Waiters, first: Option<Ended>, live: &mut usize) ->
 /// tmux's waiters: each a `tmux wait-for -E EVENT`, waited for on a thread
 /// of its own, which tells the loop as it ends. Those still running are
 /// killed as it drops.
-struct Tmux {
+struct TmuxWaiters {
     server: Server,
     tx: Sender<Ended>,
     rx: Receiver<Ended>,
@@ -179,10 +179,10 @@ struct Tmux {
     running: Arc<Mutex<Vec<u32>>>,
 }
 
-impl Tmux {
-    fn on(server: Server) -> Tmux {
+impl TmuxWaiters {
+    fn on(server: Server) -> TmuxWaiters {
         let (tx, rx) = channel();
-        Tmux {
+        TmuxWaiters {
             server,
             tx,
             rx,
@@ -191,7 +191,7 @@ impl Tmux {
     }
 }
 
-impl Waiters for Tmux {
+impl Waiters for TmuxWaiters {
     fn arm(&mut self, event: &'static str) {
         let armed = Instant::now();
         let tx = self.tx.clone();
@@ -217,23 +217,8 @@ impl Waiters for Tmux {
         self.running.lock().unwrap().push(pid);
         let running = Arc::clone(&self.running);
         std::thread::spawn(move || {
-            // waits without reaping it, so a pid listed is never another's
-            // SAFETY: zeroed siginfo_t is valid; waitid writes it.
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: a plain syscall, on our own child.
-            unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    &mut info,
-                    libc::WEXITED | libc::WNOWAIT,
-                )
-            };
-            let woke = {
-                let mut running = running.lock().unwrap();
-                running.retain(|&p| p != pid);
-                child.wait().is_ok_and(|s| s.success())
-            };
+            let exited = exited_unreaped(|| wait_unreaped(pid));
+            let woke = reap(&mut child, &running, exited);
             let _ = tx.send(Ended {
                 event,
                 woke,
@@ -254,11 +239,61 @@ impl Waiters for Tmux {
     }
 }
 
-impl Drop for Tmux {
+/// Waits for waiter `pid` to exit, leaving it unreaped, so its pid stays
+/// ours while it's listed.
+fn wait_unreaped(pid: u32) -> std::io::Result<()> {
+    // SAFETY: zeroed siginfo_t is valid; waitid writes it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: a plain syscall, on our own child, with a valid out-pointer.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Whether `wait`, a [`wait_unreaped`], saw its waiter exit: tried again
+/// while a signal interrupts it, false on any other error.
+fn exited_unreaped(mut wait: impl FnMut() -> std::io::Result<()>) -> bool {
+    loop {
+        match wait() {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Reaps waiter `child`, listed in `running`, and gives whether it woke.
+/// One known to have `exited` is unlisted and reaped under the lock, which
+/// doesn't block, so `Drop` never signals a pid reused meanwhile. Else it
+/// is unlisted first, so `Drop` can no longer signal it, and reaped off the
+/// lock: it may run until its event.
+fn reap(child: &mut std::process::Child, running: &Mutex<Vec<u32>>, exited: bool) -> bool {
+    let pid = child.id();
+    let mut listed = running.lock().unwrap();
+    listed.retain(|&p| p != pid);
+    if exited {
+        return child.wait().is_ok_and(|s| s.success());
+    }
+    drop(listed);
+    child.wait().is_ok_and(|s| s.success())
+}
+
+impl Drop for TmuxWaiters {
     fn drop(&mut self) {
+        // a waiter listed isn't reaped while the lock is held, so its pid
+        // is still ours
         for &pid in self.running.lock().unwrap().iter() {
-            // SAFETY: a plain syscall, to a waiter of ours: one listed
-            // isn't reaped while the lock is held.
+            // SAFETY: a plain syscall, to a waiter of ours.
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
     }
@@ -516,5 +551,49 @@ mod tests {
         };
         run(&mut fake);
         assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    #[test]
+    fn waiting_for_a_waiter_to_exit_tries_again_when_interrupted_and_gives_up_on_an_error() {
+        let mut tries = 0;
+        let exited = exited_unreaped(|| {
+            tries += 1;
+            if tries < 3 {
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(exited);
+        assert_eq!(tries, 3);
+        let exited = exited_unreaped(|| Err(std::io::Error::from_raw_os_error(libc::ECHILD)));
+        assert!(!exited);
+    }
+
+    #[test]
+    fn a_waiter_not_known_to_have_exited_is_released_before_its_reaped_off_the_lock() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0.3")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let running = Arc::new(Mutex::new(vec![pid, 1]));
+        let theirs = Arc::clone(&running);
+        let reaping = std::thread::spawn(move || reap(&mut child, &theirs, false));
+        std::thread::sleep(Duration::from_millis(100));
+        // it waits for its waiter without the lock, no longer listed
+        let listed = running.try_lock().expect("reap holds the lock").clone();
+        assert_eq!(listed, [1]);
+        assert!(reaping.join().unwrap(), "sleep exits 0");
+    }
+
+    #[test]
+    fn a_waiter_known_to_have_exited_is_reaped_and_unlisted() {
+        let mut child = std::process::Command::new("false").spawn().unwrap();
+        let pid = child.id();
+        let running = Mutex::new(vec![pid]);
+        assert!(exited_unreaped(|| wait_unreaped(pid)));
+        assert!(!reap(&mut child, &running, true));
+        assert!(running.lock().unwrap().is_empty());
     }
 }
