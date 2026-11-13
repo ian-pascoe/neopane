@@ -328,7 +328,7 @@ pub(crate) fn decode_token(t: usize) -> DecodedToken {
 /// The command a requested pane's terminal runs: `{attach}`, with the pane
 /// id minted for it, and `--transport relay` under the relay diagnostic.
 pub(crate) fn attach_words(
-    exe: &str,
+    exe: &std::path::Path,
     address: &Address,
     transport: Transport,
     pane: &Pane,
@@ -792,7 +792,7 @@ mod tests {
             ..Pane::blank(4)
         };
         let address = Address::from_arg("/run/d/sock".into());
-        let words = |t| attach_words("/bin/x", &address, t, &pane).join(" ");
+        let words = |t| attach_words(std::path::Path::new("/bin/x"), &address, t, &pane).join(" ");
         let fd = "/bin/x attach --address /run/d/sock --pane 4-abcdefghij";
         assert_eq!(fd, words(Transport::Fd));
         assert_eq!(format!("{fd} --transport relay"), words(Transport::Relay));

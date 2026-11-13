@@ -201,7 +201,10 @@ pub(super) fn run(choice: &Choice, attach: &Attach, tty: &Tty) -> Find {
     };
     let pane = PaneId::unnumbered();
     let title = crate::daemon::pane::title(&pane);
-    let mut provider = match CommandProvider::new(spec, &attach.env, &attach.cwd) {
+    // `{exe}`: this binary, as the daemon's own would be; unknown, a
+    // command naming it can't start
+    let exe = std::env::current_exe().and_then(|e| e.canonicalize()).ok();
+    let mut provider = match CommandProvider::new(spec, &attach.env, &attach.cwd, exe.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             return Find::Ran {

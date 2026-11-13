@@ -133,7 +133,7 @@ impl Rig {
             event_loop,
             NvimSession::new(nvim),
             provider,
-            String::new(),
+            std::path::PathBuf::new(),
             crate::daemon::dir::Address::from_arg(sock.clone().into()),
         );
         let (mut term, slave) = Term::open();

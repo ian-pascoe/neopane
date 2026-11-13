@@ -76,8 +76,15 @@ pub(crate) fn default_choice(env: &Env) -> Choice {
 
 /// Chooses with the built-in default for a self-attach with environment
 /// `env`, working directory `cwd` and `hint`, connecting to Rex through
-/// `connect` if that's the choice.
-pub(crate) fn choose(env: &Env, cwd: &[u8], hint: Option<&str>, connect: &mut Connect) -> Chosen {
+/// `connect` if that's the choice; a table's `{exe}` is `exe`, the
+/// daemon's own binary.
+pub(crate) fn choose(
+    env: &Env,
+    cwd: &[u8],
+    hint: Option<&str>,
+    exe: &Path,
+    connect: &mut Connect,
+) -> Chosen {
     if hint == Some(HINT_NONE) {
         return Chosen::None {
             why: format!("the hint is {HINT_NONE}"),
@@ -91,7 +98,7 @@ pub(crate) fn choose(env: &Env, cwd: &[u8], hint: Option<&str>, connect: &mut Co
                 .into(),
             warn: false,
         },
-        choice => of_choice(&choice, env, cwd, connect),
+        choice => of_choice(&choice, env, cwd, exe, connect),
     }
 }
 
@@ -269,11 +276,13 @@ impl Drop for ConfigRun {
 /// hello is `hello`, connecting to Rex through `connect` if that's the
 /// choice; and the Neovim warning its problems make, if any
 /// (#93 decision 20). Any error means none, never the default. What it
-/// printed and its problems go to the log.
+/// printed and its problems go to the log. A table's `{exe}` is `exe`, the
+/// daemon's own binary.
 pub(crate) fn by_config(
     outcome: &config::Outcome,
     file: &Path,
     hello: &AttachHello,
+    exe: &Path,
     connect: &mut Connect,
 ) -> (Chosen, Option<String>) {
     let file_name = file
@@ -293,7 +302,7 @@ pub(crate) fn by_config(
         Ok(chosen) => {
             log_problems(&chosen.warnings);
             let warning = chosen.warnings.message();
-            let chosen = of_choice(&chosen.choice, &hello.env, &hello.cwd, connect);
+            let chosen = of_choice(&chosen.choice, &hello.env, &hello.cwd, exe, connect);
             (chosen, warning)
         }
     }
@@ -310,8 +319,8 @@ fn log_problems(problems: &Problems) {
 }
 
 /// The pane provider for `choice`, for the choosing attach, whose
-/// environment is `env` and working directory `cwd`.
-fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], connect: &mut Connect) -> Chosen {
+/// environment is `env` and working directory `cwd`, `{exe}` being `exe`.
+fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], exe: &Path, connect: &mut Connect) -> Chosen {
     let started = Instant::now();
     match choice {
         Choice::None => Chosen::None {
@@ -322,7 +331,7 @@ fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], connect: &mut Connect) -> C
         Choice::Whole(_) | Choice::Pair(_) => {
             let spec = Spec::of(choice).expect("a table or a pair has a spec");
             let name = spec.name.clone();
-            match CommandProvider::new(spec, env, cwd) {
+            match CommandProvider::new(spec, env, cwd, Some(exe)) {
                 Ok(p) => Chosen::Provider {
                     held: Box::new(p),
                     spent: started.elapsed(),
@@ -382,6 +391,10 @@ mod tests {
             Choice::None,
             default_choice(&env(&[("TERM_PROGRAM", "tmux"), ("TMUX", "")]))
         );
+    }
+
+    fn exe() -> &'static Path {
+        Path::new("/opt/np/bin/np")
     }
 
     fn connects_nowhere() -> Connect {
@@ -496,9 +509,21 @@ mod tests {
     #[test]
     fn the_hint_none_or_no_rex_chooses_none_quietly() {
         let in_rex = env(&[("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")]);
-        let (_, warn) = none(choose(&in_rex, b"/", Some("none"), &mut connects_nowhere()));
+        let (_, warn) = none(choose(
+            &in_rex,
+            b"/",
+            Some("none"),
+            exe(),
+            &mut connects_nowhere(),
+        ));
         assert!(!warn);
-        let (_, warn) = none(choose(&env(&[]), b"/", None, &mut connects_nowhere()));
+        let (_, warn) = none(choose(
+            &env(&[]),
+            b"/",
+            None,
+            exe(),
+            &mut connects_nowhere(),
+        ));
         assert!(!warn);
     }
 
@@ -507,7 +532,7 @@ mod tests {
         // stale REX_*: a Ghostty window started from a Rex shell, Rex since quit
         let stale = env(&[("REX_SERVER", "unix:///gone"), ("REX_SESSION", "session:s")]);
         let mut refused: Connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
-        let (why, warn) = none(choose(&stale, b"/", None, &mut refused));
+        let (why, warn) = none(choose(&stale, b"/", None, exe(), &mut refused));
         assert!(warn);
         assert!(why.starts_with("rex: can't reach Rex: "), "{why}");
     }
@@ -521,7 +546,8 @@ mod tests {
             assert_eq!("unix:///s", url);
             Ok(ours.take().unwrap())
         });
-        let Chosen::Provider { held, spent } = choose(&in_rex, b"/", Some("tmux"), &mut connect)
+        let Chosen::Provider { held, spent } =
+            choose(&in_rex, b"/", Some("tmux"), exe(), &mut connect)
         else {
             panic!("chose none");
         };

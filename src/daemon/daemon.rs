@@ -66,7 +66,7 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub(crate) struct Daemon {
     /// Our executable and the helpers' socket, for new panes' command.
-    pub exe: String,
+    pub exe: std::path::PathBuf,
     pub sock: super::dir::Address,
     /// How requested panes' helpers attach: `<NAME>_TRANSPORT` as the
     /// daemon started (ADR 0013).
@@ -375,7 +375,7 @@ impl Daemon {
         event_loop: Loop,
         nvim: NvimSession,
         provider: Option<Box<dyn PaneProvider>>,
-        exe: String,
+        exe: std::path::PathBuf,
         sock: super::dir::Address,
     ) -> Daemon {
         Daemon {
@@ -1117,7 +1117,7 @@ impl Daemon {
         }
         log_info!(
             "{NAME} daemon: {} changed: new windows get terminals again",
-            self.exe
+            self.exe.display()
         );
         self.version_refused = None;
         true
@@ -3362,7 +3362,7 @@ mod tests {
             Loop::init().unwrap(),
             NvimSession::new(for_test_on(nvim_ours)),
             provider,
-            String::new(),
+            std::path::PathBuf::new(),
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
         Fixture { d, nvim_end }
@@ -6150,7 +6150,7 @@ mod tests {
         };
         let path = std::env::var_os("PATH").unwrap_or_default();
         let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];
-        let p = CommandProvider::new(spec, &env, b"/").unwrap();
+        let p = CommandProvider::new(spec, &env, b"/", None).unwrap();
         let mut fx = with_provider(Some(Box::new(p)));
         let fd = fx.d.provider.as_ref().and_then(|p| p.fd()).unwrap();
         fx.d.event_loop

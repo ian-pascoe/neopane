@@ -31,7 +31,7 @@ fn fixture_config(file: &Path, named: bool) -> Option<Fixture> {
     let exe = child_exe()?;
     let mut fx = with_provider(None);
     fx.d.nvim.ready = true;
-    fx.d.exe = exe;
+    fx.d.exe = exe.into();
     fx.d.name = "work".into();
     fx.d.config_file = Some(ConfigFile {
         path: file.to_path_buf(),

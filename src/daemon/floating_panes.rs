@@ -25,7 +25,7 @@ use super::nvim_session::NvimSession;
 
 pub(crate) struct FloatingPanes<'a> {
     /// Our executable and the helpers' socket, for new panes' command.
-    pub exe: &'a str,
+    pub exe: &'a std::path::Path,
     pub sock: &'a Address,
     pub transport: Transport,
     pub grids: &'a Grids,

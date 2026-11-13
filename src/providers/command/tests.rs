@@ -31,8 +31,11 @@ fn runner(
         .iter()
         .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
         .collect();
-    CommandProvider::new(spec, &env, cwd.as_bytes()).unwrap()
+    CommandProvider::new(spec, &env, cwd.as_bytes(), Some(Path::new(EXE))).unwrap()
 }
+
+/// The daemon's own binary, as the runners here are given it.
+const EXE: &str = "/opt/np/bin/np";
 
 /// A runner whose `open` runs `script` under `sh -c`, its other words after.
 fn opening(script: &str, words: &[&str]) -> CommandProvider {
@@ -100,6 +103,26 @@ fn terminal(id: &str) -> Outcome {
 
 /// A script that prints its arguments, each in brackets, as its id.
 const ARGS: &str = r#"printf '[%s]' "$@"; echo"#;
+
+#[test]
+fn exe_is_the_daemons_binary_and_without_it_a_command_naming_it_cant_start() {
+    let mut p = opening(ARGS, &["{exe}"]);
+    assert_eq!(
+        terminal(&format!("[{EXE}]")),
+        outcome(&mut p, open(&["np"]))
+    );
+    let spec = Spec {
+        commands: vec![CapCommand {
+            cap: Capability::Close,
+            argv: vec![b"{exe}".to_vec(), b"x".to_vec()],
+            timeout: Duration::from_secs(2),
+            protocol: 1,
+        }],
+        ..Spec::named("test")
+    };
+    let mut p = CommandProvider::new(spec, &[], b"/", None).unwrap();
+    assert_eq!(Outcome::Unsupported, outcome(&mut p, close()));
+}
 
 #[test]
 fn placeholders_replace_whole_words_only() {
@@ -609,7 +632,7 @@ fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Ce
         ..Spec::named("test")
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
-    let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
+    let p = CommandProvider::with_clock(spec, &env, b"/", None, clock).unwrap();
     (p, now)
 }
 
@@ -831,7 +854,7 @@ fn a_runner_has_its_specs_attach_timeout() {
         attach_timeout: Duration::from_secs(9),
         ..Spec::named("test")
     };
-    let p = CommandProvider::new(spec, &[], b"/").unwrap();
+    let p = CommandProvider::new(spec, &[], b"/", None).unwrap();
     assert_eq!(Duration::from_secs(9), p.attach_timeout());
 }
 
@@ -963,7 +986,7 @@ fn a_runner_names_its_specs_context_and_find_variables() {
         pair: true,
         ..Spec::named("test")
     };
-    let p = CommandProvider::new(spec, &[], b"/").unwrap();
+    let p = CommandProvider::new(spec, &[], b"/", None).unwrap();
     assert_eq!(vec!["TMUX"], p.context_vars());
     assert_eq!(vec!["TMUX_PANE"], p.find_vars());
     assert!(p.is_pair());

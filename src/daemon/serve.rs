@@ -26,7 +26,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -598,10 +598,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let log = dir.log();
     // resolved, symlinks and all: the `npane` link shouldn't end up in every
     // pane's command
-    let exe = std::env::current_exe()?
-        .canonicalize()?
-        .to_string_lossy()
-        .into_owned();
+    let exe = std::env::current_exe()?.canonicalize()?;
 
     // open until we exit: every new pane's helper connects here
     let server = dir.bind()?;
@@ -633,7 +630,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
         Some(h) => match choose::choose_by(config_file.as_ref(), h.hint.as_deref()) {
             ChooseBy::Config(file) => {
-                match ConfigRun::start(Path::new(&exe), file, h.for_config(&name)) {
+                match ConfigRun::start(&exe, file, h.for_config(&name)) {
                     Ok(run) => config_run = Some(run),
                     // tried again, and warned of, at `start`
                     Err(e) => log_warn!("{NAME} daemon: config: can't run {}: {e}", file.display()),
@@ -646,6 +643,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
                 &h.env,
                 &h.cwd,
                 h.hint.as_deref(),
+                &exe,
                 &mut choose::connect(),
             )),
         },
@@ -729,7 +727,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     nvim_args: &[S],
     config: Config<'_>,
     server: &UnixListener,
-    exe: String,
+    exe: std::path::PathBuf,
     first: &mut Option<SelfAttach>,
     choice: FirstChoice,
 ) -> Result<(NvimChild, Daemon)> {

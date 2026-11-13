@@ -303,7 +303,7 @@ Each is `<NAME>_` and the name below.
 |---|---|---|
 | `CAPABILITY` | e.g. `open_beside` | the running capability |
 | `PROTOCOL` | integer | the table's agreed number |
-| `EXE` | path | the absolute path of the daemon's own binary, symlinks resolved: what a [built-in command](#built-in-commands) runs |
+| `EXE` | path | the absolute path of the daemon's own binary, symlinks resolved, as it was when the daemon started: what a [built-in command](#built-in-commands) runs. Where it can't be found, a command naming `{exe}` can't start |
 | `ATTACH` | one string | the attach words joined by spaces, each in single quotes unless it holds only `[A-Za-z0-9_@%+=:,./-]`; `eval "set -- $<NAME>_ATTACH"` gets them back |
 | `ATTACH_JSON` | compact JSON array | the same words |
 | `TITLE` | e.g. `<name>-k3j9x2qpa8` | the pane title |

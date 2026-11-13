@@ -446,7 +446,7 @@ impl Daemon {
             self.version_refused = Some(VersionRefused::of(&self.exe));
             line += &format!(
                 "; new windows are drawn in their origin panes until {} changes",
-                self.exe
+                self.exe.display()
             );
         }
         if quiet {
