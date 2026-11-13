@@ -373,6 +373,16 @@ impl Pane {
         }
     }
 
+    /// Whether its terminal is on its way: the daemon asked for it, and its
+    /// open is neither answered nor given up.
+    pub(crate) fn terminal_on_its_way(&self) -> bool {
+        !self.self_attached
+            && self.layer.is_none()
+            && self.terminal.is_none()
+            && !self.open_answered
+            && self.closing.is_none()
+    }
+
     /// Whether it holds window `win`: shows it, alone or among others, or
     /// holds it in another tab page's layout.
     pub(crate) fn holds(&self, win: NeovimWindowHandle) -> bool {

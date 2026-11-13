@@ -292,8 +292,10 @@ fn a_window_opened_unentered_is_drawn_in_its_origin_pane_unless_focus_can_be_giv
 fn two_splits_in_one_flush_each_open_a_terminal_though_the_current_ones_id_is_on_its_way() {
     let mut fx = focusing();
     let (origin, _live) = split_off_origin(&mut fx, 1002);
-    // `:vsplit | vsplit`: the second is current, and neither has a pane
-    split_from(&mut fx, 1003, 1002);
+    // two splits of the first, as `:split | wincmd p | split`: the second
+    // is current, and neither has a pane. A split of the first split would
+    // wait for its terminal (SPI-1157).
+    split_from(&mut fx, 1003, 1000);
     fx.d.reconcile().unwrap();
     let [a, b] = [1002, 1003].map(|w| fx.d.panes.by_win(w).unwrap().id);
     assert!(a != origin && b != origin && a != b);
