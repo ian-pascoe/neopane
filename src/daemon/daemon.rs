@@ -1028,7 +1028,8 @@ impl Daemon {
                     // beside that once it's made, or ask for its own if the
                     // open failed. Split off a window of its tab page with
                     // no pane yet, made in the same flush: that one opens it.
-                    if self.tab_floating_pane_pending(sp.tab) || self.origin_awaits_pane(sp) {
+                    if self.tab_floating_pane_pending(sp.tab) || self.split_origin_awaiting_pane(sp)
+                    {
                         return Ok(());
                     }
                     let from = self.split_from(sp).and_then(|f| f.terminal.clone());
@@ -1268,12 +1269,12 @@ impl Daemon {
         self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none() && !q.is_self_attached())
     }
 
-    /// Whether the window a tab page's window was split off as `sp` is one of
-    /// that tab page's, drawn and waiting for its pane, as `:tabnew | vsplit`
-    /// leaves the tab page's first window.
-    fn origin_awaits_pane(&self, sp: windows::Split) -> bool {
+    /// Whether a window split off as `sp` waits for the window it was split
+    /// off: a drawn window of the same tab page that has no pane yet. That
+    /// one opens the tab page area, as after `:tabnew | vsplit`.
+    fn split_origin_awaiting_pane(&self, sp: windows::Split) -> bool {
         sp.from != 0
-            && self.panes.by_win(sp.from).is_none()
+            && self.split_origin(sp).is_none()
             && self.grids.grid_of(sp.from).is_some()
             && self.changes.split_of(sp.from).tab == sp.tab
     }
@@ -2009,12 +2010,15 @@ impl Daemon {
 
     /// The pane a new window splits: its origin's, else the focused one.
     fn split_from(&self, sp: windows::Split) -> Option<&Pane> {
-        if sp.from != 0
-            && let Some(p) = self.panes.by_win(sp.from)
-        {
-            return Some(p);
+        self.split_origin(sp).or_else(|| self.current_pane())
+    }
+
+    /// The pane of the window a window was split off as `sp`, if it has one.
+    fn split_origin(&self, sp: windows::Split) -> Option<&Pane> {
+        if sp.from == 0 {
+            return None;
         }
-        self.current_pane()
+        self.panes.by_win(sp.from)
     }
 
     // The pane provider

@@ -124,8 +124,8 @@ pub(crate) struct Pane {
     /// hasn't laid out yet: its window keeps the guessed size until the first
     /// size message, a second, or the pane provider is dropped.
     pub awaiting_size: bool,
-    /// The size its terminal was asked to open at, cols x rows: what a split
-    /// of it guesses from until its terminal attaches.
+    /// The size its terminal was asked to open at, cols x rows. A guess, not
+    /// its size: the pane provider may have opened it at another.
     pub opened_size: Option<[u32; 2]>,
     /// Opened by `open`, for want of `open_beside`: where it is placed, with
     /// `place_beside`, once it has its terminal id and its terminal has
@@ -364,6 +364,15 @@ fn ending_message(ending: Ending) -> &'static str {
 }
 
 impl Pane {
+    /// Its size, cols x rows, as best known: its terminal's once attached,
+    /// else the size it was asked to open at.
+    pub(crate) fn known_size(&self) -> Option<[u32; 2]> {
+        match &self.terminal_surface {
+            Some(s) => Some([s.view.cols, s.view.rows]),
+            None => self.opened_size,
+        }
+    }
+
     /// Whether it holds window `win`: shows it, alone or among others, or
     /// holds it in another tab page's layout.
     pub(crate) fn holds(&self, win: NeovimWindowHandle) -> bool {

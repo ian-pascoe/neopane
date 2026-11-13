@@ -43,13 +43,8 @@ impl Geometry<'_> {
         if first_of_tab {
             return self.screen_size();
         }
-        let Some(p) = from else {
+        let Some([cols, rows]) = from.and_then(Pane::known_size) else {
             return GUESS_SIZE;
-        };
-        let [cols, rows] = match (&p.terminal_surface, p.opened_size) {
-            (Some(s), _) => [s.view.cols, s.view.rows],
-            (None, Some(size)) => size,
-            (None, None) => return GUESS_SIZE,
         };
         let (cols, rows) = (cols.max(1), rows.max(2));
         if sp.side_by_side {

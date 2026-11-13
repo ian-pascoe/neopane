@@ -239,12 +239,15 @@ fn ctrl_w_capital_t_moves_a_window_to_a_new_tab_page_and_refuses_a_tab_pages_onl
     );
 }
 
-/// `:tabnew | vsplit` in one flush: the tab page's first window opens its
-/// tab page area, and the split opens beside it as Neovim put it, as when
-/// they are made one at a time. Not the other way round, which opens the
-/// first window below the split at Neovim's full width, there for good
-/// without `place_beside`. Nor does the split open at that width beside an
-/// area whose terminal hasn't attached, leaving the first window none.
+/// `:tabnew | vsplit` in one flush. The tab page's first window opens the
+/// tab page area. The split opens beside it, where Neovim put it, as when
+/// the two are made one at a time.
+///
+/// The other way round, the first window opened below the split at
+/// Neovim's full width. Without `place_beside` it stayed there.
+///
+/// The split opens before the area's terminal attaches. It opens at half
+/// the size the area was asked to open at, not at Neovim's full width.
 #[test]
 fn a_split_made_in_the_same_flush_as_its_tab_page_opens_beside_its_first_window() {
     let Some((mut rig, _)) = tabs("tp-flush", 1, FakeProvider::opening()) else {
