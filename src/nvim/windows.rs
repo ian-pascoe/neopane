@@ -4483,6 +4483,41 @@ mod tests {
     }
 
     #[test]
+    fn a_window_nvim_open_win_splits_off_is_its_origins_though_the_previous_window_isnt() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        h.sync(&adopt_all());
+        let first = h.current();
+        h.sync(&format!(
+            "vim.cmd('tab sb ' .. vim.api.nvim_create_buf(false, true))\n{}",
+            adopt_all()
+        ));
+        let status = h.current();
+        let tab: i64 = h
+            .eval_str("return tostring(vim.api.nvim_get_current_tabpage())")
+            .parse()
+            .unwrap();
+        // `#` left on the first tab page's window, which external windows
+        // bring along, as Neogit's status leaves it
+        h.sync(&format!(
+            "vim.cmd('noautocmd call win_gotoid({first})')\n\
+             vim.cmd('noautocmd call win_gotoid({status})')\n\
+             assert(vim.fn.win_getid(vim.fn.winnr('#')) == {first})"
+        ));
+
+        // as Neogit opens its commit view
+        h.sync(
+            "vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, \
+             { split = 'right', vertical = true })",
+        );
+        let win = h.current();
+        assert!(h.until(|x| x.split_note(win).is_some()));
+        let split = h.split_note(win).unwrap();
+        assert_eq!((status, tab), (split.from, split.tab));
+    }
+
+    #[test]
     fn an_idle_floating_tab_page_doesnt_keep_neovim_busy() {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;
