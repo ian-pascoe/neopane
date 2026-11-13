@@ -12,6 +12,7 @@
 use super::asks;
 use super::dir::Address;
 use super::event_loop::Loop;
+use super::float_homes::FloatHomes;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::provider::{Ask, TerminalId};
@@ -31,6 +32,8 @@ pub(crate) struct FloatingPanes<'a> {
     pub panes: &'a mut Panes,
     pub event_loop: &'a Loop,
     pub nvim: &'a mut NvimSession,
+    /// Where the groups with no float group pane are drawn.
+    pub homes: &'a mut FloatHomes,
 }
 
 impl FloatingPanes<'_> {
@@ -61,18 +64,18 @@ impl FloatingPanes<'_> {
     /// those whose group closed hang up. A float group pane's size is the pane provider's:
     /// it's never moved to follow its floats, they follow it. Float group
     /// panes are only made if the pane provider can `open_float`, from
-    /// `origin`, the current pane's terminal. What to ask for, it returns.
+    /// `origin`, the current pane's terminal, for the top-most `MAX_GROUPS`
+    /// groups; a group ranked out loses its float group pane. A group that
+    /// met no `open_float` is drawn in a pane for life. While the screen is `shrunk` to the current pane, its
+    /// bounds are the screen's. What to ask for, it returns.
     pub(crate) fn reconcile_layers(
         &mut self,
         open_float: bool,
         origin: Option<TerminalId>,
+        shrunk: bool,
     ) -> Vec<Ask> {
         let mut out = Vec::new();
-        let groups = if open_float {
-            float_groups::find(self.grids, self.nvim.entered_floats())
-        } else {
-            Vec::new()
-        };
+        let groups = float_groups::find(self.grids, self.nvim.entered_floats());
         let mut i = self.panes.list.len();
         while i > 0 {
             i -= 1;
@@ -98,9 +101,56 @@ impl FloatingPanes<'_> {
             }
             self.panes.remove(i, self.event_loop);
         }
-        for g in groups {
+        self.homes.forget_closed(self.grids);
+        if !open_float {
+            // drawn in a pane for life: none to ask for, now or later
+            for g in &groups {
+                if self.panes.by_layer_key(g.key).is_none() {
+                    self.homes.keep_in_pane(g.key);
+                }
+            }
+            return out;
+        }
+        // the top-most groups that may have one, but for room kept by those
+        // hidden in another tab page
+        let hidden = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| p.layer_hides())
+            .filter(|p| float_groups::hidden(self.grids, &p.layer.as_ref().unwrap().group))
+            .count();
+        let top: Vec<Group> = groups
+            .iter()
+            .rev()
+            .filter(|g| !self.in_pane_for_life(g.key))
+            .take(float_groups::MAX_GROUPS.saturating_sub(hidden))
+            .copied()
+            .collect();
+        // a group ranked out by a higher one loses its float group pane, and
+        // is drawn in a pane until it ranks among the top-most again
+        let mut i = self.panes.list.len();
+        while i > 0 {
+            i -= 1;
+            let p = &mut self.panes.list[i];
+            let Some(l) = &p.layer else {
+                continue;
+            };
+            if !p.layer_hides()
+                || top.iter().any(|g| g.key == l.group.key)
+                || float_groups::hidden(self.grids, &l.group)
+            {
+                continue;
+            }
+            if let Some(t) = p.terminal.clone() {
+                out.push(asks::close(t));
+            }
+            p.closing = Some(Close::WindowClosed);
+            self.panes.remove(i, self.event_loop);
+        }
+        for g in top {
             if self.panes.by_layer_key(g.key).is_none()
-                && let Some(ask) = self.new_layer(g, origin.as_ref())
+                && let Some(ask) = self.new_layer(g, origin.as_ref(), shrunk)
             {
                 out.push(ask);
             }
@@ -108,11 +158,23 @@ impl FloatingPanes<'_> {
         out
     }
 
+    /// Whether group `key` is drawn in a pane for life: its `open_float`
+    /// failed, timed out or was unsupported, or there was none to ask.
+    fn in_pane_for_life(&self, key: i64) -> bool {
+        self.homes.in_pane_for_life(key)
+            || self
+                .panes
+                .by_layer_key(key)
+                .is_some_and(|p| p.closing.is_some())
+    }
+
     /// A float group pane for `g`, and its `open_float`; None while there's no
     /// screen or no `origin` to open it from.
-    fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>) -> Option<Ask> {
+    fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>, shrunk: bool) -> Option<Ask> {
         let origin = origin?.clone();
-        let b = group_bounds(self.grids, self.panes.by_terminal(origin.as_str()), &g)?;
+        // shrunk, the screen is the origin pane
+        let from = self.panes.by_terminal(origin.as_str()).filter(|_| !shrunk);
+        let b = group_bounds(self.grids, from, &g)?;
         let pane = self.panes.add_for_group(g);
         let id = pane.attach_id.expect("a requested pane");
         let attach = pane::attach_words(self.exe, self.sock, self.transport, pane);

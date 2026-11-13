@@ -16,6 +16,27 @@ use crate::nvim::windows;
 /// How many float windows that have been current are remembered.
 const MAX_ENTERED: usize = 32;
 
+/// Whether Neovim's screen is shrunk to the current pane, to fit a float
+/// group with no float group pane that is too big for it (ADR 0010).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Shrink {
+    /// The screen is the current pane's layout area's size.
+    #[default]
+    No,
+    /// Float `win` became current from a window: whether its group shrinks
+    /// the screen is decided once, when the group is drawn.
+    Deciding(i64),
+    /// The screen is the current pane's own size, for the group of float
+    /// `win`, while a float is current.
+    Shrunk(i64),
+}
+
+impl Shrink {
+    pub(crate) fn is_shrunk(self) -> bool {
+        matches!(self, Shrink::Shrunk(_))
+    }
+}
+
 pub(crate) struct NvimSession {
     pub client: Nvim,
     /// Neovim's current window, as the Lua last said; 0 before setup.
@@ -34,6 +55,8 @@ pub(crate) struct NvimSession {
     pub current_float: i64,
     /// The editor size last asked for.
     pub editor_size: [u32; 2],
+    /// Whether the screen is shrunk to fit a float group.
+    pub shrink: Shrink,
     /// The tabline width Neovim was last told (see `Geometry::tabline_width`);
     /// None, as it starts, while the tabline hides nothing.
     pub tabline_width: Option<u32>,
@@ -68,6 +91,7 @@ impl NvimSession {
             ui_focused: true,
             current_float: 0,
             editor_size: [0, 0],
+            shrink: Shrink::No,
             tabline_width: None,
             entered_floats: [0; MAX_ENTERED],
             entered_len: 0,
@@ -247,7 +271,8 @@ impl NvimSession {
     }
 
     /// Sizes Neovim's screen to current pane `p`'s layout area, in `p`'s
-    /// cells (ADR 0008), so screen floats such as pickers can span it; only
+    /// cells (ADR 0008), so screen floats such as pickers can span it, or
+    /// while it's `Shrunk`, to `p` alone (ADR 0010); only
     /// when that size changes, and not while `p` is in no layout area. The
     /// command line and messages show in `p`. Not before setup: the first
     /// window still fills the screen, and growing the screen to the layout
@@ -258,7 +283,14 @@ impl NvimSession {
             return Ok(());
         }
         // while it's in no layout area, the screen keeps its size
-        let Some(size) = super::geometry::area_size(p) else {
+        let size = match self.shrink {
+            Shrink::Shrunk(_) => p
+                .terminal_surface
+                .as_ref()
+                .map(|s| [s.view.cols, s.view.rows]),
+            _ => super::geometry::area_size(p),
+        };
+        let Some(size) = size else {
             return Ok(());
         };
         if size == self.editor_size {

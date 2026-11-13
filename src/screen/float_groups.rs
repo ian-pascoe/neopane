@@ -1,25 +1,27 @@
-//! Floats to show in a Rex floating pane. A group is an editor
-//! float with every float hanging from it, as a picker builds its box,
-//! input, list and preview; focusable groups that touch, as Telescope's
-//! do, are one. It goes native once something in it has taken focus:
-//! being focusable isn't enough, since completion menus are and are never
-//! entered. Those stay drawn in their pane, beside what they complete.
+//! Float groups. A group is a screen float with every float hanging from
+//! it, as a picker builds its box, input, list and preview; focusable groups
+//! that touch, as Telescope's do, are one. It may get a float group pane
+//! once something in it has taken focus: being focusable isn't enough,
+//! since completion menus are and are never entered. Those stay drawn in
+//! their pane, beside what they complete.
 
 use super::grids::{Grids, MAX_FLOATS, Placed, WinKind, keep_top_floats};
 
+/// The most float group panes at once (ADR 0010): groups past it are drawn
+/// in a pane.
 pub(crate) const MAX_GROUPS: usize = 4;
 const MAX_TOPS: usize = MAX_FLOATS;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Group {
-    /// The editor floats in it, by grid.
+    /// The screen floats in it, by grid.
     pub tops: [u32; MAX_TOPS],
     /// Each top's (zindex, compindex), alongside `tops`.
     pub tops_z: [(u32, u32); MAX_TOPS],
     pub tops_len: u8,
     /// Names the group while it's open: its lowest window handle.
     pub key: i64,
-    /// The z, (zindex, compindex), of the group's highest editor float: what
+    /// The z, (zindex, compindex), of the group's highest screen float: what
     /// groups are ranked by.
     pub z: (u32, u32),
     /// Where it sits on grid 1.
@@ -63,7 +65,7 @@ impl Group {
         self.entered = self.entered || b.entered;
         self.key = self.key.min(b.key);
         self.z = self.z.max(b.z);
-        // keep the top-most editor floats, lowest first
+        // keep the top-most screen floats, lowest first
         let mut all: Vec<((u32, u32), u32)> = Vec::new();
         for g in [&*self, &b] {
             for i in 0..g.tops_len as usize {
@@ -106,12 +108,12 @@ impl Group {
     }
 }
 
-/// The groups to show natively: those with a float in `entered`, the
-/// float windows that have been current. At most `MAX_GROUPS`: past that the
-/// top-most groups (by their highest float) stay. Lowest first, ties in grid order.
+/// The entered groups: those with a float in `entered`, the float windows
+/// that have been current. Lowest first (by their highest float), ties in
+/// grid order.
 pub(crate) fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     let mut all: Vec<Group> = Vec::new();
-    // each editor float, with the floats hanging from it
+    // each screen float, with the floats hanging from it
     for (&id, w) in &grids.wins {
         if w.kind != WinKind::Float || w.win < 0 {
             continue;
@@ -171,9 +173,35 @@ pub(crate) fn find(grids: &Grids, entered: &[i64]) -> Vec<Group> {
     }
     all.retain(|g| g.entered);
     all.sort_by_key(|g| g.z);
-    let extra = all.len().saturating_sub(MAX_GROUPS);
-    all.drain(..extra);
     all
+}
+
+/// The entered group (`entered` as for `find`) float window `win` is in,
+/// if any.
+pub(crate) fn group_of_win(grids: &Grids, entered: &[i64], win: i64) -> Option<Group> {
+    find(grids, entered)
+        .into_iter()
+        .find(|g| has_win(grids, g, win))
+}
+
+/// Whether float window `win` is in group `g`: its screen float, or one
+/// hanging from it.
+pub(crate) fn has_win(grids: &Grids, g: &Group, win: i64) -> bool {
+    let Some(grid) = grids.grid_of(win) else {
+        return false;
+    };
+    grids
+        .place(grid)
+        .is_some_and(|p| p.top != 0 && g.has_top(p.top))
+}
+
+/// The windows of the floats in group `g`.
+pub(crate) fn wins(grids: &Grids, g: &Group) -> Vec<i64> {
+    members(grids, g)
+        .iter()
+        .filter_map(|m| grids.win_on(m.grid))
+        .map(|w| w.win)
+        .collect()
 }
 
 /// Whether group `g`'s screen floats are all hidden, in a tab page that
@@ -432,7 +460,7 @@ mod tests {
     #[test]
     fn past_the_cap_the_top_most_floats_are_kept() {
         let mut gs = Grids::default();
-        // 20 floats hanging from one editor float, the last made the top-most
+        // 20 floats hanging from one screen float, the last made the top-most
         add_float(
             &mut gs,
             3,
@@ -503,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn past_max_groups_the_top_most_entered_groups_stay_lowest_first() {
+    fn every_entered_group_is_found_lowest_first() {
         let mut gs = Grids::default();
         for i in 0..20u32 {
             add_float(
@@ -521,18 +549,17 @@ mod tests {
         }
         let entered: Vec<i64> = (1000..1020).collect();
         let groups = find(&gs, &entered);
-        let first = 3 + 20 - MAX_GROUPS as u32;
         let grids: Vec<u32> = groups.iter().map(|g| g.tops[0]).collect();
-        assert_eq!(
-            (first..first + MAX_GROUPS as u32).collect::<Vec<_>>(),
-            grids
-        );
+        assert_eq!((3..23).collect::<Vec<_>>(), grids);
+        assert!(has_win(&gs, &groups[2], 1002));
+        assert!(!has_win(&gs, &groups[2], 1003));
+        assert_eq!(vec![1002], wins(&gs, &groups[2]));
     }
 
     #[test]
     fn a_merged_group_past_the_cap_keeps_its_top_most_editor_floats() {
         let mut gs = Grids::default();
-        // 20 focusable editor floats in a row, each a cell from the next, the last top-most
+        // 20 focusable screen floats in a row, each a cell from the next, the last top-most
         for i in 0..20u32 {
             add_float(
                 &mut gs,

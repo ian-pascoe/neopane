@@ -1112,6 +1112,46 @@ end
 -- before anything is drawn
 api.nvim_create_autocmd('TabEnter', { group = group, callback = bring_carried })
 
+-- runs autocommand `a`, of `nvim_get_autocmds`, for buffer `buf`, as Neovim
+-- would; one that runs once, or whose callback returns true, is deleted
+local function run_autocmd(a, buf)
+  if a.once then pcall(api.nvim_del_autocmd, a.id) end
+  local ok, res = true, nil
+  if type(a.callback) == 'function' then
+    local ev = { id = a.id, event = a.event, group = a.group, match = '', buf = buf, file = '' }
+    ok, res = pcall(a.callback, ev)
+  elseif type(a.callback) == 'string' then
+    ok, res = pcall(vim.fn[a.callback])
+  elseif a.command and a.command ~= '' then
+    ok, res = pcall(vim.cmd, a.command)
+  end
+  if not ok then
+    api.nvim_echo({ { tostring(res), 'ErrorMsg' } }, true, {})
+  elseif res == true and type(a.callback) == 'function' then
+    pcall(api.nvim_del_autocmd, a.id)
+  end
+end
+
+--- Runs the buffer-local VimResized autocommands of each of floats `wins`
+--- again, with its window current: the screen grew back while another
+--- window was current, and pickers such as Telescope's listen only on their
+--- own buffers. Global ones, which Neovim ran, aren't.
+function M.resized_again(wins)
+  local done = {}
+  for _, win in ipairs(wins) do
+    local buf = api.nvim_win_is_valid(win) and api.nvim_win_get_buf(win)
+    if buf and not done[buf] then
+      done[buf] = true
+      local acs = api.nvim_get_autocmds({ event = 'VimResized', buffer = buf })
+      if #acs > 0 then
+        api.nvim_win_call(win, function()
+          for _, a in ipairs(acs) do run_autocmd(a, buf) end
+        end)
+      end
+    end
+  end
+end
+
 --- Makes `win` the current window, as when its pane is focused: its home
 --- tab page first, if that isn't current, as `gt` would go there, so
 --- TabLeave and TabEnter fire. A float stays where Neovim keeps it; one that
