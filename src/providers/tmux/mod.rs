@@ -11,8 +11,15 @@
 //!   origin, running the attach; `kill-pane`, done if already gone.
 //! - `open_float` (`float.rs`): `new-pane -d` over the origin's window,
 //!   its content on the float group; tmux 3.7 at least, else exit 69.
+//! - `open_tab_page` (`tab_page.rs`): `new-window -d` after the origin's
+//!   window: a tmux window is a tab page area.
+//! - `place_beside` and `resize` (`resize.rs`): `join-pane -d`, then one
+//!   `resize-pane` chosen from the window's layout tree
+//!   (`window_layout.rs`); exit 1 where none moves the border.
+//! - `focus` and `focus_direction` (`focus.rs`): `select-window` and
+//!   `select-pane`; steps that stop at the window's edge.
 //! - `report_layout` (`layout.rs`): one area per window of the server,
-//!   from `list-panes -a`.
+//!   from `list-panes -a`; a zoom's hidden panes in `@N~hidden`.
 //! - `events` (`events.rs`): a `wait-for -E` waiter per event, a line
 //!   after each burst, the focus with it when it moved; tmux 3.8 at
 //!   least, else exit 69. It runs until every waiter is gone.
@@ -30,10 +37,14 @@ pub(crate) mod check;
 mod events;
 mod find;
 mod float;
+mod focus;
 mod inside;
 mod layout;
 mod panes;
+mod resize;
 mod server;
+mod tab_page;
+mod window_layout;
 
 pub(crate) use inside::inside;
 
@@ -65,6 +76,11 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Close => finish(cap, panes::close(given).map(|()| None)),
         Capability::ReportLayout => finish(cap, layout::report_layout(given).map(Some)),
         Capability::Events => finish(cap, Err::<Option<String>, _>(events::events(given))),
+        Capability::Resize => finish(cap, resize::resize(given).map(|()| None)),
+        Capability::PlaceBeside => finish(cap, resize::place_beside(given).map(|()| None)),
+        Capability::Focus => finish(cap, focus::focus(given).map(|()| None)),
+        Capability::FocusDirection => finish(cap, focus::focus_direction(given).map(|()| None)),
+        Capability::OpenTabPage => finish(cap, tab_page::open_tab_page(given).map(Some)),
         _ => UNSUPPORTED,
     }
 }
@@ -90,5 +106,11 @@ fn finish(cap: Capability, done: Result<Option<String>, impl Into<Failure>>) -> 
 /// tmux's `-t`, could name a session or window, and printed, isn't a pane.
 fn is_pane_id(id: &[u8]) -> bool {
     id.strip_prefix(b"%")
+        .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+}
+
+/// Whether `id` is a tmux window id, `@` and digits.
+fn is_window_id(id: &[u8]) -> bool {
+    id.strip_prefix(b"@")
         .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
 }

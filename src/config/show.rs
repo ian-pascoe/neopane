@@ -205,13 +205,23 @@ mod tests {
                    name = \"tmux\",\n  \
                    close = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"close\" }},\n  \
                    find = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"find\" }},\n  \
+                   place_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"place_beside\" }},\n  \
+                   resize = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"resize\" }},\n  \
+                   focus = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"focus\" }},\n  \
+                   focus_direction = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"focus_direction\" }},\n  \
                    report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"report_layout\" }},\n  \
                    events = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"events\" }},\n  \
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"open_beside\" }},\n  \
                    open_float = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
-                 \"open_float\" }},\n\
+                 \"open_float\" }},\n  \
+                   open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"open_tab_page\" }},\n\
                  }}\n"
             )
         );

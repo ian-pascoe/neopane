@@ -374,6 +374,20 @@ impl TmuxServer {
         });
         TmuxClient { child, keys }
     }
+
+    /// [`attach`](Self::attach), once tmux lists the client.
+    pub fn attached(&self) -> TmuxClient {
+        let client = self.attach();
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.run(&["list-clients"]).is_empty() {
+            assert!(
+                std::time::Instant::now() < due,
+                "tmux attach never attached"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        client
+    }
 }
 
 /// A user's `tmux attach` in a pty, from [`TmuxServer::attach`].

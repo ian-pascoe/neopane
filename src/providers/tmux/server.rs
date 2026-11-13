@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::is_window_id;
 use crate::providers::builtin::Given;
 
 /// The oldest tmux the built-in works with: `list-panes -a` with
@@ -88,6 +89,22 @@ impl Server {
             .env_remove("TMUX_PANE")
             .stdin(Stdio::null());
         cmd
+    }
+
+    /// The id of pane `pane`'s window, or without one, of tmux's own
+    /// current window; or why there's none.
+    pub(super) fn window_of(&self, pane: Option<&str>) -> Result<String, String> {
+        let mut args = vec!["display-message", "-p"];
+        if let Some(pane) = pane {
+            args.extend(["-t", pane]);
+        }
+        args.push("#{window_id}");
+        let out = self.run(&args)?;
+        let window = String::from_utf8_lossy(&out).trim().to_string();
+        if !is_window_id(window.as_bytes()) {
+            return Err(format!("display-message printed {window:?}, not a window"));
+        }
+        Ok(window)
     }
 
     /// The installed tmux's version, as `tmux -V` prints it, such as

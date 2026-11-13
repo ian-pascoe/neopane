@@ -45,6 +45,11 @@ impl BuiltinTable {
                 Capability::OpenBeside,
                 Capability::OpenFloat,
                 Capability::Events,
+                Capability::PlaceBeside,
+                Capability::Resize,
+                Capability::Focus,
+                Capability::FocusDirection,
+                Capability::OpenTabPage,
             ],
         }
     }
@@ -159,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_runs_the_binary_for_find_close_report_layout_and_its_opens() {
+    fn tmux_runs_the_binary_for_every_capability_but_open_and_events() {
         let t = BuiltinTable::Tmux.table();
         let shown: Vec<(&str, String)> = t
             .capabilities
@@ -187,6 +192,20 @@ mod tests {
                     "{exe} provider builtin tmux open_float".to_string()
                 ),
                 ("events", "{exe} provider builtin tmux events".to_string()),
+                (
+                    "place_beside",
+                    "{exe} provider builtin tmux place_beside".to_string()
+                ),
+                ("resize", "{exe} provider builtin tmux resize".to_string()),
+                ("focus", "{exe} provider builtin tmux focus".to_string()),
+                (
+                    "focus_direction",
+                    "{exe} provider builtin tmux focus_direction".to_string()
+                ),
+                (
+                    "open_tab_page",
+                    "{exe} provider builtin tmux open_tab_page".to_string()
+                ),
             ]
         );
         assert!(t.settings.is_empty());

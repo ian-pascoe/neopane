@@ -12,13 +12,18 @@
 //! - A floating pane (3.7 and newer) is its frame, which belongs to it:
 //!   its content grown by a cell on each side, with an inset of 1 all
 //!   round. Either may be partly off its window.
+//! - A zoomed window's area holds the panes it shows: the zoomed one. The
+//!   panes the zoom hides are in an area of their own, `@N~hidden`, where
+//!   the unzoomed layout, `#{window_layout}`, has them, as their own
+//!   `pane_*` are stale.
 //! - `focus` is the active pane of the window the most recently active
 //!   client shows; none without a client.
 
 use serde_json::{Value, json};
 
-use super::is_pane_id;
 use super::server::Server;
+use super::window_layout::parse;
+use super::{is_pane_id, is_window_id};
 use crate::providers::builtin::Given;
 
 /// One line per pane of the server, a window linked into several sessions
@@ -27,6 +32,10 @@ pub(super) const PANES: &str = "#{window_id} #{window_width} #{window_height} #{
                      #{pane_top} #{pane_width} #{pane_height} #{pane_at_top} \
                      #{pane-border-status} #{?pane_floating_flag,1,0}";
 
+/// One line per zoomed window: its id, then its layout as shown and
+/// unzoomed, neither with a space.
+const ZOOMED: &str = "#{window_id} #{window_visible_layout} #{window_layout}";
+
 /// One line per client: its last activity, and the active pane of the
 /// window it shows.
 const CLIENTS: &str = "#{client_activity} #{pane_id}";
@@ -34,9 +43,31 @@ const CLIENTS: &str = "#{client_activity} #{pane_id}";
 /// The live layout, as one line of JSON, or why there's none.
 pub(super) fn report_layout(given: &Given) -> Result<String, String> {
     let server = Server::of(given)?;
-    let panes = server.run(&["list-panes", "-a", "-F", PANES])?;
-    let clients = server.run(&["list-clients", "-F", CLIENTS])?;
-    Ok(layout(&panes, &clients)?.to_string())
+    // one call, so a zoom can't come or go between the listings
+    let (panes, clients, zoomed) = (
+        format!("p {PANES}"),
+        format!("c {CLIENTS}"),
+        format!("z {ZOOMED}"),
+    );
+    let out = server.run(&[
+        "list-panes",
+        "-a",
+        "-F",
+        &panes,
+        ";",
+        "list-clients",
+        "-F",
+        &clients,
+        ";",
+        "list-windows",
+        "-a",
+        "-f",
+        "#{window_zoomed_flag}",
+        "-F",
+        &zoomed,
+    ])?;
+    let (panes, clients, windows) = listings(&out)?;
+    Ok(layout(&panes, &clients, &windows)?.to_string())
 }
 
 /// The focused pane, as `report_layout` reports it, if any.
@@ -44,11 +75,38 @@ pub(super) fn focused(server: &Server) -> Result<Option<String>, String> {
     Ok(focus(&server.run(&["list-clients", "-F", CLIENTS])?))
 }
 
-/// The report `report_layout` prints, from what `list-panes -a -F PANES`
-/// and `list-clients -F CLIENTS` printed.
-fn layout(panes: &[u8], clients: &[u8]) -> Result<Value, String> {
+/// `list-panes`', `list-clients`' and `list-windows`' lines.
+type Listings = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// What one call of `list-panes`, `list-clients` and `list-windows`
+/// printed, each line tagged `p `, `c ` or `z `: each listing's lines,
+/// untagged, or why it can't tell them apart.
+fn listings(out: &[u8]) -> Result<Listings, String> {
+    let (mut panes, mut clients, mut windows) = (Vec::new(), Vec::new(), Vec::new());
+    for line in out.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let into = match line.get(..2) {
+            Some(b"p ") => &mut panes,
+            Some(b"c ") => &mut clients,
+            Some(b"z ") => &mut windows,
+            _ => {
+                let line = String::from_utf8_lossy(line);
+                return Err(format!("tmux printed {line:?}, of no listing"));
+            }
+        };
+        into.extend_from_slice(&line[2..]);
+        into.push(b'\n');
+    }
+    Ok((panes, clients, windows))
+}
+
+/// The report `report_layout` prints, from what `list-panes -a -F PANES`,
+/// `list-clients -F CLIENTS` and the zoomed windows' `list-windows -a -F
+/// ZOOMED` printed, in one tmux call.
+fn layout(panes: &[u8], clients: &[u8], windows: &[u8]) -> Result<Value, String> {
     let panes = std::str::from_utf8(panes).map_err(|_| "list-panes printed bytes not UTF-8")?;
+    let zoomed = zoomed(windows)?;
     let mut areas: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut hidden: Vec<(String, Vec<Value>)> = Vec::new();
     let mut seen = Vec::new();
     for line in panes.lines().filter(|l| !l.trim().is_empty()) {
         let p = Pane::parse(line).ok_or_else(|| format!("list-panes printed {line:?}"))?;
@@ -56,16 +114,33 @@ fn layout(panes: &[u8], clients: &[u8]) -> Result<Value, String> {
             continue;
         }
         seen.push(p.id.clone());
-        let terminal = p.terminal();
-        match areas.iter_mut().find(|(id, _)| *id == p.window) {
+        let cell = zoomed
+            .iter()
+            .filter(|z| z.window == p.window)
+            .find_map(|z| z.hidden.iter().find(|(id, _)| *id == p.id));
+        let (into, terminal) = match cell {
+            Some((_, cell)) => (&mut hidden, p.hidden_terminal(*cell)),
+            None => (&mut areas, p.terminal()),
+        };
+        match into.iter_mut().find(|(id, _)| *id == p.window) {
             Some((_, terminals)) => terminals.push(terminal),
-            None => areas.push((p.window, vec![terminal])),
+            None => into.push((p.window, vec![terminal])),
         }
     }
-    let areas: Vec<Value> = areas
-        .into_iter()
-        .map(|(id, terminals)| json!({ "id": id, "terminals": terminals }))
-        .collect();
+    let area = |id: String, terminals: Vec<Value>| json!({ "id": id, "terminals": terminals });
+    let mut all = Vec::new();
+    for (id, terminals) in areas {
+        let behind = hidden.iter().position(|(w, _)| *w == id);
+        let behind = behind.map(|at| hidden.remove(at));
+        all.push(area(id, terminals));
+        if let Some((id, terminals)) = behind {
+            all.push(area(format!("{id}~hidden"), terminals));
+        }
+    }
+    for (id, terminals) in hidden {
+        all.push(area(format!("{id}~hidden"), terminals));
+    }
+    let areas = all;
     let mut report = json!({ "areas": areas });
     if let Some(focus) = focus(clients) {
         report["focus"] = focus.into();
@@ -103,6 +178,48 @@ pub(super) fn reported_corner(line: &[u8]) -> Option<([i64; 2], [u32; 2])> {
     Some(([x as i64, y as i64], [ww as u32, wh as u32]))
 }
 
+/// A zoomed window: the panes its zoom hides, with their cells in its
+/// unzoomed layout.
+struct Zoomed {
+    window: String,
+    hidden: Vec<(String, [u32; 4])>,
+}
+
+/// The zoomed windows `list-windows -a -f '#{window_zoomed_flag}' -F
+/// ZOOMED` printed. A hidden pane is a tiled one of `#{window_layout}`,
+/// the unzoomed layout, that `#{window_visible_layout}` hasn't: its own
+/// `pane_*` are stale, or the whole window for one made while zoomed.
+fn zoomed(windows: &[u8]) -> Result<Vec<Zoomed>, String> {
+    let windows =
+        std::str::from_utf8(windows).map_err(|_| "list-windows printed bytes not UTF-8")?;
+    let mut all = Vec::new();
+    for line in windows.lines().filter(|l| !l.trim().is_empty()) {
+        let bad = || format!("list-windows printed {line:?}");
+        let [window, visible, layout] = line.split(' ').collect::<Vec<_>>()[..] else {
+            return Err(bad());
+        };
+        if !is_window_id(window.as_bytes()) {
+            return Err(bad());
+        }
+        let visible = parse(visible)?;
+        let shown: Vec<&str> = visible.panes().iter().filter_map(|c| c.pane()).collect();
+        let layout = parse(layout)?;
+        let hidden = layout
+            .panes()
+            .into_iter()
+            .filter(|c| !c.floating)
+            .filter_map(|c| Some((c.pane()?, c.rect)))
+            .filter(|(id, _)| !shown.contains(id))
+            .map(|(id, rect)| (id.to_string(), rect))
+            .collect();
+        all.push(Zoomed {
+            window: window.to_string(),
+            hidden,
+        });
+    }
+    Ok(all)
+}
+
 /// One line of `list-panes -a -F PANES`.
 struct Pane {
     window: String,
@@ -113,6 +230,7 @@ struct Pane {
     cells: [f64; 4],
     at_top: bool,
     status_top: bool,
+    status_bottom: bool,
     floating: bool,
 }
 
@@ -138,7 +256,10 @@ impl Pane {
         let n = |s: &str| s.parse::<u32>().ok().map(f64::from);
         let at = |s: &str| s.parse::<i32>().ok().map(f64::from);
         let window_size = [n(ww)?, n(wh)?];
-        if window_size.contains(&0.0) || !window.starts_with('@') || !is_pane_id(id.as_bytes()) {
+        if window_size.contains(&0.0)
+            || !is_window_id(window.as_bytes())
+            || !is_pane_id(id.as_bytes())
+        {
             return None;
         }
         Some(Pane {
@@ -148,6 +269,7 @@ impl Pane {
             cells: [at(left)?, at(top)?, n(width)?, n(height)?],
             at_top: *at_top == "1",
             status_top: *status == "top",
+            status_bottom: *status == "bottom",
             floating: *floating == "1",
         })
     }
@@ -180,6 +302,23 @@ impl Pane {
         }
         t
     }
+
+    /// As `report_layout` gives it hidden by a zoomed pane, its cell
+    /// `[x, y, w, h]` in the unzoomed layout: as it would be shown, the
+    /// border status line taking the top row of a cell on the window's
+    /// top row, or the bottom row of one on its bottom row.
+    fn hidden_terminal(&self, cell: [u32; 4]) -> Value {
+        let [x, y, w, mut h] = cell.map(f64::from);
+        let [ww, wh] = self.window_size;
+        if self.status_bottom && y + h >= wh {
+            h -= 1.0;
+        }
+        let mut t = json!({ "terminal": self.id, "rect": [x / ww, y / wh, w / ww, h / wh] });
+        if self.status_top && y == 0.0 {
+            t["inset"] = json!([0, 1, 0, 0]);
+        }
+        t
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +345,7 @@ mod tests {
         let report = layout(
             include_bytes!("fixtures/3.8-panes.txt"),
             include_bytes!("fixtures/3.8-clients.txt"),
+            b"",
         )
         .unwrap();
         let want = json!({
@@ -228,7 +368,7 @@ mod tests {
     /// both linked into sessions `a` and `b`.
     #[test]
     fn tmux_3_2_status_on_top_only_the_top_row_loses_a_row_and_no_client_no_focus() {
-        let report = layout(include_bytes!("fixtures/3.2a-panes.txt"), b"").unwrap();
+        let report = layout(include_bytes!("fixtures/3.2a-panes.txt"), b"", b"").unwrap();
         let want = json!({
             "areas": [
                 {"id": "@0", "terminals": [
@@ -254,7 +394,7 @@ mod tests {
     /// frame off the window's top left.
     #[test]
     fn tmux_3_8_a_float_is_its_frame_floating_with_an_inset_of_one() {
-        let report = layout(include_bytes!("fixtures/3.8-floats.txt"), b"").unwrap();
+        let report = layout(include_bytes!("fixtures/3.8-floats.txt"), b"", b"").unwrap();
         let want = json!({
             "areas": [
                 {"id": "@0", "terminals": [
@@ -273,7 +413,7 @@ mod tests {
     /// content is off the window too.
     #[test]
     fn tmux_3_7_a_float_off_the_window_is_reported_where_it_is() {
-        let report = layout(include_bytes!("fixtures/3.7c-floats.txt"), b"").unwrap();
+        let report = layout(include_bytes!("fixtures/3.7c-floats.txt"), b"", b"").unwrap();
         let want = json!({
             "areas": [
                 {"id": "@0", "terminals": [
@@ -287,21 +427,140 @@ mod tests {
         assert_eq!(report, want);
     }
 
+    /// Recorded from tmux 3.8, no client: window @0 (80x24) is `(%0 / %4)
+    /// | (%2 / %3)`, `%0` zoomed and `%4` made while it was, so tmux says
+    /// `%4` fills the window; @1 holds `%1`.
+    #[test]
+    fn tmux_3_8_zoomed_the_zoomed_pane_alone_and_the_hidden_ones_in_an_area_of_their_own() {
+        let report = layout(
+            include_bytes!("fixtures/3.8-zoomed-panes.txt"),
+            b"",
+            include_bytes!("fixtures/3.8-zoomed-windows.txt"),
+        )
+        .unwrap();
+        let want = json!({
+            "areas": [
+                {"id": "@0", "terminals": [t("%0", [0.0, 0.0, 1.0, 1.0])]},
+                {"id": "@0~hidden", "terminals": [
+                    t("%4", [0.0, 13.0 / 24.0, 40.0 / 80.0, 11.0 / 24.0]),
+                    t("%2", [41.0 / 80.0, 0.0, 39.0 / 80.0, 12.0 / 24.0]),
+                    t("%3", [41.0 / 80.0, 13.0 / 24.0, 39.0 / 80.0, 11.0 / 24.0]),
+                ]},
+                {"id": "@1", "terminals": [t("%1", [0.0, 0.0, 1.0, 1.0])]},
+            ],
+        });
+        assert_eq!(report, want);
+    }
+
+    /// The same, from tmux 3.2a, its layouts in the older string, @0
+    /// 80x23.
+    #[test]
+    fn tmux_3_2_zoomed_reads_the_hidden_panes_from_the_older_layout() {
+        let report = layout(
+            include_bytes!("fixtures/3.2a-zoomed-panes.txt"),
+            b"",
+            include_bytes!("fixtures/3.2a-zoomed-windows.txt"),
+        )
+        .unwrap();
+        let want = json!({
+            "areas": [
+                {"id": "@0", "terminals": [t("%0", [0.0, 0.0, 1.0, 1.0])]},
+                {"id": "@0~hidden", "terminals": [
+                    t("%4", [0.0, 12.0 / 23.0, 40.0 / 80.0, 11.0 / 23.0]),
+                    t("%2", [41.0 / 80.0, 0.0, 39.0 / 80.0, 11.0 / 23.0]),
+                    t("%3", [41.0 / 80.0, 12.0 / 23.0, 39.0 / 80.0, 11.0 / 23.0]),
+                ]},
+                {"id": "@1", "terminals": [t("%1", [0.0, 0.0, 1.0, 1.0])]},
+            ],
+        });
+        assert_eq!(report, want);
+    }
+
+    /// The 3.8 one with `pane-border-status` top, then bottom: a hidden
+    /// pane on the top row has the status line as its inset, as a shown
+    /// one does; one on the bottom row loses its last row to it.
+    #[test]
+    fn zoomed_with_a_border_status_the_hidden_panes_lose_its_row() {
+        let report = layout(
+            include_bytes!("fixtures/3.8-zoomed-top-panes.txt"),
+            b"",
+            include_bytes!("fixtures/3.8-zoomed-top-windows.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            report["areas"][0]["terminals"],
+            json!([under_status("%0", [0.0, 0.0, 1.0, 1.0])])
+        );
+        assert_eq!(
+            report["areas"][1]["terminals"],
+            json!([
+                t("%4", [0.0, 13.0 / 24.0, 40.0 / 80.0, 11.0 / 24.0]),
+                under_status("%2", [41.0 / 80.0, 0.0, 39.0 / 80.0, 12.0 / 24.0]),
+                t("%3", [41.0 / 80.0, 13.0 / 24.0, 39.0 / 80.0, 11.0 / 24.0]),
+            ])
+        );
+        let report = layout(
+            include_bytes!("fixtures/3.8-zoomed-bottom-panes.txt"),
+            b"",
+            include_bytes!("fixtures/3.8-zoomed-bottom-windows.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            report["areas"][0]["terminals"],
+            json!([t("%0", [0.0, 0.0, 1.0, 23.0 / 24.0])])
+        );
+        assert_eq!(
+            report["areas"][1]["terminals"],
+            json!([
+                t("%4", [0.0, 13.0 / 24.0, 40.0 / 80.0, 10.0 / 24.0]),
+                t("%2", [41.0 / 80.0, 0.0, 39.0 / 80.0, 12.0 / 24.0]),
+                t("%3", [41.0 / 80.0, 13.0 / 24.0, 39.0 / 80.0, 10.0 / 24.0]),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_zoomed_window_it_cant_read_fails_the_report() {
+        let panes = b"@0 80 24 %0 0 0 80 24 1 off 0\n";
+        assert!(layout(panes, b"", b"@0 nonsense\n").is_err());
+        assert!(layout(panes, b"", b"@0 0000, 0000,\n").is_err());
+        let layout_of_one = r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"i":0,"I":"%0"}}"#;
+        let window = format!("@ {layout_of_one} {layout_of_one}\n");
+        assert!(layout(panes, b"", window.as_bytes()).is_err());
+    }
+
+    /// One tmux call lists all three, each line tagged with its listing.
+    #[test]
+    fn one_calls_listings_are_told_apart_by_their_tags() {
+        let out = b"p @0 80 24 %0 0 0 80 24 1 off 0\nc 9 %0\np @1 80 24 %1 0 0 80 24 1 off 0\n\
+                    z @0 a b\n";
+        let (panes, clients, windows) = listings(out).unwrap();
+        assert_eq!(
+            panes,
+            b"@0 80 24 %0 0 0 80 24 1 off 0\n@1 80 24 %1 0 0 80 24 1 off 0\n"
+        );
+        assert_eq!(clients, b"9 %0\n");
+        assert_eq!(windows, b"@0 a b\n");
+        assert!(listings(b"x what\n").is_err());
+    }
+
     #[test]
     fn focus_is_only_ever_a_pane_id() {
         let panes = b"@0 80 24 %0 0 0 80 24 1 off 0\n";
-        let report = layout(panes, b"9 %\n8 %1x\n7 @1\n3 %0\n").unwrap();
+        let report = layout(panes, b"9 %\n8 %1x\n7 @1\n3 %0\n", b"").unwrap();
         assert_eq!(report["focus"], "%0");
-        let report = layout(panes, b"9 %x\n").unwrap();
+        let report = layout(panes, b"9 %x\n", b"").unwrap();
         assert!(report.get("focus").is_none());
     }
 
     #[test]
     fn a_line_it_cant_read_fails_the_report() {
-        assert!(layout(b"@0 80 24 %0 0 0 80\n", b"").is_err());
-        assert!(layout(b"@0 0 24 %0 0 0 80 24 1 off 0\n", b"").is_err());
-        assert!(layout(b"@0 80 24 %0 0 0 80 24 1 off\n", b"").is_err());
+        assert!(layout(b"@0 80 24 %0 0 0 80\n", b"", b"").is_err());
+        assert!(layout(b"@0 0 24 %0 0 0 80 24 1 off 0\n", b"", b"").is_err());
+        assert!(layout(b"@0 80 24 %0 0 0 80 24 1 off\n", b"", b"").is_err());
+        // a window id is @ and digits
+        assert!(layout(b"@x 80 24 %0 0 0 80 24 1 off 0\n", b"", b"").is_err());
         // no pane at all is no area
-        assert_eq!(layout(b"", b"").unwrap(), json!({ "areas": [] }));
+        assert_eq!(layout(b"", b"", b"").unwrap(), json!({ "areas": [] }));
     }
 }

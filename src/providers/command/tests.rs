@@ -993,3 +993,76 @@ fn a_runner_names_its_specs_context_and_find_variables() {
     // its find matches the pane title, unlike Rex's
     assert!(p.wants_title());
 }
+
+/// A runner whose `report_layout` waits for `go` in `dir`, then reports
+/// focus on `%1`; whose `focus` and `focus_direction` are done at once.
+fn focus_racing(dir: &Path) -> CommandProvider {
+    let report = format!(
+        r#"while [ ! -e '{}/go' ]; do sleep 0.01; done
+           echo '{{"areas":[{{"id":"w1","terminals":[{{"terminal":"%1","rect":[0,0,1,1]}}]}}],"focus":"%1"}}'"#,
+        dir.display()
+    );
+    runner(
+        &[
+            (Capability::ReportLayout, &["sh", "-c", &report]),
+            (Capability::Focus, &["true"]),
+            (Capability::FocusDirection, &["true"]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+/// The focus `p`'s report answers, `report` being its ask.
+fn reported_focus(p: &mut CommandProvider, report: AskId) -> Option<TerminalId> {
+    loop {
+        let (id, outcome) = answer(p, Duration::from_secs(5)).expect("an answer");
+        if id != report {
+            continue;
+        }
+        let Outcome::Done(Answer::Layout(l)) = outcome else {
+            panic!("no layout: {outcome:?}");
+        };
+        return l.current;
+    }
+}
+
+/// A report read before a focus act landed may tell the focus as it was:
+/// it ends after the act, so the daemon would take it for the user's own
+/// move. Its focus is dropped; the report the daemon asks after the act
+/// tells it.
+#[test]
+fn a_report_started_before_a_focus_act_ended_tells_no_focus() {
+    let acts = [
+        Ask::Focus {
+            terminal: TerminalId::from("%2"),
+        },
+        Ask::FocusDirection {
+            dir: Direction::Right,
+            count: 1,
+        },
+    ];
+    for act in acts {
+        let dir =
+            std::env::temp_dir().join(format!("{}-focus-race-{}", name::NAME, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let mut p = focus_racing(&dir);
+        p.ask(AskId(1), Ask::ReportLayout);
+        p.ask(AskId(2), act.clone());
+        let (id, done) = answer(&mut p, Duration::from_secs(5)).expect("the act's answer");
+        assert_eq!((AskId(2), Outcome::Done(Answer::Nothing)), (id, done));
+        std::fs::write(dir.join("go"), "").unwrap();
+        assert_eq!(None, reported_focus(&mut p, AskId(1)), "{act:?}");
+
+        // one started after the act ended tells it
+        p.ask(AskId(3), Ask::ReportLayout);
+        assert_eq!(
+            Some(TerminalId::from("%1")),
+            reported_focus(&mut p, AskId(3)),
+            "{act:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
