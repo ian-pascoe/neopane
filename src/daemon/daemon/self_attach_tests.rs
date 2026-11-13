@@ -160,10 +160,22 @@ impl Rig {
     /// `-p` with three files, named for test `tag`, holding one line each:
     /// `alpha`, `bravo`, `charlie`; and the files.
     fn three_tabs(tag: &str) -> Option<(Rig, Vec<String>)> {
-        let files = three_files(tag);
+        Rig::tabs(tag, 3, None)
+    }
+
+    /// `-p` with the first `n` of the files `three_files` makes for test
+    /// `tag`, and `provider` the pane provider, the first pane's terminal
+    /// `t0` if there is one; and the files.
+    pub(super) fn tabs(
+        tag: &str,
+        n: usize,
+        provider: Option<Box<dyn PaneProvider>>,
+    ) -> Option<(Rig, Vec<String>)> {
+        let files = files(tag, n);
         let mut args = vec!["-p"];
         args.extend(files.iter().map(String::as_str));
-        let started = Rig::start(&args);
+        let terminal = provider.as_ref().map(|_| TerminalId::from("t0"));
+        let started = Rig::start_with(&args, provider, terminal);
         if started.is_none() {
             remove(&files);
         }
@@ -229,7 +241,7 @@ impl Rig {
     }
 
     /// Runs Lua `code` returning a list of ints, on the test's own channel.
-    fn ints(&mut self, code: &str) -> Vec<i64> {
+    pub(super) fn ints(&mut self, code: &str) -> Vec<i64> {
         ints(&mut self.query, code)
     }
 
@@ -241,7 +253,7 @@ impl Rig {
     }
 
     /// The windows on each of `files`, once Neovim is set up.
-    fn wins_on(&mut self, files: &[String]) -> Vec<i64> {
+    pub(super) fn wins_on(&mut self, files: &[String]) -> Vec<i64> {
         self.pump(|r| r.d.nvim.ready);
         files.iter().map(|f| self.win_on(f)).collect()
     }
@@ -284,7 +296,12 @@ fn ints(nvim: &mut crate::nvim::nvim::Nvim, code: &str) -> Vec<i64> {
 /// `-p` with three files, named for test `tag`, holding one line each:
 /// `alpha`, `bravo`, `charlie`.
 fn three_files(tag: &str) -> Vec<String> {
-    ["alpha", "bravo", "charlie"]
+    files(tag, 3)
+}
+
+/// The first `n` of `three_files`' files for test `tag`.
+fn files(tag: &str, n: usize) -> Vec<String> {
+    ["alpha", "bravo", "charlie"][..n]
         .iter()
         .map(|word| {
             let f = std::env::temp_dir()

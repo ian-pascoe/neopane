@@ -151,7 +151,9 @@ it does in plain Neovim.
 That first attach chooses the daemon's pane provider, which gives windows
 terminals of their own, without holding anything up: the first window shows
 at once, and the windows Neovim opened at the start, such as `-O a b`'s
-second, wait for the choice and then open beside the first. Your own
+second, wait for the choice and then open beside the first. The other tab
+pages it opened, such as `-p a b`'s second, each get their place when first
+current, as one opened later does. Your own
 `~/.config/neopane/init.lua` chooses it, in Lua: see
 [docs/config.md](docs/config.md). Without one, Rex is chosen in a Rex pane
 (see [Rex](#rex)), and none elsewhere. With no pane provider, or when the
@@ -632,8 +634,11 @@ quietly.
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane
-  controls instead. The exception is resizing a window in a tab page's
-  floating pane, below: that resizes its Rex block.
+  controls instead. The exceptions are resizing a window in a tab page's
+  Rex floating pane, below, which resizes its Rex block, and `<C-w>T`,
+  which moves the window to a new tab page, as `:tab split` then `:close`
+  would: the window is a new one, and it's refused for its tab page's only
+  window.
 - `<C-w>h/j/k/l` (also `<C-w><C-h>`, `<C-w><BS>` and `<C-w><Left>` and the like,
   in Normal and Visual mode) move to the neighbouring pane in Rex, and stay
   put at an edge. A count repeats the move, up to 20 times. Mappings that
@@ -645,10 +650,10 @@ quietly.
   - Rex servers whose `session.focus_direction` has no `wrap` option wrap
     around at an edge. Ones without the method do nothing for these keys,
     and log the refusal.
-  - Rex looks at every pane in its window, so a move can enter an open
+  - Rex looks at every pane in its window, so a move can enter an open Rex
     floating pane, such as a tab page's, and leave it.
 - Plugins that arrange windows (sidebars, layout managers) don't get the
-  placement they expect, except in a tab page's floating pane, below. A
+  placement they expect, except in a tab page's Rex floating pane, below. A
   window such a plugin moves back into Neovim's own layout goes back to its
   pane. edgy.nvim works without turning it off:
   neopane tells it to leave the windows in panes alone (`vim.w.edgy_disable`),
@@ -659,12 +664,15 @@ quietly.
   again after 2 seconds, then 4, up to a minute. Turn such a plugin off with
   `cond = vim.g.neopane == nil`.
 - Neovim tab pages aren't Rex tabs. A tab page opened after startup, as
-  `:tabnew`, Neogit and Diffview open, shows in a Rex floating pane and
-  closes with its last window. Its windows' panes are placed as Neovim's
-  layout has them, at about their sizes, so Diffview's file panel is on the
-  left. They follow the layout as windows come and go, and a window Neovim
-  resizes, such as with `<C-w>|`, resizes its pane. Moving windows once they
-  show in panes, as with `<C-w>H`, still does nothing.
+  `:tabnew`, `:tab split`, `<C-w>T`, Neogit and Diffview open, shows in a Rex
+  floating pane and closes with its last window. So does each tab page
+  opened at startup, as `-p` or a session opens them, but the current one:
+  it gets its Rex floating pane when first current. Its windows' panes are
+  placed as Neovim's layout has them, at about their sizes, so Diffview's
+  file panel is on the left. They follow the layout as windows come and go,
+  and a window Neovim resizes, such as with `<C-w>|`, resizes its pane.
+  Moving windows once they show in panes, as with `<C-w>H`, still does
+  nothing.
 - A picker or other float group in a Rex floating pane shows over whichever
   tab page is current, and closes with the tab page it opened in: closing
   the tab page it shows over sends it back to its own first, but for the

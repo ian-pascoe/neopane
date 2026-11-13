@@ -146,7 +146,7 @@ pub(crate) struct Daemon {
     unshown_awaiting_origin: Vec<(i64, windows::Split)>,
     /// Where float groups with no float group pane are drawn (ADR 0010).
     float_homes: FloatHomes,
-    /// The tab pages made after setup with no tab page area, each drawn
+    /// The tab pages with no tab page area that would get one, each drawn
     /// whole in the pane it opened in, for its life (ADR 0012).
     tabs_in_panes: Vec<i64>,
     /// Which terminal the pane provider has focused, as last said or asked.
@@ -1119,11 +1119,11 @@ impl Daemon {
         true
     }
 
-    /// Whether a window of a tab page made after setup, split off as `sp`,
-    /// is drawn in a pane with the rest of its tab page (ADR 0012): its tab
-    /// page already is, or has no tab page area and can't ask for one, the
-    /// pane provider having no `open_tab_page` or the origin pane being out
-    /// of its reach.
+    /// Whether a window of a tab page that gets a place of its own (a
+    /// split's `tab`), split off as `sp`, is drawn in a pane with the rest of
+    /// its tab page (ADR 0012): its tab page already is, or has no tab page
+    /// area and can't ask for one, the pane provider having no
+    /// `open_tab_page` or the origin pane being out of its reach.
     fn tab_page_in_pane(&self, sp: windows::Split) -> bool {
         if sp.tab == 0 {
             return false;
@@ -3296,6 +3296,8 @@ fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
 mod self_attach_tests;
 #[cfg(test)]
 mod slow_terminal_tests;
+#[cfg(test)]
+mod tab_area_tests;
 #[cfg(test)]
 mod unattached_tests;
 

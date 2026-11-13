@@ -237,7 +237,7 @@ pub enum Note {
     Cmdheight(i64),
     /// `<C-w>h/j/k/l` was typed: Rex knows where the panes sit, not Neovim.
     Direction(Move),
-    /// Where the windows of a tab page made after setup sit in it.
+    /// Where the windows of a tab page sit in it.
     Layout(Layout),
     /// The options a pane layout splits and closes windows by.
     Options(SplitOptions),
@@ -453,8 +453,9 @@ pub struct Split {
     pub(crate) before: bool,
     /// The window it was split from, or 0.
     pub(crate) from: i64,
-    /// The tab page made after setup it belongs to, which Neovim shows
-    /// over the first one's windows, else 0.
+    /// The tab page it belongs to, if that gets a place of its own: one
+    /// made after setup, or one Neovim started with, as `-p` opens them,
+    /// once it first became current (ADR 0012). Else 0.
     pub(crate) tab: i64,
 }
 
@@ -3874,6 +3875,37 @@ mod tests {
         assert_eq!(first, h.last_layout(1).unwrap().items()[0].win);
     }
 
+    /// How many tab pages windows.lua's records `names` hold between them,
+    /// found through the closures of its module.
+    fn records(h: &mut Harness, names: &[&str]) -> String {
+        let names: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+        h.eval_str(&format!(
+            "local function find(f, seen, want)\n\
+             \x20 if seen[f] then return end\n\
+             \x20 seen[f] = true\n\
+             \x20 for i = 1, math.huge do\n\
+             \x20   local n, v = debug.getupvalue(f, i)\n\
+             \x20   if not n then return end\n\
+             \x20   if n == want then return v end\n\
+             \x20   if type(v) == 'function' then\n\
+             \x20     local got = find(v, seen, want)\n\
+             \x20     if got then return got end\n\
+             \x20   end\n\
+             \x20 end\n\
+             end\n\
+             local total = 0\n\
+             for _, want in ipairs({{ {} }}) do\n\
+             \x20 local seen, found = {{}}\n\
+             \x20 for _, f in pairs(_G['{NAME}']) do\n\
+             \x20   if type(f) == 'function' then found = found or find(f, seen, want) end\n\
+             \x20 end\n\
+             \x20 total = total + vim.tbl_count(assert(found, 'no ' .. want))\n\
+             end\n\
+             return tostring(total)",
+            names.join(", ")
+        ))
+    }
+
     #[test]
     fn a_closed_tab_pages_layout_record_goes_with_it() {
         let argv = ["nvim", "--clean", "--embed", "-n", "-p", "a", "b"];
@@ -3881,36 +3913,88 @@ mod tests {
             return;
         };
         h.boot();
-        // the records windows.lua keeps of tab pages without a tab page area,
-        // found through the closures of its module
-        let count = |h: &mut Harness| {
-            h.eval_str(&format!(
-                "local function find(f, seen)\n\
-                 \x20 if seen[f] then return end\n\
-                 \x20 seen[f] = true\n\
-                 \x20 for i = 1, math.huge do\n\
-                 \x20   local n, v = debug.getupvalue(f, i)\n\
-                 \x20   if not n then return end\n\
-                 \x20   if n == 'layouts' then return v end\n\
-                 \x20   if type(v) == 'function' then\n\
-                 \x20     local got = find(v, seen)\n\
-                 \x20     if got then return got end\n\
-                 \x20   end\n\
-                 \x20 end\n\
-                 end\n\
-                 local seen, layouts = {{}}\n\
-                 for _, f in pairs(_G['{NAME}']) do\n\
-                 \x20 if type(f) == 'function' then layouts = layouts or find(f, seen) end\n\
-                 end\n\
-                 return tostring(vim.tbl_count(assert(layouts, 'no layouts')))",
-            ))
-        };
-        // both tab pages were current, so both have one
+        // the records of tab pages' layouts, those without a place of their
+        // own and those with
+        let layouts = ["layouts", "floating"];
+        // both tab pages were current, so both have one: the first without
+        // a place, b with one since it was first current
         h.sync("vim.cmd('tabnext')");
         h.sync("vim.cmd('tabnext')");
-        assert_eq!("2", count(&mut h));
+        assert_eq!("2", records(&mut h, &layouts));
         h.sync("vim.cmd('2tabclose')");
-        assert_eq!("1", count(&mut h));
+        assert_eq!("1", records(&mut h, &layouts));
+    }
+
+    /// The tab page handles, in order.
+    fn tab_pages(h: &mut Harness) -> Vec<i64> {
+        h.eval_str("return table.concat(vim.api.nvim_list_tabpages(), ' ')")
+            .split(' ')
+            .map(|t| t.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_page_neovim_started_with_is_told_split_off_the_window_current_before_when_first_current()
+     {
+        let argv = ["nvim", "--clean", "--embed", "-n", "-p", "a", "b"];
+        let Some(mut h) = Harness::spawn(&argv, 120, 30) else {
+            return;
+        };
+        h.boot();
+        let first = h.wins[0];
+        let tabs = tab_pages(&mut h);
+        // none of the other tab page's windows is told at start
+        assert!(
+            h.notes
+                .iter()
+                .all(|n| !matches!(n, Note::Split(s) if s.tab != 0))
+        );
+        h.sync("vim.cmd('tabnext')");
+        let b = h.eval_str("return tostring(vim.fn.win_getid(1, 2))");
+        let b: i64 = b.parse().unwrap();
+        let splits: Vec<Split> = h
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                Note::Split(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        let [only] = splits[..] else {
+            panic!("not one split: {splits:?}")
+        };
+        assert_eq!((b, first, tabs[1]), (only.win, only.from, only.tab));
+
+        // the first time only
+        h.notes.clear();
+        h.sync("vim.cmd('tabprevious')");
+        h.sync("vim.cmd('tabnext')");
+        assert!(h.notes.iter().all(|n| !matches!(n, Note::Split(_))));
+    }
+
+    #[test]
+    fn a_tab_page_neovim_started_with_closed_before_it_was_current_is_forgotten() {
+        let argv = ["nvim", "--clean", "--embed", "-n", "-p", "a", "b", "c"];
+        let Some(mut h) = Harness::spawn(&argv, 120, 30) else {
+            return;
+        };
+        h.boot();
+        let tabs = tab_pages(&mut h);
+        assert_eq!("2", records(&mut h, &["unvisited"]));
+        h.sync("vim.cmd('2tabclose')");
+        assert_eq!("1", records(&mut h, &["unvisited"]));
+        // c's, first current, is told; never b's
+        h.notes.clear();
+        h.sync("vim.cmd('tabnext')");
+        let told: Vec<i64> = h
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                Note::Split(s) => Some(s.tab),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vec![tabs[2]], told);
     }
 
     #[test]
