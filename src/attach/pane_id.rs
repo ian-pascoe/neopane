@@ -36,6 +36,15 @@ impl PaneId {
         })
     }
 
+    /// A pane id numbered 0, which no daemon mints, with a fresh token:
+    /// `provider check`'s, for the attach it plays (#93 decision 30).
+    pub fn unnumbered() -> PaneId {
+        PaneId {
+            number: 0,
+            token: token(),
+        }
+    }
+
     /// The token, which the pane title uses.
     pub fn token(&self) -> &str {
         std::str::from_utf8(&self.token).expect("tokens are ASCII")

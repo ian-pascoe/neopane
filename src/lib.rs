@@ -11,7 +11,7 @@ pub mod log;
 pub mod name;
 pub mod nvim;
 pub(crate) mod placeholder;
-pub(crate) mod providers;
+pub mod providers;
 pub(crate) mod rex;
 pub mod screen;
 pub(crate) mod term;

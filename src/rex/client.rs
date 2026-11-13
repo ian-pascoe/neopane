@@ -76,6 +76,8 @@ pub(crate) struct Client {
     pub next_id: u64,
     /// The server's `limits.max_message_bytes`.
     pub max_message: usize,
+    /// The server's API revision, as its welcome said.
+    pub api_revision: i64,
     /// Scratch for building outgoing JSON.
     pub out: Vec<u8>,
     /// Scratch for building outgoing frames.
@@ -171,6 +173,7 @@ impl Client {
             ws: WebSocket::default(),
             next_id: 1,
             max_message: 65536,
+            api_revision: API_REVISION,
             out: Vec::new(),
             frame: Vec::new(),
             open: true,
@@ -370,6 +373,7 @@ impl Client {
             }
         };
         self.max_message = welcome.max_message_bytes;
+        self.api_revision = welcome.api_revision;
         self.ws.max_message = welcome.max_message_bytes;
         self.greeting = Greeting::Welcomed;
         let held = std::mem::take(&mut self.held);

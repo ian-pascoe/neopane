@@ -164,10 +164,15 @@ pub(crate) fn choose_by<'a>(file: Option<&'a ConfigFile>, hint: Option<&str>) ->
 /// What the log and the Neovim warning say of a config file
 /// `$<NAME>_CONFIG` names that isn't there.
 pub(crate) fn missing_line(file: &Path) -> String {
+    missing_line_named_by(file, &config::config_var())
+}
+
+/// The same, for a config file `by` named: `provider check`'s `--config`
+/// names one too.
+pub(crate) fn missing_line_named_by(file: &Path, by: &str) -> String {
     format!(
-        "config: {} isn't there ({} names it); no pane provider",
-        file.display(),
-        config::config_var()
+        "config: {} isn't there ({by} names it); no pane provider",
+        file.display()
     )
 }
 

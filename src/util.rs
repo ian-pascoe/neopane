@@ -9,6 +9,24 @@ pub(crate) fn seconds(d: Duration) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// Waits until `fd` has something to read, at most until `due`, and at
+/// most 1 s: false once `due` has passed. For a blocking wait on one fd.
+pub(crate) fn wait_readable(fd: std::os::fd::RawFd, due: std::time::Instant) -> bool {
+    let left = due.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return false;
+    }
+    let mut fds = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let ms = left.as_millis().clamp(1, 1000) as libc::c_int;
+    // SAFETY: one valid pollfd.
+    unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
+    true
+}
+
 /// Puts every signal the daemon ignores back to its default, and unblocks
 /// every signal, for a child about to `exec`: an ignored signal stays
 /// ignored across `exec`, so a command could neither be ended by SIGTERM

@@ -43,9 +43,9 @@ pub enum Command {
         to: KillTarget,
         force: bool,
     },
-    /// A command whose handler comes later: it exits 1 with
-    /// `<name>: <what> isn't built yet`.
-    NotBuilt(String),
+    /// `provider check [--config FILE] [--provider P] [--daemon-name N]
+    /// [--no-find] [--full] [--json]` (#93 decision 30, #94 decision 33).
+    ProviderCheck(ProviderCheck),
     /// `provider show [NAME]`: a built-in pane provider as Lua, or with no
     /// NAME, the built-ins.
     ProviderShow(Option<String>),
@@ -89,6 +89,20 @@ pub enum Command {
         address: OsString,
         pane: PaneId,
     },
+}
+
+/// `provider check`'s options.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProviderCheck {
+    /// `--config FILE`, as typed.
+    pub config: Option<OsString>,
+    /// `--provider P`: `""` is no hint; left out, `$<NAME>_PROVIDER`.
+    pub provider: Option<OsString>,
+    /// `--daemon-name N`, a valid daemon name.
+    pub daemon_name: Option<String>,
+    pub no_find: bool,
+    pub full: bool,
+    pub json: bool,
 }
 
 /// The daemons `kill` ends.
@@ -229,7 +243,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         b"kill" => kill(rest),
         b"provider" if asks_help(rest) => Ok(Command::Help),
         b"provider" => match rest.first().map(|w| w.as_encoded_bytes()) {
-            Some(b"check") => Ok(Command::NotBuilt("provider check".to_string())),
+            Some(b"check") => provider_check(&rest[1..]),
             Some(b"show") => provider_show(&rest[1..]),
             Some(b"types") => provider_types(&rest[1..]),
             _ => Err(UsageError(
@@ -620,6 +634,63 @@ fn kill(words: &[OsString]) -> Result<Command, UsageError> {
         to: KillTarget::All,
         force,
     })
+}
+
+/// `provider check`'s words: `[--config FILE] [--provider P]
+/// [--daemon-name N] [--no-find] [--full] [--json]`, in any order.
+fn provider_check(words: &[OsString]) -> Result<Command, UsageError> {
+    let mut c = ProviderCheck::default();
+    let twice = |option: &str| UsageError(format!("{option} is given twice"));
+    let mut i = 0;
+    while let Some(word) = words.get(i) {
+        let flag = match word.as_encoded_bytes() {
+            b"--no-find" => Some(&mut c.no_find),
+            b"--full" => Some(&mut c.full),
+            b"--json" => Some(&mut c.json),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            if std::mem::replace(flag, true) {
+                return Err(twice(&word.to_string_lossy()));
+            }
+            i += 1;
+            continue;
+        }
+        let Some((option, attached)) =
+            long_option(word, &["--config", "--provider", "--daemon-name"])
+        else {
+            return Err(UsageError(
+                "provider check takes [--config FILE] [--provider P] [--daemon-name N] \
+                 [--no-find] [--full] [--json]"
+                    .into(),
+            ));
+        };
+        let value = option_value(option, attached, words, &mut i)?;
+        let given = match option {
+            "--config" if value.is_empty() => {
+                return Err(UsageError(format!("{option} needs a value")));
+            }
+            "--config" => c.config.replace(value).is_some(),
+            // "" is no hint
+            "--provider" => c.provider.replace(value).is_some(),
+            _ => {
+                let name = value
+                    .to_str()
+                    .filter(|n| valid_name(OsStr::new(n)))
+                    .ok_or_else(|| {
+                        UsageError(format!(
+                            "{option}: use 1-32 letters, digits, '.', '_' or '-'"
+                        ))
+                    })?;
+                c.daemon_name.replace(name.to_string()).is_some()
+            }
+        };
+        if given {
+            return Err(twice(option));
+        }
+        i += 1;
+    }
+    Ok(Command::ProviderCheck(c))
 }
 
 /// `provider show`'s words: `[NAME]`.

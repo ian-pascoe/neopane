@@ -43,7 +43,6 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::Help => Ok(print(&cli::help())),
         Command::DebugHelp => Ok(print(&cli::debug_help())),
         Command::Version => Ok(print(&cli::version())),
-        Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
         Command::List { json } => Ok(list(json)),
         Command::Status { to, json } => Ok(status(&to, json)),
         Command::Kill { to, force } => Ok(kill(to, force)),
@@ -54,6 +53,23 @@ fn run(command: Command) -> Result<ExitCode> {
             }
         }
         Command::ProviderTypes { config } => Ok(write_types(config)),
+        Command::ProviderCheck(c) => {
+            let options = neopane::providers::check::Options {
+                config: c.config,
+                provider: c.provider,
+                daemon_name: c.daemon_name,
+                no_find: c.no_find,
+                full: c.full,
+                json: c.json,
+            };
+            let checked = neopane::providers::check::run(&options);
+            let code = print(&checked.out);
+            Ok(if checked.status == 0 {
+                code
+            } else {
+                ExitCode::from(checked.status)
+            })
+        }
         // started by the launcher, not by people
         Command::Daemon {
             name,
