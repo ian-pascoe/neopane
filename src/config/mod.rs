@@ -6,6 +6,7 @@
 //! side is [`child::main`], behind the hidden `config-child` command.
 
 mod api;
+pub mod builtin;
 pub mod check;
 pub mod child;
 mod runner;
@@ -18,6 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use builtin::BuiltinTable;
 pub use check::{Builtin, Capability, Choice, Chosen, Pair, Problem, Problems, Provider, check};
 pub use runner::{Failure, MAX_PRINTED, Outcome, Spawn, run};
 pub use wire::{Answer, Attach, Request};

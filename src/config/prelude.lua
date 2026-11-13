@@ -47,3 +47,4 @@ end
 
 api.run = raising(run)
 api.which = raising(which)
+for name, f in pairs(api.builtin) do api.builtin[name] = raising(f) end

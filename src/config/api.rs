@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 
 use mlua::{Lua, Table, Value};
 
+use super::BuiltinTable;
+use super::builtin::tree_of_table;
+use super::tree::Tree;
 use super::wire::Request;
 use crate::name::NAME;
 use crate::util::seconds;
@@ -57,7 +60,20 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
     api.raw_set("version", request.version.as_str())?;
     api.raw_set("config_dir", dir)?;
     api.raw_set("default", lua.create_function(default)?)?;
-    api.raw_set("builtin", lua.create_table()?)?;
+    let builtin = lua.create_table()?;
+    for table in BuiltinTable::ALL {
+        let f = lua.create_function(move |lua, opts: Value| {
+            Ok(match no_options(&opts) {
+                Ok(()) => (built_in(lua, table)?, None),
+                Err(why) => (
+                    Value::Nil,
+                    Some(format!("{NAME}.builtin.{}: {why}", table.name())),
+                ),
+            })
+        })?;
+        builtin.raw_set(table.name(), f)?;
+    }
+    api.raw_set("builtin", builtin)?;
     api.raw_set("inside", lua.create_table()?)?;
     let time = request.time;
     let run = lua.create_function(move |lua, (argv, opts): (Value, Value)| {
@@ -103,6 +119,48 @@ fn default(lua: &Lua, attach: Value) -> mlua::Result<Value> {
         Some(name) => Value::String(lua.create_string(name)?),
         None => Value::Nil,
     })
+}
+
+/// A fresh copy of built-in `table`'s table.
+fn built_in(lua: &Lua, table: BuiltinTable) -> mlua::Result<Value> {
+    lua_of(lua, &tree_of_table(&table.table()))
+}
+
+/// `tree` as a Lua value: plain data only.
+fn lua_of(lua: &Lua, tree: &Tree) -> mlua::Result<Value> {
+    Ok(match tree {
+        Tree::Nil | Tree::Marker(_) => Value::Nil,
+        Tree::Bool(b) => Value::Boolean(*b),
+        Tree::Number(n) => Value::Number(*n),
+        Tree::String(s) => Value::String(lua.create_string(s)?),
+        Tree::Table(pairs) => {
+            let t = lua.create_table()?;
+            for (k, v) in pairs {
+                let k = match k {
+                    Tree::Number(n) if n.fract() == 0.0 => Value::Integer(*n as i64),
+                    k => lua_of(lua, k)?,
+                };
+                t.raw_set(k, lua_of(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
+/// A built-in's options: it takes none, so nil or an empty table.
+fn no_options(opts: &Value) -> Result<(), String> {
+    let got = match opts {
+        Value::Nil => return Ok(()),
+        Value::Table(t) => match t.pairs::<Value, Value>().next() {
+            None => return Ok(()),
+            Some(Ok((Value::String(k), _))) => k.to_string_lossy(),
+            Some(Ok((k, _))) => format!("a {} key", type_name(&k)),
+            Some(Err(e)) => e.to_string(),
+        },
+        Value::Integer(_) | Value::Number(_) => format!("the number {}", shown(opts)),
+        other => format!("a {}", type_name(other)),
+    };
+    Err(format!("takes no options; got {got}"))
 }
 
 /// Lua's name for `v`'s type.

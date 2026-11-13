@@ -196,6 +196,7 @@ fn the_meta_file_has_the_decided_classes() {
         "Config",
         "RunOptions",
         "RunResult",
+        "Builtin",
     ] {
         want.push(format!("{NAME}.{class}"));
     }
@@ -282,4 +283,10 @@ fn the_meta_file_keeps_in_step_with_the_api() {
     // nil without a hint
     attach.insert("provider".into());
     assert_eq!(fields(&meta, "Attach"), attach);
+    let builtin: Table = api.get("builtin").unwrap();
+    assert_eq!(fields(&meta, "Builtin"), keys(&builtin));
+    assert_eq!(
+        keys(&builtin),
+        set(crate::config::BuiltinTable::ALL.map(|b| b.name()))
+    );
 }

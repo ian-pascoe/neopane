@@ -3,6 +3,7 @@
 
 use std::fmt::Write as _;
 
+use super::BuiltinTable;
 use super::check::{Builtin, Capability, Setting, number};
 use crate::name::NAME;
 
@@ -27,56 +28,49 @@ pub enum Value {
     Map(Vec<(String, Value)>),
 }
 
-impl Builtin {
-    /// Its Lua table, if it has one. Rex is only `"rex"`.
-    pub fn table(self) -> Option<Table> {
-        match self {
-            Builtin::Rex => None,
-        }
-    }
-}
-
 /// What `provider show [NAME]` prints on stdout, or why it exits 1.
 pub fn show(name: Option<&str>, build: &str) -> Result<String, String> {
     let Some(name) = name else {
         return Ok(listing());
     };
-    let names: Vec<&str> = Builtin::ALL.iter().map(|b| b.name()).collect();
-    let builtin = Builtin::from_name(name.as_bytes()).ok_or_else(|| {
-        format!(
-            "no built-in pane provider named {name} (built-ins: {})",
-            names.join(", ")
-        )
-    })?;
-    match builtin.table() {
-        Some(table) => Ok(lua_file(&table, build)),
-        None => Err(format!(
+    if let Some(table) = BuiltinTable::from_name(name.as_bytes()) {
+        return Ok(lua_file(&table.table(), build));
+    }
+    if Builtin::from_name(name.as_bytes()).is_some() {
+        return Err(format!(
             "{name} is built into {NAME} and has no Lua table; return \"{name}\" from provider() \
              to use it"
-        )),
+        ));
     }
+    let names: Vec<&str> = listed().into_iter().map(|(n, _)| n).collect();
+    Err(format!(
+        "no built-in pane provider named {name} (built-ins: {})",
+        names.join(", ")
+    ))
+}
+
+/// Each built-in's name and how a config gets it: Rex's, then the tables.
+fn listed() -> Vec<(&'static str, String)> {
+    let rex = Builtin::ALL.iter().map(|b| {
+        let name = b.name();
+        (
+            name,
+            format!("return \"{name}\" from provider() (built in; no Lua table)"),
+        )
+    });
+    let tables = BuiltinTable::ALL
+        .iter()
+        .map(|t| (t.name(), format!("{NAME}.builtin.{}()", t.name())));
+    rex.chain(tables).collect()
 }
 
 /// One line per built-in.
 fn listing() -> String {
-    let width = Builtin::ALL
+    let listed = listed();
+    let width = listed.iter().map(|(n, _)| n.len()).max().unwrap_or(0) + 2;
+    listed
         .iter()
-        .map(|b| b.name().len())
-        .max()
-        .unwrap_or(0)
-        + 2;
-    Builtin::ALL
-        .iter()
-        .map(|b| {
-            let what = match b.table() {
-                Some(_) => format!("{NAME}.builtin.{}()", b.name()),
-                None => format!(
-                    "return \"{}\" from provider() (built in; no Lua table)",
-                    b.name()
-                ),
-            };
-            format!("{:width$}{what}\n", b.name())
-        })
+        .map(|(name, what)| format!("{name:width$}{what}\n"))
         .collect()
 }
 
@@ -185,7 +179,7 @@ mod tests {
     fn an_unknown_name_lists_the_builtins() {
         assert_eq!(
             show(Some("foo"), "b").unwrap_err(),
-            "no built-in pane provider named foo (built-ins: rex)"
+            "no built-in pane provider named foo (built-ins: rex, tmux)"
         );
     }
 
@@ -193,7 +187,30 @@ mod tests {
     fn no_name_lists_one_line_per_builtin() {
         assert_eq!(
             show(None, "b").unwrap(),
-            "rex  return \"rex\" from provider() (built in; no Lua table)\n"
+            format!(
+                "rex   return \"rex\" from provider() (built in; no Lua table)\n\
+                 tmux  {NAME}.builtin.tmux()\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_table_built_in_shows_its_table() {
+        assert_eq!(
+            show(Some("tmux"), "B 1").unwrap(),
+            format!(
+                "-- {NAME}.builtin.tmux() in B 1.\n\
+                 -- To change it, copy it into your init.lua and return it from provider().\n\
+                 return {{\n  \
+                   name = \"tmux\",\n  \
+                   close = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"close\" }},\n  \
+                   find = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"find\" }},\n  \
+                   report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"report_layout\" }},\n  \
+                   open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"open_beside\" }},\n\
+                 }}\n"
+            )
         );
     }
 

@@ -535,8 +535,14 @@ impl Checker {
             Tree::String(s) => match Builtin::from_name(s) {
                 Some(builtin) => Some(Choice::Builtin(builtin)),
                 None => {
+                    let table = match super::BuiltinTable::from_name(s) {
+                        Some(t) => {
+                            format!(" (for {0}'s table, return {NAME}.builtin.{0}())", t.name())
+                        }
+                        None => String::new(),
+                    };
                     self.error(format!(
-                        "{ROOT} returned {}; the only built-in name is \"rex\"",
+                        "{ROOT} returned {}; the only built-in name is \"rex\"{table}",
                         quoted(s)
                     ));
                     None
