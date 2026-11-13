@@ -248,8 +248,10 @@ impl Drop for ConfigRun {
     fn drop(&mut self) {
         let group = self.group.swap(0, Ordering::SeqCst);
         if group > 0 {
-            // SAFETY: a plain syscall; the runner hasn't reaped the child,
-            // or it would have cleared `group` first.
+            // SAFETY: a plain syscall. The runner clears `group` before it
+            // kills and reaps the group, but may do both between the swap
+            // and this kill: then the group is gone, and the kill is ESRCH,
+            // unless the pid was reused in those microseconds.
             unsafe { libc::kill(-group, libc::SIGKILL) };
         }
     }

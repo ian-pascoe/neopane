@@ -23,8 +23,8 @@ environment its commands get (`docs/capabilities.md`, "Running a command").
 It has 3 s to answer; once it has answered, or its time is up, its process
 group is killed, so nothing it started outlives the choice. A fix to the
 file applies at the next choice, and a file made after the daemon started is
-read then too, wherever it is. `--provider none` (or `NEOPANE_PROVIDER=none`) chooses none
-without running it.
+read then too, wherever it is. `--provider none` (or
+`NEOPANE_PROVIDER=none`) chooses none without running it.
 
 It returns a table whose only key is `provider`, a function called with the
 choosing attach:
@@ -138,14 +138,20 @@ Also `require("neopane")`.
 
 ## Errors
 
-Any error means no pane provider for that choice, never the default: the
-file `$NEOPANE_CONFIG` names isn't there, fails to load or raises, runs out its 3 s, ends without answering, or
-returns something malformed, such as a wrong type, an argv with a hole (is a
-variable nil?), a side with no usable capability, a paired `"rex"`, or no
-protocol number shared with neopane. Anything unknown, such as a key, a
-field or a placeholder, gets a warning and is ignored, a capability holding
-an unknown placeholder with it; a time over 60 s gets a warning and is cut
-to 60 s. So an older daemon still reads a newer file.
+Any error means no pane provider for that choice, never the default.
+
+A file `$NEOPANE_CONFIG` names that isn't there is an error. Only an empty
+default place, with `$NEOPANE_CONFIG` unset, means the built-in default
+chooses.
+
+A file that fails to load or raises, runs out its 3 s, ends without
+answering, or returns something malformed is an error too: a wrong type,
+an argv with a hole (is a variable nil?), a side with no usable
+capability, a paired `"rex"`, or no protocol number shared with neopane.
+Anything unknown, such as a key, a field or a placeholder, gets a warning
+and is ignored, a capability holding an unknown placeholder with it; a
+time over 60 s gets a warning and is cut to 60 s. So an older daemon still
+reads a newer file.
 
 Each choice shows its problems as one warning in Neovim, the first error
 or else the first warning, with the count of the rest:

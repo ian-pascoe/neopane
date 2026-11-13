@@ -1,4 +1,4 @@
-//! The user's `init.lua` choosing the pane provider, end to end (#129,
+//! The user's config choosing the pane provider, end to end (#129,
 //! ADR 0007): a real daemon in a pty, its config through `$<NAME>_CONFIG`,
 //! and fake capability scripts, whose `open` attaches its terminal with
 //! the relay test tool.
@@ -253,6 +253,9 @@ return {
     );
     work.attach();
     assert_eq!(until_lines(&work.path("runs"), 1), ["ran"]);
+    // from here to `go` must fit in the config's 3 s: on a machine too
+    // loaded for that, the config times out and the test fails, rather
+    // than passing without the two attaches overlapping
     work.attach();
     // both attached, the first's choice still running
     let s = work.until_status(|s| s["panes"] == 2);

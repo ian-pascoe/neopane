@@ -6,10 +6,11 @@
 //! file the built-in default, from its hello (`providers::choose`). A
 //! config error means none for that choice, with one warning. The chosen
 //! pane provider is held at once, unconfirmed, and its `find` for the
-//! choosing attach's pane confirms it: in reach keeps it; anything else, or the
-//! choice's 3 s running out, drops it with a warning. Nothing waits for that but what
-//! needs the pane provider: the windows Neovim has with no pane of their own
-//! wait unshown, then open as new windows do, and self-attaches that arrive
+//! choosing attach's pane confirms it: in reach keeps it; anything else, or
+//! the choice's time running out (3 s, or `find`'s timeout if longer),
+//! drops it with a warning. Nothing waits for that but what needs the pane
+//! provider: the windows Neovim has with no pane of their own wait
+//! unshown, then open as new windows do, and self-attaches that arrive
 //! meanwhile wait their turn, until one gets a pane provider. A later
 //! self-attach is in reach if its context variables are the choosing
 //! attach's, and its `find` agrees; a window opened from a pane out of reach

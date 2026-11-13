@@ -177,7 +177,7 @@ return { provider = function() return { name = "fake", open = { "true" } } end }
 }
 
 #[test]
-fn a_config_that_couldnt_start_before_neovim_runs_at_start() {
+fn start_with_no_first_choice_nor_config_running_runs_the_config() {
     // serve.rs found a config but couldn't start it: no first choice and
     // no config running, so `start` chooses
     let dir = config_dir("start", "return { provider = function() return nil end }\n");
