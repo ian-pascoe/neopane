@@ -4896,6 +4896,176 @@ mod tests {
         assert_eq!("0 0", h.tab_numbers(&[top, kid]));
     }
 
+    impl Harness {
+        /// Gives window `win` a buffer of its own with unsaved changes, and
+        /// sets 'nohidden', so its last window can't close without !.
+        fn give_unsaved_changes(&mut self, win: i64) {
+            self.sync(&format!(
+                "vim.o.hidden = false\n\
+                 local buf = vim.api.nvim_create_buf(true, false)\n\
+                 vim.api.nvim_win_set_buf({win}, buf)\n\
+                 vim.api.nvim_buf_set_lines(buf, 0, -1, false, {{ 'changed' }})"
+            ));
+        }
+
+        /// Runs the Ex command `cmd` from Lua: `ok`, or the error it
+        /// gives.
+        fn try_command(&mut self, cmd: &str) -> String {
+            self.eval_str(&format!(
+                "local ok, err = pcall(vim.cmd, '{cmd}')\n\
+                 return ok and 'ok' or tostring(err):match('E%d+') or tostring(err)"
+            ))
+        }
+
+        fn buf_of(&mut self, win: i64) -> String {
+            self.eval_str(&format!("return tostring(vim.api.nvim_win_get_buf({win}))"))
+        }
+
+        fn tab_count(&mut self) -> String {
+            self.eval_str("return tostring(vim.fn.tabpagenr('$'))")
+        }
+
+        /// How many windows show buffer `buf`, and whether it has unsaved
+        /// changes, as `<windows> <modified>`.
+        fn buffer_state(&mut self, buf: &str) -> String {
+            self.eval_str(&format!(
+                "return #vim.fn.win_findbuf({buf}) .. ' ' .. tostring(vim.bo[{buf}].modified)"
+            ))
+        }
+    }
+
+    // Neovim 0.12's :tabclose loops forever on a current float it can't close
+    // for its unsaved changes (SPI-1112); every window here floats, external
+    // ones too.
+
+    #[test]
+    fn tabclose_with_unsaved_changes_in_the_current_window_fails_as_for_a_split() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(c);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        assert_eq!("2", h.tab_count());
+        assert_eq!("2", h.tabpagenr());
+        // back in the window it was in, never the hidden anchor
+        assert_eq!(c, h.current());
+        assert_eq!(Some(WinKind::External), h.kind(c));
+    }
+
+    #[test]
+    fn tabclose_typed_with_unsaved_changes_in_the_current_window_fails() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(c);
+        h.input(":tabclose<CR>");
+        h.barrier();
+        assert_eq!("E445", h.eval_str("return vim.v.errmsg:match('E%d+')"));
+        assert_eq!("2", h.tab_count());
+        assert_eq!(Some(WinKind::External), h.kind(c));
+    }
+
+    #[test]
+    fn tabclose_with_unsaved_changes_in_another_window_of_the_tab_page_fails() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.sync(&format!("vim.cmd('vsplit')\n{}", adopt_all()));
+        let d = h.current();
+        h.give_unsaved_changes(c);
+        assert_ne!(c, d);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("2", h.tab_count());
+        assert_eq!(Some(WinKind::External), h.kind(c));
+        // as Neovim closes a split without unsaved changes
+        assert_eq!("0", h.tab_numbers(&[d]));
+    }
+
+    #[test]
+    fn tabclose_bang_closes_a_tab_page_with_unsaved_changes_and_keeps_them_hidden() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(c);
+        let buf = h.buf_of(c);
+        assert_eq!("ok", h.try_command("tabclose!"));
+        h.barrier();
+        assert_eq!("1", h.tab_count());
+        assert_eq!("0 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn tabclose_with_unsaved_changes_under_hidden_closes_the_tab_page() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [_, _, c] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(c);
+        h.sync("vim.o.hidden = true");
+        let buf = h.buf_of(c);
+        assert_eq!("ok", h.try_command("tabclose"));
+        h.barrier();
+        assert_eq!("1", h.tab_count());
+        assert_eq!("0 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn tabclose_closes_the_tab_page_though_a_window_that_followed_it_in_has_unsaved_changes() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // `a`, the first tab page's, sits in the second, current
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(a);
+        let buf = h.buf_of(a);
+        assert_eq!("ok", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("1", h.tab_count());
+        // reopened at home, its changes and all
+        assert_eq!("1 true", h.buffer_state(&buf));
+        // its 'bufhidden' as it was
+        assert_eq!("", h.eval_str(&format!("return vim.bo[{buf}].bufhidden")));
+    }
+
+    #[test]
+    fn tabclose_of_another_tab_page_with_unsaved_changes_returns() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, _, _] = two_tab_pages(&mut h);
+        h.give_unsaved_changes(a);
+        let buf = h.buf_of(a);
+        // Neovim's tabpage_close_other stops at the first close that fails,
+        // so this never looped
+        h.try_command("1tabclose");
+        h.barrier();
+        h.sync("");
+        // whatever closed, the changes are still shown
+        assert_eq!("1 true", h.buffer_state(&buf));
+    }
+
+    #[test]
+    fn a_float_group_panes_floats_come_back_after_a_tabclose_that_fails() {
+        let Some((mut h, floats)) = picker_carried_into_the_second() else {
+            return;
+        };
+        let c = h.current();
+        h.give_unsaved_changes(c);
+        assert_eq!("E445", h.try_command("tabclose"));
+        h.barrier();
+        h.sync("");
+        assert_eq!("2", h.tab_count());
+        assert_eq!("2 2 1", h.tab_numbers(&floats));
+    }
+
     #[test]
     fn a_tab_page_whose_label_counts_no_window_doesnt_end_neovim() {
         let Some(mut h) = Harness::start_sized(60, 10) else {

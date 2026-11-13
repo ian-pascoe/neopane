@@ -2283,14 +2283,89 @@ api.nvim_create_autocmd('WinClosed', {
   end,
 })
 
+-- Whether closing the last window of `buf` without ! fails on its unsaved
+-- changes, as Neovim's bufIsChanged() and buf_hide() tell; :hide aside.
+local function holds_unsaved_changes(buf)
+  local bt, bh = vim.bo[buf].buftype, vim.bo[buf].bufhidden
+  if not vim.bo[buf].modified or bt == 'nofile' or bt == 'nowrite' or bt == 'terminal' then return false end
+  return bh ~= 'hide' and (bh ~= '' or not vim.o.hidden)
+end
+
+-- makes `win` current without autocommands, which would move on from an anchor
+local function enter_quietly(win)
+  vim.cmd('noautocmd call nvim_set_current_win(' .. win .. ')')
+end
+
+-- Readies tab page `tab`, about to close, so the close can't hang Neovim.
+-- Returns what to undo once the close is done.
+--
+-- :tabclose closes the current window while it floats, and in Neovim 0.12
+-- tries again forever when that fails on unsaved changes (`tabpage_close`;
+-- Neovim's 0d3ed7904a caps it, after 0.12, and this can go with 0.12).
+-- Every window here floats, external ones too. So:
+-- - a window of another tab page that only sits in this one, and is reopened
+--   at home, hides its unsaved changes for the close instead of failing it;
+-- - if one of the tab page's own windows can't close, Neovim is to close the
+--   rest from the anchor, as it closes splits: E445, keeping that one. To
+--   get there it first closes one window that can close, made current with
+--   the anchor current before it, so the carried floats go home before any
+--   of them could close, and come back after.
+local function prepare_tab_close(tab)
+  local wins = vim.tbl_filter(function(w)
+    local c = api.nvim_win_get_config(w)
+    return c.external or c.relative ~= ''
+  end, api.nvim_tabpage_list_wins(tab))
+  local bufhidden_was, followed = {}, {}
+  for _, w in ipairs(wins) do
+    local buf = api.nvim_win_get_buf(w)
+    local belongs = api.nvim_win_get_config(w).external and home[w] or float_home_of(w)
+    if belongs and belongs ~= tab and api.nvim_tabpage_is_valid(belongs) then
+      followed[w] = true
+      if bufhidden_was[buf] == nil and holds_unsaved_changes(buf) then
+        bufhidden_was[buf] = vim.bo[buf].bufhidden
+        vim.bo[buf].bufhidden = 'hide'
+      end
+    end
+  end
+  local stuck, close_first = false, nil
+  for _, w in ipairs(wins) do
+    if holds_unsaved_changes(api.nvim_win_get_buf(w)) then
+      stuck = true
+    -- best one that only sat here, as it's reopened; never a carried float
+    elseif not float_home_of(w) and (not close_first or (followed[w] and not followed[close_first])) then
+      close_first = w
+    end
+  end
+  local cur, anchor = api.nvim_get_current_win(), window_of(tab)
+  stuck = stuck and anchor ~= nil
+  if stuck then enter_quietly(anchor) end
+  if stuck and close_first then enter_quietly(close_first) end
+  return function()
+    for buf, bh in pairs(bufhidden_was) do
+      if api.nvim_buf_is_valid(buf) then vim.bo[buf].bufhidden = bh end
+    end
+    -- the close failed: back to the window it was in
+    if not stuck or api.nvim_get_current_win() ~= anchor then return end
+    if api.nvim_win_is_valid(cur) and api.nvim_win_get_tabpage(cur) == tab then
+      enter_quietly(cur)
+    else
+      schedule_report()
+    end
+  end
+end
+
 -- Every window in a closing tab page closes, external ones from other tab
 -- pages too. Not in older Neovim, which lacks the event.
 pcall(api.nvim_create_autocmd, 'TabClosedPre', {
   group = group,
   callback = function()
     closing_tab = api.nvim_get_current_tabpage()
+    local undo = prepare_tab_close(closing_tab)
     -- for a close that fails
-    vim.schedule(function() closing_tab = nil end)
+    vim.schedule(function()
+      closing_tab = nil
+      undo()
+    end)
   end,
 })
 -- Closed, after its windows: focus from here on is real, the window Neovim
