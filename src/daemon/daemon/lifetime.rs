@@ -69,6 +69,11 @@ impl Lifetime {
     pub(crate) fn is_attached(&self) -> bool {
         self.stage == Stage::Attached
     }
+
+    /// The unsaved changes, as Neovim last told.
+    pub(crate) fn unsaved(&self) -> &[Vec<u8>] {
+        &self.unsaved
+    }
 }
 
 impl Daemon {

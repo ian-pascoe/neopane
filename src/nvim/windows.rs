@@ -238,6 +238,12 @@ pub enum Note {
     /// to quit over, empty for an unnamed one. Told when they change, and at
     /// the SafeState after `unsaved_at_safe_state` as answer `ask`, else 0.
     Unsaved { files: Vec<Vec<u8>>, ask: u32 },
+    /// Neovim's global working directory, `getcwd(-1, -1)`: told at start
+    /// and when it changes.
+    Cwd(Vec<u8>),
+    /// The ptys of Neovim's running `:terminal` jobs, sorted: told as they
+    /// open and close.
+    Terminals(Vec<Vec<u8>>),
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -494,6 +500,18 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
     if method == b"unsaved" {
         return parse_unsaved(params).map(Some);
     }
+    if method == b"cwd" {
+        if rpc::expect_array(params)? < 1 {
+            return Err(rpc::Error::BadMessage);
+        }
+        return Ok(Some(Note::Cwd(rpc::expect_str(params)?.to_vec())));
+    }
+    if method == b"terminals" {
+        if rpc::expect_array(params)? < 1 {
+            return Err(rpc::Error::BadMessage);
+        }
+        return parse_strs(params).map(|ptys| Some(Note::Terminals(ptys)));
+    }
     let tag = match method {
         b"win" => Tag::Current,
         b"reopen" => Tag::Reopen,
@@ -618,13 +636,19 @@ fn parse_unsaved(params: &mut Decoder<'_>) -> rpc::Result<Note> {
     if rpc::expect_array(params)? < 2 {
         return Err(rpc::Error::BadMessage);
     }
-    let n = rpc::expect_array(params)?;
-    let mut files = Vec::with_capacity(n.min(64) as usize);
-    for _ in 0..n {
-        files.push(rpc::expect_str(params)?.to_vec());
-    }
+    let files = parse_strs(params)?;
     let ask = u32::try_from(rpc::expect_int(params)?).map_err(|_| rpc::Error::BadMessage)?;
     Ok(Note::Unsaved { files, ask })
+}
+
+/// An array of strings, each as bytes.
+fn parse_strs(params: &mut Decoder<'_>) -> rpc::Result<Vec<Vec<u8>>> {
+    let n = rpc::expect_array(params)?;
+    let mut strs = Vec::with_capacity(n.min(64) as usize);
+    for _ in 0..n {
+        strs.push(rpc::expect_str(params)?.to_vec());
+    }
+    Ok(strs)
 }
 
 /// At Neovim's next SafeState, the Lua tells the unsaved changes as answer
@@ -1163,6 +1187,71 @@ mod tests {
         );
         h.lua(&format!("{NAME}.unsaved_at_safe_state(7)"));
         h.until_unsaved(&[], 7);
+    }
+
+    impl Harness {
+        /// Waits for `want` among the notes, then clears them.
+        fn until_note(&mut self, want: Note) {
+            for _ in 0..100 {
+                if self.notes.contains(&want) {
+                    break;
+                }
+                self.sync("vim.wait(10)");
+            }
+            assert!(self.notes.contains(&want), "{want:?}: {:?}", self.notes);
+            self.notes.clear();
+        }
+    }
+
+    #[test]
+    fn the_cwd_note_tells_the_global_directory_at_start_and_as_it_changes() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let start = h.eval_str("return vim.fn.getcwd(-1, -1)");
+        h.until_note(Note::Cwd(start.into_bytes()));
+        // as Neovim names it: macOS's /var is /private/var
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let tmp = tmp.to_str().unwrap();
+        h.sync(&format!("vim.cmd.cd({tmp:?})"));
+        h.until_note(Note::Cwd(tmp.as_bytes().to_vec()));
+        // a window's or a tab page's own directory isn't the global one
+        h.sync("vim.cmd.lcd('/') vim.cmd.tcd('/')");
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| matches!(n, Note::Cwd(_))),
+            "{:?}",
+            h.notes
+        );
+    }
+
+    #[test]
+    fn the_terminals_note_tells_the_ptys_of_running_terminals() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let pty = |h: &mut Harness| {
+            h.eval_str("return vim.api.nvim_get_chan_info(vim.bo.channel).pty or ''")
+        };
+        h.sync("vim.cmd('hide terminal')");
+        let first = pty(&mut h);
+        assert!(first.starts_with("/dev/"), "{first:?}");
+        h.until_note(Note::Terminals(vec![first.clone().into_bytes()]));
+        h.sync("vim.cmd('hide terminal')");
+        let second = pty(&mut h);
+        let mut both = vec![first.clone().into_bytes(), second.clone().into_bytes()];
+        both.sort();
+        h.until_note(Note::Terminals(both));
+        // its job ends: gone from the list
+        h.sync("vim.fn.jobstop(vim.bo.channel)");
+        h.until_note(Note::Terminals(vec![first.into_bytes()]));
+        // none left: an empty list
+        h.sync(
+            "for _, c in ipairs(vim.api.nvim_list_chans()) do \
+               if (c.pty or '') ~= '' then vim.fn.jobstop(c.id) end \
+             end",
+        );
+        h.until_note(Note::Terminals(vec![]));
     }
 
     #[test]

@@ -53,6 +53,7 @@ use indexmap::IndexMap;
 
 mod attaches;
 mod choosing;
+mod control;
 mod lifetime;
 mod self_attach;
 use attaches::PENDING_BASE;
@@ -115,6 +116,14 @@ pub(crate) struct Daemon {
     pub stopped: Option<StopReason>,
     /// Whether the daemon has a pane, or is past its last (ADR 0003).
     pub(crate) lifetime: lifetime::Lifetime,
+    /// What Neovim told of itself that `status` shows, never asking it.
+    pub(crate) told: control::Told,
+    /// Ending, as a `stop` asked: attaches are refused, and it stops once
+    /// the terminals it requested are closed.
+    stopping: bool,
+    /// What `status` shows while there's no pane provider: `none`, and why
+    /// if it was refused or skipped.
+    no_provider: &'static str,
     /// Neovim's exit status, once it has quit and exited: the self-attached
     /// panes' helpers exit with it.
     pub quit_status: Option<u8>,
@@ -177,6 +186,8 @@ pub(crate) enum StopReason {
     NvimExited,
     PaneGone,
     Signal,
+    /// A `stop` control request.
+    Stopped,
 }
 
 impl StopReason {
@@ -186,6 +197,7 @@ impl StopReason {
             StopReason::NvimExited => "nvim_exited",
             StopReason::PaneGone => "pane_gone",
             StopReason::Signal => "signal",
+            StopReason::Stopped => "stopped",
         }
     }
 }
@@ -210,6 +222,7 @@ pub(crate) enum Token {
     AttachTimer,
     ChoiceTimer,
     UnattachTimer,
+    StopTimer,
 }
 
 impl Token {
@@ -231,13 +244,17 @@ impl Token {
             12 => Token::AttachTimer,
             13 => Token::ChoiceTimer,
             14 => Token::UnattachTimer,
+            15 => Token::StopTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::UnattachTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::StopTimer as usize) < pane::TOKEN_BASE);
+
+/// What `status` shows with no pane provider, nothing said why.
+const NO_PROVIDER: &str = "none";
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -321,7 +338,7 @@ impl Drop for Daemon {
         self.panes.unregister_all(&self.event_loop);
         let ending = match self.stopped {
             Some(StopReason::NvimExited) => Ending::Quit,
-            Some(StopReason::Signal) => Ending::Stopped,
+            Some(StopReason::Signal | StopReason::Stopped) => Ending::Stopped,
             Some(StopReason::PaneGone) => Ending::Closed,
             None => Ending::Failed,
         };
@@ -364,6 +381,9 @@ impl Daemon {
             escape_timer_due: None,
             stopped: None,
             lifetime: lifetime::Lifetime::default(),
+            told: control::Told::default(),
+            stopping: false,
+            no_provider: NO_PROVIDER,
             quit_status: None,
             asks: Asks::default(),
             ask_timer_due: None,
@@ -503,6 +523,7 @@ impl Daemon {
             Some(Token::AttachTimer) => self.time_out_attaches(Instant::now())?,
             Some(Token::ChoiceTimer) => self.time_out_choice(Instant::now())?,
             Some(Token::UnattachTimer) => self.unattach_wait_over()?,
+            Some(Token::StopTimer) => self.stop_wait_over(),
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -518,6 +539,9 @@ impl Daemon {
         self.tell_panes_show()?;
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
+        if self.stopping_done() {
+            return Ok(());
+        }
         self.drop_provider_out_of_reach()?;
         if self.nvim.watch_switch() {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
@@ -1266,6 +1290,8 @@ impl Daemon {
             windows::Note::Options(o) => self.on_split_options(o)?,
             windows::Note::Resized { win, cols, rows } => self.on_resized(win, cols, rows)?,
             windows::Note::Unsaved { files, ask } => self.on_unsaved(files, ask)?,
+            windows::Note::Cwd(dir) => self.told.dir = Some(dir),
+            windows::Note::Terminals(ptys) => self.told.terminals = ptys,
         }
         Ok(())
     }
@@ -1914,6 +1940,7 @@ impl Daemon {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
+        self.no_provider = NO_PROVIDER;
         self.provider_writes = false;
         self.context.clear();
         // dropped before it was confirmed: none was chosen after all
@@ -3079,6 +3106,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     mod choosing;
+    mod control;
     mod fallback;
     mod in_layout;
     mod tab_layouts;
@@ -3752,21 +3780,6 @@ mod tests {
         let helper = sender.join().unwrap();
         assert!(matches!(answer(&helper), crate::attach::Message::Accept(_)));
         assert!(fx.d.panes.by_id(id).unwrap().terminal_surface.is_some());
-    }
-
-    #[test]
-    fn a_control_request_is_refused_for_now() {
-        use crate::attach::{Hello, Message, Purpose};
-        let mut fx = fixture();
-        let at = Address::new("status");
-        let hello = Message::Hello(Hello::new(Purpose::Status { pid: None }))
-            .encode()
-            .unwrap();
-        let helper = at.send(&hello, None);
-        fx.d.accept(&at.server).unwrap();
-        let z = refusal(&helper);
-        assert_eq!(Some(crate::attach::Refusal::Hello), z.as_refusal());
-        assert_eq!("this daemon takes no status hello yet", z.message);
     }
 
     /// A self-attach's hello from a terminal on `tty` whose `$<NAME>` is

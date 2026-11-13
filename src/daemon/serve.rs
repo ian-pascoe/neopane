@@ -52,6 +52,8 @@ pub enum Error {
     DetachNotBuilt,
     LauncherGone,
     NoPane,
+    /// A `stop` came before the first attach.
+    Stopped,
 }
 
 impl std::fmt::Display for Error {
@@ -60,6 +62,7 @@ impl std::fmt::Display for Error {
             Error::DetachNotBuilt => write!(f, "--detach isn't built yet"),
             Error::LauncherGone => write!(f, "the launcher went away"),
             Error::NoPane => write!(f, "the launcher's terminal didn't attach"),
+            Error::Stopped => write!(f, "it was stopped before its first attach"),
         }
     }
 }
@@ -607,7 +610,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
 
     // the first attach is answered before Neovim starts, which is sized to it
     let name = dir.name().to_string();
-    let mut first = Some(first_attach(&server, &name, &log)?);
+    let mut first = Some(first_attach(&server, &dir.address(), &name, &log)?);
     // it chooses now: connecting to Rex goes on as Neovim starts
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
         Some(h) => choose::choose(&h.env, h.hint.as_deref(), &mut choose::connect()),
@@ -658,6 +661,25 @@ fn refuse_stopping(server: &UnixListener, within: Duration) {
                 End::refusal(Refusal::Stopping, "the daemon is ending"),
             );
         }
+    }
+}
+
+/// What `status` says of a daemon that awaits its first attach: no pane,
+/// no pane provider, and Neovim's directory to be this one.
+fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::Status {
+    crate::attach::Status {
+        address: address.as_arg().as_encoded_bytes().to_vec(),
+        panes: 0,
+        unsaved: Vec::new(),
+        provider: "none".into(),
+        dir: std::env::current_dir()
+            .ok()
+            .map(|d| d.into_os_string().into_encoded_bytes()),
+        kept: Some(false),
+        capabilities: Some(Vec::new()),
+        unsupported: Some(Vec::new()),
+        log: Some(log.as_bytes().to_vec()),
+        terminals: Some(Vec::new()),
     }
 }
 
@@ -769,9 +791,14 @@ fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
 /// `HELLO_TIMEOUT`, blocking: the loop isn't running yet. A connection that
 /// hangs up before its hello, as one finding the daemons running does, or
 /// another user's, is passed over.
-fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
+fn first_attach(
+    server: &UnixListener,
+    address: &super::dir::Address,
+    name: &str,
+    log: &str,
+) -> Result<SelfAttach> {
     let due = Instant::now() + Duration::from_secs(5);
-    let a = loop {
+    let (stream, tty, at, rest, hello) = loop {
         let left = due.saturating_duration_since(Instant::now());
         let mut fds = [libc::pollfd {
             fd: server.as_raw_fd(),
@@ -791,15 +818,30 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
         let Some(pending) = Pending::new(stream, attach_conn::HELLO_TIMEOUT, euid())? else {
             continue;
         };
-        if let Step::Arrived(a) = pending.read_blocking() {
-            break a;
-        }
-    };
-    let hello = match a.hello {
-        Ok(h) => h,
-        Err(e) => {
-            attach_conn::refuse(a.stream, attach_conn::refusal_of(&e));
-            return Err(e.into());
+        let Step::Arrived(a) = pending.read_blocking() else {
+            continue;
+        };
+        let hello = match a.hello {
+            Ok(h) => h,
+            Err(e) => {
+                attach_conn::refuse(a.stream, attach_conn::refusal_of(&e));
+                return Err(e.into());
+            }
+        };
+        match hello.purpose {
+            // `list` or `kill`, as a daemon starts: answered, and the first
+            // attach still awaited
+            Purpose::Status { .. } => {
+                let status = (hello.v == crate::attach::ATTACH_PROTOCOL_VERSION)
+                    .then(|| starting_status(address, log));
+                attach_conn::send_reply(&a.stream, attach_conn::reply(name, true, None, status));
+            }
+            Purpose::Stop { .. } => {
+                attach_conn::send_reply(&a.stream, attach_conn::reply(name, true, None, None));
+                log_info!("{NAME} daemon: stopped by request before its first attach");
+                return Err(Error::Stopped.into());
+            }
+            _ => break (a.stream, a.tty, a.at, a.rest, hello),
         }
     };
     let Purpose::SelfAttach {
@@ -807,24 +849,24 @@ fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAtta
     } = hello.purpose
     else {
         let message = format!("the first attach can't be {}", hello.purpose.name());
-        attach_conn::refuse(a.stream, End::refusal(Refusal::Hello, message));
+        attach_conn::refuse(stream, End::refusal(Refusal::Hello, message));
         return Err(Error::NoPane.into());
     };
     log_info!(
         "{NAME} daemon: hello: {}",
         attach_conn::describe("self", None, &terminal, &hello.build)
     );
-    if let Err(z) = attach_conn::check_terminal(&terminal, a.tty.as_ref()) {
-        attach_conn::refuse(a.stream, z);
+    if let Err(z) = attach_conn::check_terminal(&terminal, tty.as_ref()) {
+        attach_conn::refuse(stream, z);
         return Err(Error::NoPane.into());
     }
-    let self_hello = attach_conn::attach_hello_of(&terminal, a.tty.as_ref(), provider);
-    let mut surface = Surface::for_attach(a.stream, terminal.transport, a.tty, terminal.size);
+    let self_hello = attach_conn::attach_hello_of(&terminal, tty.as_ref(), provider);
+    let mut surface = Surface::for_attach(stream, terminal.transport, tty, terminal.size);
     attach_conn::send_accept(&surface.helper_socket, name, log)?;
     // traced as 0, which no pane's id is: its pane is made after
-    log::trace_at(Point::Hello, 0, a.at);
+    log::trace_at(Point::Hello, 0, at);
     log::trace(Point::Accepted, 0);
-    surface.helper_in = a.rest;
+    surface.helper_in = rest;
     Ok(SelfAttach {
         surface,
         terminal: None,
@@ -1085,10 +1127,44 @@ mod tests {
         };
         assert_eq!(0, rc);
         let _launcher = fake_launcher_ready(&dir.address(), slave).unwrap();
-        let first = first_attach(&server, "d", "/l");
+        let first = first_attach(&server, &dir.address(), "d", "/l");
         // SAFETY: our own master.
         unsafe { libc::close(master) };
         assert!(first.is_ok(), "{:?}", first.err());
+    }
+
+    #[test]
+    fn the_first_attach_waits_on_past_a_status_and_ends_at_a_stop() {
+        use crate::attach::{Hello, Message, Purpose, Reply};
+        let (_base, dir) = test_dir();
+        let server = dir.bind().unwrap();
+        let ask = |purpose: Purpose| {
+            let stream = dir.address().connect().unwrap();
+            let hello = Message::Hello(Hello::new(purpose)).encode().unwrap();
+            (&stream).write_all(&hello).unwrap();
+            stream
+        };
+        let reply = |stream: &UnixStream| -> Reply {
+            match &attach_conn::read_all_frames(stream)[..] {
+                [Message::Reply(r)] => r.clone(),
+                said => panic!("{said:?}"),
+            }
+        };
+        let status = ask(Purpose::Status { pid: None });
+        let stop = ask(Purpose::Stop {
+            pid: None,
+            force: false,
+        });
+        let first = first_attach(&server, &dir.address(), "d", "/l");
+        let r = reply(&status);
+        assert!(r.ok);
+        assert_eq!("d", r.name);
+        let s = r.status.unwrap();
+        assert_eq!((0, "none"), (s.panes, s.provider.as_str()));
+        assert_eq!(Some(b"/l".to_vec()), s.log);
+        assert!(reply(&stop).ok);
+        let err = first.err().unwrap().to_string();
+        assert_eq!("it was stopped before its first attach", err);
     }
 
     /// The launcher, for a test: connects to the daemon's socket as soon as it

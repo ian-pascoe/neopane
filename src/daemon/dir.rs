@@ -271,6 +271,22 @@ impl Address {
     pub fn answers(&self) -> bool {
         self.connect().is_ok()
     }
+
+    /// Whether a live daemon holds the directory this address is in: its
+    /// lock goes last as it ends. False for an address in no daemon's
+    /// directory.
+    pub fn dir_locked(&self) -> bool {
+        let path = Path::new(&self.0);
+        match (path.parent(), path.file_name()) {
+            (Some(dir), Some(sock)) if sock == SOCK => {
+                let (Some(base), Some(name)) = (dir.parent(), dir.file_name()) else {
+                    return false;
+                };
+                name.to_str().is_some_and(|n| Base(base.to_path_buf()).live(n))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// For messages: lossy where the path isn't Unicode.

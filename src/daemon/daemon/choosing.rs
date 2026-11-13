@@ -99,6 +99,15 @@ impl Daemon {
         let (held, spent) = match chosen {
             Chosen::Provider { held, spent } => (held, spent),
             Chosen::None { why, warn } => {
+                let hint = self
+                    .panes
+                    .by_id(id)
+                    .and_then(|p| p.hello.as_deref())
+                    .and_then(|h| h.hint.as_deref());
+                self.no_provider = match hint {
+                    Some(choose::HINT_NONE) => "none (hint none)",
+                    _ => NO_PROVIDER,
+                };
                 if warn {
                     let line = format!("{why}; no pane provider");
                     log_warn!("{NAME} daemon: {line}");
@@ -420,6 +429,7 @@ impl Daemon {
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
         self.choosing = None;
         self.provider_gone(why)?;
+        self.no_provider = "none (find refused)";
         self.reach_decided()
     }
 

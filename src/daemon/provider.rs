@@ -41,6 +41,22 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
+    /// Every capability, in #93's order.
+    pub(crate) const ALL: [Capability; 12] = [
+        Capability::Open,
+        Capability::OpenBeside,
+        Capability::OpenFloat,
+        Capability::OpenTabPage,
+        Capability::Close,
+        Capability::Find,
+        Capability::PlaceBeside,
+        Capability::Resize,
+        Capability::Focus,
+        Capability::FocusDirection,
+        Capability::ReportLayout,
+        Capability::Events,
+    ];
+
     /// Its name, as logs, warnings and configs spell it.
     pub(crate) fn name(self) -> &'static str {
         match self {
