@@ -8,6 +8,7 @@
 use super::self_attach_tests::Rig;
 use super::tab_area_tests::{lua, tabs};
 use super::*;
+use crate::daemon::pane::Reach;
 use crate::daemon::provider::fake::FakeProvider;
 use crate::daemon::provider::{AskId, Outcome};
 
@@ -68,17 +69,24 @@ fn beside(ask: &Ask) -> (&str, Direction, [u32; 2]) {
     }
 }
 
-/// The opens asked so far, then the windows each of Neovim's `cmds` makes,
-/// all in one flush, each split off the one before. Starts in the first tab
-/// page, whose first terminal is `t0`, or with `in_area` in a new tab page's
-/// tab page area, whose first terminal is `t5`. None when Neovim isn't
-/// installed.
+/// What `split_in_one_flush` made: the opens asked before, the terminal
+/// the first split opens beside, and the windows made.
+struct Made {
+    before: usize,
+    first_origin: &'static str,
+    wins: Vec<i64>,
+}
+
+/// The windows each of Neovim's `cmds` makes, all in one flush, each split
+/// off the one before. Starts in the first tab page, whose first terminal
+/// is `t0`, or with `in_area` in a new tab page's tab page area, whose
+/// first terminal is `t5`. None when Neovim isn't installed.
 fn split_in_one_flush(
     tag: &str,
     fake: FakeProvider,
     in_area: bool,
     cmds: &[&str],
-) -> Option<(Rig, usize, Vec<i64>)> {
+) -> Option<(Rig, Made)> {
     let (mut rig, _) = tabs(tag, 1, fake)?;
     let mut before = 0;
     if in_area {
@@ -94,19 +102,32 @@ fn split_in_one_flush(
     let wins = rig.ints(&format!("local wins = {{}}\n{code}return wins"));
     // the first is asked for; reconcile met the others too
     until_opens(&mut rig, before + 1);
-    Some((rig, before, wins))
+    let first_origin = if in_area { "t5" } else { "t0" };
+    Some((
+        rig,
+        Made {
+            before,
+            first_origin,
+            wins,
+        },
+    ))
 }
 
 /// `:vsplit | split` in one flush: the split of the split waits, without a
 /// pane, for the first split's terminal, and opens beside it, above it as
 /// Neovim split it, at half the size the first split was opened at.
 fn vsplit_split_opens_beside_its_origin(tag: &str, in_area: bool) {
-    let Some((mut rig, before, wins)) =
-        split_in_one_flush(tag, beside_only(), in_area, &["vsplit", "split"])
+    let Some((
+        mut rig,
+        Made {
+            before,
+            first_origin,
+            wins,
+        },
+    )) = split_in_one_flush(tag, beside_only(), in_area, &["vsplit", "split"])
     else {
         return;
     };
-    let first_origin = if in_area { "t5" } else { "t0" };
     let opens_now = opens(&rig);
     assert_eq!(before + 1, opens_now.len());
     let (origin, dir, [cols, rows]) = beside(&opens_now[before].1);
@@ -136,12 +157,17 @@ fn a_split_of_a_split_made_in_one_flush_opens_beside_it_in_a_tab_page_area() {
 /// `:vsplit | split | vsplit` in one flush: each split opens beside the one
 /// before it, as its terminal is answered, in the direction Neovim split it.
 fn a_chain_of_three_opens_each_beside_its_own_origin(tag: &str, in_area: bool) {
-    let Some((mut rig, before, wins)) =
-        split_in_one_flush(tag, beside_only(), in_area, &["vsplit", "split", "vsplit"])
+    let Some((
+        mut rig,
+        Made {
+            before,
+            first_origin,
+            wins,
+        },
+    )) = split_in_one_flush(tag, beside_only(), in_area, &["vsplit", "split", "vsplit"])
     else {
         return;
     };
-    let first_origin = if in_area { "t5" } else { "t0" };
     let want = [
         (first_origin, Direction::Left),
         ("t1", Direction::Up),
@@ -173,19 +199,20 @@ fn a_chain_of_three_splits_in_one_flush_opens_each_beside_its_own_origin_in_a_ta
 
 /// `:vsplit | split` in one flush, then `end` ends the wait of the split of
 /// the split, given the two windows: it gets a pane without waiting for
-/// the first split's terminal any more. The rig, the opens asked before,
-/// and the two windows. None when Neovim isn't installed.
+/// the first split's terminal any more. The rig, and the two windows.
+/// None when Neovim isn't installed.
 fn the_wait_ends(
     tag: &str,
     fake: FakeProvider,
     in_area: bool,
     end: impl FnOnce(&mut Rig, &[i64]),
-) -> Option<(Rig, usize, Vec<i64>)> {
-    let (mut rig, before, wins) = split_in_one_flush(tag, fake, in_area, &["vsplit", "split"])?;
+) -> Option<(Rig, Vec<i64>)> {
+    let (mut rig, Made { wins, .. }) =
+        split_in_one_flush(tag, fake, in_area, &["vsplit", "split"])?;
     assert!(rig.d.panes.by_win(wins[1]).is_none(), "the split waits");
     end(&mut rig, &wins);
     rig.pump(|r| r.d.panes.by_win(wins[1]).is_some());
-    Some((rig, before, wins))
+    Some((rig, wins))
 }
 
 /// The first split's open fails: the split opens beside the terminal the
@@ -193,7 +220,7 @@ fn the_wait_ends(
 #[test]
 fn a_split_stops_waiting_when_its_origins_open_fails() {
     let failed = |rig: &mut Rig, _: &[i64]| answer_open(rig, 0, Outcome::Failed("no room".into()));
-    let Some((rig, _, wins)) = the_wait_ends("so-fail", beside_only(), false, failed) else {
+    let Some((rig, wins)) = the_wait_ends("so-fail", beside_only(), false, failed) else {
         return;
     };
     let opens_now = opens(&rig);
@@ -210,7 +237,7 @@ fn a_split_stops_waiting_when_its_origins_open_fails() {
 #[test]
 fn a_split_stops_waiting_when_its_origins_open_fails_in_a_tab_page_area() {
     let failed = |rig: &mut Rig, _: &[i64]| answer_open(rig, 1, Outcome::Failed("no room".into()));
-    let Some((rig, _, _)) = the_wait_ends("so-fail-area", beside_only(), true, failed) else {
+    let Some((rig, _)) = the_wait_ends("so-fail-area", beside_only(), true, failed) else {
         return;
     };
     let opens_now = opens(&rig);
@@ -224,7 +251,7 @@ fn a_split_stops_waiting_when_its_origins_open_fails_in_a_tab_page_area() {
 #[test]
 fn a_split_stops_waiting_when_its_origins_open_is_refused() {
     let refused = |rig: &mut Rig, _: &[i64]| answer_open(rig, 0, Outcome::Unsupported);
-    let Some((rig, _, wins)) = the_wait_ends("so-refused", beside_only(), false, refused) else {
+    let Some((rig, wins)) = the_wait_ends("so-refused", beside_only(), false, refused) else {
         return;
     };
     assert_eq!(1, opens(&rig).len());
@@ -238,7 +265,7 @@ fn a_split_stops_waiting_when_its_origins_open_is_refused() {
 fn a_split_stops_waiting_when_its_origins_open_times_out() {
     let mut fake = beside_only();
     fake.timeout = Some(Duration::from_secs(1));
-    let Some((rig, _, _)) = the_wait_ends("so-timeout", fake, false, |_, _| {}) else {
+    let Some((rig, _)) = the_wait_ends("so-timeout", fake, false, |_, _| {}) else {
         return;
     };
     let opens_now = opens(&rig);
@@ -253,7 +280,7 @@ fn a_split_stops_waiting_when_its_origin_closes() {
     let closed = |rig: &mut Rig, wins: &[i64]| {
         lua(rig, &format!("vim.api.nvim_win_close({}, true)", wins[0]));
     };
-    let Some((rig, _, wins)) = the_wait_ends("so-closed", beside_only(), false, closed) else {
+    let Some((rig, wins)) = the_wait_ends("so-closed", beside_only(), false, closed) else {
         return;
     };
     assert!(rig.d.panes.by_win(wins[0]).is_none());
@@ -274,10 +301,41 @@ fn a_split_stops_waiting_when_the_pane_provider_is_gone() {
             .push(ProviderEvent::Gone { reason });
         rig.d.drain_provider().unwrap();
     };
-    let Some((rig, _, wins)) = the_wait_ends("so-gone", beside_only(), false, gone) else {
+    let Some((rig, wins)) = the_wait_ends("so-gone", beside_only(), false, gone) else {
         return;
     };
     assert!(rig.d.provider.is_none());
     let first = rig.d.panes.by_win(wins[0]).unwrap().id;
     assert_eq!(first, rig.d.panes.by_win(wins[1]).unwrap().id);
+}
+
+/// Another terminal self-attaches while the split waits, the first
+/// window's terminal out of reach. A pane provider with no terminal in its
+/// reach, only asks pending, is dropped for the attach's choice. The first
+/// split's pane, its open unanswered, is in its reach: the pane provider is
+/// kept, so no drop ends the wait. While an open is pending, only `Gone`
+/// drops it.
+///
+/// The attach's own terminal is current and has no id yet, so focus can't
+/// be given back to it: the split, unentered, is drawn in its pane (#86 D5)
+/// rather than waiting on.
+#[test]
+fn an_attach_while_a_split_waits_keeps_the_pane_provider() {
+    let Some((mut rig, Made { wins, .. })) =
+        split_in_one_flush("so-attach", beside_only(), false, &["vsplit", "split"])
+    else {
+        return;
+    };
+    assert!(rig.d.panes.by_win(wins[1]).is_none(), "the split waits");
+    // as its `find` can say
+    rig.d.panes.list[0].reach = Reach::Out;
+    let attached = rig.attach(None, None);
+    rig.win_of(attached);
+    assert!(rig.d.provider.is_some());
+    assert_eq!(attached, rig.d.panes.by_win(wins[1]).unwrap().id);
+
+    // the first split's terminal still comes, and is its own
+    open_as(&mut rig, 0, "t1");
+    let first = rig.d.panes.by_win(wins[0]).unwrap();
+    assert_eq!(Some("t1"), first.terminal.as_ref().map(TerminalId::as_str));
 }

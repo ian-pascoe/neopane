@@ -1295,14 +1295,19 @@ impl Daemon {
         match self.split_origin(sp) {
             Some(p) => p.tab == sp.tab && p.terminal_on_its_way(),
             None => {
-                self.grids
-                    .wins
-                    .values()
-                    .any(|w| w.win == sp.from && w.kind == WinKind::External)
+                self.is_external(sp.from)
                     && !self.gets_no_pane(sp.from)
                     && self.changes.split_of(sp.from).tab == sp.tab
             }
         }
+    }
+
+    /// Whether window `win` is drawn, and external.
+    fn is_external(&self, win: i64) -> bool {
+        self.grids
+            .wins
+            .values()
+            .any(|w| w.win == win && w.kind == WinKind::External)
     }
 
     /// Whether external window `win`, with no pane, gets none for now: it is
@@ -2423,9 +2428,9 @@ impl Daemon {
         };
         let waits = self.grids.wins.values().any(|w| {
             let from = self.changes.split_of(w.win).from;
-            w.kind == WinKind::External
-                && from != 0
+            from != 0
                 && p.holds(from)
+                && self.is_external(w.win)
                 && self.panes.by_win(w.win).is_none()
         });
         if waits {
