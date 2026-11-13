@@ -16,11 +16,7 @@ pub(super) fn open_tab_page(given: &Given) -> Result<String, String> {
     let origin = pane_id(given, "origin")?;
     let words = attach_words(given)?;
     // new-window takes a window, not a pane
-    let window = server.run(&["display-message", "-p", "-t", &origin, "#{window_id}"])?;
-    let window = String::from_utf8_lossy(&window).trim().to_string();
-    if !window.starts_with('@') {
-        return Err(format!("{origin}'s window is {window:?}"));
-    }
+    let window = server.window_of(Some(&origin))?;
     let mut args: Vec<OsString> = [
         "new-window",
         "-d",

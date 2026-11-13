@@ -11,6 +11,7 @@
 //!   `select-pane -L/-R/-U/-D` guarded by `#{pane_at_left}` and the like,
 //!   so it stops at the window's edge: tmux's own wraps around.
 
+use super::is_window_id;
 use super::panes::pane_id;
 use super::server::Server;
 use crate::providers::builtin::Given;
@@ -44,14 +45,7 @@ pub(super) fn focus_direction(given: &Given) -> Result<(), String> {
     let clients = server.run(&["list-clients", "-F", "#{client_activity} #{window_id}"])?;
     let window = match latest_window(&clients) {
         Some(window) => window,
-        None => {
-            let current = server.run(&["display-message", "-p", "#{window_id}"])?;
-            let current = String::from_utf8_lossy(&current).trim().to_string();
-            if !is_window_id(&current) {
-                return Err(format!("display-message printed {current:?}, not a window"));
-            }
-            current
-        }
+        None => server.window_of(None)?,
     };
     let args = steps(&direction, count, &window).ok_or_else(|| {
         format!(
@@ -104,15 +98,9 @@ fn latest_window(clients: &[u8]) -> Option<String> {
         else {
             continue;
         };
-        if is_window_id(window) && latest.is_none_or(|(a, _)| activity > a) {
+        if is_window_id(window.as_bytes()) && latest.is_none_or(|(a, _)| activity > a) {
             latest = Some((activity, window));
         }
     }
     latest.map(|(_, window)| window.to_string())
-}
-
-/// Whether `id` is a tmux window id, `@` and digits.
-fn is_window_id(id: &str) -> bool {
-    id.strip_prefix('@')
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }

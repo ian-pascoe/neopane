@@ -108,3 +108,9 @@ fn is_pane_id(id: &[u8]) -> bool {
     id.strip_prefix(b"%")
         .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
 }
+
+/// Whether `id` is a tmux window id, `@` and digits.
+fn is_window_id(id: &[u8]) -> bool {
+    id.strip_prefix(b"@")
+        .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+}

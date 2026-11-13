@@ -21,9 +21,9 @@
 
 use serde_json::{Value, json};
 
-use super::is_pane_id;
 use super::server::Server;
 use super::window_layout::parse;
+use super::{is_pane_id, is_window_id};
 use crate::providers::builtin::Given;
 
 /// One line per pane of the server, a window linked into several sessions
@@ -198,7 +198,7 @@ fn zoomed(windows: &[u8]) -> Result<Vec<Zoomed>, String> {
         let [window, visible, layout] = line.split(' ').collect::<Vec<_>>()[..] else {
             return Err(bad());
         };
-        if !window.starts_with('@') {
+        if !is_window_id(window.as_bytes()) {
             return Err(bad());
         }
         let visible = parse(visible)?;
@@ -256,7 +256,10 @@ impl Pane {
         let n = |s: &str| s.parse::<u32>().ok().map(f64::from);
         let at = |s: &str| s.parse::<i32>().ok().map(f64::from);
         let window_size = [n(ww)?, n(wh)?];
-        if window_size.contains(&0.0) || !window.starts_with('@') || !is_pane_id(id.as_bytes()) {
+        if window_size.contains(&0.0)
+            || !is_window_id(window.as_bytes())
+            || !is_pane_id(id.as_bytes())
+        {
             return None;
         }
         Some(Pane {
@@ -521,6 +524,9 @@ mod tests {
         let panes = b"@0 80 24 %0 0 0 80 24 1 off 0\n";
         assert!(layout(panes, b"", b"@0 nonsense\n").is_err());
         assert!(layout(panes, b"", b"@0 0000, 0000,\n").is_err());
+        let layout_of_one = r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"i":0,"I":"%0"}}"#;
+        let window = format!("@ {layout_of_one} {layout_of_one}\n");
+        assert!(layout(panes, b"", window.as_bytes()).is_err());
     }
 
     /// One tmux call lists all three, each line tagged with its listing.
@@ -552,6 +558,8 @@ mod tests {
         assert!(layout(b"@0 80 24 %0 0 0 80\n", b"", b"").is_err());
         assert!(layout(b"@0 0 24 %0 0 0 80 24 1 off 0\n", b"", b"").is_err());
         assert!(layout(b"@0 80 24 %0 0 0 80 24 1 off\n", b"", b"").is_err());
+        // a window id is @ and digits
+        assert!(layout(b"@x 80 24 %0 0 0 80 24 1 off 0\n", b"", b"").is_err());
         // no pane at all is no area
         assert_eq!(layout(b"", b"", b"").unwrap(), json!({ "areas": [] }));
     }
