@@ -19,7 +19,8 @@ Amended by #138: a statusline neopane draws, at `'laststatus'` 0, shows the
 text and highlights Neovim would draw it with. Neovim evaluates it after each
 redraw, and when an option, the mode, the current window or buffer, or a
 buffer's modified flag changes. Text that changes only with time, such as a
-clock, waits for the next of those.
+clock, waits for the next of those, as does an option set inside an
+autocommand that isn't nested, which fires no `OptionSet`.
 
 A window that can't have a terminal of its own is drawn in its origin pane,
 laid out as Neovim lays out splits (#83, #88). That happens with no terminal

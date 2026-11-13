@@ -316,9 +316,9 @@ pub enum Note {
     /// its pane did.
     Done { buf: i64, by_pane: bool },
     /// The statuslines neopane draws for Neovim may have changed with no
-    /// redraw to show it: `'statusline'`, `'fillchars'` or the mode, the
-    /// current window or buffer, or a buffer's modified flag changed, at
-    /// `'laststatus'` 0.
+    /// redraw to show it: `'statusline'`, `'fillchars'`, `'laststatus'` or
+    /// the mode, the current window or buffer, or a buffer's modified flag
+    /// changed, with `'laststatus'` 0.
     Statuslines,
 }
 
