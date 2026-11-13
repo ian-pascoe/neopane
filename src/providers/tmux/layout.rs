@@ -43,10 +43,30 @@ const CLIENTS: &str = "#{client_activity} #{pane_id}";
 /// The live layout, as one line of JSON, or why there's none.
 pub(super) fn report_layout(given: &Given) -> Result<String, String> {
     let server = Server::of(given)?;
-    let panes = server.run(&["list-panes", "-a", "-F", PANES])?;
-    let clients = server.run(&["list-clients", "-F", CLIENTS])?;
-    let filter = "#{window_zoomed_flag}";
-    let windows = server.run(&["list-windows", "-a", "-f", filter, "-F", ZOOMED])?;
+    // one call, so a zoom can't come or go between the listings
+    let (panes, clients, zoomed) = (
+        format!("p {PANES}"),
+        format!("c {CLIENTS}"),
+        format!("z {ZOOMED}"),
+    );
+    let out = server.run(&[
+        "list-panes",
+        "-a",
+        "-F",
+        &panes,
+        ";",
+        "list-clients",
+        "-F",
+        &clients,
+        ";",
+        "list-windows",
+        "-a",
+        "-f",
+        "#{window_zoomed_flag}",
+        "-F",
+        &zoomed,
+    ])?;
+    let (panes, clients, windows) = listings(&out)?;
     Ok(layout(&panes, &clients, &windows)?.to_string())
 }
 
@@ -55,9 +75,33 @@ pub(super) fn focused(server: &Server) -> Result<Option<String>, String> {
     Ok(focus(&server.run(&["list-clients", "-F", CLIENTS])?))
 }
 
+/// `list-panes`', `list-clients`' and `list-windows`' lines.
+type Listings = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// What one call of `list-panes`, `list-clients` and `list-windows`
+/// printed, each line tagged `p `, `c ` or `z `: each listing's lines,
+/// untagged, or why it can't tell them apart.
+fn listings(out: &[u8]) -> Result<Listings, String> {
+    let (mut panes, mut clients, mut windows) = (Vec::new(), Vec::new(), Vec::new());
+    for line in out.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let into = match line.get(..2) {
+            Some(b"p ") => &mut panes,
+            Some(b"c ") => &mut clients,
+            Some(b"z ") => &mut windows,
+            _ => {
+                let line = String::from_utf8_lossy(line);
+                return Err(format!("tmux printed {line:?}, of no listing"));
+            }
+        };
+        into.extend_from_slice(&line[2..]);
+        into.push(b'\n');
+    }
+    Ok((panes, clients, windows))
+}
+
 /// The report `report_layout` prints, from what `list-panes -a -F PANES`,
 /// `list-clients -F CLIENTS` and the zoomed windows' `list-windows -a -F
-/// ZOOMED` printed.
+/// ZOOMED` printed, in one tmux call.
 fn layout(panes: &[u8], clients: &[u8], windows: &[u8]) -> Result<Value, String> {
     let panes = std::str::from_utf8(panes).map_err(|_| "list-panes printed bytes not UTF-8")?;
     let zoomed = zoomed(windows)?;
@@ -477,6 +521,21 @@ mod tests {
         let panes = b"@0 80 24 %0 0 0 80 24 1 off 0\n";
         assert!(layout(panes, b"", b"@0 nonsense\n").is_err());
         assert!(layout(panes, b"", b"@0 0000, 0000,\n").is_err());
+    }
+
+    /// One tmux call lists all three, each line tagged with its listing.
+    #[test]
+    fn one_calls_listings_are_told_apart_by_their_tags() {
+        let out = b"p @0 80 24 %0 0 0 80 24 1 off 0\nc 9 %0\np @1 80 24 %1 0 0 80 24 1 off 0\n\
+                    z @0 a b\n";
+        let (panes, clients, windows) = listings(out).unwrap();
+        assert_eq!(
+            panes,
+            b"@0 80 24 %0 0 0 80 24 1 off 0\n@1 80 24 %1 0 0 80 24 1 off 0\n"
+        );
+        assert_eq!(clients, b"9 %0\n");
+        assert_eq!(windows, b"@0 a b\n");
+        assert!(listings(b"x what\n").is_err());
     }
 
     #[test]
