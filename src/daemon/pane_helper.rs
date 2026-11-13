@@ -1645,7 +1645,7 @@ mod tests {
     #[test]
     fn a_titled_pane_hung_up_has_its_old_title_put_back() {
         use crate::daemon::surface::{Surface, cells};
-        let title = "neopane-abcdefghij";
+        let title: &'static str = format!("{NAME}-abcdefghij").leak();
         for transport in [Transport::Fd, Transport::Relay] {
             let how = Attach::new(Want::Requested(pane()), transport);
             let run = against_with(how, None, move |f| {
