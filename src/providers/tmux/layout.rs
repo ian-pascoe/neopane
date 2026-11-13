@@ -14,8 +14,9 @@
 
 use serde_json::{Value, json};
 
+use super::is_pane_id;
 use super::server::Server;
-use crate::providers::builtin::{FAILED, Given, print_line};
+use crate::providers::builtin::Given;
 
 /// One line per pane of the server, a window linked into several sessions
 /// listing its panes once for each.
@@ -27,28 +28,12 @@ const PANES: &str = "#{window_id} #{window_width} #{window_height} #{pane_id} #{
 /// window it shows.
 const CLIENTS: &str = "#{client_activity} #{pane_id}";
 
-pub(super) fn report_layout(given: &Given) -> u8 {
-    let server = match Server::of(given) {
-        Ok(s) => s,
-        Err(why) => return failed(&why),
-    };
-    let panes = match server.run(&["list-panes", "-a", "-F", PANES]) {
-        Ok(out) => out,
-        Err(why) => return failed(&why),
-    };
-    let clients = match server.run(&["list-clients", "-F", CLIENTS]) {
-        Ok(out) => out,
-        Err(why) => return failed(&why),
-    };
-    match layout(&panes, &clients) {
-        Ok(report) => print_line(report.to_string().as_bytes()),
-        Err(why) => failed(&why),
-    }
-}
-
-fn failed(why: &str) -> u8 {
-    eprintln!("tmux report_layout: {why}");
-    FAILED
+/// The live layout, as one line of JSON, or why there's none.
+pub(super) fn report_layout(given: &Given) -> Result<String, String> {
+    let server = Server::of(given)?;
+    let panes = server.run(&["list-panes", "-a", "-F", PANES])?;
+    let clients = server.run(&["list-clients", "-F", CLIENTS])?;
+    Ok(layout(&panes, &clients)?.to_string())
 }
 
 /// The report `report_layout` prints, from what `list-panes -a -F PANES`
@@ -92,7 +77,7 @@ fn focus(clients: &[u8]) -> Option<String> {
         else {
             continue;
         };
-        if pane.starts_with('%') && latest.is_none_or(|(a, _)| activity > a) {
+        if is_pane_id(pane.as_bytes()) && latest.is_none_or(|(a, _)| activity > a) {
             latest = Some((activity, pane));
         }
     }
@@ -118,7 +103,7 @@ impl Pane {
         };
         let n = |s: &str| s.parse::<u32>().ok().map(f64::from);
         let window_size = [n(ww)?, n(wh)?];
-        if window_size.contains(&0.0) || !window.starts_with('@') || !id.starts_with('%') {
+        if window_size.contains(&0.0) || !window.starts_with('@') || !is_pane_id(id.as_bytes()) {
             return None;
         }
         Some(Pane {
@@ -208,6 +193,15 @@ mod tests {
             ],
         });
         assert_eq!(report, want);
+    }
+
+    #[test]
+    fn focus_is_only_ever_a_pane_id() {
+        let panes = b"@0 80 24 %0 0 0 80 24 1 off\n";
+        let report = layout(panes, b"9 %\n8 %1x\n7 @1\n3 %0\n").unwrap();
+        assert_eq!(report["focus"], "%0");
+        let report = layout(panes, b"9 %x\n").unwrap();
+        assert!(report.get("focus").is_none());
     }
 
     #[test]

@@ -6,21 +6,12 @@
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
+use super::is_pane_id;
 use super::server::Server;
-use crate::providers::builtin::{DONE, FAILED, Given, print_line};
-
-pub(super) fn open_beside(given: &Given) -> u8 {
-    match split(given) {
-        Ok(pane) => print_line(pane.as_bytes()),
-        Err(why) => {
-            eprintln!("tmux open_beside: {why}");
-            FAILED
-        }
-    }
-}
+use crate::providers::builtin::Given;
 
 /// The new pane's id, or why there's none.
-fn split(given: &Given) -> Result<String, String> {
+pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     let server = Server::of(given)?;
     let origin = pane_id(given, "origin")?;
     let attach = given.var("attach").unwrap_or_default();
@@ -68,26 +59,17 @@ fn split(given: &Given) -> Result<String, String> {
     Ok(id.to_string())
 }
 
-pub(super) fn close(given: &Given) -> u8 {
-    let both = Server::of(given).and_then(|s| Ok((s, pane_id(given, "terminal")?)));
-    let (server, pane) = match both {
-        Ok(both) => both,
-        Err(why) => {
-            eprintln!("tmux close: {why}");
-            return FAILED;
-        }
-    };
+/// Kills the pane, or says why it's still there.
+pub(super) fn close(given: &Given) -> Result<(), String> {
+    let server = Server::of(given)?;
+    let pane = pane_id(given, "terminal")?;
     let Err(why) = server.run(&["kill-pane", "-t", &pane]) else {
-        return DONE;
+        return Ok(());
     };
     // gone already, or its server with it
-    let listed = server.run(&["list-panes", "-a", "-F", "#{pane_id}"]);
-    match listed {
-        Ok(out) if out.split(|&b| b == b'\n').any(|l| l == pane.as_bytes()) => {
-            eprintln!("tmux close: {why}");
-            FAILED
-        }
-        _ => DONE,
+    match server.run(&["list-panes", "-a", "-F", "#{pane_id}"]) {
+        Ok(out) if out.split(|&b| b == b'\n').any(|l| l == pane.as_bytes()) => Err(why),
+        _ => Ok(()),
     }
 }
 
@@ -103,12 +85,6 @@ fn pane_id(given: &Given, name: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&id).into_owned())
-}
-
-/// `%` and digits.
-fn is_pane_id(id: &[u8]) -> bool {
-    id.strip_prefix(b"%")
-        .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
 }
 
 /// The words of `line`, as `<NAME>_ATTACH` has them: each bare, or in
