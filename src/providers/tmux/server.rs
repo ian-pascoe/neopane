@@ -134,10 +134,15 @@ impl Server {
             .stdin(Stdio::null())
             .output()
             .map_err(|e| format!("can't run tmux: {e}"))?;
-        let shown = String::from_utf8_lossy(&out.stdout);
-        let shown = shown.trim();
-        Ok(shown.strip_prefix("tmux ").unwrap_or(shown).to_string())
+        Ok(version_of(&out.stdout))
     }
+}
+
+/// The version `tmux -V` printed as `out`, such as `3.2a`.
+pub(super) fn version_of(out: &[u8]) -> String {
+    let shown = String::from_utf8_lossy(out);
+    let shown = shown.trim();
+    shown.strip_prefix("tmux ").unwrap_or(shown).to_string()
 }
 
 /// How a timed run of tmux failed.

@@ -160,9 +160,10 @@ named, else none. Rex is never proven there: its `find` proves it. The
 daemon runs the proofs off its loop, and new windows wait for them as they
 do for a config.
 
-`neopane.inside.tmux(attach)` is true when the attach's tty is a pane of the
-tmux server `TMUX` names, as tmux's `find` checks, so exactly when `find`
-would accept it; `TMUX_PANE` isn't needed. Its `why`:
+`neopane.inside.tmux(attach)` runs tmux's `find`'s whole check: tmux must be
+3.2 or newer, and the attach's tty a pane of the tmux server `TMUX` names.
+So it is true exactly when `find` would accept the attach; `TMUX_PANE` isn't
+needed. Its `why`:
 
 | | |
 |---|---|
@@ -172,6 +173,8 @@ would accept it; `TMUX_PANE` isn't needed. Its `why`:
 | `"can't run tmux: <error>"` | tmux isn't on the attach's `PATH`, say |
 | `"tmux: <first stderr line>"` | tmux failed, as when no server listens at the socket |
 | `"tmux didn't answer in 0.5 s"` | |
+| `"tmux 3.1c is too old: the built-in tmux needs 3.2 or newer"` | |
+| `"the attach's tty \"/some/file\" isn't one"` | `tty` is set but isn't a terminal's |
 | `"this terminal (/dev/ttys003) isn't a pane of the tmux server at <socket>"` | |
 
 Its `find` still confirms the choice, and refusing it goes only to the log:

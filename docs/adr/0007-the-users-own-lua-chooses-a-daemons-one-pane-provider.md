@@ -10,8 +10,9 @@ and Rex by `REX_SERVER` and `REX_SESSION`; the multiplexers are proved in
 the order tmux, herdr, zellij, each cut at 0.5 s, then Rex if named, else
 none: Rex is never proven there, its own `find` proves it. One Rust function
 is both the config's `<name>.default` and the daemon's default with no
-config file, so the two never differ. `<name>.inside.tmux` is `find`'s tty
-search, true exactly when `find` would accept; `TMUX_PANE` isn't needed.
+config file, so the two never differ. `<name>.inside.tmux` runs `find`'s
+whole check, tmux's version and then the tty search, so it is true exactly
+when `find` would accept; `TMUX_PANE` isn't needed.
 With no config, `find` refusing the default's guess goes only to the log,
 and `list` and `status` show `none (find refused)`; a config's choice
 refused still warns, quoting `find`'s first stderr line.

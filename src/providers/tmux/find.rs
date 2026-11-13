@@ -4,7 +4,8 @@
 //! `TMUX`, `TMUX_PANE` and `TERM_PROGRAM` leak into terminals tmux doesn't
 //! run, such as zellij's inside tmux, so only the tty proves a pane. It
 //! refuses a tmux older than 3.2, naming its version. `inside.tmux`
-//! (`inside.rs`) runs the same search.
+//! (`inside.rs`) runs the same check, so it proves exactly when this
+//! accepts.
 
 use super::is_pane_id;
 use super::server::{OLDEST, Server, too_old};
@@ -14,19 +15,31 @@ use crate::providers::tty;
 /// The attaching terminal's pane, or why there's none.
 pub(super) fn find(given: &Given) -> Result<String, String> {
     let server = Server::of(given)?;
-    let version = Server::version()?;
+    let tty = given.var("tty").unwrap_or_default();
+    pane_of(&server, &tty, |args| server.run(args), Server::version)
+}
+
+/// The pane of `server` whose tty is `tty`, or why there's none: `find`'s
+/// whole check, running tmux through `run` for the listing and `version`
+/// for its version, as `tmux -V` prints it after `tmux `.
+pub(super) fn pane_of(
+    server: &Server,
+    tty: &[u8],
+    run: impl FnOnce(&[&str]) -> Result<Vec<u8>, String>,
+    version: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let version = version()?;
     if too_old(&version) {
         let (major, minor) = OLDEST;
         return Err(format!(
             "tmux {version} is too old: the built-in tmux needs {major}.{minor} or newer"
         ));
     }
-    let tty = given.var("tty").unwrap_or_default();
-    let shown = String::from_utf8_lossy(&tty).into_owned();
+    let shown = String::from_utf8_lossy(tty).into_owned();
     let device =
-        tty::of_path(&tty).ok_or_else(|| format!("the attach's tty {shown:?} isn't one"))?;
-    let panes = server.run(&LIST_TTYS)?;
-    pane_with(&panes, device).ok_or_else(|| not_a_pane(&shown, &server))
+        tty::of_path(tty).ok_or_else(|| format!("the attach's tty {shown:?} isn't one"))?;
+    let panes = run(&LIST_TTYS)?;
+    pane_with(&panes, device).ok_or_else(|| not_a_pane(&shown, server))
 }
 
 /// The arguments that list every pane of the server with its tty.

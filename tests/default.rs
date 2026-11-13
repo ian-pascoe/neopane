@@ -284,6 +284,53 @@ fn inside_tmux_says_why_it_cant_prove_a_pane() {
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
+/// What `inside.tmux` says, called from a config with `attach` (Lua) in
+/// place of the choosing attach, the config's `PATH` being `path`.
+fn inside_of(dir: &Dir, attach: &str, path: &Path) -> String {
+    let file = dir.path.join("crafted.lua");
+    std::fs::write(
+        &file,
+        format!("return {{ provider = function() print({NAME}.inside.tmux({attach})) end }}"),
+    )
+    .unwrap();
+    let (k, v) = config_var(&file);
+    let out = check(
+        &dir.path,
+        &["--no-find"],
+        &[(k.as_str(), v), ("PATH", path.as_os_str())],
+    )
+    .output()
+    .unwrap();
+    printed(&json(&out)).to_string()
+}
+
+#[test]
+fn inside_tmux_refuses_what_find_refuses() {
+    let dir = Dir::new("as-find");
+    let (_master, _slave, tty) = pty();
+    // a tmux too old for the built-in, whose listing would hold the pane
+    let old = fake_tmux(
+        &dir,
+        &format!(
+            "[ \"$1\" = -V ] || [ \"$3\" = -V ] && {{ echo 'tmux 3.1c'; exit 0; }}\necho '%0 {tty}'"
+        ),
+    );
+    let attach = format!(
+        "{{ env = {{ TMUX = '/tmp/nowhere/sock,1,0', PATH = os.getenv('PATH') }}, tty = '{tty}' }}"
+    );
+    assert_eq!(
+        inside_of(&dir, &attach, &old),
+        "false\ttmux 3.1c is too old: the built-in tmux needs 3.2 or newer"
+    );
+    // a tty that isn't a terminal's, as find words it
+    let new = fake_tmux(&dir, "echo 'tmux 3.8'");
+    let attach = "{ env = { TMUX = '/tmp/nowhere/sock,1,0', PATH = os.getenv('PATH') }, tty = '/tmp/not-a-tty' }";
+    assert_eq!(
+        inside_of(&dir, attach, &new),
+        "false\tthe attach's tty \"/tmp/not-a-tty\" isn't one"
+    );
+}
+
 #[test]
 fn a_refused_guess_is_none_quietly_but_a_configs_choice_refused_quotes_finds_stderr() {
     if !have_tmux() {
