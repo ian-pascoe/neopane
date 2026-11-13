@@ -94,7 +94,7 @@ field. A field that's there but nil counts as missing.
 | `pane` | str: a pane id | required | — | — | — |
 | `size` | `{cols, rows, px?}` | required | required | — | — |
 | `pid` | int: the helper's pid | required | required | optional | optional |
-| `tty` | bin; empty where the platform has none | required | required | — | — |
+| `tty` | bin; empty where the platform has none. For `open`, the caller's terminal, if it has one: the window splits off one showing the `:terminal` on it | required | required | — | optional |
 | `env` | map bin → bin: the whole environment, first occurrence wins | required | required | — | — |
 | `cwd` | bin | required | required | — | required |
 | `provider` | str: `--provider`, else `$<NAME>_PROVIDER` | — | optional | — | — |
@@ -260,7 +260,10 @@ peer check, with no terminal and no 300 ms minimum. The daemon answers with one
 - A daemon still waiting for its launcher's attach answers `status` with no
   panes and pane provider `none`, and a `stop` ends it before Neovim starts.
 - `open` needs a version match, `cwd` and `file`. Its reply waits on Neovim
-  without blocking the loop; with `wait`, until the file is done.
+  without blocking the loop; with `wait`, until the file is done: no window
+  shows its buffer, or the buffer was unloaded or deleted, Neovim exiting
+  aside. The file's window splits off one showing the `:terminal` on `tty`,
+  else off Neovim's current window.
 
 ## The peer check
 
@@ -329,6 +332,7 @@ means tracked files differ from it.
 | `h`, purpose `stop` | `force` | bool, default false. Without it, a daemon with unsaved changes answers `r{ok: false, message}` naming them and keeps running; with it, it ends, changes in swap | yes | **yes**, with `stop` |
 | `h`, purposes `self`, `open` | `line` | int ≥ 1: put the cursor on this line of `file` | yes | no |
 | `h`, purpose `open` | `wait` | bool, default false: answer only once `file` is done | yes | no |
+| `h`, purpose `open` | `tty` | bin: the caller's terminal; the new window splits off one showing the `:terminal` on it, else off Neovim's current window (#123) | yes | no |
 | `r` to `open` | `waited` | bool, true on the answer to a waited open; `ok: false` with it means the terminal closed with unsaved changes or the daemon was stopped | yes | no |
 | `r` to `status` (versions agree) | `dir` | bin: Neovim's global working directory | yes | no |
 | | `kept` | bool: started with `--detach` | yes | no |

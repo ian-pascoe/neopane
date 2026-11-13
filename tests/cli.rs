@@ -1006,3 +1006,244 @@ fn status_shows_unsaved_files_the_directory_and_terminals_and_kill_keeps_them_in
     let status = helper.wait_with_output().unwrap().status;
     assert_eq!(status.code(), Some(0));
 }
+
+/// Sends Neovim at `sock` the keys `keys`, from Normal mode.
+fn remote_send(sock: &Path, keys: &str) {
+    let _ = Command::new("nvim")
+        .args(["--clean", "--headless", "--server"])
+        .arg(sock)
+        .args(["--remote-send", &format!("<C-\\><C-N>{keys}")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Waits up to 20 s for `file` to hold something, and gives it.
+fn until_file(file: &Path) -> Option<String> {
+    let due = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match std::fs::read_to_string(file) {
+            Ok(s) if !s.is_empty() => return Some(s.trim().to_string()),
+            _ if std::time::Instant::now() > due => return None,
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+/// `git` with no config of the user's, in `repo`.
+fn git(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+    text(&out.stdout).trim().to_string()
+}
+
+/// Whether `git` runs; with `CI` set, it must.
+fn have_git() -> bool {
+    let ran = Command::new("git").arg("--version").output().is_ok();
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "git isn't installed"
+    );
+    ran
+}
+
+/// Scripts for Neovim's `:terminal`, in `tmp`, each run as `sh SCRIPT REPO
+/// EXE OUT`. `commit.sh` runs `git commit` in REPO with EXE as its editor,
+/// through `editor.sh`, which keeps EXE's status in `OUT.status` and its
+/// stderr in `OUT.err`; git's own status goes to `OUT.git`. Hang-ups are
+/// ignored, so they outlive Neovim. `attach.sh` and `no-wait.sh` open
+/// `f.txt` in REPO, keeping status and stderr the same way.
+fn terminal_scripts(tmp: &Path) {
+    let editor = tmp.join("editor.sh");
+    std::fs::write(
+        &editor,
+        "\"$ED_EXE\" \"$@\" 2> \"$ED_OUT.err\"; s=$?; echo $s > \"$ED_OUT.status\"; exit $s\n",
+    )
+    .unwrap();
+    let commit = format!(
+        "trap '' HUP\n\
+         cd \"$1\" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 ED_EXE=\"$2\" \
+         ED_OUT=\"$3\"\n\
+         git -c user.name=t -c user.email=t@t -c commit.gpgsign=false \
+         -c core.editor=\"sh {}\" commit -q; echo $? > \"$3.git\"\n",
+        editor.display()
+    );
+    std::fs::write(tmp.join("commit.sh"), commit).unwrap();
+    for (script, args) in [
+        ("attach.sh", "attach --name work +2 f.txt"),
+        ("no-wait.sh", "--no-wait f.txt"),
+    ] {
+        std::fs::write(
+            tmp.join(script),
+            format!("cd \"$1\" && \"$2\" {args} 2> \"$3.err\"; echo $? > \"$3.status\"\n"),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn as_git_s_editor_in_a_daemons_terminal_a_file_is_waited_for() {
+    if !have_nvim() || !have_git() {
+        return;
+    }
+    let tmp = scratch("waited");
+    let repo = tmp.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+    git(&repo, &["add", "f.txt"]);
+    terminal_scripts(&tmp);
+    let sock = base_of(&tmp).join("work/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    ending.helpers.push(in_pty(
+        &tmp,
+        &repo,
+        &["--name", "work", "--provider", "none"],
+    ));
+    until_expr(&sock, "1", |_| true).expect("work's Neovim never answered");
+    let exe = exe();
+    // runs `script` in a :terminal, its output named `out`
+    let in_terminal = |script: &str, out: &str| -> PathBuf {
+        let out = tmp.join(out);
+        let cmd = format!(
+            "execute('terminal sh {} {} {} {}')",
+            tmp.join(script).display(),
+            repo.display(),
+            exe.display(),
+            out.display()
+        );
+        remote_expr(&sock, &cmd).expect("Neovim answers");
+        out
+    };
+    let with = |out: &Path, ext: &str| PathBuf::from(format!("{}.{ext}", out.display()));
+    let editing = |what: &str| until_expr(&sock, "expand('%:t')", |f| f == what);
+    let log = base_of(&tmp).join("work/log");
+    let dones = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(" is done")
+            .count()
+    };
+    // Neovim has run `keys`, and the daemon has read what it noted meanwhile
+    let barrier = |keys: &str| {
+        remote_send(
+            &sock,
+            &format!("{keys}:let g:barrier = {}<CR>", dones() + 100),
+        );
+        let want = format!("{}", dones() + 100);
+        until_expr(&sock, "get(g:, 'barrier', 0)", |b| b == want).expect("Neovim answers");
+        let out = under(&tmp, &["status", "--name", "work"]);
+        assert_eq!(out.status.code(), Some(0));
+    };
+
+    // :wq: done, 0, and committed
+    let out = in_terminal("commit.sh", "wq");
+    assert_eq!(editing("COMMIT_EDITMSG").as_deref(), Some("COMMIT_EDITMSG"));
+    remote_send(&sock, ":call setline(1, 'first')<CR>:wq<CR>");
+    assert_eq!(until_file(&with(&out, "status")).as_deref(), Some("0"));
+    assert_eq!(until_file(&with(&out, "git")).as_deref(), Some("0"));
+    assert_eq!(git(&repo, &["log", "--format=%s"]), "first");
+
+    // :w alone isn't done; :bd is
+    std::fs::write(repo.join("f.txt"), "1\n2\n3\n").unwrap();
+    git(&repo, &["add", "f.txt"]);
+    let out = in_terminal("commit.sh", "bd");
+    assert_eq!(editing("COMMIT_EDITMSG").as_deref(), Some("COMMIT_EDITMSG"));
+    let before = dones();
+    barrier(":call setline(1, 'second')<CR>:w<CR>");
+    assert_eq!(before, dones(), "done at :w");
+    assert!(!with(&out, "status").exists(), "done at :w");
+    remote_send(&sock, ":bd<CR>");
+    assert_eq!(until_file(&with(&out, "status")).as_deref(), Some("0"));
+    assert_eq!(git(&repo, &["log", "-1", "--format=%s"]), "second");
+
+    // attach naming the daemon it runs in opens its file there, waited
+    // (#94 decision 24)
+    let out = in_terminal("attach.sh", "attach");
+    let at = until_expr(&sock, "expand('%:t') .. ':' .. line('.')", |a| {
+        a == "f.txt:2"
+    });
+    assert_eq!(at.as_deref(), Some("f.txt:2"));
+    let before = dones();
+    barrier("");
+    assert_eq!(before, dones());
+    assert!(!with(&out, "status").exists(), "attach didn't wait");
+    remote_send(&sock, ":q<CR>");
+    assert_eq!(until_file(&with(&out, "status")).as_deref(), Some("0"));
+    assert_eq!(std::fs::read_to_string(with(&out, "err")).unwrap(), "");
+
+    // --no-wait returns once Neovim has the window
+    let out = in_terminal("no-wait.sh", "no-wait");
+    assert_eq!(until_file(&with(&out, "status")).as_deref(), Some("0"));
+    let shown = remote_expr(&sock, "bufwinnr('f.txt') > 0");
+    assert_eq!(shown.as_deref(), Some("1"));
+
+    // $NEOPANE from a terminal not Neovim's, or naming no daemon: ignored,
+    // with a warning, and a new daemon starts
+    let work = base_of(&tmp).join("work/sock");
+    let gone = tmp.join("gone.sock");
+    let var = NAME.to_ascii_uppercase();
+    for (dir, inside, why) in [
+        (
+            // short: a socket path has room for few bytes
+            "e",
+            work.to_str().unwrap(),
+            format!("this terminal isn't one of work's (unset {var} to stop this warning)"),
+        ),
+        (
+            "s",
+            gone.to_str().unwrap(),
+            format!("nothing answers at {}", gone.display()),
+        ),
+    ] {
+        let cwd = tmp.join(dir);
+        std::fs::create_dir(&cwd).unwrap();
+        let env = [(var.as_str(), std::ffi::OsStr::new(inside))];
+        let (helper, drawn) = in_pty_drawn(&tmp, &cwd, &[], &env, 80);
+        let other = base_of(&tmp).join(dir).join("nvim.sock");
+        let _other = Ending {
+            sock: other.clone(),
+            helpers: vec![helper],
+            tmp: tmp.join("kept"),
+        };
+        let answered = until_expr(&other, "1", |_| true);
+        let drawn = String::from_utf8_lossy(&drawn.lock().unwrap()).into_owned();
+        let log = std::fs::read_to_string(base_of(&tmp).join(dir).join("log"));
+        assert!(
+            answered.is_some(),
+            "no new daemon answered: {drawn:?} {log:?}"
+        );
+        let warning = format!("{NAME}: ignoring ${var}: {why}");
+        assert!(drawn.contains(&warning), "{warning}: {drawn:?}");
+    }
+
+    // :cq quits Neovim and ends the daemon: the waited file is never done,
+    // and git commits nothing
+    std::fs::write(repo.join("f.txt"), "three\n").unwrap();
+    git(&repo, &["add", "f.txt"]);
+    let out = in_terminal("commit.sh", "cq");
+    assert_eq!(editing("COMMIT_EDITMSG").as_deref(), Some("COMMIT_EDITMSG"));
+    remote_send(&sock, ":call setline(1, 'third')<CR>:w<CR>:cq<CR>");
+    let launcher = ending.helpers.pop().unwrap();
+    let ended = launcher.wait_with_output().unwrap();
+    assert_eq!(ended.status.code(), Some(1));
+    assert_eq!(until_file(&with(&out, "status")).as_deref(), Some("1"));
+    let err = std::fs::read_to_string(with(&out, "err")).unwrap();
+    assert!(
+        err.starts_with(&format!("{NAME}: work ended before ")) && err.ends_with(" was done\n"),
+        "{err:?}"
+    );
+    assert_ne!(until_file(&with(&out, "git")).as_deref(), Some("0"));
+    assert_eq!(git(&repo, &["log", "-1", "--format=%s"]), "second");
+}

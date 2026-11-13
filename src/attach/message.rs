@@ -268,15 +268,49 @@ pub enum Purpose {
     /// A control request to end the daemon; `force` ends it with unsaved
     /// changes.
     Stop { pid: Option<u32>, force: bool },
-    /// A control request to open `file` in Neovim, answering once it is
-    /// done if `wait`.
+    /// A control request to open a file in Neovim, answering once Neovim
+    /// has it, or once it is done if waited for.
     Open {
         pid: Option<u32>,
         cwd: Vec<u8>,
-        file: Vec<u8>,
-        line: Option<u32>,
-        wait: bool,
+        /// The caller's terminal, if it has one: the new window splits off
+        /// one showing the `:terminal` on it.
+        tty: Option<Vec<u8>>,
+        open: OpenFile,
     },
+}
+
+/// How long an `open` waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// Until Neovim has the window.
+    ForWindow,
+    /// Until the file is done: a waited file (ADR 0015).
+    UntilDone,
+}
+
+impl Wait {
+    /// `--no-wait`, given or not.
+    pub fn unless(no_wait: bool) -> Wait {
+        if no_wait {
+            Wait::ForWindow
+        } else {
+            Wait::UntilDone
+        }
+    }
+
+    pub fn until_done(self) -> bool {
+        self == Wait::UntilDone
+    }
+}
+
+/// A file an `open` opens: `[+LINE] FILE`, and how long it waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFile {
+    pub file: Vec<u8>,
+    /// The cursor's line in `file`, from 1.
+    pub line: Option<u32>,
+    pub wait: Wait,
 }
 
 impl Purpose {
@@ -359,18 +393,20 @@ impl Hello {
             Purpose::Open {
                 pid,
                 cwd,
-                file,
-                line,
-                wait,
+                tty,
+                open,
             } => {
                 if let Some(p) = pid {
                     w.int("pid", *p);
                 }
-                w.bin("cwd", cwd).bin("file", file);
-                if let Some(l) = line {
-                    w.int("line", *l);
+                w.bin("cwd", cwd).bin("file", &open.file);
+                if let Some(t) = tty {
+                    w.bin("tty", t);
                 }
-                if *wait {
+                if let Some(l) = open.line {
+                    w.int("line", l);
+                }
+                if open.wait.until_done() {
                     w.bool("wait", true);
                 }
             }
@@ -419,9 +455,15 @@ impl Hello {
             "open" => Purpose::Open {
                 pid,
                 cwd: f.bin("cwd")?,
-                file: f.bin("file")?,
-                line: line(&f, true)?,
-                wait: f.opt_bool("wait")?.unwrap_or(false),
+                tty: f.opt_bin("tty")?,
+                open: OpenFile {
+                    file: f.bin("file")?,
+                    line: line(&f, true)?,
+                    wait: match f.opt_bool("wait")? {
+                        Some(true) => Wait::UntilDone,
+                        _ => Wait::ForWindow,
+                    },
+                },
             },
             _ => return Err(Error::Invalid("purpose")),
         };
@@ -867,9 +909,12 @@ mod tests {
             Message::Hello(Hello::new(Purpose::Open {
                 pid: Some(1),
                 cwd: b"/home/me".to_vec(),
-                file: b"/home/me/a b".to_vec(),
-                line: Some(1),
-                wait: true,
+                tty: Some(b"/dev/ttys004".to_vec()),
+                open: OpenFile {
+                    file: b"/home/me/a b".to_vec(),
+                    line: Some(1),
+                    wait: Wait::UntilDone,
+                },
             })),
             Message::Size(Size {
                 cols: 1,
@@ -1083,9 +1128,12 @@ mod tests {
             Message::Hello(Hello::new(Purpose::Open {
                 pid: None,
                 cwd: b"/".to_vec(),
-                file: b"/f".to_vec(),
-                line: None,
-                wait: false,
+                tty: None,
+                open: OpenFile {
+                    file: b"/f".to_vec(),
+                    line: None,
+                    wait: Wait::ForWindow,
+                },
             })),
             Message::Size(Size {
                 cols: 1,

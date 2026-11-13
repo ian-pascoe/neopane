@@ -215,12 +215,12 @@ becomes current. Closing that terminal closes its windows, and only those;
 the terminal goes back to its shell. With no pane provider yet, the attach
 chooses one, as the first did. In the pane provider's reach, as in a Rex block
 of the chosen Rex session, `:vsplit` there opens a pane beside it; out of its
-reach, `:vsplit` draws the new window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neopane: a
-terminal in <name>'s own Neovim can't attach to it`.
+reach, `:vsplit` draws the new window in that terminal. Run in the daemon's
+own `:terminal`, it opens its file there instead, as below.
 
 `attach` finds its daemon by `--address`, then `--name`, then `$NEOPANE`, the
-address a daemon sets in its Neovim's `:terminal`s, then the only one
-running. It never starts one. When it finds none, it says why in one line and
+address a daemon sets in its Neovim's `:terminal`s, once proven (below), then
+the only one running. It never starts one. When it finds none, it says why in one line and
 exits 1:
 
 - `neopane: no daemon is running; start one with neopane [FILE]`
@@ -229,12 +229,74 @@ exits 1:
 - `neopane: no daemon named work is running (running: notes, scratch)`
 - `neopane: no daemon answers at /tmp/neopane-501/work/sock`
 
-`$NEOPANE` where nothing answers is ignored, with `neopane: ignoring $NEOPANE:
-nothing answers at …`. `attach` takes only `[+LINE] [FILE]`; anything else is
+`attach` takes only `[+LINE] [FILE]`; anything else is
 a usage error, `neopane: attach takes [+LINE] [FILE]`. `--provider P` is the
 hint `NEOPANE_PROVIDER` gives, and wins over it; it counts only when this
 attach chooses the pane provider, and otherwise the daemon logs `hint P
 ignored: work keeps rex`.
+
+### Inside a `:terminal`
+
+In a daemon's own `:terminal`, `neopane notes.md` opens `notes.md` in a new
+window of that Neovim, split off the window showing that `:terminal` (else
+the current one), so a pane beside the terminal's in Rex, and returns once
+you're done with it: no window shows it any more
+(`:wq`, `:q`, `ZZ`, `:bd`, or its window showing another buffer), or its
+buffer is unloaded or deleted. `:w` alone isn't done. It prints nothing and
+exits 0, with no time limit. `neopane +12 notes.md` puts the cursor on line
+12, and `--` may come before the file. `--no-wait` returns as soon as Neovim
+has the window, or exits 1 after 10 s with `neopane: work hasn't opened
+notes.md in 10 s (is Neovim waiting at a prompt?)`. Naming that daemon with
+`attach`, `--name` or `--address` does the same. Outside a daemon's
+`:terminal`, `--no-wait` does nothing.
+
+It exits 1, with one line, when:
+
+- `neopane: notes.md's terminal closed with unsaved changes`: the file's last
+  window went because its pane's terminal closed while it had unsaved
+  changes;
+- `neopane: work was stopped before notes.md was done`: `neopane kill`;
+- `neopane: work ended before notes.md was done`: the daemon went away, as
+  when its Neovim quits;
+- `neopane: work can't wait for a file (an older build); not waiting`;
+- the file couldn't be opened, as after Quit at Neovim's swap file prompt
+  (E325): the daemon's line.
+
+Ctrl-C exits 1 quietly. Only `[+LINE] FILE` opens there: bare `neopane`
+exits 1 with `neopane: already inside work's Neovim; open a file with neopane
+FILE`, and `-p`, `-O`, `-S`, `+cmd` or several files exit 2 with `neopane:
+inside work's Neovim, only [+LINE] FILE can be opened; use :tabedit, :vsplit
+or :source there`.
+
+Inside needs proof: `$NEOPANE` names a running daemon of this attach protocol
+version, and this process's terminal (the first of stdin, stdout and stderr
+that is one) is one of its Neovim's `:terminal`s; a process with no terminal
+is trusted on the address alone. A tmux server or terminal app started from a
+`:terminal` copies `$NEOPANE` into terminals that aren't Neovim's. Unproven,
+`$NEOPANE` is ignored, `neopane` acts as anywhere else, and it warns:
+
+- `neopane: ignoring $NEOPANE: this terminal isn't one of work's (unset
+  NEOPANE to stop this warning)`
+- `neopane: ignoring $NEOPANE: work runs another version, so this terminal
+  can't be proven to be its own`
+- `neopane: ignoring $NEOPANE: nothing answers at …`
+
+### `$EDITOR`
+
+`EDITOR=neopane`, with no flag, works everywhere
+([ADR 0015](docs/adr/0015-a-file-opened-from-a-daemons-own-terminal-is-waited-for.md)).
+In a daemon's `:terminal`, the file is waited for, as above, so `git commit`
+gets its message once you `:wq`. Elsewhere, `neopane FILE` starts a daemon for
+the file and returns when its Neovim quits, with Neovim's status, as `nvim`
+does: `:cq` aborts `git commit` and `git rebase -i`. In a daemon's
+`:terminal`, `:cq` quits that whole Neovim, as plain Neovim would; to abort
+one commit, leave its message empty. Callers that add `+N` (less) or `--`
+(visudo, sudoedit) before the file work too.
+
+To send edits to a running daemon from outside it, set `EDITOR="neopane
+--name work"`: it attaches, and returns when that pane ends. The value has a
+space, so it needs a caller that splits it, as git does; macOS `crontab -e`
+doesn't.
 
 ### Several daemons
 
@@ -346,7 +408,7 @@ Usage:
 ```
 
 Not built yet, each exiting 1 with `neopane: <what> isn't built yet`:
-`provider check`, and the bare form's `--detach` and `--no-wait`. `--provider` with `--detach` exits 2: it is for
+`provider check`, and the bare form's `--detach`. `--provider` with `--detach` exits 2: it is for
 the terminal that chooses the pane provider.
 
 ### Own options first, then Neovim's

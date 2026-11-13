@@ -11,8 +11,8 @@ mod value;
 pub use command::{attach_command, attach_json, attach_line, attach_vars, posix_quote};
 pub use frame::Frame;
 pub use message::{
-    Accept, End, Ending, Hello, Message, Purpose, Refusal, Reply, Size, Status, Terminal,
-    Transport, UNDO_LIMIT, env_value,
+    Accept, End, Ending, Hello, Message, OpenFile, Purpose, Refusal, Reply, Size, Status, Terminal,
+    Transport, UNDO_LIMIT, Wait, env_value,
 };
 pub use pane_id::{PaneId, PaneIdRegistry};
 

@@ -3,7 +3,9 @@
 //! changes unless forced.
 
 use super::*;
-use crate::attach::{ATTACH_PROTOCOL_VERSION, Ending, Hello, Message, Purpose, Refusal, Reply};
+use crate::attach::{
+    ATTACH_PROTOCOL_VERSION, Ending, Hello, Message, OpenFile, Purpose, Refusal, Reply, Wait,
+};
 use crate::daemon::attach_conn::read_all_frames;
 
 /// Sends `hello` to `fx`'s daemon as a control request: the reply, and
@@ -216,20 +218,172 @@ fn a_close_never_answered_is_left_after_the_stop_wait() {
     assert_eq!(Some(StopReason::Stopped), fx.d.stopped);
 }
 
-#[test]
-fn open_isnt_taken_yet() {
-    let mut fx = fixture();
-    let at = Address::new("open");
+/// Sends `fx`'s daemon an `open` of `/w/notes.md` from `/w`, at line 3,
+/// waiting as `wait` says: the helper's end.
+fn send_open(fx: &mut Fixture, tag: &str, wait: Wait) -> (UnixStream, Address) {
+    let at = Address::new(tag);
     let hello = Hello::new(Purpose::Open {
         pid: None,
-        cwd: b"/".to_vec(),
-        file: b"/f".to_vec(),
-        line: None,
-        wait: false,
+        cwd: b"/w".to_vec(),
+        tty: None,
+        open: OpenFile {
+            file: b"notes.md".to_vec(),
+            line: Some(3),
+            wait,
+        },
     });
     let helper = at.send(&Message::Hello(hello).encode().unwrap(), None);
     fx.d.accept(&at.server).unwrap();
-    let z = refusal(&helper);
-    assert_eq!(Some(Refusal::Hello), z.as_refusal());
-    assert_eq!("this daemon takes no open hello yet", z.message);
+    (helper, at)
+}
+
+/// `send_open`, and the request it asked of Neovim.
+fn open(fx: &mut Fixture, tag: &str, wait: Wait) -> (UnixStream, Address, u32) {
+    let (helper, at) = send_open(fx, tag, wait);
+    let req = fx.d.opens.asked.last().expect("asked of Neovim").req;
+    (helper, at, req)
+}
+
+/// Neovim's answer to `edit`: buffer `buf`, named `name`, `watched`.
+fn edited(fx: &mut Fixture, req: u32, buf: i64, name: &[u8], watched: bool) {
+    let mut b = Vec::new();
+    msgpack::write_array_header(&mut b, 3);
+    msgpack::write_int(&mut b, buf);
+    msgpack::write_str(&mut b, name);
+    msgpack::write_bool(&mut b, watched);
+    assert!(fx.d.on_open_answer(req, None, Decoder::of(&b)).unwrap());
+}
+
+/// Whether anything was sent to `helper` yet.
+fn answered(helper: &UnixStream) -> bool {
+    helper.set_nonblocking(true).unwrap();
+    let mut buf = [0u8; 1];
+    let got = (&*helper).read(&mut buf);
+    helper.set_nonblocking(false).unwrap();
+    !matches!(got, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+}
+
+/// The reply sent to `helper`, which is hung up on after it.
+fn reply_of(helper: &UnixStream) -> Reply {
+    match &read_all_frames(helper)[..] {
+        [Message::Reply(r)] => r.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_open_is_answered_once_neovim_has_its_window() {
+    let (mut fx, _) = work();
+    let (helper, _at, req) = open(&mut fx, "open-now", Wait::ForWindow);
+    assert!(!answered(&helper));
+    edited(&mut fx, req, 7, b"/w/notes.md", false);
+    let r = reply_of(&helper);
+    assert!(r.ok, "{r:?}");
+    assert_eq!((None, None), (r.message, r.waited));
+    assert!(fx.d.opens.asked.is_empty());
+}
+
+#[test]
+fn a_waited_open_is_answered_once_its_buffer_is_done() {
+    let (mut fx, _) = work();
+    let (helper, _at, req) = open(&mut fx, "open-wait", Wait::UntilDone);
+    edited(&mut fx, req, 7, b"/w/notes.md", true);
+    assert!(!answered(&helper));
+    // another buffer's done, and this one's
+    fx.d.on_note(windows::Note::Done {
+        buf: 8,
+        by_pane: false,
+    })
+    .unwrap();
+    assert!(!answered(&helper));
+    fx.d.on_note(windows::Note::Done {
+        buf: 7,
+        by_pane: false,
+    })
+    .unwrap();
+    let r = reply_of(&helper);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(Some(true), r.waited);
+    // done before Neovim answered
+    let (helper, _at, req) = open(&mut fx, "open-done", Wait::UntilDone);
+    edited(&mut fx, req, 9, b"/w/notes.md", false);
+    assert_eq!(Some(true), reply_of(&helper).waited);
+}
+
+#[test]
+fn a_waited_file_whose_terminal_hung_up_with_unsaved_changes_fails() {
+    let (mut fx, _) = work();
+    let (unsaved, _a, req) = open(&mut fx, "open-unsaved", Wait::UntilDone);
+    edited(&mut fx, req, 7, b"/w/notes.md", true);
+    let (saved, _b, req) = open(&mut fx, "open-saved", Wait::UntilDone);
+    edited(&mut fx, req, 8, b"/w/other.md", true);
+    let (closed, _c, req) = open(&mut fx, "open-closed", Wait::UntilDone);
+    edited(&mut fx, req, 9, b"/w/third.md", true);
+    fx.d.on_note(windows::Note::Unsaved {
+        files: vec![b"/w/notes.md".to_vec(), b"/w/third.md".to_vec()],
+        ask: 0,
+    })
+    .unwrap();
+    for (buf, by_pane) in [(7, true), (8, true), (9, false)] {
+        fx.d.on_note(windows::Note::Done { buf, by_pane }).unwrap();
+    }
+    let r = reply_of(&unsaved);
+    assert!(!r.ok);
+    assert_eq!(Some(true), r.waited);
+    assert_eq!(
+        Some("notes.md's terminal closed with unsaved changes".to_string()),
+        r.message
+    );
+    // saved, or closed by its own :q, it's done
+    assert!(reply_of(&saved).ok);
+    assert!(reply_of(&closed).ok);
+}
+
+#[test]
+fn an_open_neovim_refused_fails_with_its_error() {
+    let (mut fx, _) = work();
+    let (helper, _at, req) = open(&mut fx, "open-err", Wait::UntilDone);
+    let err = b"Error executing lua: x:1: Vim(split):E325: ATTENTION";
+    assert!(
+        fx.d.on_open_answer(req, Some(err), Decoder::of(&[0xc0]))
+            .unwrap()
+    );
+    let r = reply_of(&helper);
+    assert!(!r.ok);
+    assert_eq!(None, r.waited);
+    assert_eq!(
+        Some("notes.md didn't open: E325: ATTENTION".to_string()),
+        r.message
+    );
+}
+
+#[test]
+fn stopping_answers_the_opens_left() {
+    let (mut fx, _) = work();
+    let (waiting, _a, req) = open(&mut fx, "open-stop", Wait::UntilDone);
+    edited(&mut fx, req, 7, b"/w/notes.md", true);
+    let (asked, _b, _) = open(&mut fx, "open-stop2", Wait::UntilDone);
+    control(&mut fx, stop(true));
+    for helper in [waiting, asked] {
+        let r = reply_of(&helper);
+        assert!(!r.ok);
+        assert_eq!(Some(true), r.waited);
+        assert_eq!(
+            Some("work was stopped before notes.md was done".to_string()),
+            r.message
+        );
+    }
+}
+
+#[test]
+fn an_open_before_neovim_is_ready_fails() {
+    let mut fx = fixture();
+    fx.d.name = "work".into();
+    let (helper, _at) = send_open(&mut fx, "open-early", Wait::UntilDone);
+    let r = reply_of(&helper);
+    assert!(!r.ok);
+    assert_eq!(
+        Some("work's Neovim isn't ready to open notes.md".to_string()),
+        r.message
+    );
 }

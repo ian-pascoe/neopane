@@ -154,15 +154,14 @@ impl Daemon {
                 purpose: Purpose::SelfAttach { .. },
                 ..
             }) => self.attach_self(a),
-            // `open` comes later
-            Ok(h) => {
-                let z = End::refusal(
-                    Refusal::Hello,
-                    format!("this daemon takes no {} hello yet", h.purpose.name()),
-                );
-                log_warn!("{NAME} daemon: refused a hello: {}", z.message);
-                attach_conn::refuse(a.stream, z);
-                Ok(())
+            Ok(Hello {
+                purpose: Purpose::Open { .. },
+                ..
+            }) => {
+                let Ok(hello) = a.hello else {
+                    unreachable!("matched as read");
+                };
+                self.on_open(a.stream, hello)
             }
         }
     }

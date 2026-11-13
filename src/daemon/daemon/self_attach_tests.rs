@@ -561,3 +561,75 @@ fn a_new_windows_pane_holds_it_before_an_autocommand_can_redraw() {
     assert!(rig.d.panes.by_id(1).unwrap().layout.is_none());
     assert_eq!(Some(second), rig.d.panes.by_win(win).map(|p| p.id));
 }
+
+/// Sends `rig`'s daemon an `open` of `file`, waited for: the helper's end.
+fn open_waited(rig: &mut Rig, file: &str) -> UnixStream {
+    let purpose = Purpose::Open {
+        pid: None,
+        cwd: b"/".to_vec(),
+        tty: None,
+        open: crate::attach::OpenFile {
+            file: file.as_bytes().to_vec(),
+            line: None,
+            wait: crate::attach::Wait::UntilDone,
+        },
+    };
+    let hello = Message::Hello(Hello::new(purpose)).encode().unwrap();
+    let helper = UnixStream::connect(&rig.sock).unwrap();
+    std::io::Write::write_all(&mut &helper, &hello).unwrap();
+    rig.d.accept(&rig.server).unwrap();
+    helper
+}
+
+#[test]
+fn a_waited_file_whose_terminal_hangs_up_with_unsaved_changes_fails_and_one_saved_is_done() {
+    let file = nine_lines("waited");
+    let Some(mut rig) = Rig::start(&[]) else {
+        let _ = std::fs::remove_file(&file);
+        return;
+    };
+    rig.files.push(file.clone());
+    rig.pump(|r| r.d.nvim.ready);
+    rig.win_of(1);
+    for unsaved in [true, false] {
+        // a second terminal, whose window the file splits off
+        let second = rig.attach(None, None);
+        let win = rig.win_of(second);
+        rig.pump(|r| r.d.nvim.current_win == win);
+        let helper = open_waited(&mut rig, &file);
+        rig.pump(|r| !r.d.opens.waiting.is_empty());
+        let opened = rig.win_on(&file);
+        assert_ne!(opened, win);
+        rig.pump(|r| r.d.panes.by_win(opened).map(|p| p.id) == Some(second));
+        if unsaved {
+            rig.ints(&format!(
+                "vim.api.nvim_buf_set_lines(vim.fn.bufnr({file:?}), 0, 1, false, {{ 'x' }}) \
+                 return {{}}"
+            ));
+            rig.pump(|r| !r.d.lifetime.unsaved().is_empty());
+        }
+        // the terminal goes, with the file's window
+        rig.terms.pop().unwrap().helper = None;
+        rig.pump(|r| r.d.opens.waiting.is_empty());
+        let said = attach_conn::read_all_frames(&helper);
+        let [Message::Reply(r)] = &said[..] else {
+            panic!("{said:?}")
+        };
+        assert_eq!(Some(true), r.waited);
+        if unsaved {
+            assert!(!r.ok);
+            assert_eq!(
+                Some(format!("{file}'s terminal closed with unsaved changes")),
+                r.message
+            );
+            // saved for the next round
+            rig.ints(&format!(
+                "vim.api.nvim_buf_call(vim.fn.bufnr({file:?}), function() vim.cmd('write') end) \
+                 return {{}}"
+            ));
+            rig.pump(|r| r.d.lifetime.unsaved().is_empty());
+        } else {
+            assert!(r.ok, "{r:?}");
+        }
+    }
+}

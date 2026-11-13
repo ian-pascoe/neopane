@@ -8,7 +8,7 @@ pub mod report;
 
 use std::ffi::{OsStr, OsString};
 
-use crate::attach::{PaneId, Transport};
+use crate::attach::{OpenFile, PaneId, Transport, Wait};
 use crate::daemon::dir::{Address, valid_name};
 use crate::name::NAME;
 
@@ -142,6 +142,45 @@ impl Start {
             file,
             line,
         })
+    }
+
+    /// The bare `--address A`, kept by `--no-wait`: `attach --address A`
+    /// (#94 decision 16). None without `--address`.
+    pub fn attach_to_address(&self) -> Result<Option<AttachSelf>, UsageError> {
+        let Some(address) = &self.address else {
+            return Ok(None);
+        };
+        let (file, line) = attach_words(&self.nvim_args).map_err(|_| attach_takes())?;
+        Ok(Some(AttachSelf {
+            to: Target::Address(Address::from_arg(address.clone())),
+            provider: self.provider.clone(),
+            file,
+            line,
+        }))
+    }
+}
+
+/// What `<name> [ARGS]` opens inside daemon `daemon`'s own Neovim (#94
+/// decision 17), waiting as `wait` says: `[+LINE] [--] FILE`, the file as
+/// typed; None for nothing.
+pub fn inside_file(
+    words: &[OsString],
+    daemon: &str,
+    wait: Wait,
+) -> Result<Option<OpenFile>, UsageError> {
+    let only = || {
+        UsageError(format!(
+            "inside {daemon}'s Neovim, only [+LINE] FILE can be opened; use :tabedit, :vsplit \
+             or :source there"
+        ))
+    };
+    match attach_words(words).map_err(|_| only())? {
+        (Some(file), line) => Ok(Some(OpenFile {
+            file: file.into_encoded_bytes(),
+            line,
+            wait,
+        })),
+        (None, _) => Ok(None),
     }
 }
 

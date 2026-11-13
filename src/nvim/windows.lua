@@ -1957,6 +1957,79 @@ api.nvim_create_autocmd('TermClose', {
   end,
 })
 
+-- Waited files' buffers, each told done once (`<tool>_done`): buffer ->
+-- true.
+local watched = {}
+-- Neovim is exiting: its buffers going isn't the user being done with them
+local leaving = false
+api.nvim_create_autocmd('VimLeavePre', {
+  group = group,
+  callback = function() leaving = true end,
+})
+
+-- Buffer `buf` is done with; `by_pane` if its last window went because its
+-- pane did. Not as Neovim exits: the daemon goes with it.
+local function done(buf, by_pane)
+  if not watched[buf] or leaving or vim.v.exiting ~= vim.NIL then return end
+  watched[buf] = nil
+  pcall(note, 'done', buf, by_pane)
+end
+
+-- Done once no window shows it, as the turn after it left one tells: the
+-- command that hid it may show it again, as :edit! does.
+api.nvim_create_autocmd('BufWinLeave', {
+  group = group,
+  callback = function(ev)
+    local buf = ev.buf
+    if not watched[buf] then return end
+    local by_pane = closing_ours
+    vim.schedule(function()
+      if api.nvim_buf_is_valid(buf) and #vim.fn.win_findbuf(buf) > 0 then return end
+      done(buf, by_pane)
+    end)
+  end,
+})
+api.nvim_create_autocmd({ 'BufUnload', 'BufDelete', 'BufWipeout' }, {
+  group = group,
+  callback = function(ev) done(ev.buf, closing_ours) end,
+})
+
+-- The window a control request's file splits off: one a pane shows on the
+-- :terminal running on `tty`, the caller's, if any; else the current window,
+-- or the window last current if a pane doesn't show that.
+local function edit_from(tty)
+  for buf, pty in pairs(terminal_ptys) do
+    if tty ~= vim.NIL and pty == tty then
+      local cur = api.nvim_get_current_win()
+      if api.nvim_win_get_buf(cur) == buf and shown(cur) then return cur end
+      for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+        if shown(win) then return win end
+      end
+    end
+  end
+  local cur = api.nvim_get_current_win()
+  if not shown(cur) and last and shown(last) then return last end
+  return cur
+end
+
+--- A file a control request opens: in a new window split off the one
+--- `edit_from` picks for `tty`, with the cursor on `line` if given. Watched
+--- with `watch`, until it's done. Returns { buffer, its full name, whether
+--- it's still watched }; an error if it can't be opened.
+function M.edit(file, line, watch, tty)
+  if line == vim.NIL then line = nil end
+  local from = edit_from(tty)
+  if from ~= api.nvim_get_current_win() then api.nvim_set_current_win(from) end
+  vim.cmd.split({ args = { file }, magic = { file = false } })
+  local win = api.nvim_get_current_win()
+  local buf = api.nvim_win_get_buf(win)
+  if line then
+    api.nvim_win_set_cursor(win, { math.min(line, api.nvim_buf_line_count(buf)), 0 })
+  end
+  if watch then watched[buf] = true end
+  return { buf, api.nvim_buf_get_name(buf), watched[buf] == true }
+end
+
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), `restore` or the daemon
 -- adopts it again.

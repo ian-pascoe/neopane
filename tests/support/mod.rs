@@ -56,6 +56,20 @@ pub fn in_pty_with(
     env: &[(&str, &std::ffi::OsStr)],
     cols: u16,
 ) -> std::process::Child {
+    in_pty_drawn(tmpdir, cwd, args, env, cols).0
+}
+
+/// What a terminal was sent, as it comes.
+pub type Drawn = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+
+/// `in_pty_with`, keeping what it draws.
+pub fn in_pty_drawn(
+    tmpdir: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &std::ffi::OsStr)],
+    cols: u16,
+) -> (std::process::Child, Drawn) {
     let (mut master, mut slave) = (-1, -1);
     let mut size = libc::winsize {
         ws_row: 24,
@@ -94,13 +108,17 @@ pub fn in_pty_with(
         .stderr(slave)
         .spawn()
         .unwrap();
+    let drawn = Drawn::default();
+    let kept = drawn.clone();
     std::thread::spawn(move || {
         use std::io::Read;
         let mut master = File::from(master);
         let mut buf = [0u8; 4096];
-        while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+        while let Ok(n @ 1..) = master.read(&mut buf) {
+            kept.lock().unwrap().extend_from_slice(&buf[..n]);
+        }
     });
-    child
+    (child, drawn)
 }
 
 /// What Neovim at `sock` makes of `expr`, if it answers.

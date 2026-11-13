@@ -56,6 +56,7 @@ mod attaches;
 mod choosing;
 pub(crate) mod control;
 mod lifetime;
+mod open;
 mod self_attach;
 use attaches::PENDING_BASE;
 
@@ -85,6 +86,8 @@ pub(crate) struct Daemon {
     /// Self-attaches that may come from Neovim's own terminals, waiting for
     /// it to list them.
     nested_checks: Vec<attaches::NestedCheck>,
+    /// The `open` control requests not yet answered.
+    opens: open::Opens,
     /// The user a connection's peer must run as: ours.
     uid: u32,
     pub grids: Grids,
@@ -379,6 +382,7 @@ impl Daemon {
             hello_timer_due: None,
             window_ask: None,
             nested_checks: Vec::new(),
+            opens: open::Opens::default(),
             uid: super::attach_conn::euid(),
             grids: Grids::default(),
             panes: Panes::default(),
@@ -1325,6 +1329,7 @@ impl Daemon {
             windows::Note::Unsaved { files, ask } => self.on_unsaved(files, ask)?,
             windows::Note::Cwd(dir) => self.told.dir = Some(dir),
             windows::Note::Terminals(ptys) => self.told.terminals = ptys,
+            windows::Note::Done { buf, by_pane } => self.on_done(buf, by_pane),
         }
         Ok(())
     }
@@ -1353,7 +1358,10 @@ impl Daemon {
         if show_now {
             self.draw()?;
         }
-        if self.on_window_answer(id, err, result)? || self.on_nested_answer(id, err, result)? {
+        if self.on_window_answer(id, err, result)?
+            || self.on_nested_answer(id, err, result)?
+            || self.on_open_answer(id, err, result)?
+        {
             return Ok(());
         }
         if let Some(e) = err {

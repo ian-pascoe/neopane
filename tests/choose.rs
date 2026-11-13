@@ -268,3 +268,51 @@ return {
     assert_eq!((&s["provider"], &s["panes"]), (&"fake".into(), &2.into()));
     assert_eq!(lines_of(&work.path("runs")), ["ran"]);
 }
+
+#[test]
+fn a_waited_file_whose_terminal_hangs_up_with_unsaved_changes_exits_1() {
+    if !have_nvim() {
+        return;
+    }
+    let mut work = Work::new("hangup", OPEN_BY_RELAY);
+    work.attach();
+    work.until_up();
+    let s = work.until_status(|s| s["provider"] == "fake");
+    assert_eq!(s["provider"], "fake");
+    std::fs::write(work.path("f.txt"), "one\n").unwrap();
+    // in work's :terminal, f.txt opened, waited for: its status and stderr
+    // kept
+    let script = work.path("open.sh");
+    std::fs::write(
+        &script,
+        "cd \"$1\" && \"$2\" f.txt 2> \"$1/err\"; echo $? > \"$1/status\"\n",
+    )
+    .unwrap();
+    let cmd = format!(
+        "execute('terminal sh {} {} {}')",
+        script.display(),
+        work.tmp.display(),
+        exe().display()
+    );
+    remote_expr(&work.sock, &cmd).expect("Neovim answers");
+    // its window gets a terminal of its own
+    let relays = until_lines(&work.path("relays"), 1);
+    assert_eq!(relays.len(), 1, "open never ran: {}", work.log());
+    let editing = until_expr(&work.sock, "expand('%:t')", |f| f == "f.txt");
+    assert_eq!(editing.as_deref(), Some("f.txt"));
+    work.until_status(|s| s["panes"] == 2);
+    remote_expr(&work.sock, "execute('call setline(1, \"changed\")')").unwrap();
+    let s = work.until_status(|s| s["unsaved"].as_array().is_some_and(|u| !u.is_empty()));
+    assert_eq!(s["unsaved"].as_array().map(Vec::len), Some(1));
+
+    // that terminal hangs up
+    let pid: i32 = relays[0].trim().parse().unwrap();
+    // SAFETY: a plain syscall, to the relay tool this test's config started.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let status = until_lines(&work.path("status"), 1);
+    assert_eq!(status, ["1"], "{}", work.log());
+    assert_eq!(
+        std::fs::read_to_string(work.path("err")).unwrap(),
+        format!("{NAME}: f.txt's terminal closed with unsaved changes\n")
+    );
+}

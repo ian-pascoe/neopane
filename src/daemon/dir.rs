@@ -266,6 +266,14 @@ impl Address {
         UnixStream::connect(&self.0)
     }
 
+    /// Whether `other` is the same daemon's address: spelled the same, or
+    /// another path to the same file, its device and inode.
+    pub fn same_daemon(&self, other: &Address) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let id = |a: &Address| std::fs::metadata(&a.0).ok().map(|m| (m.dev(), m.ino()));
+        self == other || id(self).is_some_and(|i| Some(i) == id(other))
+    }
+
     /// Whether a daemon answers here: it accepts a connection, which hangs
     /// up at once, before any hello.
     pub fn answers(&self) -> bool {
@@ -576,6 +584,26 @@ mod tests {
     fn uid() -> u32 {
         // SAFETY: getuid can't fail.
         unsafe { libc::getuid() }
+    }
+
+    #[test]
+    fn another_path_to_the_same_address_is_the_same_daemon() {
+        let scratch = Scratch::new();
+        let sock = scratch.0.join("sock");
+        let _server = UnixListener::bind(&sock).unwrap();
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&sock, &link).unwrap();
+        let other = scratch.0.join("other");
+        let _other = UnixListener::bind(&other).unwrap();
+        let at = |p: &Path| Address::from_arg(p.as_os_str().to_os_string());
+        assert!(at(&sock).same_daemon(&at(&sock)));
+        assert!(at(&sock).same_daemon(&at(&link)));
+        assert!(at(&link).same_daemon(&at(&sock)));
+        assert!(!at(&sock).same_daemon(&at(&other)));
+        // neither there: only the same spelling
+        let gone = scratch.0.join("gone");
+        assert!(at(&gone).same_daemon(&at(&gone)));
+        assert!(!at(&gone).same_daemon(&at(&scratch.0.join("gone2"))));
     }
 
     #[test]

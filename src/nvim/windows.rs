@@ -5,6 +5,7 @@
 use super::msgpack::{self, Decoder};
 use super::nvim::Nvim;
 use super::rpc;
+use crate::attach::OpenFile;
 use crate::name::{self, NAME};
 
 const LUA: &str = include_str!("windows.lua");
@@ -254,6 +255,10 @@ pub enum Note {
     /// The ptys of Neovim's running `:terminal` jobs, sorted: told as they
     /// open and close.
     Terminals(Vec<Vec<u8>>),
+    /// Waited file buffer `buf` is done with: no window shows it, or it
+    /// was unloaded or deleted. `by_pane` if its last window went because
+    /// its pane did.
+    Done { buf: i64, by_pane: bool },
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -516,6 +521,14 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         }
         return Ok(Some(Note::Cwd(rpc::expect_str(params)?.to_vec())));
     }
+    if method == b"done" {
+        if rpc::expect_array(params)? < 2 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let buf = rpc::expect_handle(params)?;
+        let by_pane = rpc::expect_bool(params)?;
+        return Ok(Some(Note::Done { buf, by_pane }));
+    }
     if method == b"terminals" {
         if rpc::expect_array(params)? < 1 {
             return Err(rpc::Error::BadMessage);
@@ -659,6 +672,47 @@ fn parse_strs(params: &mut Decoder<'_>) -> rpc::Result<Vec<Vec<u8>>> {
         strs.push(rpc::expect_str(params)?.to_vec());
     }
     Ok(strs)
+}
+
+/// Opens `open`'s file, absolute, a control request's, in a new window split
+/// off one showing the `:terminal` on `tty`, else off the current one, the
+/// cursor on its line if given. A waited file is watched until it's done
+/// (`Note::Done`). `parse_edit` reads the response.
+pub(crate) fn edit(nvim: &mut Nvim, open: &OpenFile, tty: Option<&[u8]>) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.edit(...)"), 4);
+    let w = nvim.writer();
+    msgpack::write_str(w, &open.file);
+    match open.line {
+        Some(l) => msgpack::write_int(w, l),
+        None => msgpack::write_nil(w),
+    }
+    msgpack::write_bool(w, open.wait.until_done());
+    match tty {
+        Some(t) => msgpack::write_str(w, t),
+        None => msgpack::write_nil(w),
+    }
+    id
+}
+
+/// What `edit` opened: its buffer, the buffer's full name, and whether
+/// it's still watched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Edited {
+    pub(crate) buf: i64,
+    pub(crate) name: Vec<u8>,
+    pub(crate) watched: bool,
+}
+
+/// `edit`'s response: `[buf, name, watched]`.
+pub(crate) fn parse_edit(result: &mut Decoder<'_>) -> rpc::Result<Edited> {
+    if rpc::expect_array(result)? < 3 {
+        return Err(rpc::Error::BadMessage);
+    }
+    Ok(Edited {
+        buf: rpc::expect_handle(result)?,
+        name: rpc::expect_str(result)?.to_vec(),
+        watched: rpc::expect_bool(result)?,
+    })
 }
 
 /// At Neovim's next SafeState, the Lua tells the unsaved changes as answer
@@ -1262,6 +1316,140 @@ mod tests {
              end",
         );
         h.until_note(Note::Terminals(vec![]));
+    }
+
+    #[test]
+    fn a_watched_buffer_is_done_once_no_window_shows_it_or_it_goes() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let file = three_lines("done");
+        let edit = |h: &mut Harness, line: &str| -> i64 {
+            h.sync(&format!("_G.e = {NAME}.edit({file:?}, {line}, true, nil)"));
+            h.eval_str("return tostring(_G.e[1])").parse().unwrap()
+        };
+        // opened split off the current window, at its line, and watched
+        let buf = edit(&mut h, "2");
+        let opened = h.eval_str(
+            "return table.concat({ _G.e[2], tostring(_G.e[3]), vim.fn.line('.'), \
+             #vim.fn.win_findbuf(_G.e[1]), vim.fn.winnr('$') }, ' ')",
+        );
+        assert_eq!(format!("{file} true 2 1 3"), opened);
+        // :w alone isn't done, nor a second window on it closing
+        h.sync("vim.cmd('write') vim.cmd('split') vim.cmd('close')");
+        h.sync("vim.wait(10)");
+        assert!(
+            !h.notes.iter().any(|n| matches!(n, Note::Done { .. })),
+            "{:?}",
+            h.notes
+        );
+        // its last window closing is, once
+        h.sync("vim.cmd('close')");
+        h.until_note(Note::Done {
+            buf,
+            by_pane: false,
+        });
+        h.sync("vim.cmd('split') vim.cmd('close') vim.wait(10)");
+        assert!(!h.notes.iter().any(|n| matches!(n, Note::Done { .. })));
+        // its window switching to another buffer
+        let buf = edit(&mut h, "nil");
+        h.sync("vim.cmd('enew')");
+        h.until_note(Note::Done {
+            buf,
+            by_pane: false,
+        });
+        h.sync("vim.cmd('close')");
+        // :bdelete
+        let buf = edit(&mut h, "nil");
+        h.sync("vim.cmd('bdelete')");
+        h.until_note(Note::Done {
+            buf,
+            by_pane: false,
+        });
+        // its window closed because its pane went, with unsaved changes
+        let buf = edit(&mut h, "nil");
+        h.sync(&format!(
+            "vim.api.nvim_buf_set_lines(0, 0, 1, false, {{ 'changed' }}) \
+             {NAME}.close(vim.api.nvim_get_current_win())"
+        ));
+        h.until_note(Note::Done { buf, by_pane: true });
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A file of three lines for test `tag`, as Neovim names it: macOS's
+    /// /var is /private/var.
+    fn three_lines(tag: &str) -> String {
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let file = tmp.join(format!("{NAME}-{tag}-{}", std::process::id()));
+        std::fs::write(&file, "1\n2\n3\n").unwrap();
+        file.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_watched_buffer_isnt_done_as_neovim_quits() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let file = three_lines("quit");
+        h.sync(&format!("{NAME}.edit({file:?}, nil, true, nil)"));
+        h.notes.clear();
+        h.command("qa!");
+        // read until Neovim has exited
+        assert!(!h.until(|_| false));
+        assert!(
+            !h.notes.iter().any(|n| matches!(n, Note::Done { .. })),
+            "{:?}",
+            h.notes
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_file_splits_off_the_window_on_the_callers_terminal_else_the_current_one() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let file = three_lines("from");
+        let first = h.wins[0];
+        let split_from = |h: &mut Harness| -> i64 {
+            h.eval_str("return tostring(vim.fn.win_getid(vim.fn.winnr('#')))")
+                .parse()
+                .unwrap()
+        };
+        // a :terminal in a window of its own, focus then elsewhere
+        let term = h.adopt_split();
+        h.sync("vim.cmd('terminal')");
+        let pty = h.eval_str("return vim.api.nvim_get_chan_info(vim.bo.channel).pty or ''");
+        assert!(pty.starts_with("/dev/"), "{pty:?}");
+        h.sync(&format!("vim.api.nvim_set_current_win({first})"));
+        h.sync(&format!("{NAME}.edit({file:?}, nil, false, {pty:?})"));
+        assert_eq!(term, split_from(&mut h));
+        // a caller with no terminal, or one no window shows: the current
+        h.sync(&format!(
+            "vim.cmd('close') vim.api.nvim_set_current_win({first})"
+        ));
+        h.sync(&format!("{NAME}.edit({file:?}, nil, false, nil)"));
+        assert_eq!(first, split_from(&mut h));
+        h.sync(&format!(
+            "vim.cmd('close') vim.api.nvim_set_current_win({first})"
+        ));
+        h.sync(&format!("{NAME}.edit({file:?}, nil, false, '/dev/none')"));
+        assert_eq!(first, split_from(&mut h));
+        // a float current: the window last current
+        h.sync(&format!(
+            "vim.cmd('close') vim.api.nvim_set_current_win({first})"
+        ));
+        // reported current, the window last current
+        h.sync("vim.wait(10)");
+        h.sync(
+            "vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, \
+               { relative = 'editor', row = 1, col = 1, width = 5, height = 2 })",
+        );
+        h.sync(&format!("{NAME}.edit({file:?}, nil, false, nil)"));
+        assert_eq!(first, split_from(&mut h));
+        let relative = h.eval_str("return vim.api.nvim_win_get_config(0).relative");
+        assert_eq!("", relative);
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
