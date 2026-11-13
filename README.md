@@ -465,7 +465,7 @@ Environment:
 Each daemon keeps its files in $NEOPANE_TMPDIR, else /tmp, under
 /neopane-<uid>/<daemon name>/, and logs to `log` there. The log stays after
 the daemon ends; the next daemon of that name keeps it as log.1.
-More: https://github.com/ian-pascoe/neorex   Developer tools: neopane help debug
+More: https://github.com/ian-pascoe/neopane  Developer tools: neopane help debug
 ```
 
 ### Own options first, then Neovim's
@@ -961,6 +961,7 @@ The old names have no aliases: change them by hand.
 | `~/.config/neorex/` | `~/.config/neopane/` |
 | `/tmp/neorex-<uid>/` | `/tmp/neopane-<uid>/` |
 | the Rex block label and client name `neorex` | `neopane` |
+| the repository `ian-pascoe/neorex` (its URLs redirect) | `ian-pascoe/neopane` |
 
 A daemon started before the rename keeps running under its old name, and
 leftover `neorex-<uid>` directories are left alone: remove them once no old

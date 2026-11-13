@@ -93,7 +93,7 @@ Environment:
 Each daemon keeps its files in {tmpdir}, else /tmp, under
 /{n}-<uid>/<daemon name>/, and logs to `log` there. The log stays after
 the daemon ends; the next daemon of that name keeps it as log.1.
-More: {url}   Developer tools: {n} help debug
+More: {url}  Developer tools: {n} help debug
 ",
         pad = " ".repeat(n.len()),
         tmpdir = format_args!("${}", tmpdir_var()),

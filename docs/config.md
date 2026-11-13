@@ -335,7 +335,7 @@ of `$NEOPANE_CONFIG`, else `~/.config/neopane` (created if missing).
 $ neopane provider types
 wrote ~/.config/neopane/types/neopane.lua
 wrote ~/.config/neopane/.luarc.json
-no init.lua yet: see https://github.com/ian-pascoe/neorex/blob/main/docs/config.md
+no init.lua yet: see https://github.com/ian-pascoe/neopane/blob/main/docs/config.md
 ```
 
 Open `~/.config/neopane` as the editor's workspace folder. LuaLS reads neither

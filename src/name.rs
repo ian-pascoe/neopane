@@ -6,14 +6,9 @@
 /// The name: lower-case letters only, so no form of it needs escaping.
 pub const NAME: &str = "neopane";
 
-/// The project's repository, under its old name until the repository is
-/// renamed (SPI-673); then `https://github.com/ian-pascoe/{NAME}`. Split so a
-/// search of `src/` for the old name finds nothing.
-const REPO: &str = concat!("https://github.com/ian-pascoe/neo", "rex");
-
-/// The project's home.
+/// The project's home: its repository, named after the tool (SPI-673).
 pub fn repo_url() -> String {
-    REPO.to_string()
+    format!("https://github.com/ian-pascoe/{NAME}")
 }
 
 /// The name in upper case, as in `$<NAME>`.
