@@ -4,8 +4,8 @@ Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
 chooses: tmux in a tmux pane, Rex inside Rex, else none (see
 [The default](#the-default) and
-[Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md` is the contract
-of a pane provider's commands.
+[Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md`
+is the contract of a pane provider's commands.
 
 ## The file
 
@@ -307,8 +307,7 @@ result  ok
 It exits 0 for a pane provider, or for none by design (`provider()` returned
 `nil` or `false`, the hint is `none`, or with no file, a `find` refusing the
 default's choice), also when `find` wasn't run; 1 for an error, or a `find`
-refusing a config's choice; 2 for a usage error. Warnings
-don't change it.
+refusing a config's choice; 2 for a usage error. Warnings don't change it.
 
 ### `--json`
 
@@ -386,9 +385,9 @@ tmux floating pane. The default knows tmux by its own variables,
 `TERM_PROGRAM=tmux` and `TMUX`, and where Rex's are set too, asks
 `neopane.inside.tmux` (see [The default](#the-default)); its `find` then
 checks the terminal is a pane of that tmux server, by its tty, so a `TMUX`
-leaked into another terminal chooses nothing, and says so only in the log.
-A config gets the same table from
-`neopane.builtin.tmux()`, and may change any capability of it:
+leaked into another terminal chooses nothing, and says so only in the log. A
+config gets the same table from `neopane.builtin.tmux()`, and may change any
+capability of it:
 
 ```lua
 return {
