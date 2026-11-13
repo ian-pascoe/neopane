@@ -404,8 +404,15 @@ fn provider_raises_or_returns_the_wrong_thing() {
         "provider() returned true; expected nil, false, \"rex\" or a table"
     );
     assert_eq!(
+        error_of(&returning("'zellij'")),
+        "provider() returned \"zellij\"; the only built-in name is \"rex\""
+    );
+    assert_eq!(
         error_of(&returning("'tmux'")),
-        "provider() returned \"tmux\"; the only built-in name is \"rex\""
+        format!(
+            "provider() returned \"tmux\"; the only built-in name is \"rex\" (for tmux's \
+             table, return {NAME}.builtin.tmux())"
+        )
     );
     assert_eq!(
         error_of(&returning("print")),
@@ -629,9 +636,9 @@ fn placeholders_a_capability_isnt_given() {
     let p = whole(choice);
     assert!(p.capability(Capability::Open).is_some());
     assert!(p.capability(Capability::OpenBeside).is_none());
-    // every command gets {capability} and {protocol}
+    // every command gets {capability}, {protocol} and {exe}
     let (_, warnings) = chosen(&returning(
-        "{ events = { 'e', '{capability}', '{protocol}' } }",
+        "{ events = { '{exe}', '{capability}', '{protocol}' } }",
     ));
     assert_eq!(warnings, Vec::<String>::new());
 }
@@ -756,7 +763,7 @@ fn the_global_and_require_give_the_same_table() {
     assert_eq!(
         f.run().printed,
         [format!(
-            "true\t{}\t9.8.7\t{dir}\ttable\ttable\tnil\tnil",
+            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux\tnil",
             std::env::consts::OS
         )]
     );
@@ -975,13 +982,66 @@ fn which_finds_programs_on_path() {
     assert_eq!(&fields[1..], ["nil", "/bin/sh", "nil"]);
 }
 
+// <name>.builtin: the built-in tables (ADR 0016)
+
+#[test]
+fn builtin_tmux_is_the_tmux_table_and_passes_the_checker() {
+    let (choice, warnings) = chosen(&returning("{name}.builtin.tmux()"));
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(whole(choice), config::BuiltinTable::Tmux.provider());
+    // fresh each time
+    let (choice, _) = chosen(&returning(
+        "(function() local t = {name}.builtin.tmux() t.find = false \
+           return {name}.builtin.tmux() end)()",
+    ));
+    assert_eq!(whole(choice), config::BuiltinTable::Tmux.provider());
+}
+
+#[test]
+fn builtin_tmux_takes_no_options() {
+    let (choice, _) = chosen(&returning("{name}.builtin.tmux({})"));
+    assert_eq!(whole(choice), config::BuiltinTable::Tmux.provider());
+    assert_eq!(
+        error_of(&returning("({name}.builtin.tmux({ split = 'h' }))")),
+        format!("provider() raised: init.lua:1: {NAME}.builtin.tmux: takes no options; got split")
+    );
+    assert_eq!(
+        error_of(&returning("({name}.builtin.tmux(5))")),
+        format!(
+            "provider() raised: init.lua:1: {NAME}.builtin.tmux: takes no options; got the \
+             number 5"
+        )
+    );
+}
+
+#[test]
+fn provider_show_prints_what_builtin_returns() {
+    let shown = std::process::Command::new(exe())
+        .args(["provider", "show", "tmux"])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let f = Fixture::new(
+        "local function same(a, b) \
+           if type(a) ~= 'table' or type(b) ~= 'table' then return a == b end \
+           for k, v in pairs(a) do if not same(v, b[k]) then return false end end \
+           for k in pairs(b) do if a[k] == nil then return false end end \
+           return true \
+         end \
+         print(same(dofile({name}.config_dir .. '/shown.lua'), {name}.builtin.tmux())) \
+         return {}",
+    );
+    std::fs::write(f.dir.join("shown.lua"), &shown.stdout).unwrap();
+    assert_eq!(f.run().printed, ["true"]);
+}
+
 // <name>.default (#93 decision 27): the same as the daemon's
 
 #[test]
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
     // set means present, even empty, as the daemon reads its own
-    let envs: [&[(&str, &str)]; 7] = [
+    let envs: [&[(&str, &str)]; 9] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
@@ -993,9 +1053,18 @@ fn default_agrees_with_the_daemons() {
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
+        &[("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")],
+        &[
+            ("TERM_PROGRAM", "tmux"),
+            ("TMUX", "/tmp/t,1,0"),
+            ("REX_SERVER", "ws://x"),
+            ("REX_SESSION", "s"),
+        ],
     ];
-    let want = [false, true, false, false, true, true, true];
-    for (env, want) in envs.into_iter().zip(want) {
+    let want = [false, true, false, false, true, true, true, false, false];
+    let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
+    let wants_tmux = [false, false, false, false, false, false, false, true, true];
+    for ((env, want), wants_tmux) in envs.into_iter().zip(want).zip(wants_tmux) {
         let mut f = Fixture::new(source);
         f.attach.env = env
             .iter()
@@ -1005,6 +1074,7 @@ fn default_agrees_with_the_daemons() {
         assert_eq!(f.choose().unwrap().choice, daemons, "{env:?}");
         let rex = Choice::Builtin(Builtin::Rex);
         assert_eq!(daemons == rex, want, "{env:?}");
+        assert_eq!(daemons == tmux, wants_tmux, "{env:?}");
     }
 }
 

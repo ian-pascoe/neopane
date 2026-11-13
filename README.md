@@ -316,8 +316,8 @@ is for the terminal that chooses the pane provider.
 A pane provider gives Neovim's windows terminals of their own, and places
 and focuses them: a terminal provider, a layout provider, or both. A daemon
 has at most one at a time, chosen by a self-attach, as `neopane` and
-`neopane attach` are: by your config, or without one, Rex in a Rex block and
-none elsewhere.
+`neopane attach` are: by your config, or without one, tmux in a tmux pane,
+Rex in a Rex block and none elsewhere.
 
 The daemon keeps its pane provider while a terminal in its reach is attached
 or on its way, and drops it otherwise, as when the last of them closes; one
@@ -380,6 +380,19 @@ names ([docs/config.md](docs/config.md#provider-check)).
 To try a build without it taking the focus in your own Rex session, which
 neopane does as it works, run it in a Rex block of a Rex session of your
 own, made with `rex new`.
+
+### tmux
+
+tmux's pane provider is built in, as a table of capabilities that each run
+neopane itself
+([ADR 0016](docs/adr/0016-built-in-pane-providers-other-than-rex-are-tables-that-run-neopane-itself.md)).
+An attach chooses it when `TERM_PROGRAM` is `tmux` and `TMUX` is set, as in
+every tmux pane: each window gets a tmux pane of its own, split beside the
+one it was opened from. tmux checks the choice: the terminal's tty must be
+one of that tmux server's panes', so a `TMUX` inherited by another terminal
+chooses none. It needs tmux 3.2 or newer. `neopane provider show tmux` prints
+its table, which `neopane.builtin.tmux()` returns for your config to change
+([docs/config.md](docs/config.md#tmux)); `--provider none` opts out.
 
 ### Your own
 

@@ -326,7 +326,7 @@ fn after_a_version_refusal_new_windows_are_drawn_in_their_origin_panes_until_the
     let exe = dir.join("exe");
     std::fs::write(&exe, "new").unwrap();
     let mut fx = fixture();
-    fx.d.exe = exe.to_string_lossy().into_owned();
+    fx.d.exe = exe.clone();
     let (origin, _live) = split_off_origin(&mut fx, 1002);
     fx.d.new_pane(1002).unwrap();
     let pane = fx.d.panes.by_win(1002).unwrap().attach_id.unwrap();
@@ -411,7 +411,7 @@ pub(super) fn started_with(
         event_loop,
         NvimSession::new(nvim),
         provider,
-        String::new(),
+        std::path::PathBuf::new(),
         crate::daemon::dir::Address::from_arg(Default::default()),
     );
     let (surface, live) = attached_surface(120, 40);

@@ -194,15 +194,16 @@ fn a_config_error_warns_once_and_list_shows_it() {
     }
     let mut work = Work::new(
         "error",
-        "return { provider = function(attach) return \"tmux\" end }\n",
+        "return { provider = function(attach) return \"zellij\" end }\n",
     );
     work.attach();
     work.until_up();
     let s = work.until_status(|s| s["provider"] != "(choosing)");
     assert_eq!(s["provider"], "none (config error)");
     assert_eq!(work.listed_provider(), "none (config error)");
-    let warning =
-        format!("{NAME}: config: provider() returned \"tmux\"; the only built-in name is \"rex\"");
+    let warning = format!(
+        "{NAME}: config: provider() returned \"zellij\"; the only built-in name is \"rex\""
+    );
     let messages = work.until_message(&warning);
     assert_eq!(messages.matches(&warning).count(), 1, "{messages}");
 }

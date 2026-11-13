@@ -30,7 +30,7 @@ which runs for as long as the pane provider is chosen (see [Events](#events)).
   in the table below, whether this capability gets it or not, and every
   `<NAME>_ENV_*`. The rest stays, `<NAME>_CONFIG`, `<NAME>_PROVIDER` and
   `<NAME>_TMPDIR` among them. Then the capability's own variables are set,
-  and always `<NAME>_CAPABILITY` and `<NAME>_PROTOCOL`.
+  and always `<NAME>_CAPABILITY`, `<NAME>_PROTOCOL` and `<NAME>_EXE`.
 - **Timeout:** each capability has a default, which the table's `timeouts`
   changes, up to 60 s. At its timeout the command's group gets SIGTERM, and
   SIGKILL 1 s later; the act has failed, whatever it does after.
@@ -215,12 +215,57 @@ start waits the same way. Exit 69, or a command that can't start the first
 time, ends it for good: the daemon then runs `report_layout` as it would
 without `events`.
 
+## Built-in commands
+
+A built-in pane provider other than Rex, such as tmux's, is a table whose
+every capability runs `<name>` itself (ADR 0016):
+
+```lua
+find = { "{exe}", "provider", "builtin", "tmux", "find" },
+```
+
+- **Words:** `provider builtin NAME CAPABILITY`, hidden from help. The
+  capability word wins over `<NAME>_CAPABILITY`.
+- **Inputs:** only the variables this page documents for the capability,
+  and the choosing attach's environment, such as `TMUX`.
+- **Outputs:** the capability's stdout and exit status, as this page says.
+  An unknown name, capability or extra word exits 69, unsupported, as does
+  a capability the installed multiplexer is too old for.
+- **Run by hand**, without `<NAME>_PROTOCOL`, it exits 2, saying a pane
+  provider table runs it.
+
+The words, inputs and outputs are frozen, and only ever gain forms: a
+daemon upgraded in place runs a newer binary at `{exe}`. The commands it
+runs, such as `tmux`'s, and its stderr are not.
+
+### tmux
+
+`<name>.builtin.tmux()`: `find`, `open_beside`, `close` and
+`report_layout`, on the tmux server `TMUX` names. Every `tmux` call passes
+that socket with `-S`, and names the pane it acts on with `-t`.
+
+- `find`: the pane of the server whose tty is `TTY`, compared by device,
+  as tmux itself tells a client inside it; `%N`, else exit 1. No context
+  or find variables: `TMUX` leaks into terminals tmux doesn't run. It
+  refuses tmux older than 3.2, naming the version.
+- `open_beside`: `split-window -d`, `-h` or `-v` and `-b` from
+  `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
+  the new pane's id.
+- `close`: `kill-pane`; done when the pane is already gone.
+- `report_layout`: an area per window of the server, `@N`, a window
+  linked into several sessions counted once, foreign panes included. Rects
+  are each pane's content, as fractions of its window, with no inset; with
+  `pane-border-status top`, a pane on the top row is reported from the top,
+  one row taller, with an inset of 1 at the top. `focus` is the active pane
+  of the window the most recently active client shows.
+
 ## Placeholders
 
 Every variable but `<NAME>_ENV_*` is also a placeholder: a whole argv word,
 the lower-cased rest of its name in braces. `{terminal}` is
 `<NAME>_TERMINAL`.
 
+- Every capability gets `{capability}`, `{protocol}` and `{exe}`.
 - `{attach}` alone becomes several words: the attach command's.
 - A value the act doesn't have becomes one empty word.
 - `{{name}}` passes `{name}`.
@@ -258,6 +303,7 @@ Each is `<NAME>_` and the name below.
 |---|---|---|
 | `CAPABILITY` | e.g. `open_beside` | the running capability |
 | `PROTOCOL` | integer | the table's agreed number |
+| `EXE` | path | the absolute path of the daemon's own binary, symlinks resolved, as it was when the daemon started: what a [built-in command](#built-in-commands) runs. Where it can't be found, a command naming `{exe}` can't start |
 | `ATTACH` | one string | the attach words joined by spaces, each in single quotes unless it holds only `[A-Za-z0-9_@%+=:,./-]`; `eval "set -- $<NAME>_ATTACH"` gets them back |
 | `ATTACH_JSON` | compact JSON array | the same words |
 | `TITLE` | e.g. `<name>-k3j9x2qpa8` | the pane title |

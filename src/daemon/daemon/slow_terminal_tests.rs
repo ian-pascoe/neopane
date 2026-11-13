@@ -223,7 +223,7 @@ impl Rig {
             event_loop,
             NvimSession::new(nvim),
             Some(Box::new(FakeProvider::opening())),
-            String::new(),
+            std::path::PathBuf::new(),
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
 

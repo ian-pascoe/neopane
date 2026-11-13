@@ -13,6 +13,7 @@ use crate::name;
 pub(super) enum Var {
     Capability,
     Protocol,
+    Exe,
     Attach,
     AttachJson,
     Title,
@@ -35,9 +36,10 @@ pub(super) enum Var {
 }
 
 impl Var {
-    pub(super) const ALL: [Var; 21] = [
+    pub(super) const ALL: [Var; 22] = [
         Var::Capability,
         Var::Protocol,
+        Var::Exe,
         Var::Attach,
         Var::AttachJson,
         Var::Title,
@@ -65,6 +67,7 @@ impl Var {
         match self {
             Var::Capability => "capability",
             Var::Protocol => "protocol",
+            Var::Exe => "exe",
             Var::Attach => "attach",
             Var::AttachJson => "attach_json",
             Var::Title => "title",
@@ -98,6 +101,9 @@ impl Var {
 pub(crate) struct Inputs {
     /// `{attach}`'s words, for the opens.
     attach: Option<Vec<String>>,
+    /// `{exe}`: the daemon's own binary, its path's bytes as they are; None
+    /// if the daemon couldn't find it, which fails a command naming it.
+    exe: Option<Vec<u8>>,
     /// Each input by its placeholder name; None for one this act doesn't
     /// have, such as `area_bounds` outside a live layout.
     vars: Vec<(Var, Option<String>)>,
@@ -116,6 +122,7 @@ impl Inputs {
                 (Var::Capability, Some(cap.name().to_string())),
                 (Var::Protocol, Some(protocol.to_string())),
             ],
+            exe: None,
             env_vars: Vec::new(),
         }
     }
@@ -260,16 +267,27 @@ impl Inputs {
         }
         Inputs {
             attach,
+            exe: None,
             vars,
             env_vars,
+        }
+    }
+
+    /// The same, with `exe` as `{exe}`.
+    pub(crate) fn with_exe(self, exe: Option<&std::path::Path>) -> Inputs {
+        use std::os::unix::ffi::OsStrExt;
+        Inputs {
+            exe: exe.map(|e| e.as_os_str().as_bytes().to_vec()),
+            ..self
         }
     }
 
     /// `written`, an argv as the config wrote it, with its whole-word placeholders replaced: `{attach}` by
     /// its words, `{{x}}` by `{x}`, any other by its value, or one empty
     /// word if this act has none. A word that only holds a placeholder
-    /// passes as written, and other braces are never looked at.
-    pub(crate) fn argv(&self, written: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    /// passes as written, and other braces are never looked at. Fails on
+    /// `{exe}` without the daemon's binary.
+    pub(crate) fn argv(&self, written: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
         let mut argv = Vec::with_capacity(written.len());
         for word in written {
             if let Some(name) = crate::placeholder::whole_placeholder(word) {
@@ -277,6 +295,9 @@ impl Inputs {
                     ("attach", Some(words)) => {
                         argv.extend(words.iter().map(|w| w.as_bytes().to_vec()))
                     }
+                    ("exe", _) => argv.push(self.exe.clone().ok_or(
+                        "{exe} is unknown: the daemon couldn't find its own binary as it started",
+                    )?),
                     _ => argv.push(self.value(name).unwrap_or("").as_bytes().to_vec()),
                 }
             } else if crate::placeholder::is_escaped(word) {
@@ -285,7 +306,7 @@ impl Inputs {
                 argv.push(word.clone());
             }
         }
-        argv
+        Ok(argv)
     }
 
     /// The value of the input placeholder `name` names, if the act has it.
@@ -304,6 +325,9 @@ impl Inputs {
             if let Some(value) = value {
                 env.push((var.var().into_bytes(), value.as_bytes().to_vec()));
             }
+        }
+        if let Some(exe) = &self.exe {
+            env.push((Var::Exe.var().into_bytes(), exe.clone()));
         }
         env.extend(self.env_vars.iter().cloned());
         env
@@ -426,6 +450,39 @@ mod tests {
     }
 
     #[test]
+    fn every_act_gets_the_daemons_own_binary_as_exe_its_bytes_as_they_are() {
+        use std::os::unix::ffi::OsStrExt;
+        let up = name::upper();
+        let exe = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/opt/n\xffp/np"));
+        for i in [
+            Inputs::bare(Capability::ReportLayout, 1),
+            Inputs::of(&open_float(None), 1),
+            Inputs::of(&Ask::ReportLayout, 1),
+        ] {
+            let i = i.with_exe(Some(exe));
+            assert_eq!(
+                Ok(vec![b"/opt/n\xffp/np".to_vec(), b"x".to_vec()]),
+                i.argv(&b(&["{exe}", "x"]))
+            );
+            let env = i.env(&[]);
+            let var = format!("{up}_EXE").into_bytes();
+            assert!(env.contains(&(var, b"/opt/n\xffp/np".to_vec())), "{env:?}");
+        }
+    }
+
+    #[test]
+    fn without_the_daemons_binary_exe_fails_the_act_rather_than_run_empty() {
+        let up = name::upper();
+        let i = Inputs::bare(Capability::ReportLayout, 1).with_exe(None);
+        let why = i.argv(&b(&["{exe}", "x"])).unwrap_err();
+        assert!(why.contains("own binary"), "{why}");
+        // only a command that names it
+        assert_eq!(Ok(b(&["x"])), i.argv(&b(&["x"])));
+        let var = format!("{up}_EXE").into_bytes();
+        assert!(i.env(&[]).iter().all(|(k, _)| *k != var));
+    }
+
+    #[test]
     fn fractions_have_at_most_four_decimals_and_no_trailing_zeros() {
         assert_eq!("0.5", fraction(0.5));
         assert_eq!("0.3333", fraction(1.0 / 3.0));
@@ -460,20 +517,22 @@ mod tests {
     #[test]
     fn placeholders_are_whole_words_and_attach_becomes_several() {
         let i = Inputs::of(&open_float(None), 1);
-        let argv = i.argv(&b(&[
-            "run",
-            "{attach}",
-            "{x}",
-            "{y}",
-            "{{x}}",
-            "{{nope}}",
-            "--at={x}",
-            "#{pane_id}",
-            "{area_bounds}",
-            "{capability}",
-            "{protocol}",
-            "{origin}",
-        ]));
+        let argv = i
+            .argv(&b(&[
+                "run",
+                "{attach}",
+                "{x}",
+                "{y}",
+                "{{x}}",
+                "{{nope}}",
+                "--at={x}",
+                "#{pane_id}",
+                "{area_bounds}",
+                "{capability}",
+                "{protocol}",
+                "{origin}",
+            ]))
+            .unwrap();
         assert_eq!(
             b(&[
                 "run",
@@ -560,6 +619,7 @@ mod tests {
                 "find"
             ]),
             i.argv(&b(&["{tty}", "{pid}", "{pane}", "{title}", "{capability}"]))
+                .unwrap()
         );
         let env = i.env(&[]);
         let var = |k: &str| {
@@ -576,7 +636,7 @@ mod tests {
         assert_eq!(Some(b"%3".to_vec()), var("ENV_TMUX_PANE"));
         assert_eq!(Some(b"\xff\x01".to_vec()), var("ENV_RAW"));
         // never a placeholder
-        assert_eq!(b(&[""]), i.argv(&b(&["{env_tmux_pane}"])));
+        assert_eq!(b(&[""]), i.argv(&b(&["{env_tmux_pane}"])).unwrap());
     }
 
     #[test]

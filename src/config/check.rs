@@ -265,7 +265,7 @@ impl Capability {
     }
 
     /// The placeholders it is given (#93 decision 14), besides
-    /// `{capability}` and `{protocol}`, which every command gets.
+    /// [`EVERY_CAPABILITY_GETS`].
     pub fn placeholders(self) -> &'static [&'static str] {
         match self {
             Capability::Open => &["attach", "attach_json", "title", "pane", "cols", "rows"],
@@ -315,11 +315,13 @@ impl Capability {
     }
 
     fn gets(self, placeholder: &str) -> bool {
-        placeholder == "capability"
-            || placeholder == "protocol"
-            || self.placeholders().contains(&placeholder)
+        EVERY_CAPABILITY_GETS.contains(&placeholder) || self.placeholders().contains(&placeholder)
     }
 }
+
+/// The placeholders every capability is given: `{capability}`,
+/// `{protocol}` and `{exe}`.
+pub const EVERY_CAPABILITY_GETS: [&str; 3] = ["capability", "protocol", "exe"];
 
 /// How bad a problem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,8 +535,14 @@ impl Checker {
             Tree::String(s) => match Builtin::from_name(s) {
                 Some(builtin) => Some(Choice::Builtin(builtin)),
                 None => {
+                    let table = match super::BuiltinTable::from_name(s) {
+                        Some(t) => {
+                            format!(" (for {0}'s table, return {NAME}.builtin.{0}())", t.name())
+                        }
+                        None => String::new(),
+                    };
                     self.error(format!(
-                        "{ROOT} returned {}; the only built-in name is \"rex\"",
+                        "{ROOT} returned {}; the only built-in name is \"rex\"{table}",
                         quoted(s)
                     ));
                     None
@@ -1093,7 +1101,7 @@ fn expected(want: &str, got: &Tree) -> String {
 
 /// The first of `cap`'s placeholders written inside `word`.
 fn inner_placeholder(word: &[u8], cap: Capability) -> Option<&'static str> {
-    let all = ["capability", "protocol"]
+    let all = EVERY_CAPABILITY_GETS
         .iter()
         .chain(cap.placeholders())
         .copied();

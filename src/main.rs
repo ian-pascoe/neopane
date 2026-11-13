@@ -18,6 +18,13 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// `<name>: …` line on stderr), 2 on a usage error.
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // what a built-in table's capabilities run, before anything else
+    if let [provider, builtin, words @ ..] = args.as_slice()
+        && provider == "provider"
+        && builtin == "builtin"
+    {
+        return ExitCode::from(neopane::providers::builtin::main(words));
+    }
     if let Err(err) = cli::started_by_us(&args, stdout_is_terminal()) {
         return usage_error(err);
     }

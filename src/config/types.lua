@@ -79,19 +79,27 @@
 ---@field stderr string Up to 1 MiB, raw bytes
 ---@field error? string "can't start: …", "timed out after 1 s", "killed by signal 9", "no time left (the config has 3 s)"
 
+---The built-in pane provider tables: each function returns a fresh copy, to
+---return as it is or copy and change. Every capability runs __NAME__ itself, as
+---{exe} provider builtin <name> <capability>. They take no options.
+---@class __NAME__.Builtin
+---@field tmux fun(): __NAME__.Provider tmux's: a pane per window, in the tmux server the choosing attach runs in
+
 ---The config's API, also require("__NAME__").
 ---@class __NAME__
 ---@field os string "macos" or "linux"
 ---@field version string The daemon's version
 ---@field config_dir string The absolute directory of the file that ran
----@field builtin table<string, fun(opts?: table): __NAME__.Provider> Functions that each return a fresh built-in pane provider table. "rex" is only a name.
+---@field builtin __NAME__.Builtin Functions that each return a fresh built-in pane provider table. "rex" is only a name.
 ---@field inside table<string, fun(attach: __NAME__.Attach): boolean, string> Functions telling whether the attach runs inside a terminal multiplexer, and why. They never raise.
 __NAME__ = {}
 
----What `provider` returns by default: "rex" when REX_SERVER and REX_SESSION
----are both set, else nil. Reads only the environment; never raises.
+---What `provider` returns by default: tmux's table, as __NAME__.builtin.tmux()
+---returns it, when TERM_PROGRAM is "tmux" and TMUX is set and not empty; else
+---"rex" when REX_SERVER and REX_SESSION are both set; else nil. Reads only the
+---environment; never raises.
 ---@param attach __NAME__.Attach
----@return "rex"|nil
+---@return "rex"|__NAME__.Provider|nil
 function __NAME__.default(attach) end
 
 ---Run a command without a shell and wait for it. Raises only on bad arguments.

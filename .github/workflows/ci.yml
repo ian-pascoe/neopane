@@ -29,6 +29,10 @@ jobs:
             echo "::error::Neovim 0.12 or newer is required"
             exit 1
           }
+      - name: Install tmux
+        run: |
+          brew install tmux
+          tmux -V
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -58,6 +62,11 @@ jobs:
             echo "::error::Neovim 0.12 or newer is required"
             exit 1
           }
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          tmux -V
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -70,7 +79,7 @@ jobs:
       # Keep the version in step with rust-version in Cargo.toml
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - name: Install Neovim
-        run: brew install neovim
+      - name: Install Neovim and tmux
+        run: brew install neovim tmux
       - run: cargo check --all-targets
       - run: cargo test

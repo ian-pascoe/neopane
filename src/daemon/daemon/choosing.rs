@@ -105,8 +105,13 @@ impl Daemon {
                 self.config_failed(id, line)
             }
             ChooseBy::Default => {
-                let chosen =
-                    choose::choose(&hello.env, hello.hint.as_deref(), &mut choose::connect());
+                let chosen = choose::choose(
+                    &hello.env,
+                    &hello.cwd,
+                    hello.hint.as_deref(),
+                    &self.exe,
+                    &mut choose::connect(),
+                );
                 self.take_choice(id, chosen)
             }
         }
@@ -132,7 +137,7 @@ impl Daemon {
     fn run_config(&mut self, id: u32, file: &Path) -> Result<()> {
         let hello = self.panes.by_id(id).and_then(|p| p.hello.as_deref());
         let attach = hello.unwrap().for_config(&self.name);
-        match ConfigRun::start(Path::new(&self.exe), file, attach) {
+        match ConfigRun::start(&self.exe, file, attach) {
             Ok(run) => self.wait_for_config(id, run),
             Err(e) => {
                 let line = format!("config: can't run {}: {e}", file.display());
@@ -165,8 +170,13 @@ impl Daemon {
             log_info!("{NAME} daemon: pane {id} went before its config answered");
             return self.reach_decided();
         };
-        let (chosen, warning) =
-            choose::by_config(&outcome, &run.file, hello, &mut choose::connect());
+        let (chosen, warning) = choose::by_config(
+            &outcome,
+            &run.file,
+            hello,
+            &self.exe,
+            &mut choose::connect(),
+        );
         if let Some(warning) = warning {
             self.warn_when_ready(warning);
         }

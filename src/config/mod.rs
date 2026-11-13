@@ -6,6 +6,7 @@
 //! side is [`child::main`], behind the hidden `config-child` command.
 
 mod api;
+pub mod builtin;
 pub mod check;
 pub mod child;
 mod runner;
@@ -18,6 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use builtin::BuiltinTable;
 pub use check::{Builtin, Capability, Choice, Chosen, Pair, Problem, Problems, Provider, check};
 pub use runner::{Failure, MAX_PRINTED, Outcome, Spawn, run};
 pub use wire::{Answer, Attach, Request};
@@ -36,11 +38,29 @@ pub fn choose(outcome: &Outcome, file: &str) -> Result<Chosen, Problems> {
     }
 }
 
-/// The built-in default (#93 decision 27), on an environment: `"rex"` when
-/// `REX_SERVER` and `REX_SESSION` are both set, even if empty, else none.
-/// The daemon's own default and the config's `<name>.default` both use it.
-pub fn default_name(var: impl Fn(&str) -> Option<Vec<u8>>) -> Option<&'static str> {
-    (var("REX_SERVER").is_some() && var("REX_SESSION").is_some()).then_some(Builtin::Rex.name())
+/// What the built-in default names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultName {
+    /// Rex's, by its name.
+    Rex,
+    /// A built-in table.
+    Table(BuiltinTable),
+}
+
+/// The built-in default (#93 decision 27, as SPI-1126 amends it), on an
+/// environment: tmux's table when `TERM_PROGRAM` is `tmux` and `TMUX` is
+/// set and not empty, as in a tmux pane; else Rex when `REX_SERVER` and
+/// `REX_SESSION` are both set, even if empty; else none. tmux comes first:
+/// `TERM_PROGRAM` names the innermost multiplexer, and Rex's variables
+/// leak into a tmux run in a Rex pane. The daemon's own default and the
+/// config's `<name>.default` both use it.
+pub fn default_of(var: impl Fn(&str) -> Option<Vec<u8>>) -> Option<DefaultName> {
+    let tmux = var("TERM_PROGRAM").as_deref() == Some(b"tmux")
+        && var("TMUX").is_some_and(|t| !t.is_empty());
+    if tmux {
+        return Some(DefaultName::Table(BuiltinTable::Tmux));
+    }
+    (var("REX_SERVER").is_some() && var("REX_SESSION").is_some()).then_some(DefaultName::Rex)
 }
 
 /// The built-in default's choice for `attach`, as the daemon makes it with
@@ -53,8 +73,9 @@ pub fn default(attach: &Attach) -> Choice {
             .find(|(k, _)| k == name.as_bytes())
             .map(|(_, v)| v.clone())
     };
-    match default_name(var) {
-        Some(_) => Choice::Builtin(Builtin::Rex),
+    match default_of(var) {
+        Some(DefaultName::Rex) => Choice::Builtin(Builtin::Rex),
+        Some(DefaultName::Table(table)) => Choice::Whole(table.provider()),
         None => Choice::None,
     }
 }

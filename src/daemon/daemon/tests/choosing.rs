@@ -1122,7 +1122,7 @@ fn runner_finding(script: &Script, pair: bool) -> Box<dyn PaneProvider> {
         (b"PATH".to_vec(), path.as_encoded_bytes().to_vec()),
         (b"CTX".to_vec(), b"a".to_vec()),
     ];
-    Box::new(CommandProvider::new(spec, &env, b"/").unwrap())
+    Box::new(CommandProvider::new(spec, &env, b"/", None).unwrap())
 }
 
 /// A self-attach's hello from context `ctx`.

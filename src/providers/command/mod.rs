@@ -264,6 +264,8 @@ pub(crate) struct CommandProvider {
     env: Vec<(Vec<u8>, Vec<u8>)>,
     /// The choosing attach's working directory.
     cwd: PathBuf,
+    /// `{exe}`: the daemon's own binary, if it found it as it started.
+    exe: Option<PathBuf>,
     /// Its own loop: its pipes, its children's exits and its timer.
     inner_loop: Loop,
     running: Vec<Running>,
@@ -277,13 +279,15 @@ pub(crate) struct CommandProvider {
 
 impl CommandProvider {
     /// The runner for `spec`, for an attach with environment `env` and
-    /// working directory `cwd`.
+    /// working directory `cwd`, `{exe}` being `exe`: the daemon's own
+    /// binary, found as it started.
     pub(crate) fn new(
         spec: Spec,
         env: &[(Vec<u8>, Vec<u8>)],
         cwd: &[u8],
+        exe: Option<&Path>,
     ) -> std::io::Result<CommandProvider> {
-        CommandProvider::with_clock(spec, env, cwd, Box::new(Instant::now))
+        CommandProvider::with_clock(spec, env, cwd, exe, Box::new(Instant::now))
     }
 
     /// The same, its time told by `clock`. `events` starts at once.
@@ -291,6 +295,7 @@ impl CommandProvider {
         spec: Spec,
         env: &[(Vec<u8>, Vec<u8>)],
         cwd: &[u8],
+        exe: Option<&Path>,
         clock: Clock,
     ) -> std::io::Result<CommandProvider> {
         let inner_loop = Loop::init().map_err(std::io::Error::other)?;
@@ -310,6 +315,7 @@ impl CommandProvider {
             clock,
             env: commands_env(env),
             cwd: PathBuf::from(OsStr::from_bytes(cwd)),
+            exe: exe.map(Path::to_path_buf),
             inner_loop,
             running: Vec::new(),
             kills: Vec::new(),
@@ -380,9 +386,16 @@ impl CommandProvider {
 
     /// Starts `cap`'s command with `inputs`, watched on the inner loop.
     /// Fails if it can't start, which is logged.
-    fn spawn(&self, cap: Capability, inputs: &Inputs) -> Option<Run> {
+    fn spawn(&self, cap: Capability, inputs: Inputs) -> Option<Run> {
         let t = self.command(cap).expect("a capability it has");
-        let argv = inputs.argv(&t.argv);
+        let inputs = inputs.with_exe(self.exe.as_deref());
+        let argv = match inputs.argv(&t.argv) {
+            Ok(argv) => argv,
+            Err(why) => {
+                log_warn!("{NAME} daemon: {}: {cap}: can't run: {why}", self.name);
+                return None;
+            }
+        };
         let env = inputs.env(&self.env);
         let start = Start {
             argv: &argv,
@@ -426,7 +439,7 @@ impl CommandProvider {
         let protocol = self.command(Capability::Events).expect("events").protocol;
         let inputs = Inputs::bare(Capability::Events, protocol);
         let now = (self.clock)();
-        match self.spawn(Capability::Events, &inputs) {
+        match self.spawn(Capability::Events, inputs) {
             Some(run) => {
                 self.events_run = Some(Events::Running { run, since: now });
                 self.events.push_back(ProviderEvent::LayoutChanged);
@@ -628,7 +641,7 @@ impl PaneProvider for CommandProvider {
         };
         let timeout = t.timeout;
         let inputs = Inputs::of(&ask, t.protocol);
-        let Some(run) = self.spawn(cap, &inputs) else {
+        let Some(run) = self.spawn(cap, inputs) else {
             return self.answer_at_next_ready(id, Outcome::Unsupported);
         };
         let now = (self.clock)();
