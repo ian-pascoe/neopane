@@ -278,7 +278,7 @@ impl Daemon {
                 }
                 return Ok(());
             }
-            Chosen::None { why, warn } => {
+            Chosen::None { why } => {
                 let hint = self
                     .panes
                     .by_id(id)
@@ -286,14 +286,17 @@ impl Daemon {
                     .and_then(|h| h.hint.as_deref());
                 self.no_provider = match hint {
                     Some(choose::HINT_NONE) => NoProvider::HintNone,
-                    _ if warn => NoProvider::CantStart,
                     _ => NoProvider::None,
                 };
-                if warn {
-                    self.tell_no_provider(&format!("{why}; no pane provider"), quiet);
-                } else {
-                    log_info!("{NAME} daemon: no pane provider for pane {id}: {why}");
+                log_info!("{NAME} daemon: no pane provider for pane {id}: {why}");
+                if let Some(p) = self.panes.by_id_mut(id) {
+                    p.reach = Reach::Out;
                 }
+                return Ok(());
+            }
+            Chosen::CantStart { why } => {
+                self.no_provider = NoProvider::CantStart;
+                self.tell_no_provider(&format!("{why}; no pane provider"), quiet);
                 if let Some(p) = self.panes.by_id_mut(id) {
                     p.reach = Reach::Out;
                 }

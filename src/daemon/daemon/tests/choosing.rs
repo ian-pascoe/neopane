@@ -75,7 +75,6 @@ fn fixture_choosing(fakes: Vec<FakeProvider>) -> (Fixture, Choices) {
     fx.d.test_choose = Some(Box::new(move |_| {
         next.borrow_mut().pop_front().unwrap_or(Chosen::None {
             why: "none left".into(),
-            warn: false,
         })
     }));
     (fx, choices)
@@ -84,10 +83,7 @@ fn fixture_choosing(fakes: Vec<FakeProvider>) -> (Fixture, Choices) {
 /// A daemon whose self-attaches choose none, for `why`, with a warning.
 fn fixture_unreachable(why: &'static str) -> Fixture {
     let mut fx = with_provider(None);
-    fx.d.test_choose = Some(Box::new(move |_| Chosen::None {
-        why: why.into(),
-        warn: true,
-    }));
+    fx.d.test_choose = Some(Box::new(move |_| Chosen::CantStart { why: why.into() }));
     fx
 }
 
@@ -415,9 +411,8 @@ fn the_defaults_guess_unanswered_is_refused_quietly_too() {
 #[test]
 fn the_defaults_guess_that_cant_be_reached_is_only_logged() {
     // stale REX_SERVER: Rex has quit, nothing listens
-    let (mut fx, go) = fixture_proving_to(|| Chosen::None {
+    let (mut fx, go) = fixture_proving_to(|| Chosen::CantStart {
         why: "rex: can't reach Rex: connection refused".into(),
-        warn: true,
     });
     let (id, _helper, _pty) = attach_showing_1000(&mut fx, &nested_hello());
     split_1001_off_1000(&mut fx);
@@ -647,7 +642,6 @@ fn connecting_counts_against_the_choice_and_a_find_queued_behind_a_layout_act_do
     fx.d.nvim.ready = true;
     fx.d.test_choose = Some(Box::new(|_| Chosen::None {
         why: "not yet".into(),
-        warn: false,
     }));
     let (id, _helper, _pty) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     // a layout act running: the find waits behind it
