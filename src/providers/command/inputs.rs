@@ -13,6 +13,7 @@ use crate::name;
 pub(super) enum Var {
     Capability,
     Protocol,
+    Exe,
     Attach,
     AttachJson,
     Title,
@@ -35,9 +36,10 @@ pub(super) enum Var {
 }
 
 impl Var {
-    pub(super) const ALL: [Var; 21] = [
+    pub(super) const ALL: [Var; 22] = [
         Var::Capability,
         Var::Protocol,
+        Var::Exe,
         Var::Attach,
         Var::AttachJson,
         Var::Title,
@@ -65,6 +67,7 @@ impl Var {
         match self {
             Var::Capability => "capability",
             Var::Protocol => "protocol",
+            Var::Exe => "exe",
             Var::Attach => "attach",
             Var::AttachJson => "attach_json",
             Var::Title => "title",
@@ -115,6 +118,7 @@ impl Inputs {
             vars: vec![
                 (Var::Capability, Some(cap.name().to_string())),
                 (Var::Protocol, Some(protocol.to_string())),
+                (Var::Exe, exe()),
             ],
             env_vars: Vec::new(),
         }
@@ -338,6 +342,19 @@ pub(crate) fn commands_env(attach_env: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, V
         .collect()
 }
 
+/// `<NAME>_EXE`: the absolute path of the daemon's own binary, symlinks
+/// resolved as `{attach}`'s first word is. None if the system can't say.
+fn exe() -> Option<String> {
+    static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        let exe = std::env::current_exe()
+            .and_then(|e| e.canonicalize())
+            .ok()?;
+        Some(exe.to_string_lossy().into_owned())
+    })
+    .clone()
+}
+
 fn direction(d: Direction) -> &'static str {
     match d {
         Direction::Left => "left",
@@ -422,6 +439,30 @@ mod tests {
             for p in cap.placeholders() {
                 assert!(Var::ALL.iter().any(|v| v.name() == *p), "{p}");
             }
+        }
+    }
+
+    #[test]
+    fn every_act_gets_the_daemons_own_binary_as_exe() {
+        let up = name::upper();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for i in [
+            Inputs::bare(Capability::ReportLayout, 1),
+            Inputs::of(&open_float(None), 1),
+            Inputs::of(&Ask::ReportLayout, 1),
+        ] {
+            assert_eq!(b(&[&exe, "x"]), i.argv(&b(&["{exe}", "x"])));
+            let env = i.env(&[]);
+            let var = format!("{up}_EXE");
+            assert!(
+                env.contains(&(var.into_bytes(), exe.as_bytes().to_vec())),
+                "{env:?}"
+            );
         }
     }
 

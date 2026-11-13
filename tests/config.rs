@@ -629,9 +629,9 @@ fn placeholders_a_capability_isnt_given() {
     let p = whole(choice);
     assert!(p.capability(Capability::Open).is_some());
     assert!(p.capability(Capability::OpenBeside).is_none());
-    // every command gets {capability} and {protocol}
+    // every command gets {capability}, {protocol} and {exe}
     let (_, warnings) = chosen(&returning(
-        "{ events = { 'e', '{capability}', '{protocol}' } }",
+        "{ events = { '{exe}', '{capability}', '{protocol}' } }",
     ));
     assert_eq!(warnings, Vec::<String>::new());
 }

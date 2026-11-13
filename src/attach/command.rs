@@ -171,6 +171,18 @@ mod tests {
         );
     }
 
+    /// A multiplexer runs a one-word command through `$SHELL -c`, as tmux
+    /// does: `{attach}` is never one word, so it runs as it is.
+    #[test]
+    fn the_command_is_always_two_words_or_more() {
+        for exe in ["", "x", "/a b/x"] {
+            for transport in [Transport::Fd, Transport::Relay] {
+                let words = attach_command(OsStr::new(exe), OsStr::new(""), &id(), transport);
+                assert!(words.len() >= 2, "{words:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_variables() {
         let words = attach_command(OsStr::new("é\"x"), OsStr::new("a"), &id(), Transport::Fd);

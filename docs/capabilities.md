@@ -30,7 +30,7 @@ which runs for as long as the pane provider is chosen (see [Events](#events)).
   in the table below, whether this capability gets it or not, and every
   `<NAME>_ENV_*`. The rest stays, `<NAME>_CONFIG`, `<NAME>_PROVIDER` and
   `<NAME>_TMPDIR` among them. Then the capability's own variables are set,
-  and always `<NAME>_CAPABILITY` and `<NAME>_PROTOCOL`.
+  and always `<NAME>_CAPABILITY`, `<NAME>_PROTOCOL` and `<NAME>_EXE`.
 - **Timeout:** each capability has a default, which the table's `timeouts`
   changes, up to 60 s. At its timeout the command's group gets SIGTERM, and
   SIGKILL 1 s later; the act has failed, whatever it does after.
@@ -221,6 +221,7 @@ Every variable but `<NAME>_ENV_*` is also a placeholder: a whole argv word,
 the lower-cased rest of its name in braces. `{terminal}` is
 `<NAME>_TERMINAL`.
 
+- Every capability gets `{capability}`, `{protocol}` and `{exe}`.
 - `{attach}` alone becomes several words: the attach command's.
 - A value the act doesn't have becomes one empty word.
 - `{{name}}` passes `{name}`.
@@ -258,6 +259,7 @@ Each is `<NAME>_` and the name below.
 |---|---|---|
 | `CAPABILITY` | e.g. `open_beside` | the running capability |
 | `PROTOCOL` | integer | the table's agreed number |
+| `EXE` | path | the absolute path of the daemon's own binary, symlinks resolved: what a [built-in command](#built-in-commands) runs |
 | `ATTACH` | one string | the attach words joined by spaces, each in single quotes unless it holds only `[A-Za-z0-9_@%+=:,./-]`; `eval "set -- $<NAME>_ATTACH"` gets them back |
 | `ATTACH_JSON` | compact JSON array | the same words |
 | `TITLE` | e.g. `<name>-k3j9x2qpa8` | the pane title |
