@@ -190,16 +190,17 @@ fn our_options_go_before_neovims() {
 
 #[test]
 fn our_options_are_read_from_the_front() {
-    let start = started("--name work --provider=none --detach --no-wait -O a b");
+    let start = started("--name work --provider=none --no-wait -O a b");
     assert_eq!(start.name, Some("work".into()));
     assert_eq!(start.provider, Some("none".into()));
-    assert!(start.detach && start.no_wait);
+    assert!(start.no_wait);
+    assert!(started("--detach --no-wait").detach);
     assert_eq!(start.nvim_args, args("-O a b"));
-    let start = started("--address=/tmp/s f");
-    assert_eq!(start.address, Some("/tmp/s".into()));
-    assert_eq!(start.nvim_args, args("f"));
     // a value may look like an option
-    assert_eq!(started("--name --detach").name, Some("--detach".into()));
+    assert_eq!(
+        started("--provider --detach").provider,
+        Some("--detach".into())
+    );
     // no abbreviations
     let start = started("--provider p f");
     assert_eq!(start.provider, Some("p".into()));
@@ -306,9 +307,8 @@ fn provider_types_takes_a_config_file() {
 
 #[test]
 fn command_words_are_only_the_first_argument() {
+    assert_eq!(parsed("attach f"), found(Some("f"), None));
     for (line, what) in [
-        ("attach", "attach"),
-        ("attach f", "attach"),
         ("list", "list"),
         ("list --json", "list"),
         ("status", "status"),
@@ -406,10 +406,7 @@ fn flags_take_no_value() {
 
 #[test]
 fn help_after_dashdash_is_a_file() {
-    assert_eq!(
-        parsed("attach -- -h"),
-        Ok(Command::NotBuilt("attach".into()))
-    );
+    assert_eq!(parsed("attach -- -h"), found(Some("-h"), None));
     assert_eq!(
         parsed("list -- --help"),
         Ok(Command::NotBuilt("list".into()))
@@ -509,11 +506,11 @@ fn usage_errors_are_one_line_pointing_at_help() {
 fn neovims_arguments_need_not_be_unicode() {
     use std::os::unix::ffi::OsStringExt;
     let file = OsString::from_vec(b"caf\xe9.txt".to_vec());
-    let line = vec![OsString::from("--name=\u{e9}"), file.clone()];
+    let line = vec![OsString::from("--provider=\u{e9}"), file.clone()];
     let Ok(Command::Start(start)) = parse(&line) else {
         panic!()
     };
-    assert_eq!(start.name, Some("\u{e9}".into()));
+    assert_eq!(start.provider, Some("\u{e9}".into()));
     assert_eq!(start.reading.files, vec![file]);
 }
 
@@ -569,14 +566,25 @@ fn attach_pane_takes_an_address_and_a_pane() {
     }
 }
 
+/// `attach` to the daemon found, with `file` at `line`.
+fn found(file: Option<&str>, line: Option<u32>) -> Result<Command, UsageError> {
+    Ok(Command::AttachSelf(AttachSelf {
+        to: Target::Found,
+        provider: None,
+        file: file.map(OsString::from),
+        line,
+    }))
+}
+
 #[test]
 fn attach_with_an_address_self_attaches_with_an_optional_file_and_line() {
     let self_attach = |file: Option<&str>, line: Option<u32>| {
-        Ok(Command::AttachSelf {
-            address: "/tmp/x/sock".into(),
+        Ok(Command::AttachSelf(AttachSelf {
+            to: Target::Address("/tmp/x/sock".into()),
+            provider: None,
             file: file.map(OsString::from),
             line,
-        })
+        }))
     };
     assert_eq!(
         parsed("attach --address /tmp/x/sock"),
@@ -599,26 +607,167 @@ fn attach_with_an_address_self_attaches_with_an_optional_file_and_line() {
         parsed("attach --address /tmp/x/sock -- +3"),
         self_attach(Some("+3"), None)
     );
+}
+
+#[test]
+fn attach_finds_its_daemon_by_name_or_else() {
+    let attach = |to: Target, provider: Option<&str>, file: Option<&str>, line| {
+        Ok(Command::AttachSelf(AttachSelf {
+            to,
+            provider: provider.map(OsString::from),
+            file: file.map(OsString::from),
+            line,
+        }))
+    };
+    let work = || Target::Name("work".into());
+    assert_eq!(parsed("attach"), found(None, None));
+    assert_eq!(parsed("attach +12 f.txt"), found(Some("f.txt"), Some(12)));
+    assert_eq!(
+        parsed("attach --name work"),
+        attach(work(), None, None, None)
+    );
+    assert_eq!(
+        parsed("attach --provider=tmux --name=work +3 -- f"),
+        attach(work(), Some("tmux"), Some("f"), Some(3))
+    );
+    assert_eq!(
+        parsed("attach --provider none"),
+        attach(Target::Found, Some("none"), None, None)
+    );
+}
+
+#[test]
+fn attach_takes_only_line_and_file() {
+    let takes = "attach takes [+LINE] [FILE]";
     for (line, why) in [
-        ("attach --address /a a b", "attach takes one FILE"),
+        ("attach a b", takes),
+        ("attach --address /a a b", takes),
+        ("attach --address /a -x f", takes),
+        ("attach --nope f", takes),
+        ("attach -O a", takes),
+        ("attach +cmd f", takes),
+        ("attach -- a b", takes),
         ("attach --address /a +3", "+LINE needs a FILE"),
-        ("attach --address /a +3 +4 f", "+LINE is given twice"),
+        ("attach +3 +4 f", "+LINE is given twice"),
         (
             "attach --address /a --address /b",
             "--address is given twice",
         ),
         ("attach --address", "--address needs a value"),
-        ("attach --address /a -x f", "attach doesn't take -x"),
-        ("attach --address /a --nope f", "attach doesn't take --nope"),
+        ("attach --name", "--name needs a value"),
+        (
+            "attach --provider a --provider b",
+            "--provider is given twice",
+        ),
+        (
+            "attach --name n --address /a",
+            "--name and --address both choose a daemon: give one",
+        ),
     ] {
         assert_eq!(refused(line), why, "{line}");
     }
-    // what #121 brings
-    for (line, what) in [
-        ("attach --name n", "attach --name"),
-        ("attach --address /a --provider=p", "attach --provider"),
-        ("attach notes.md", "attach"),
-    ] {
-        assert_eq!(parsed(line), Ok(Command::NotBuilt(what.into())), "{line}");
+}
+
+#[test]
+fn a_daemon_name_is_1_to_32_of_letters_digits_dot_underscore_dash() {
+    let use_ = "--name: use 1-32 letters, digits, '.', '_' or '-'";
+    let max = "w".repeat(32);
+    for ok in ["work", "a", "w.o_r-k2", "..a", &max] {
+        assert_eq!(
+            started(&format!("--name {ok}")).name,
+            Some(ok.into()),
+            "{ok}"
+        );
+        assert_eq!(
+            parsed(&format!("attach --name {ok}")),
+            Ok(Command::AttachSelf(AttachSelf {
+                to: Target::Name(ok.into()),
+                provider: None,
+                file: None,
+                line: None,
+            })),
+            "{ok}"
+        );
     }
+    let long = "w".repeat(33);
+    for bad in [".", "..", "a/b", "w\u{e9}", "a b", &long, "x:y"] {
+        let words = vec![OsString::from("--name"), OsString::from(bad)];
+        assert_eq!(parse(&words), Err(UsageError(use_.into())), "{bad}");
+        let words = vec![
+            OsString::from("attach"),
+            OsString::from(format!("--name={bad}")),
+        ];
+        assert_eq!(parse(&words), Err(UsageError(use_.into())), "{bad}");
+    }
+    assert_eq!(refused("--name="), use_);
+}
+
+#[test]
+fn the_bare_address_is_exactly_attach_address() {
+    let attach = |provider: Option<&str>, file: Option<&str>, line| {
+        Ok(Command::AttachSelf(AttachSelf {
+            to: Target::Address("/a/sock".into()),
+            provider: provider.map(OsString::from),
+            file: file.map(OsString::from),
+            line,
+        }))
+    };
+    assert_eq!(parsed("--address /a/sock"), attach(None, None, None));
+    assert_eq!(
+        parsed("--provider p --address=/a/sock +12 -- f.txt"),
+        attach(Some("p"), Some("f.txt"), Some(12))
+    );
+    let beyond = |word: &str| {
+        format!(
+            "--address only attaches, so it takes only [+LINE] FILE; {word} is for starting a \
+             daemon (open windows from Neovim)"
+        )
+    };
+    assert_eq!(refused("--address /a -O a b"), beyond("-O"));
+    assert_eq!(refused("--address /a a b"), beyond("b"));
+    assert_eq!(refused("--address /a +cmd"), beyond("+cmd"));
+    assert_eq!(refused("--address /a +3"), "+LINE needs a FILE");
+    assert_eq!(
+        refused("--address /a --detach"),
+        "--address attaches to a running daemon, and --detach starts one: give one"
+    );
+    // Neovim's refusals come first
+    assert!(refused("--address /a --embed").starts_with("--embed is the daemon's own"));
+}
+
+#[test]
+fn provider_is_refused_with_detach() {
+    assert_eq!(
+        refused("--provider tmux --detach"),
+        "--provider is for a terminal that chooses the pane provider, and --detach shows none"
+    );
+}
+
+#[test]
+fn a_running_name_takes_only_line_and_file() {
+    let attach = |file: Option<&str>, line| {
+        Ok(AttachSelf {
+            to: Target::Name("work".into()),
+            provider: Some("none".into()),
+            file: file.map(OsString::from),
+            line,
+        })
+    };
+    let running =
+        |line: &str| started(&format!("--provider none {line}")).attach_to_running("work");
+    assert_eq!(running(""), attach(None, None));
+    assert_eq!(running("notes.md"), attach(Some("notes.md"), None));
+    assert_eq!(
+        running("+12 -- notes.md"),
+        attach(Some("notes.md"), Some(12))
+    );
+    let beyond = |word: &str| {
+        Err(UsageError(format!(
+            "work is running, so it takes only [+LINE] FILE; {word} is for starting a daemon \
+             (open windows from Neovim)"
+        )))
+    };
+    assert_eq!(running("-O a b"), beyond("-O"));
+    assert_eq!(running("a b"), beyond("b"));
+    assert_eq!(running("+3"), Err(UsageError("+LINE needs a FILE".into())));
 }

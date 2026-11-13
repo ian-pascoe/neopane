@@ -198,6 +198,23 @@ impl Base {
         self.0.join(name).join(LOG)
     }
 
+    /// The names of the daemons running here, sorted: each directory with a
+    /// daemon name whose `sock` answers. A stale directory, its daemon
+    /// gone, is left out.
+    pub fn running(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.0) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| valid_name(OsStr::new(n)) && self.address(n).answers())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The base directory at `path`, unchecked.
     #[cfg(test)]
     pub(crate) fn at(path: &Path) -> Base {
@@ -232,6 +249,12 @@ impl Address {
     /// Connects to the daemon at this address.
     pub fn connect(&self) -> io::Result<UnixStream> {
         UnixStream::connect(&self.0)
+    }
+
+    /// Whether a daemon answers here: it accepts a connection, which hangs
+    /// up at once, before any hello.
+    pub fn answers(&self) -> bool {
+        self.connect().is_ok()
     }
 }
 

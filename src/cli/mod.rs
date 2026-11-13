@@ -44,14 +44,10 @@ pub enum Command {
         pane: PaneId,
         transport: Option<Transport>,
     },
-    /// `attach --address A [+LINE] [--] [FILE]`: shows the daemon at A in
-    /// this terminal, with FILE in a new window, the cursor on LINE. #121
-    /// brings the rest of `attach`.
-    AttachSelf {
-        address: OsString,
-        file: Option<OsString>,
-        line: Option<u32>,
-    },
+    /// `attach [--name N | --address A] [--provider P] [+LINE] [--] [FILE]`,
+    /// and the bare `--address A`: shows a running daemon in this terminal,
+    /// with FILE in a new window, the cursor on LINE.
+    AttachSelf(AttachSelf),
     /// `daemon NAME [--dedup] [--detach] -- NVIM-ARGS…`, which the launcher
     /// starts.
     Daemon {
@@ -78,10 +74,33 @@ pub enum Command {
     },
 }
 
+/// A self-attach to a running daemon.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AttachSelf {
+    pub to: Target,
+    /// `--provider P`, for the hello.
+    pub provider: Option<OsString>,
+    /// As typed: the helper makes it absolute.
+    pub file: Option<OsString>,
+    pub line: Option<u32>,
+}
+
+/// The daemon a self-attach is to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Target {
+    /// `--address A`.
+    Address(OsString),
+    /// `--name N`, a valid daemon name.
+    Name(String),
+    /// Neither: `$<NAME>`, else the only one running.
+    Found,
+}
+
 /// The bare form's own options, and Neovim's arguments as typed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Start {
-    pub name: Option<OsString>,
+    /// `--name N`, a valid daemon name.
+    pub name: Option<String>,
     pub address: Option<OsString>,
     pub provider: Option<OsString>,
     pub detach: bool,
@@ -89,6 +108,27 @@ pub struct Start {
     pub nvim_args: Vec<OsString>,
     /// What reading `nvim_args` found.
     pub reading: Reading,
+}
+
+impl Start {
+    /// The bare `--name N` with N running: `attach --name N`, as long as
+    /// Neovim's arguments are only `[+LINE] [--] [FILE]` (#94 decision 15).
+    pub fn attach_to_running(&self, name: &str) -> Result<AttachSelf, UsageError> {
+        let (file, line) = attach_words(&self.nvim_args).map_err(|misfit| {
+            misfit.usage(|word| {
+                format!(
+                    "{name} is running, so it takes only [+LINE] FILE; {word} is for starting \
+                     a daemon (open windows from Neovim)"
+                )
+            })
+        })?;
+        Ok(AttachSelf {
+            to: Target::Name(name.to_string()),
+            provider: self.provider.clone(),
+            file,
+            line,
+        })
+    }
 }
 
 /// A command line that can't be run: exit 2. Displayed as one line,
@@ -261,6 +301,7 @@ fn is_help(word: &OsStr) -> bool {
 /// The bare form: our options from the front, then Neovim's arguments.
 fn start(args: &[OsString]) -> Result<Command, UsageError> {
     let mut start = Start::default();
+    let mut name = None;
     let mut i = 0;
     while let Some(word) = args.get(i) {
         let bytes = word.as_encoded_bytes();
@@ -280,7 +321,7 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
                 };
                 let value = option_value(option, attached, args, &mut i)?;
                 let slot = match option {
-                    "--name" => &mut start.name,
+                    "--name" => &mut name,
                     "--address" => &mut start.address,
                     _ => &mut start.provider,
                 };
@@ -291,14 +332,132 @@ fn start(args: &[OsString]) -> Result<Command, UsageError> {
         }
         i += 1;
     }
+    start.name = name.as_deref().map(daemon_name).transpose()?;
     if start.name.is_some() && start.address.is_some() {
+        return Err(both_choose());
+    }
+    if start.detach && start.provider.is_some() {
         return Err(UsageError(
-            "--name and --address both choose a daemon: give one".to_string(),
+            "--provider is for a terminal that chooses the pane provider, and --detach shows \
+             none"
+                .to_string(),
         ));
     }
     start.nvim_args = args[i..].to_vec();
     start.reading = nvim_args::read(&start.nvim_args).map_err(UsageError)?;
-    Ok(Command::Start(start))
+    let Some(address) = start.address.take() else {
+        return Ok(Command::Start(start));
+    };
+    // exactly `attach --address A` (#94 decision 16)
+    if start.detach {
+        return Err(UsageError(
+            "--address attaches to a running daemon, and --detach starts one: give one".into(),
+        ));
+    }
+    if start.no_wait {
+        start.address = Some(address);
+        return Ok(Command::Start(start));
+    }
+    let (file, line) = attach_words(&start.nvim_args).map_err(|misfit| {
+        misfit.usage(|word| {
+            format!(
+                "--address only attaches, so it takes only [+LINE] FILE; {word} is for \
+                 starting a daemon (open windows from Neovim)"
+            )
+        })
+    })?;
+    Ok(Command::AttachSelf(AttachSelf {
+        to: Target::Address(address),
+        provider: start.provider,
+        file,
+        line,
+    }))
+}
+
+/// `--name`'s value, checked: a daemon name (#94 decision 15).
+fn daemon_name(value: &OsStr) -> Result<String, UsageError> {
+    value
+        .to_str()
+        .filter(|n| valid_name(OsStr::new(n)))
+        .map(str::to_string)
+        .ok_or_else(|| UsageError("--name: use 1-32 letters, digits, '.', '_' or '-'".into()))
+}
+
+fn both_choose() -> UsageError {
+    UsageError("--name and --address both choose a daemon: give one".to_string())
+}
+
+/// Why words don't fit a self-attach's `[+LINE] [--] [FILE]`.
+#[derive(Debug, PartialEq, Eq)]
+enum Misfit {
+    /// A word beyond them: an option, or a second file.
+    Word(OsString),
+    LineTwice,
+    LineWithoutFile,
+}
+
+impl Misfit {
+    /// The usage error, `beyond` saying what a word beyond them is for.
+    fn usage(self, beyond: impl FnOnce(&str) -> String) -> UsageError {
+        UsageError(match self {
+            Misfit::Word(word) => beyond(&word.to_string_lossy()),
+            Misfit::LineTwice => "+LINE is given twice".into(),
+            Misfit::LineWithoutFile => "+LINE needs a FILE".into(),
+        })
+    }
+}
+
+/// A self-attach's `[+LINE] [--] [FILE]`, read a word at a time.
+#[derive(Debug, Default)]
+struct AttachWords {
+    file: Option<OsString>,
+    line: Option<u32>,
+    /// After `--`.
+    files_only: bool,
+}
+
+impl AttachWords {
+    /// Whether options may still come: not after `--`.
+    fn options(&self) -> bool {
+        !self.files_only
+    }
+
+    fn take(&mut self, word: &OsString) -> Result<(), Misfit> {
+        let bytes = word.as_encoded_bytes();
+        if self.files_only {
+            // a file
+        } else if bytes == b"--" {
+            self.files_only = true;
+            return Ok(());
+        } else if let Some(n) = plus_line(bytes) {
+            return match self.line.replace(n) {
+                Some(_) => Err(Misfit::LineTwice),
+                None => Ok(()),
+            };
+        } else if (bytes.starts_with(b"-") && bytes.len() > 1) || bytes.starts_with(b"+") {
+            return Err(Misfit::Word(word.clone()));
+        }
+        if self.file.replace(word.clone()).is_some() {
+            return Err(Misfit::Word(word.clone()));
+        }
+        Ok(())
+    }
+
+    fn end(self) -> Result<(Option<OsString>, Option<u32>), Misfit> {
+        if self.line.is_some() && self.file.is_none() {
+            return Err(Misfit::LineWithoutFile);
+        }
+        Ok((self.file, self.line))
+    }
+}
+
+/// `words` as a self-attach's `[+LINE] [--] [FILE]`: the file and line.
+fn attach_words(words: &[OsString]) -> Result<(Option<OsString>, Option<u32>), Misfit> {
+    let mut read = AttachWords::default();
+    for word in words {
+        read.take(word)?;
+    }
+    read.end()
 }
 
 /// `provider show`'s words: `[NAME]`.
@@ -386,8 +545,7 @@ fn daemon(words: &[OsString]) -> Result<Command, UsageError> {
     })
 }
 
-/// `attach`'s words: the hidden `--pane` form, and a self-attach to
-/// `--address`. Finding a daemon otherwise isn't built yet.
+/// `attach`'s words: the hidden `--pane` form, else a self-attach.
 fn attach(words: &[OsString]) -> Result<Command, UsageError> {
     if !words.iter().any(|w| long_option(w, &["--pane"]).is_some()) {
         return attach_self(words);
@@ -436,52 +594,46 @@ fn attach(words: &[OsString]) -> Result<Command, UsageError> {
     })
 }
 
-/// `attach [--address A] [+LINE] [--] [FILE]`, without `--pane`. Without
-/// `--address`, or with `--name` or `--provider`, it isn't built yet (#121);
-/// any other option is a usage error.
+/// `attach [--name N | --address A] [--provider P] [+LINE] [--] [FILE]`,
+/// without `--pane` (#94 decision 22). Any other word is a usage error.
 fn attach_self(words: &[OsString]) -> Result<Command, UsageError> {
-    let (mut address, mut file, mut line) = (None, None, None);
+    let (mut name, mut address, mut provider) = (None, None, None);
+    let mut read = AttachWords::default();
     let mut i = 0;
-    let mut files_only = false;
+    let takes = |_: &str| "attach takes [+LINE] [FILE]".to_string();
     while let Some(word) = words.get(i) {
-        let bytes = word.as_encoded_bytes();
-        if !files_only && bytes == b"--" {
-            files_only = true;
-        } else if !files_only && let Some((option, attached)) = long_option(word, &["--address"]) {
+        let option = read
+            .options()
+            .then(|| long_option(word, &["--name", "--address", "--provider"]))
+            .flatten();
+        if let Some((option, attached)) = option {
             let value = option_value(option, attached, words, &mut i)?;
-            if address.replace(value).is_some() {
+            let slot = match option {
+                "--name" => &mut name,
+                "--address" => &mut address,
+                _ => &mut provider,
+            };
+            if slot.replace(value).is_some() {
                 return Err(UsageError(format!("{option} is given twice")));
             }
-        } else if !files_only && let Some(n) = plus_line(bytes) {
-            if line.replace(n).is_some() {
-                return Err(UsageError("+LINE is given twice".into()));
-            }
-        } else if !files_only
-            && let Some((option, _)) = long_option(word, &["--name", "--provider"])
-        {
-            return Ok(Command::NotBuilt(format!("attach {option}")));
-        } else if !files_only && bytes.starts_with(b"-") && bytes.len() > 1 {
-            // ADR 0014: an unknown option is a usage error
-            return Err(UsageError(format!(
-                "attach doesn't take {}",
-                word.to_string_lossy()
-            )));
-        } else if file.replace(word.clone()).is_some() {
-            return Err(UsageError("attach takes one FILE".into()));
+        } else {
+            read.take(word).map_err(|m| m.usage(takes))?;
         }
         i += 1;
     }
-    let Some(address) = address else {
-        return Ok(Command::NotBuilt("attach".to_string()));
+    let (file, line) = read.end().map_err(|m| m.usage(takes))?;
+    let to = match (name, address) {
+        (Some(_), Some(_)) => return Err(both_choose()),
+        (Some(name), None) => Target::Name(daemon_name(&name)?),
+        (None, Some(address)) => Target::Address(address),
+        (None, None) => Target::Found,
     };
-    if line.is_some() && file.is_none() {
-        return Err(UsageError("+LINE needs a FILE".into()));
-    }
-    Ok(Command::AttachSelf {
-        address,
+    Ok(Command::AttachSelf(AttachSelf {
+        to,
+        provider,
         file,
         line,
-    })
+    }))
 }
 
 /// The line in `+LINE`: digits, from 1.

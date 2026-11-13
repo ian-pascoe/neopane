@@ -92,18 +92,24 @@ pub fn run(address: &Address, want: Want, transport: Transport) -> Exit {
     run_as(address, Attach::new(want, transport))
 }
 
+/// What a self-attach asks of the daemon, beyond a pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Opening {
+    /// The file to open in a new window, absolute, and the cursor's line in
+    /// it.
+    pub file: Option<Vec<u8>>,
+    pub line: Option<u32>,
+    /// `--provider P`, the hint, before `$<NAME>_PROVIDER`.
+    pub provider: Option<String>,
+}
+
 /// Self-attaches stdin's terminal to the daemon at `address`, as `run`
-/// does, asking for `file`, absolute, in a new window with the cursor on
-/// `line`.
-pub fn run_opening(
-    address: &Address,
-    transport: Transport,
-    file: Option<Vec<u8>>,
-    line: Option<u32>,
-) -> Exit {
+/// does, asking for what `opening` says.
+pub fn run_self(address: &Address, transport: Transport, opening: Opening) -> Exit {
     let how = Attach {
-        file,
-        line,
+        file: opening.file,
+        line: opening.line,
+        provider: opening.provider,
         ..Attach::new(Want::SelfAttach, transport)
     };
     run_as(address, how)
@@ -154,6 +160,8 @@ pub(crate) struct Attach {
     /// the cursor's line in it.
     pub(crate) file: Option<Vec<u8>>,
     pub(crate) line: Option<u32>,
+    /// For a self-attach: the hint given, else `$<NAME>_PROVIDER` is read.
+    pub(crate) provider: Option<String>,
     pub(crate) transport: Transport,
     /// How long the daemon has to answer.
     pub(crate) answer_within: Duration,
@@ -170,6 +178,7 @@ impl Attach {
             want,
             file: None,
             line: None,
+            provider: None,
             transport,
             answer_within: ANSWER_TIMEOUT,
             // SAFETY: `geteuid` has no preconditions.
@@ -225,7 +234,7 @@ fn attach_with(
         Want::Requested(pane) => Purpose::Requested { pane, terminal },
         Want::SelfAttach => Purpose::SelfAttach {
             terminal,
-            provider: provider_hint(),
+            provider: how.provider.clone().or_else(provider_hint),
             file: how.file.clone(),
             line: how.line,
         },

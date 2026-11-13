@@ -4,8 +4,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use neopane::attach::Transport;
-use neopane::cli::{self, Command, Start, UsageError};
-use neopane::daemon::dir::Address;
+use neopane::cli::{self, AttachSelf, Command, Start, Target, UsageError};
+use neopane::daemon::dir::{self, Address};
+use neopane::daemon::find::{self, find_daemon};
 use neopane::daemon::{launch, pane_helper, serve};
 use neopane::debug;
 use neopane::name::NAME;
@@ -37,12 +38,7 @@ fn main() -> ExitCode {
 fn run(command: Command) -> Result<ExitCode> {
     let done = |r: Result<()>| r.map(|()| ExitCode::SUCCESS);
     match command {
-        Command::Start(start) => {
-            if let Some(option) = unbuilt_option(&start) {
-                return Ok(fail(&format!("{option} isn't built yet")));
-            }
-            Ok(helper_exit(launch::run(&start.nvim_args)))
-        }
+        Command::Start(start) => Ok(run_start(start)),
         Command::Help => Ok(print(&cli::help())),
         Command::DebugHelp => Ok(print(&cli::debug_help())),
         Command::Version => Ok(print(&cli::version())),
@@ -76,23 +72,7 @@ fn run(command: Command) -> Result<ExitCode> {
                 transport.unwrap_or_else(|| Transport::from_env(|w| eprintln!("{NAME}: {w}")));
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
-        Command::AttachSelf {
-            address,
-            file,
-            line,
-        } => {
-            // made absolute here, links not resolved: the daemon has its own
-            // working directory
-            let file = match file.map(std::path::absolute).transpose() {
-                Ok(f) => f.map(|p| p.into_os_string().into_encoded_bytes()),
-                Err(e) => return Ok(fail(&format!("can't make the file's path absolute: {e}"))),
-            };
-            let address = Address::from_arg(address);
-            let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
-            Ok(helper_exit(pane_helper::run_opening(
-                &address, transport, file, line,
-            )))
-        }
+        Command::AttachSelf(attach) => Ok(attach_self(attach)),
         Command::DebugKeys => done(debug::keys::run()),
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
         Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
@@ -127,16 +107,71 @@ fn write_types(config: Option<OsString>) -> ExitCode {
     }
 }
 
+/// The bare form (#94 decisions 13 and 15): `--name N` attaches when N is
+/// running, else starts it; without it, a daemon named after this directory
+/// starts.
+fn run_start(start: Start) -> ExitCode {
+    if let Some(option) = unbuilt_option(&start) {
+        return fail(&format!("{option} isn't built yet"));
+    }
+    if let Some(name) = &start.name {
+        let running = dir::base().is_ok_and(|base| base.address(name).answers());
+        if running {
+            return match start.attach_to_running(name) {
+                Ok(attach) => attach_self(attach),
+                Err(err) => usage_error(err),
+            };
+        }
+    }
+    let launch = launch::Launch {
+        name: start.name,
+        provider: hint(start.provider),
+    };
+    helper_exit(launch::run(&start.nvim_args, launch))
+}
+
+/// A self-attach to a running daemon, found as #94 decision 23 says. A
+/// daemon not found is a failed self-attach, held as one.
+fn attach_self(attach: AttachSelf) -> ExitCode {
+    let started = std::time::Instant::now();
+    let target = match attach.to {
+        Target::Address(a) => find::Target::Address(Address::from_arg(a)),
+        Target::Name(n) => find::Target::Name(n),
+        Target::Found => find::Target::Found,
+    };
+    let inside = std::env::var_os(find::inside_var());
+    let warn = &mut |w: String| eprintln!("{NAME}: {w}");
+    let address = match find_daemon(dir::base, &target, inside.as_deref(), warn) {
+        Ok(address) => address,
+        Err(e) => return helper_exit(pane_helper::launcher_failed(e.to_string(), started)),
+    };
+    // made absolute here, links not resolved: the daemon has its own
+    // working directory
+    let file = match attach.file.map(std::path::absolute).transpose() {
+        Ok(f) => f.map(|p| p.into_os_string().into_encoded_bytes()),
+        Err(e) => return fail(&format!("can't make the file's path absolute: {e}")),
+    };
+    let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
+    let opening = pane_helper::Opening {
+        file,
+        line: attach.line,
+        provider: hint(attach.provider),
+    };
+    helper_exit(pane_helper::run_self(&address, transport, opening))
+}
+
+/// `--provider P`, for the hello; empty is none given.
+fn hint(provider: Option<OsString>) -> Option<String> {
+    provider
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !p.is_empty())
+}
+
 /// The first of `start`'s options that does nothing yet.
 fn unbuilt_option(start: &Start) -> Option<&'static str> {
-    [
-        (start.name.is_some(), "--name"),
-        (start.address.is_some(), "--address"),
-        (start.detach, "--detach"),
-        (start.no_wait, "--no-wait"),
-    ]
-    .into_iter()
-    .find_map(|(given, option)| given.then_some(option))
+    [(start.detach, "--detach"), (start.no_wait, "--no-wait")]
+        .into_iter()
+        .find_map(|(given, option)| given.then_some(option))
 }
 
 fn stdout_is_terminal() -> bool {
