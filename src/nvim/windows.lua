@@ -952,10 +952,9 @@ local function report()
   if entered and cur ~= chosen then
     local stray = is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)
     local here = last and pane_holding(last)
+    local elsewhere = (in_panes and in_panes[cur] or pane_holding(cur)) and pane_holding(cur) ~= here
     local to
-    if here and (stray or ((in_panes and in_panes[cur] or pane_holding(cur)) and pane_holding(cur) ~= here)) then
-      to = last_current_of(here, tab)
-    end
+    if here and (stray or elsewhere) then to = last_current_of(here, tab) end
     if not to and stray then to = own_window(tab) end
     if to and to ~= cur then
       api.nvim_set_current_win(to)
