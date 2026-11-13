@@ -390,7 +390,9 @@ An attach chooses it when `TERM_PROGRAM` is `tmux` and `TMUX` is set, as in
 every tmux pane: each window gets a tmux pane of its own, split beside the
 one it was opened from. A group of floats you enter, such as a picker, gets
 a tmux floating pane, framed, on tmux 3.7 or newer; older ones draw it in
-its pane. tmux checks the choice: the terminal's tty must be one of that
+its pane. On tmux 3.8 or newer, a move between panes with tmux's own keys
+moves Neovim's current window at once, through `wait-for -E` waiters that
+attach no client; older ones learn it at the next key. tmux checks the choice: the terminal's tty must be one of that
 tmux server's panes', so a `TMUX` inherited by another terminal chooses
 none, which only the log tells. In a tmux started from a Rex pane, whose
 panes inherit Rex's variables too, the terminal's tty tells them apart

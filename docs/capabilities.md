@@ -240,8 +240,8 @@ runs, such as `tmux`'s, and its stderr are not.
 
 ### tmux
 
-`<name>.builtin.tmux()`: `find`, `open_beside`, `open_float`, `close` and
-`report_layout`, on the tmux server `TMUX` names. Every `tmux` call passes
+`<name>.builtin.tmux()`: `find`, `open_beside`, `open_float`, `close`,
+`report_layout` and `events`, on the tmux server `TMUX` names. Every `tmux` call passes
 that socket with `-S`, and names the pane it acts on with `-t`.
 
 - `find`: the pane of the server whose tty is `TTY`, compared by device,
@@ -269,6 +269,23 @@ that socket with `-S`, and names the pane it acts on with `-t`.
   of the window the most recently active client shows. A float is its
   frame, its content grown by a cell on each side, `"floating": true` with
   an inset of 1 all round; either may be partly off its window.
+- `events`: one `tmux wait-for -E EVENT` waiter per event:
+  `window-layout-changed`, `window-pane-changed`, `session-window-changed`,
+  `client-session-changed`, `window-linked`, `window-unlinked`,
+  `client-attached`, `client-detached` and `client-active`. A waiter is no
+  client: `session_attached`, `list-clients` and the user's hooks don't see
+  it, and panes still get focus-out. Its first line is where focus starts,
+  `{"focus":"%N"}`, if a client shows any. A waiter that wakes is armed
+  again; about 30 ms later, with every waiter that woke meanwhile armed
+  again too, it prints `{"focus":"%N"}` if the focused pane, read as
+  `report_layout` reads it, changed, else an empty line. A waiter failing
+  within a second of starting is dropped; once every one is gone, it exits
+  1. Below 3.8, as `tmux -V` says, it exits 69: the layout is then read
+  after each act, and a focus move made with tmux's own keys is learned at
+  the next key typed or focus report. Rejected: control mode (`tmux -C`),
+  whose client counts as attached, runs the user's `client-attached` hooks
+  and keeps every pane of its session from losing focus; and global
+  hooks, which outlive a daemon killed.
 
 ## Placeholders
 
