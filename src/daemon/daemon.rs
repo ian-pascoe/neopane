@@ -156,6 +156,12 @@ pub(crate) struct Daemon {
     just_opened: Vec<(TerminalId, Instant)>,
     /// The choice running, while its `find` hasn't confirmed it.
     choosing: Option<choosing::Choosing>,
+    /// The config file, as found at start: the config chooses if it is
+    /// there at a choice (ADR 0007).
+    pub config_file: Option<crate::providers::choose::ConfigFile>,
+    /// The config running for a choice, and the pane of the choosing
+    /// attach, until it answers.
+    config_run: Option<(u32, crate::providers::choose::ConfigRun)>,
     /// Self-attaches that came while a choice ran, waiting their turn.
     waiting_choice: Vec<u32>,
     /// The choosing attach's values of the pane provider's context
@@ -169,6 +175,9 @@ pub(crate) struct Daemon {
     pub test_choose: Option<TestChoose>,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
+    /// The config the first self-attach started running, before Neovim
+    /// started, for `start` to wait for.
+    pub first_config: Option<crate::providers::choose::ConfigRun>,
     /// Warnings for Neovim held until it is set up (`warn_when_ready`).
     held_warnings: Vec<String>,
     // Dropped last, in this order: the loop, then the pane provider, then
@@ -226,6 +235,8 @@ pub(crate) enum Token {
     ChoiceTimer,
     UnattachTimer,
     StopTimer,
+    /// The config's run for a choice is done.
+    Config,
 }
 
 impl Token {
@@ -248,13 +259,14 @@ impl Token {
             13 => Token::ChoiceTimer,
             14 => Token::UnattachTimer,
             15 => Token::StopTimer,
+            16 => Token::Config,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::StopTimer as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::Config as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -396,12 +408,15 @@ impl Daemon {
             focus_in: None,
             just_opened: Vec::new(),
             choosing: None,
+            config_file: None,
+            config_run: None,
             waiting_choice: Vec::new(),
             context: Vec::new(),
             provider_writes: false,
             #[cfg(test)]
             test_choose: None,
             first_choice: None,
+            first_config: None,
             held_warnings: Vec::new(),
             event_loop,
             provider,
@@ -440,9 +455,10 @@ impl Daemon {
         self.nvim
             .attach_ui(cols, rows)
             .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
-        match self.first_choice.take() {
-            Some(chosen) => self.take_choice(id, chosen)?,
-            None => self.choose_or_reach(id)?,
+        match (self.first_choice.take(), self.first_config.take()) {
+            (Some(chosen), _) => self.take_choice(id, chosen)?,
+            (None, Some(run)) => self.wait_for_config(id, run)?,
+            (None, None) => self.choose_or_reach(id)?,
         }
         self.nvim.client.flush()?;
         Ok(())
@@ -525,6 +541,7 @@ impl Daemon {
             Some(Token::ChoiceTimer) => self.time_out_choice(Instant::now())?,
             Some(Token::UnattachTimer) => self.unattach_wait_over()?,
             Some(Token::StopTimer) => self.stop_wait_over(),
+            Some(Token::Config) => self.on_config()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -966,15 +983,21 @@ impl Daemon {
             let any = || self.any_terminal(|q| q.layer.is_none() && q.tab == 0);
             (from.or_else(any), true)
         };
-        let Some(origin) = origin else {
+        let p = self.provider.as_deref();
+        let open_beside = self.asks.may_ask(p, Capability::OpenBeside);
+        let opens = self.asks.may_ask(p, Capability::Open);
+        let places = self.asks.may_ask(p, Capability::PlaceBeside);
+        // a terminal opened and never placed needs no origin
+        let unplaced = beside && !open_beside && !places;
+        if origin.is_none() && !unplaced {
             return Ok(()); // no origin yet: next flush
-        };
+        }
         // starts at the guess, not Rex's default
         let size = self.new_pane_size(win);
         let [cols, rows] = size;
-        let origin_size = self
-            .panes
-            .by_terminal(origin.as_str())
+        let origin_size = origin
+            .as_ref()
+            .and_then(|o| self.panes.by_terminal(o.as_str()))
             .and_then(|f| f.terminal_surface.as_ref())
             .map(|s| [s.view.cols, s.view.rows]);
         let pane = self.panes.add_for_window(win);
@@ -991,7 +1014,7 @@ impl Daemon {
                 pane: id,
                 attach,
                 title,
-                origin,
+                origin: origin.expect("a tab page's origin"),
                 cols,
                 rows,
             });
@@ -1008,10 +1031,9 @@ impl Daemon {
             Some(o) if o[axis] > 0 => (f64::from(along) / f64::from(o[axis])).clamp(0.0, 1.0),
             _ => 0.5,
         };
-        let p = self.provider.as_deref();
-        if !self.asks.may_ask(p, Capability::OpenBeside) && self.asks.may_ask(p, Capability::Open) {
-            // opened, then placed once it attaches (ADR 0006)
-            if self.asks.may_ask(p, Capability::PlaceBeside) {
+        if !open_beside && opens {
+            // opened, then placed once it attaches (ADR 0006), if it can be
+            if let Some(origin) = origin.filter(|_| places) {
                 self.panes.by_id_mut(pane_id).unwrap().placing = Some(Placing {
                     origin,
                     dir,
@@ -1033,7 +1055,7 @@ impl Daemon {
             pane: id,
             attach,
             title,
-            origin,
+            origin: origin.expect("an origin to open beside"),
             dir,
             size: along,
             ratio,
@@ -3250,6 +3272,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     mod choosing;
+    mod config;
     mod control;
     mod fallback;
     mod floats_in_panes;

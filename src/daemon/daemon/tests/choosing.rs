@@ -220,7 +220,7 @@ fn a_choice_its_find_refuses_drops_the_pane_provider_with_a_warning() {
     assert_eq!(
         1,
         warned
-            .matches("fake: find didn't confirm this terminal: REX_BLOCK names another terminal; no pane provider")
+            .matches("fake: find didn't confirm this terminal (REX_BLOCK names another terminal); no pane provider")
             .count(),
         "{warned:?}"
     );
@@ -1178,7 +1178,7 @@ fn find_confirming_the_choice_accepts_on_exit_0_or_69_and_refuses_otherwise() {
                 assert_eq!((false, Reach::Out), (kept, reach));
                 let warned = sent_to_nvim(&mut fx);
                 assert!(
-                    warned.contains("cmd: find didn't confirm this terminal: exit 1: no"),
+                    warned.contains("cmd: find didn't confirm this terminal (exit 1: no"),
                     "{warned:?}"
                 );
             }

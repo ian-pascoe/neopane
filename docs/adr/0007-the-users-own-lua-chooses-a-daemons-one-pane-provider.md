@@ -16,6 +16,11 @@ Amended by #128 before implementation: `<name>.run` raises on bad arguments,
 such as an argv that isn't a list of strings or an unknown option, and
 returns what happened otherwise.
 
+Amended by #129 in implementation: the config has its 3 s to itself; the
+chosen pane provider's `find` then has 3 s to confirm the choice, or its own
+timeout if that is longer. A `$<NAME>_CONFIG` naming a file that isn't
+there is an error, not "no file".
+
 A daemon gets its pane provider from the user's own Lua file, which Neovim
 never reads (#87). The file returns a `provider` function. When a self-attach
 arrives and the daemon has no pane provider, the daemon runs the file afresh

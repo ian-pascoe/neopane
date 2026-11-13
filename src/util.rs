@@ -57,6 +57,27 @@ pub(crate) fn thread_number() -> String {
         .collect()
 }
 
+/// The built binary, for a lib test that runs it, such as the config
+/// child: the first ancestor directory of this test's executable with a
+/// file named `<name>` in it, whatever Cargo's build-dir layout. None, but
+/// under `CI`, when it hasn't been built, as with `cargo test --lib` alone.
+#[cfg(test)]
+pub(crate) fn built_binary() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let found = exe
+        .ancestors()
+        .skip(1)
+        .map(|d| d.join(crate::name::NAME))
+        .find(|p| p.is_file());
+    assert!(
+        found.is_some() || std::env::var_os("CI").is_none(),
+        "{} isn't built beside {}",
+        crate::name::NAME,
+        exe.display()
+    );
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -40,8 +40,25 @@ pub(crate) struct AttachHello {
     /// `tty` when relayed.
     pub device: Option<u64>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Its working directory, where a config it chooses with runs.
+    pub cwd: Vec<u8>,
     /// The `--provider` hint.
     pub hint: Option<String>,
+}
+
+impl AttachHello {
+    /// The `attach` a config chooses with (#93 decision 7), the daemon being
+    /// named `daemon`.
+    pub(crate) fn for_config(&self, daemon: &str) -> crate::config::Attach {
+        crate::config::Attach {
+            env: self.env.clone(),
+            cwd: self.cwd.clone(),
+            tty: self.tty.clone(),
+            pid: self.pid,
+            daemon: daemon.to_string(),
+            provider: self.hint.clone(),
+        }
+    }
 }
 
 /// Whether a pane's terminal is in the pane provider's reach (ADR 0006):
@@ -277,7 +294,7 @@ pub(crate) enum Close {
 }
 
 /// Above Daemon's fixed tokens, so they never clash.
-pub(crate) const TOKEN_BASE: usize = 16;
+pub(crate) const TOKEN_BASE: usize = 32;
 
 /// Which of a pane's fds an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -340,6 +340,7 @@ pub(crate) fn attach_hello_of(
         tty: terminal.tty.clone(),
         device: tty_device(tty, &terminal.tty),
         env: terminal.env.clone(),
+        cwd: terminal.cwd.clone(),
         hint,
     }
 }

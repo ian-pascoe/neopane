@@ -151,10 +151,12 @@ it does in plain Neovim.
 That first attach chooses the daemon's pane provider, which gives windows
 terminals of their own, without holding anything up: the first window shows
 at once, and the windows Neovim opened at the start, such as `-O a b`'s
-second, wait for the choice and then open beside the first. Rex is the one
-built in (see [Rex](#rex)): chosen, not required. With no pane provider, or
-when the choice fails, every window is drawn in the terminal it was opened
-from, as plain Neovim draws splits.
+second, wait for the choice and then open beside the first. Your own
+`~/.config/neopane/init.lua` chooses it, in Lua: see
+[docs/config.md](docs/config.md). Without one, Rex is chosen in a Rex pane
+(see [Rex](#rex)), and none elsewhere. With no pane provider, or when the
+choice fails, every window is drawn in the terminal it was opened from, as
+plain Neovim draws splits.
 
 The daemon has one pane provider at a time. It keeps it while a terminal in
 its reach is attached or on its way, and drops it otherwise, as when the last
@@ -168,9 +170,9 @@ These variables are read from the attach's environment, never the daemon's
 own:
 
 - `NEOPANE_PROVIDER`: a hint at the pane provider, sent with the attach;
-  `none` chooses none, even in Rex. Other values are for your config, which
-  comes later. `--provider P`, on `neopane` or `neopane attach`, gives the
-  hint instead.
+  `none` chooses none, even in Rex, without running your config. Other
+  values reach your config as `attach.provider`. `--provider P`, on
+  `neopane` or `neopane attach`, gives the hint instead.
 - `NEOPANE_LOG`: how much the daemon logs, read as it starts. `warn`: what
   went wrong; `info`, the default: that, and what happened; `debug`: that,
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
@@ -184,6 +186,10 @@ own:
   under `relay` asks for its panes with `--transport relay` added to their
   command, which overrides the variable. Any other value prints `neopane:
   ignoring NEOPANE_TRANSPORT=<value> (use fd or relay)`, and `fd` is used.
+- `NEOPANE_CONFIG`: the config file, in place of
+  `~/.config/neopane/init.lua`. The daemon reads it once, as it starts,
+  made absolute against the directory it started in; a later attach's never
+  counts.
 
 Each window's pane runs `neopane attach --address <the daemon's address>
 --pane <pane id>`, which hands its terminal to the daemon (ADR 0013,
@@ -376,8 +382,9 @@ stuck    -       -        -         (didn't answer in 2 s)
 - PANES: the terminals attached, window and float group panes alike, with
   `kept` after it for a daemon started with `--detach`.
 - UNSAVED: how many buffers have unsaved changes.
-- PROVIDER: the pane provider, `(choosing)` while it is being confirmed, or
-  `none`, `none (find refused)` or `none (hint none)`.
+- PROVIDER: the pane provider (a pair as `T+L`), `(choosing)` while your
+  config runs or the choice is being confirmed, or `none`,
+  `none (config error)`, `none (find refused)` or `none (hint none)`.
 - DIRECTORY: Neovim's global working directory, `~` standing for `$HOME`.
 - A daemon of another attach protocol version shows its build and version
   instead; one that didn't answer, why.
@@ -498,7 +505,10 @@ quietly.
   couldn't be reached or attached, or didn't confirm the terminal is the pane
   `REX_BLOCK` names, as for a terminal started from a Rex shell; without one,
   `REX_SERVER` or `REX_SESSION` is unset, or `NEOPANE_PROVIDER` is `none`. The
-  log says which.
+  log says which. With a config file, `neopane: config: …` in Neovim and
+  `none (config error)` in `neopane list` mean it failed or returned
+  something malformed; the log has every problem (see
+  [docs/config.md](docs/config.md#errors)).
 - `neopane: work didn't start: <why> (log: <path>)`: read the log at that
   path. A daemon that failed before it had a log says only why, such as
   `neopane: /tmp/neopane-501 isn't a private directory (owner 0, mode 0755); set

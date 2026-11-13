@@ -1,9 +1,179 @@
 # The config
 
-`~/.config/neopane/init.lua` (or `$XDG_CONFIG_HOME/neopane/init.lua`, or the
-file `$NEOPANE_CONFIG` names) chooses each daemon's pane provider. It returns
-`{ provider = function(attach) … end }`; ADR 0007 and
-`docs/capabilities.md` cover what `provider` may return.
+Your own Lua file chooses each daemon's pane provider: what gives Neovim's
+windows terminals of their own (ADR 0007). With no file, the built-in default
+chooses: Rex inside Rex, else none. `docs/capabilities.md` is the contract
+of a pane provider's commands.
+
+## The file
+
+The daemon reads `$NEOPANE_CONFIG` if it is set and not empty, made absolute
+against the directory `neopane` started in (`~` isn't expanded), else
+`$XDG_CONFIG_HOME/neopane/init.lua` (an absolute `XDG_CONFIG_HOME` only),
+else `~/.config/neopane/init.lua`, on macOS too. It reads
+`$NEOPANE_CONFIG` once, as it starts: a later attach's never counts. With
+no file at the default places, the built-in default chooses; a file
+`$NEOPANE_CONFIG` names that isn't there is an error (see [Errors](#errors)).
+
+The file runs afresh each time a terminal chooses the pane provider: when
+a terminal attaches by itself (as `neopane` or `neopane attach` does) and the
+daemon has none. Each run is a child process of the daemon's own binary,
+in the choosing attach's working directory (`/` if it has gone), with the
+environment its commands get (`docs/capabilities.md`, "Running a command").
+It has 3 s to answer; once it has answered, or its time is up, its process
+group is killed, so nothing it started outlives the choice. A fix to the
+file applies at the next choice, and a file made after the daemon started is
+read then too, wherever it is. `--provider none` (or
+`NEOPANE_PROVIDER=none`) chooses none without running it.
+
+It returns a table whose only key is `provider`, a function called with the
+choosing attach:
+
+```lua
+return {
+  provider = function(attach)
+    if attach.env.TERM_PROGRAM == "ghostty" then
+      return { terminal = ghostty, layout = aerospace }
+    end
+    return neopane.default(attach)
+  end,
+}
+```
+
+The Lua is 5.1, PUC Lua as Neovim users write it, with `string`, `table`,
+`math`, `io`, `os`, `coroutine` and `package`, and no sandbox: `io`, `os`
+and `dofile` stay. `require` looks only in the file's own `lua/` directory
+(`lua/?.lua`, `lua/?/init.lua`), and loads no C modules. `print`,
+`io.write`, `io.stdout` and `io.stderr` go to the daemon's log, line by line,
+as `config: <line>`, up to 64 KiB a run; stdin is empty. Prefer
+`neopane.run` to `os.execute` and `io.popen`: it gives up in time for the
+config to answer.
+
+While the file runs, the terminal that chose shows its first window at once;
+new windows, and the terminals that attach meanwhile, wait for the choice.
+
+## `attach`
+
+| Field | |
+|---|---|
+| `env` | The choosing attach's environment, as it attached: names to values, raw bytes |
+| `cwd` | Its working directory, absolute |
+| `tty` | Its tty, such as `/dev/ttys014`; `""` when it has none |
+| `pid` | The attaching helper's pid |
+| `daemon` | The daemon's name |
+| `provider` | The hint: `--provider P`, else `$NEOPANE_PROVIDER`; nil without one |
+
+They are plain tables: changing them changes nothing outside this run.
+The hint means what your code makes of it; only `none` means something to
+neopane, and the file doesn't run for it.
+
+## What `provider` returns
+
+- `nil` or `false`: no pane provider. Windows are drawn in the terminal
+  they were opened from, as plain Neovim draws splits.
+- `"rex"`: Rex's pane provider, built in. It works only in a Rex pane.
+- A pane provider table, used whole.
+- A pair, `{ terminal = T, layout = L }`, or one side alone, `{ terminal = T }`
+  or `{ layout = L }`: `T` is a terminal provider, which opens and closes
+  terminals, and `L` a layout provider, which finds, places and focuses
+  them. A pair takes only `T`'s `open` and `close` and its attach timeout,
+  and only `L`'s other capabilities, `context_vars` and `find_vars`, so it
+  always opens, then places. Rex is never half of a pair. An optional
+  `name` names the pair, `"<T's name>+<L's name>"` by default.
+
+The chosen pane provider's `find` (its own, or its layout side's) then
+confirms the choice for the choosing attach: exit 0 or 69, or no `find`,
+accepts it; anything else means no pane provider, with a warning, so a
+`TMUX` leaked into a Ghostty window doesn't send new windows to a tmux pane
+nobody sees. The file's 3 s are its own: `find` then has 3 s to confirm the
+choice, or its own timeout (`timeouts.find`) if that is longer.
+
+`list` and `status` show the result as the pane provider's name (a pair's
+as `T+L`), `(choosing)` while the file runs or `find` hasn't answered, or
+`none`, `none (config error)`, `none (find refused)` or `none (hint none)`.
+
+## Pane provider tables
+
+Each capability is an argv, a list of strings run once without a shell, its
+whole-word placeholders such as `{attach}` replaced; `false` counts as
+absent. `docs/capabilities.md` says what each is given, what it prints and
+what its exit status means.
+
+| Key | |
+|---|---|
+| `name` | Shown in the log, warnings, `list` and `status`; never matched |
+| `open` | Opens a terminal running `{attach}`, and prints its id |
+| `close` | Closes `{terminal}` |
+| `find` | Prints the attaching terminal's id; exit 69: unsupported |
+| `place_beside` | Moves `{terminal}` beside `{origin}` |
+| `resize` | Resizes `{terminal}` along its split with `{origin}` |
+| `focus` | Focuses `{terminal}` |
+| `focus_direction` | Moves focus `{count}` steps `{direction}` |
+| `report_layout` | Prints the layout as JSON |
+| `events` | Prints a line whenever the layout changes; runs until it ends |
+| `open_beside`, `open_float`, `open_tab_page` | One-step opens, from a table returned whole only |
+| `timeouts` | Seconds per capability, over 0 and at most 60 |
+| `attach_timeout` | Seconds from an open's exit to its terminal attaching; default 5 |
+| `protocols` | The `NEOPANE_PROTOCOL` numbers it speaks; default `{ 1 }` |
+| `context_vars` | Variables a terminal must share with the choosing one to be in reach |
+| `find_vars` | The attaching terminal's variables `find` gets, as `$NEOPANE_ENV_<VAR>` |
+
+No capability is required: a table with only `open` opens a terminal for
+each new window and places none.
+
+## The `neopane` global
+
+Also `require("neopane")`.
+
+| | |
+|---|---|
+| `neopane.default(attach)` | What the daemon chooses with no file: `"rex"` when `REX_SERVER` and `REX_SESSION` are both set, else nil. Reads only the environment, ignores the hint, never raises |
+| `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
+| `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
+| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change. Empty for now |
+| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is a multiplexer's own pane. Empty for now |
+| `neopane.os` | `"macos"` or `"linux"` |
+| `neopane.version` | The daemon's version |
+| `neopane.config_dir` | The absolute directory of the file that ran |
+
+## Errors
+
+Any error means no pane provider for that choice, never the default.
+
+A file `$NEOPANE_CONFIG` names that isn't there is an error. Only an empty
+default place, with `$NEOPANE_CONFIG` unset, means the built-in default
+chooses.
+
+A file that fails to load or raises, runs out its 3 s, ends without
+answering, or returns something malformed is an error too: a wrong type,
+an argv with a hole (is a variable nil?), a side with no usable
+capability, a paired `"rex"`, or no protocol number shared with neopane.
+Anything unknown, such as a key, a field or a placeholder, gets a warning
+and is ignored, a capability holding an unknown placeholder with it; a
+time over 60 s gets a warning and is cut to 60 s. So an older daemon still
+reads a newer file.
+
+Each choice shows its problems as one warning in Neovim, the first error
+or else the first warning, with the count of the rest:
+
+```text
+neopane: config: provider().layout.focus[2]: expected string, got number (wrap numbers in tostring()) (and 2 more: neopane provider check)
+```
+
+The daemon's log has every one, and `list` shows `none (config error)`.
+The next terminal that attaches by itself runs the file again.
+
+A file `$NEOPANE_CONFIG` names that isn't there warns with its path:
+
+```text
+neopane: config: /home/me/my.lua isn't there (NEOPANE_CONFIG names it); no pane provider
+```
+
+A `find` that refuses the choosing attach warns too:
+
+```text
+neopane: aerospace: find didn't confirm this terminal (exit 1); no pane provider
+```
 
 ## Built-in pane providers
 
@@ -63,4 +233,63 @@ where a `.luarc.json` is:
     end,
   },
 }
+```
+
+## Ghostty with AeroSpace
+
+An example, untested: Ghostty opens a window per Neovim window, and
+AeroSpace finds, focuses and moves between them. Ghostty's `--title=` (one
+word: `--title VALUE` doesn't parse, and `-e` must come last) fixes the
+window's title for good, so Ghostty ignores the escape sequences that would
+change it, and AeroSpace finds the window by that title. The macOS form,
+`open -na Ghostty.app --args --title=… -e …`, is checked against Ghostty's
+source but not run; on Linux it is `ghostty +new-window --title=… -e …`.
+Tab pages are drawn in the window they opened from; a Ghostty table returned
+whole, with `open_tab_page` set to `open`'s argv, gives each its own window.
+
+```lua
+-- ~/.config/neopane/init.lua
+---@type neopane.Provider
+local ghostty = {
+  name = "ghostty",
+  -- --title= fixes this window's title for good (Ghostty then ignores OSC 0/2); AeroSpace finds it by that title.
+  -- macOS (source-verified, not run). Linux: 'exec ghostty +new-window --title="$NEOPANE_TITLE" -e "$@"'
+  open = { "sh", "-c",
+    'exec open -na Ghostty.app --args --title="$NEOPANE_TITLE" --abnormal-command-exit-runtime=0 -e "$@"',
+    "sh", "{attach}" },
+}
+---@type neopane.Provider
+local aerospace = {
+  name = "aerospace",
+  find = { neopane.config_dir .. "/bin/aerospace-find" },
+  focus = { "aerospace", "focus", "--window-id", "{terminal}" },
+  focus_direction = { "aerospace", "focus", "--boundaries-action", "stop", "{direction}" }, -- once, whatever the count
+}
+---@type neopane.Config
+return {
+  provider = function(attach)
+    -- Ghostty first: REX_* leak into a Ghostty window started from a Rex shell; TERM_PROGRAM names the innermost terminal.
+    if attach.env.TERM_PROGRAM == "ghostty" and neopane.which("aerospace") then
+      return { terminal = ghostty, layout = aerospace }
+    end
+    return neopane.default(attach)
+  end,
+}
+```
+
+```sh
+#!/bin/sh
+# ~/.config/neopane/bin/aerospace-find: the AeroSpace window whose title holds $NEOPANE_TITLE.
+# AeroSpace may not list a new window at once, so try for about 2.5 s (find has 3 s).
+i=0
+while [ "$i" -lt 10 ]; do
+  ids=$(aerospace list-windows --all --format '%{window-id}|%{window-title}' |
+        grep -F -- "$NEOPANE_TITLE" | cut -d'|' -f1)
+  case $(printf '%s' "$ids" | grep -c .) in
+    1) printf '%s\n' "$ids"; exit 0 ;;
+    0) sleep 0.25; i=$((i + 1)) ;;
+    *) exit 1 ;;
+  esac
+done
+exit 1
 ```
