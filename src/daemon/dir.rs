@@ -238,16 +238,9 @@ impl Base {
         self.running()
             .into_iter()
             .filter(|name| {
-                let Ok(text) = fs::read(self.0.join(name).join(UNSAVED)) else {
-                    return false;
-                };
-                let mut lines = text.split(|&b| b == b'\n');
-                lines.next() == Some(b"unsaved 1")
-                    && lines.filter(|l| l.starts_with(b"/")).any(|l| {
-                        // SAFETY: bytes Neovim gave as a file name.
-                        let l = unsafe { OsStr::from_encoded_bytes_unchecked(l) };
-                        resolved(Path::new(l)) == file
-                    })
+                Unsaved::lists(&self.0.join(name))
+                    .iter()
+                    .any(|l| resolved(l) == file)
             })
             .collect()
     }
@@ -265,36 +258,30 @@ impl std::fmt::Display for Base {
     }
 }
 
-/// `path`, made absolute and normalised, then with links resolved in as
-/// much of it as exists: two paths to one file, there or not yet, are the
-/// same.
+/// `path` as the OS opens it: made absolute, with links and `..` resolved
+/// in the longest part of it that exists, and the rest normalised as
+/// written. Two paths to one file, there or not yet, are the same.
 fn resolved(path: &Path) -> PathBuf {
     use std::path::Component;
-    let mut normal = PathBuf::new();
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    for c in absolute.components() {
+    let parts: Vec<Component> = absolute.components().collect();
+    let (mut real, rest) = (0..=parts.len())
+        .rev()
+        .find_map(|n| {
+            let prefix: PathBuf = parts[..n].iter().collect();
+            prefix.canonicalize().ok().map(|real| (real, &parts[n..]))
+        })
+        .unwrap_or_else(|| (PathBuf::new(), &parts[..]));
+    for c in rest {
         match c {
             Component::ParentDir => {
-                normal.pop();
+                real.pop();
             }
             Component::CurDir => {}
-            c => normal.push(c),
+            c => real.push(c),
         }
     }
-    let mut rest = Vec::new();
-    let mut at = normal.as_path();
-    loop {
-        if let Ok(real) = at.canonicalize() {
-            return rest.iter().rev().fold(real, |p, c| p.join(c));
-        }
-        match (at.parent(), at.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_os_string());
-                at = parent;
-            }
-            _ => return normal,
-        }
-    }
+    real
 }
 
 /// Where attaches reach a daemon (ADR 0004). Outside this module it is
@@ -479,6 +466,24 @@ impl Unsaved {
                 Err(e)
             }
         }
+    }
+
+    /// The files the `unsaved` file in daemon directory `dir` lists: none
+    /// if it isn't there, or is in a format this build doesn't read, as a
+    /// daemon of another version may write.
+    pub(crate) fn lists(dir: &Path) -> Vec<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(text) = fs::read(dir.join(UNSAVED)) else {
+            return Vec::new();
+        };
+        let mut lines = text.split(|&b| b == b'\n');
+        if lines.next() != Some(b"unsaved 1") {
+            return Vec::new();
+        }
+        lines
+            .filter(|l| l.starts_with(b"/"))
+            .map(|l| PathBuf::from(OsStr::from_bytes(l)))
+            .collect()
     }
 
     /// Removes it, if it's there.
@@ -942,5 +947,16 @@ mod tests {
         assert_eq!(vec!["c"], holding(files.join("sub/../other.md")));
         assert_eq!(vec!["c"], holding(real.join("./other.md")));
         assert!(holding(files.join("none.md")).is_empty());
+        // `..` after a link to a directory, as the OS opens it: from the
+        // link's target, not the link's own directory
+        let elsewhere = scratch.0.join("elsewhere");
+        fs::create_dir_all(elsewhere.join("deep")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("deep"), files.join("dirlink")).unwrap();
+        let _e = held(
+            "e",
+            &[listed(elsewhere.canonicalize().unwrap().join("x.md"))],
+        );
+        assert_eq!(vec!["e"], holding(files.join("dirlink/../x.md")));
+        assert!(holding(files.join("x.md")).is_empty());
     }
 }

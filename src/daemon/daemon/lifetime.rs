@@ -26,9 +26,9 @@ pub(crate) enum Stage {
     /// The last pane went: Neovim's answer `ask` about its unsaved changes
     /// is awaited, until the unattach timer fires.
     Deciding { ask: u32 },
-    /// Unattached, staying for unsaved changes, listed in the `unsaved`
+    /// It stays, unattached: for unsaved changes, listed in the `unsaved`
     /// file, or because it is kept.
-    Unattached,
+    Staying,
 }
 
 /// A daemon's life after its panes, and what it goes by.
@@ -174,13 +174,11 @@ impl Daemon {
         self.lifetime.unsaved = files;
         match self.lifetime.stage {
             Stage::Deciding { ask: asked } if ask == asked => self.decide(),
-            Stage::Unattached
-                if self.lifetime.unsaved.is_empty() && !self.lifetime.asked_to_stay =>
-            {
+            Stage::Staying if self.lifetime.unsaved.is_empty() && !self.lifetime.asked_to_stay => {
                 log_info!("{NAME} daemon: no unsaved changes are left");
                 self.stop(StopReason::PaneGone);
             }
-            Stage::Unattached => self.write_unsaved(),
+            Stage::Staying => self.write_unsaved(),
             _ => {}
         }
         Ok(())
@@ -201,7 +199,7 @@ impl Daemon {
     fn decide(&mut self) {
         if self.lifetime.asked_to_stay {
             log_info!("{NAME} daemon: kept, staying unattached");
-            self.lifetime.stage = Stage::Unattached;
+            self.lifetime.stage = Stage::Staying;
             self.write_unsaved();
             return;
         }
@@ -210,7 +208,7 @@ impl Daemon {
             self.stop(StopReason::PaneGone);
             return;
         }
-        self.lifetime.stage = Stage::Unattached;
+        self.lifetime.stage = Stage::Staying;
         log_info!(
             "{NAME} daemon: staying unattached for unsaved changes in {}",
             names(&self.lifetime.unsaved)

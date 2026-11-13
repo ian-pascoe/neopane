@@ -722,13 +722,26 @@ pub(crate) fn unsaved_at_safe_state(nvim: &mut Nvim, ask: u32) {
     msgpack::write_int(nvim.writer(), ask);
 }
 
-/// `[first, anchor]` from `setup`'s response.
+/// What `setup` answers.
 #[doc(hidden)]
-pub fn parse_setup(result: &mut Decoder<'_>) -> rpc::Result<[i64; 2]> {
-    if rpc::expect_array(result)? < 2 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Setup {
+    /// `[first, anchor]`.
+    pub wins: [i64; 2],
+    /// Whether the first window shows the buffer Neovim starts with when it
+    /// is given no file: unnamed, empty and unmodified.
+    pub throwaway: bool,
+}
+
+/// `setup`'s response.
+#[doc(hidden)]
+pub fn parse_setup(result: &mut Decoder<'_>) -> rpc::Result<Setup> {
+    if rpc::expect_array(result)? < 3 {
         return Err(rpc::Error::BadMessage);
     }
-    Ok([rpc::expect_handle(result)?, rpc::expect_handle(result)?])
+    let wins = [rpc::expect_handle(result)?, rpc::expect_handle(result)?];
+    let throwaway = rpc::expect_bool(result)?;
+    Ok(Setup { wins, throwaway })
 }
 
 /// Our channel id from `ask_channel`'s response.
@@ -933,7 +946,7 @@ mod tests {
                                 self.setup_id = setup(&mut self.nvim, chan, 40, 9);
                                 self.nvim.flush().unwrap();
                             } else if id == self.setup_id {
-                                self.wins = parse_setup(&mut result).unwrap();
+                                self.wins = parse_setup(&mut result).unwrap().wins;
                             } else if self.awaiting == Some(id) {
                                 self.reply = rpc::expect_str(&mut result)
                                     .ok()

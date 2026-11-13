@@ -1231,8 +1231,14 @@ fn as_git_s_editor_in_a_daemons_terminal_a_file_is_waited_for() {
 /// `neopane` with `args`, from no terminal, in `cwd`, its daemons under
 /// `tmpdir` with nothing around them, as `in_pty` has them.
 fn detached(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Output {
+    detached_command(tmpdir, cwd, args).output().unwrap()
+}
+
+/// The command `detached` runs.
+fn detached_command(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Command {
     let upper = NAME.to_ascii_uppercase();
-    Command::new(exe())
+    let mut command = Command::new(exe());
+    command
         .args(args)
         .current_dir(cwd)
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
@@ -1243,9 +1249,8 @@ fn detached(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove(format!("{upper}_PROVIDER"))
         .env_remove("REX_SERVER")
         .env_remove("REX_SESSION")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+        .stdin(Stdio::null());
+    command
 }
 
 /// Waits up to 10 s for `done`.
@@ -1338,12 +1343,9 @@ fn detach_starts_a_kept_daemon_that_attach_shows_and_kill_ends() {
 
 #[test]
 fn detach_that_fails_says_why_in_one_line() {
-    let tmp = scratch("df");
-    let out = Command::new(exe())
-        .args(["--detach", "--name", "work"])
-        .env(neopane::daemon::dir::tmpdir_var(), &tmp)
+    let tmp = scratch("dfail");
+    let out = detached_command(&tmp, &tmp, &["--detach", "--name", "work"])
         .env("PATH", tmp.join("nowhere"))
-        .stdin(Stdio::null())
         .output()
         .unwrap();
     let log = base_of(&tmp).join("work/log");
@@ -1466,52 +1468,82 @@ fn the_first_attach_to_a_kept_daemon_shows_its_current_tab_page() {
     if !have_nvim() {
         return;
     }
-    let tmp = scratch("dt");
-    std::fs::write(tmp.join("a.txt"), "left side\n").unwrap();
-    std::fs::write(tmp.join("b.txt"), "right side\n").unwrap();
+    let tmp = scratch("dtab");
+    std::fs::write(tmp.join("a.txt"), "first tab\n").unwrap();
+    std::fs::write(tmp.join("b.txt"), "second tab\n").unwrap();
     let mut ending = Ending {
         sock: base_of(&tmp).join("w/nvim.sock"),
         helpers: Vec::new(),
         tmp: tmp.clone(),
     };
-    let args = ["--detach", "--name", "w", "-O", "a.txt", "b.txt"];
+    let args = [
+        "--detach", "--name", "w", "-p", "a.txt", "b.txt", "-c", "tabnext",
+    ];
     let out = detached(&tmp, &tmp, &args);
     assert_eq!((out.status.code(), text(&out.stdout)), (Some(0), "w\n"));
     let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach"], &[], 80);
     ending.helpers.push(helper);
-    let both = || {
-        let s = shown(&drawn);
-        s.contains("left side") && s.contains("right side")
-    };
-    assert!(within_10s(both), "{:?}", shown(&drawn));
+    assert!(
+        within_10s(|| shown(&drawn).contains("second tab")),
+        "{:?}",
+        shown(&drawn)
+    );
+    assert!(!shown(&drawn).contains("first tab"), "{:?}", shown(&drawn));
 }
 
-#[test]
-fn a_file_attach_to_a_kept_daemon_closes_the_window_it_started_with() {
-    if !have_nvim() {
-        return;
+/// A kept daemon started with `args` in a scratch directory `test` holding
+/// `a.txt`, `b.txt` and `c.txt`, then `attach c.txt`: the files its
+/// external windows show, sorted, once `c.txt` shows, and what the attach
+/// drew.
+fn attached_c(test: &str, args: &[&str]) -> (Option<String>, String) {
+    let tmp = scratch(test);
+    for f in ["a", "b", "c"] {
+        std::fs::write(tmp.join(format!("{f}.txt")), format!("file {f}\n")).unwrap();
     }
-    let tmp = scratch("df");
-    std::fs::write(tmp.join("a.txt"), "first file\n").unwrap();
-    std::fs::write(tmp.join("b.txt"), "second file\n").unwrap();
     let sock = base_of(&tmp).join("w/nvim.sock");
     let mut ending = Ending {
         sock: sock.clone(),
         helpers: Vec::new(),
         tmp: tmp.clone(),
     };
-    let out = detached(&tmp, &tmp, &["--detach", "--name", "w", "a.txt"]);
+    let mut start = vec!["--detach", "--name", "w"];
+    start.extend(args);
+    let out = detached(&tmp, &tmp, &start);
     assert_eq!((out.status.code(), text(&out.stdout)), (Some(0), "w\n"));
-    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach", "b.txt"], &[], 80);
+    let (helper, drawn, _keys) = in_pty_typed(&tmp, &tmp, &["attach", "c.txt"], &[], 120);
     ending.helpers.push(helper);
-    assert!(
-        within_10s(|| shown(&drawn).contains("second file")),
-        "{:?}",
-        shown(&drawn)
-    );
-    // as an attach to a daemon its last pane left: no window but the file's
-    let shown_files = "join(map(filter(nvim_list_wins(), 'nvim_win_get_config(v:val).external'), \
-                       'fnamemodify(bufname(winbufnr(v:val)), \":t\")'))";
-    let files = until_expr(&sock, shown_files, |f| f == "b.txt");
-    assert_eq!(files.as_deref(), Some("b.txt"));
+    within_10s(|| shown(&drawn).contains("file c"));
+    let files = "join(sort(map(filter(nvim_list_wins(), 'nvim_win_get_config(v:val).external'), \
+                 'fnamemodify(bufname(winbufnr(v:val)), \":t\")')))";
+    let want = if args.is_empty() {
+        "c.txt"
+    } else {
+        "a.txt b.txt c.txt"
+    };
+    let files = until_expr(&sock, files, |f| f == want);
+    // drawn with the rest of the tab page, past the first redraws
+    within_10s(|| args.is_empty() || shown(&drawn).contains("file a"));
+    (files, shown(&drawn))
+}
+
+#[test]
+fn a_file_attach_to_a_kept_daemon_keeps_the_windows_its_arguments_opened() {
+    if !have_nvim() {
+        return;
+    }
+    let (files, drawn) = attached_c("dkeep", &["-O", "a.txt", "b.txt"]);
+    assert_eq!(files.as_deref(), Some("a.txt b.txt c.txt"));
+    for f in ["file a", "file b", "file c"] {
+        assert!(drawn.contains(f), "{f}: {drawn:?}");
+    }
+}
+
+#[test]
+fn a_file_attach_to_a_kept_daemon_started_on_no_file_closes_its_empty_window() {
+    if !have_nvim() {
+        return;
+    }
+    let (files, drawn) = attached_c("dempty", &[]);
+    assert_eq!(files.as_deref(), Some("c.txt"));
+    assert!(drawn.contains("file c"), "{drawn:?}");
 }

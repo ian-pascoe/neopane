@@ -928,14 +928,34 @@ fn the_bare_address_with_no_wait_attaches_to_it() {
 
 #[test]
 fn the_unsaved_file_question_is_only_for_one_file_to_start_with() {
-    let file = |f: &str| Some((OsString::from(f), None));
-    assert_eq!(file("notes.md"), started("notes.md").question_file());
-    assert_eq!(file("-n"), started("-- -n").question_file());
+    let attach = |line: &str| {
+        let mut asked = None;
+        let attach = started(line).question_attach(|f| {
+            asked = Some(f.to_os_string());
+            Some("notes".into())
+        });
+        (attach, asked)
+    };
+    let to_notes = |file: &str, line| AttachSelf {
+        to: Target::Name("notes".into()),
+        provider: None,
+        file: Some(file.into()),
+        line,
+    };
     assert_eq!(
-        Some((OsString::from("notes.md"), Some(12))),
-        started("+12 -- notes.md").question_file()
+        (Some(to_notes("notes.md", None)), Some("notes.md".into())),
+        attach("notes.md")
     );
-    assert_eq!(file("f"), started("--name work f").question_file());
+    assert_eq!(Some(to_notes("-n", None)), attach("-- -n").0);
+    assert_eq!(
+        Some(to_notes("notes.md", Some(12))),
+        attach("+12 -- notes.md").0
+    );
+    assert_eq!(Some(to_notes("f", None)), attach("--name work f").0);
+    let with_provider = started("--provider p f").question_attach(|_| Some("notes".into()));
+    assert_eq!(Some("p".into()), with_provider.unwrap().provider);
+    // no daemon holds it
+    assert_eq!(None, started("f").question_attach(|_| None));
     for line in [
         "",
         "+12",
@@ -945,6 +965,6 @@ fn the_unsaved_file_question_is_only_for_one_file_to_start_with() {
         "notes.md -c q",
         "--detach notes.md",
     ] {
-        assert_eq!(None, started(line).question_file(), "{line}");
+        assert_eq!((None, None), attach(line), "{line}");
     }
 }

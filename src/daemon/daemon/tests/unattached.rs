@@ -116,7 +116,7 @@ fn with_unsaved_changes_the_daemon_stays_listing_them_until_none_are_left() {
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
     assert_eq!(None, rig.fx.d.stopped);
-    assert_eq!(Stage::Unattached, rig.fx.d.lifetime.stage);
+    assert_eq!(Stage::Staying, rig.fx.d.lifetime.stage);
     assert_eq!(Some("unsaved 1\n/a\n".into()), rig.unsaved());
     // an unnamed buffer isn't listed: no file has its changes
     rig.told(&["/a", "", "/b"], 0);
@@ -309,7 +309,7 @@ fn an_unattached_daemon_drops_its_pane_provider_once_its_closes_are_answered() {
     group.terminal = Some(TerminalId::from("block:f"));
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
-    assert_eq!(Stage::Unattached, rig.fx.d.lifetime.stage);
+    assert_eq!(Stage::Staying, rig.fx.d.lifetime.stage);
     let (close, ask) = fake(&mut rig.fx.d).asks.last().cloned().expect("a close");
     assert_eq!(asks::close(TerminalId::from("block:f")), ask);
     // no terminal in its reach, but its close unanswered: kept

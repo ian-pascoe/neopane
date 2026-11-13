@@ -619,9 +619,10 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // the first attach is answered before Neovim starts, which is sized to
     // it; a kept daemon has none
     let name = dir.name().to_string();
-    let mut first = match detach {
-        true => None,
-        false => Some(first_attach(&server, &dir.address(), &name, &log)?),
+    let mut first = if detach {
+        None
+    } else {
+        Some(first_attach(&server, &dir.address(), &name, &log)?)
     };
     // the config file, from the start environment only (ADR 0007)
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
@@ -751,9 +752,10 @@ fn start_daemon<S: AsRef<OsStr>>(
     d.first_choice = choice.chosen;
     d.first_config = choice.config_run;
     d.config_file = choice.config_file;
-    match first.is_some() {
-        true => d.start(first)?,
-        false => d.start_kept()?,
+    if first.is_some() {
+        d.start(first)?;
+    } else {
+        d.start_kept()?;
     }
     Ok((child, d))
 }

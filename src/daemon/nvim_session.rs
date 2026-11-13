@@ -471,7 +471,7 @@ mod tests {
             });
             let id = windows::setup(&mut r.session.client, chan, 40, 9);
             r.session.client.flush().unwrap();
-            let first = r.raw_answer(id, |res| windows::parse_setup(res).unwrap()[0]);
+            let first = r.raw_answer(id, |res| windows::parse_setup(res).unwrap().wins[0]);
             let other = r.lua(&format!(
                 "vim.api.nvim_buf_set_lines(0, 0, -1, false, {{ 'one' }})\n\
                  vim.cmd('tabnew')\n\

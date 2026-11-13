@@ -179,27 +179,26 @@ fn run_start(start: Start) -> ExitCode {
 /// unattached, and a person is there to answer: the attach to it, for
 /// yes; the exit status, for no answer; None to start the daemon.
 fn ask_about_unsaved(start: &Start) -> Option<std::result::Result<AttachSelf, ExitCode>> {
-    let (file, line) = start.question_file()?;
     // SAFETY: isatty only inspects the fd.
     let terminals = unsafe { libc::isatty(0) == 1 && libc::isatty(2) == 1 };
     if !terminals {
         return None;
     }
-    let holding = dir::base().ok()?.holding_unsaved(Path::new(&file));
-    let first = holding.first()?.clone();
-    let question = launch::unsaved_question(&file.to_string_lossy(), &holding);
+    let base = dir::base().ok()?;
+    let mut holding = Vec::new();
+    let attach = start.question_attach(|file| {
+        holding = base.holding_unsaved(Path::new(file));
+        holding.first().cloned()
+    })?;
+    let shown = attach.file.as_deref().unwrap_or_default().to_string_lossy();
+    let question = launch::unsaved_question(&shown, &holding);
     // Ctrl-C exits 1 while it's asked
     let before = exit_on_interrupt();
     let answer = launch::ask(&question, &mut io::stdin().lock(), &mut io::stderr());
     // SAFETY: putting back the handler there was.
     unsafe { libc::signal(libc::SIGINT, before) };
     match answer {
-        launch::Answer::Yes => Some(Ok(AttachSelf {
-            to: Target::Name(first),
-            provider: start.provider.clone(),
-            file: Some(file),
-            line,
-        })),
+        launch::Answer::Yes => Some(Ok(attach)),
         launch::Answer::No => None,
         launch::Answer::Quit => Some(Err(ExitCode::from(1))),
     }
