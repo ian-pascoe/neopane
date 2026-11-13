@@ -64,19 +64,15 @@ impl Geometry<'_> {
         }
     }
 
-    /// Where pane `p`'s top left sits on grid 1, which spans its layout
-    /// area while it's current: row, col.
+    /// Where the top left of pane `p`'s content, its terminal's, inside its
+    /// inset, sits on grid 1, which spans its layout area while it's
+    /// current: row, col.
     pub(crate) fn pane_origin(&self, p: &Pane) -> [i32; 2] {
-        let Some(r) = p.area.rect() else {
-            return [0, 0];
-        };
         let Some(screen) = self.grids.get(1) else {
             return [0, 0];
         };
-        [
-            (r[1] * f64::from(screen.height)).round() as i32,
-            (r[0] * f64::from(screen.width)).round() as i32,
-        ]
+        let [col, row] = content_corner(&p.area, [screen.width, screen.height]).unwrap_or([0, 0]);
+        [row, col]
     }
 
     /// No terminal yet: the smallest window, as Neovim allows.
@@ -182,6 +178,19 @@ pub(crate) fn same_area(a: &Pane, b: &Pane) -> bool {
         (Area::Live { id: x, .. }, Area::Live { id: y, .. }) => x == y,
         _ => a.id == b.id,
     }
+}
+
+/// The top left of the content of a pane in `area`, its terminal's, in
+/// cells of a screen of `screen` cells spanning that area: x, y. Its rect's
+/// top left, inside its inset. None outside a live area.
+pub(crate) fn content_corner(area: &Area, screen: [u32; 2]) -> Option<[i32; 2]> {
+    let Area::Live { rect, inset, .. } = area else {
+        return None;
+    };
+    Some([
+        (rect[0] * f64::from(screen[0])).round() as i32 + i32::from(inset[0]),
+        (rect[1] * f64::from(screen[1])).round() as i32 + i32::from(inset[1]),
+    ])
 }
 
 /// Where pane `p`'s left edge is in its area, as a fraction.
