@@ -80,19 +80,9 @@ pub struct Inside {
     pub address: Address,
     /// Its name, as it answered.
     pub name: String,
-}
-
-impl Inside {
-    /// Whether `address` is this daemon's: the same socket.
-    pub fn is(&self, address: &Address) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        let id = |a: &Address| {
-            std::fs::metadata(a.as_arg())
-                .ok()
-                .map(|m| (m.dev(), m.ino()))
-        };
-        *address == self.address || id(address).is_some_and(|i| Some(i) == id(&self.address))
-    }
+    /// This process's terminal, one of its Neovim's `:terminal`s; None
+    /// if it has none.
+    pub tty: Option<Vec<u8>>,
 }
 
 /// Proves `inside`, `$<NAME>`, names the daemon whose own Neovim this
@@ -144,7 +134,11 @@ pub fn prove_inside(
         ));
         return None;
     }
-    Some(Inside { address, name })
+    Some(Inside {
+        address,
+        name,
+        tty: tty.map(<[u8]>::to_vec),
+    })
 }
 
 /// This process's terminal: the first of fds 0, 1 and 2 that is one, by
@@ -271,6 +265,7 @@ mod tests {
             let inside = inside.map(|a| Inside {
                 address: a.clone(),
                 name: "x".into(),
+                tty: None,
             });
             let found = find_daemon(|| self.base(), target, inside.as_ref());
             found.map_err(|e| e.to_string())
@@ -364,14 +359,9 @@ mod tests {
                     crate::daemon::attach_conn::idle_status(&Address::from_arg("/x".into()), "/l");
                 status.terminals = Some(terminals.clone());
                 let reply = Reply {
-                    ok: true,
-                    message: None,
                     v,
-                    build: "b".into(),
-                    name: "work".into(),
-                    pid: 1,
                     status: Some(status),
-                    waited: None,
+                    ..crate::daemon::control::test_reply(true)
                 };
                 let _ = s.write_all(&Message::Reply(reply).encode().unwrap());
             }
@@ -395,12 +385,14 @@ mod tests {
             });
             (got, warned)
         };
-        let work = Inside {
+        let work = |tty: Option<&str>| Inside {
             address: address.clone(),
             name: "work".into(),
+            tty: tty.map(|t| t.as_bytes().to_vec()),
         };
-        assert_eq!(prove(Some("/dev/ttys004")), (Some(work.clone()), vec![]));
-        assert_eq!(prove(None), (Some(work), vec![]));
+        let ours = Some("/dev/ttys004");
+        assert_eq!(prove(ours), (Some(work(ours)), vec![]));
+        assert_eq!(prove(None), (Some(work(None)), vec![]));
         let var = inside_var();
         assert_eq!(
             prove(Some("/dev/ttys009")),

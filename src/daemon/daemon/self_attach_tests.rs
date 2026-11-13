@@ -567,9 +567,12 @@ fn open_waited(rig: &mut Rig, file: &str) -> UnixStream {
     let purpose = Purpose::Open {
         pid: None,
         cwd: b"/".to_vec(),
-        file: file.as_bytes().to_vec(),
-        line: None,
-        wait: true,
+        tty: None,
+        open: crate::attach::OpenFile {
+            file: file.as_bytes().to_vec(),
+            line: None,
+            wait: crate::attach::Wait::UntilDone,
+        },
     };
     let hello = Message::Hello(Hello::new(purpose)).encode().unwrap();
     let helper = UnixStream::connect(&rig.sock).unwrap();

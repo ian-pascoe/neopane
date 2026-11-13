@@ -7,7 +7,7 @@
 use std::os::unix::net::UnixStream;
 
 use super::*;
-use crate::attach::{Hello, Purpose, Reply};
+use crate::attach::{Hello, OpenFile, Purpose, Reply, Wait};
 use crate::daemon::attach_conn;
 use crate::daemon::control::shown_files;
 
@@ -15,7 +15,7 @@ use crate::daemon::control::shown_files;
 pub(crate) struct Asked {
     pub(super) req: u32,
     stream: UnixStream,
-    wait: bool,
+    wait: Wait,
     /// The file, as messages show it.
     shown: String,
 }
@@ -38,19 +38,13 @@ pub(crate) struct Opens {
 
 impl Daemon {
     /// An `open` control request, `hello`, on `stream`: its file is opened,
-    /// and it is answered once Neovim has it, or with `wait`, once it's done.
+    /// beside the caller's `:terminal`, and it is answered once Neovim has
+    /// it, or for a waited file, once it's done.
     pub(super) fn on_open(&mut self, stream: UnixStream, hello: Hello) -> Result<()> {
-        let Purpose::Open {
-            cwd,
-            file,
-            line,
-            wait,
-            ..
-        } = hello.purpose
-        else {
+        let Purpose::Open { cwd, tty, open, .. } = hello.purpose else {
             unreachable!("on_hello passes only open");
         };
-        let file = attach_conn::file_against_cwd(&file, &cwd);
+        let file = attach_conn::file_against_cwd(&open.file, &cwd);
         let home = std::env::var_os("HOME");
         let home = home.as_deref().map(|h| h.as_encoded_bytes());
         let shown = shown_files(std::slice::from_ref(&file), Some(&cwd), home);
@@ -59,11 +53,13 @@ impl Daemon {
             self.answer(&stream, false, Some(message), None);
             return Ok(());
         }
+        let wait = open.wait;
         log_info!(
             "{NAME} daemon: opening {shown}{}",
-            if wait { ", waited" } else { "" }
+            if wait.until_done() { ", waited" } else { "" }
         );
-        let req = windows::edit(&mut self.nvim.client, &file, line, wait);
+        let open = OpenFile { file, ..open };
+        let req = windows::edit(&mut self.nvim.client, &open, tty.as_deref());
         self.nvim.client.flush()?;
         self.opens.asked.push(Asked {
             req,
@@ -94,10 +90,10 @@ impl Daemon {
         }
         let edited = windows::parse_edit(&mut result)?;
         match (asked.wait, edited.watched) {
-            (false, _) => self.answer(&asked.stream, true, None, None),
+            (Wait::ForWindow, _) => self.answer(&asked.stream, true, None, None),
             // done already
-            (true, false) => self.answer(&asked.stream, true, None, Some(true)),
-            (true, true) => self.opens.waiting.push(Waiting {
+            (Wait::UntilDone, false) => self.answer(&asked.stream, true, None, Some(true)),
+            (Wait::UntilDone, true) => self.opens.waiting.push(Waiting {
                 buf: edited.buf,
                 name: edited.name,
                 stream: asked.stream,
@@ -134,7 +130,7 @@ impl Daemon {
         let streams = opens
             .asked
             .into_iter()
-            .map(|a| (a.stream, a.shown, a.wait.then_some(true)))
+            .map(|a| (a.stream, a.shown, a.wait.until_done().then_some(true)))
             .chain(
                 opens
                     .waiting

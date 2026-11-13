@@ -832,8 +832,14 @@ fn a_running_name_takes_only_line_and_file() {
 
 #[test]
 fn inside_a_daemons_neovim_only_line_and_file_open() {
-    let inside = |line: &str| inside_file(&args(line), "work");
-    let file = |f: &str, line| Ok(Some((OsString::from(f), line)));
+    let inside = |line: &str| inside_file(&args(line), "work", Wait::UntilDone);
+    let file = |f: &str, line| {
+        Ok(Some(OpenFile {
+            file: f.as_bytes().to_vec(),
+            line,
+            wait: Wait::UntilDone,
+        }))
+    };
     assert_eq!(inside("notes.md"), file("notes.md", None));
     // as less and visudo call $EDITOR
     assert_eq!(inside("+12 notes.md"), file("notes.md", Some(12)));

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::dir::{Address, Base};
 use super::pane_helper::peer_uid;
-use crate::attach::{End, Frame, Hello, Message, Purpose, Reply};
+use crate::attach::{End, Frame, Hello, Message, OpenFile, Purpose, Reply, Wait};
 
 /// How long each daemon `list` asks has to answer.
 pub const LIST_WITHIN: Duration = Duration::from_secs(2);
@@ -141,38 +141,40 @@ fn read_reply(stream: &mut UnixStream, due: Option<(Instant, Duration)>) -> Resu
 /// How long `--no-wait` waits for Neovim to open its file.
 pub const NO_WAIT_WITHIN: Duration = Duration::from_secs(10);
 
-/// Asks the daemon at `address` to open `file`, absolute, made so against
-/// `cwd`, the cursor on `line`: with `wait`, it answers once the file is
-/// done, however long that takes; else once Neovim has it, within
-/// `NO_WAIT_WITHIN`.
+/// Asks the daemon at `address` to open `open`'s file, absolute, made so
+/// against `cwd`, beside the `:terminal` on `tty`, this process's terminal.
+/// A waited file is answered once it's done, however long that takes; else
+/// once Neovim has it, within `NO_WAIT_WITHIN`.
 pub fn open(
     address: &Address,
     cwd: Vec<u8>,
-    file: Vec<u8>,
-    line: Option<u32>,
-    wait: bool,
+    tty: Option<Vec<u8>>,
+    open: OpenFile,
 ) -> Result<Reply, Failure> {
+    let within = match open.wait {
+        Wait::UntilDone => None,
+        Wait::ForWindow => Some(NO_WAIT_WITHIN),
+    };
     let purpose = Purpose::Open {
         pid: Some(std::process::id()),
         cwd,
-        file,
-        line,
-        wait,
+        tty,
+        open,
     };
-    request(address, purpose, (!wait).then_some(NO_WAIT_WITHIN))
+    request(address, purpose, within)
 }
 
-/// How an `open` of `shown` in daemon `daemon`, `wait`ed for or not, went,
-/// as one line after `<name>: `; None when it went well (#94 decisions 17
-/// and 28).
+/// How an `open` of `shown` in daemon `daemon`, waiting as `wait` says,
+/// went, as one line after `<name>: `; None when it went well (#94
+/// decisions 17 and 28).
 pub fn opened_line(
     daemon: &str,
     shown: &str,
-    wait: bool,
+    wait: Wait,
     answer: &Result<Reply, Failure>,
 ) -> Option<String> {
     Some(match answer {
-        Ok(r) if r.ok && (!wait || r.waited == Some(true)) => return None,
+        Ok(r) if r.ok && (!wait.until_done() || r.waited == Some(true)) => return None,
         Ok(r) if r.ok => format!("{daemon} can't wait for a file (an older build); not waiting"),
         Ok(r) => r
             .message
@@ -351,6 +353,22 @@ pub fn shown_files(files: &[Vec<u8>], dir: Option<&[u8]>, home: Option<&[u8]>) -
         .join(", ")
 }
 
+/// A reply from daemon `work`, pid 1, of this attach protocol version, for
+/// tests.
+#[cfg(test)]
+pub(crate) fn test_reply(ok: bool) -> Reply {
+    Reply {
+        ok,
+        message: None,
+        v: crate::attach::ATTACH_PROTOCOL_VERSION,
+        build: "b".into(),
+        name: "work".into(),
+        pid: 1,
+        status: None,
+        waited: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,43 +403,38 @@ mod tests {
 
     #[test]
     fn how_an_open_went_is_one_line_none_when_it_went_well() {
-        use crate::attach::{ATTACH_PROTOCOL_VERSION, End, Refusal};
+        use crate::attach::{End, Refusal};
         let reply = |ok: bool, message: Option<&str>, waited: Option<bool>| {
             Ok(Reply {
-                ok,
                 message: message.map(String::from),
-                v: ATTACH_PROTOCOL_VERSION,
-                build: "b".into(),
-                name: "work".into(),
-                pid: 1,
-                status: None,
                 waited,
+                ..test_reply(ok)
             })
         };
         let line = |wait, answer| opened_line("work", "notes.md", wait, &answer);
-        assert_eq!(None, line(true, reply(true, None, Some(true))));
-        assert_eq!(None, line(false, reply(true, None, None)));
+        assert_eq!(None, line(Wait::UntilDone, reply(true, None, Some(true))));
+        assert_eq!(None, line(Wait::ForWindow, reply(true, None, None)));
         assert_eq!(
             Some("work can't wait for a file (an older build); not waiting".into()),
-            line(true, reply(true, None, None))
+            line(Wait::UntilDone, reply(true, None, None))
         );
         let unsaved = "notes.md's terminal closed with unsaved changes";
         assert_eq!(
             Some(unsaved.into()),
-            line(true, reply(false, Some(unsaved), Some(true)))
+            line(Wait::UntilDone, reply(false, Some(unsaved), Some(true)))
         );
         assert_eq!(
             Some("work hasn't opened notes.md in 10 s (is Neovim waiting at a prompt?)".into()),
-            line(false, Err(Failure::NoAnswer(NO_WAIT_WITHIN)))
+            line(Wait::ForWindow, Err(Failure::NoAnswer(NO_WAIT_WITHIN)))
         );
         assert_eq!(
             Some("work ended before notes.md was done".into()),
-            line(true, Err(Failure::HungUp))
+            line(Wait::UntilDone, Err(Failure::HungUp))
         );
         let z = End::refusal(Refusal::Stopping, "the daemon is ending");
         assert_eq!(
             Some("the daemon is ending".into()),
-            line(true, Err(Failure::Refused(z)))
+            line(Wait::UntilDone, Err(Failure::Refused(z)))
         );
     }
 
@@ -439,18 +452,9 @@ mod tests {
 
     #[test]
     fn a_reply_from_a_daemon_that_already_hung_up_is_read() {
-        use crate::attach::{ATTACH_PROTOCOL_VERSION, Message, Reply};
+        use crate::attach::Message;
         let (mut ours, mut theirs) = UnixStream::pair().unwrap();
-        let reply = Reply {
-            ok: true,
-            message: None,
-            v: ATTACH_PROTOCOL_VERSION,
-            build: "b".into(),
-            name: "work".into(),
-            pid: 1,
-            status: None,
-            waited: None,
-        };
+        let reply = test_reply(true);
         theirs
             .write_all(&Message::Reply(reply.clone()).encode().unwrap())
             .unwrap();
@@ -514,21 +518,15 @@ mod tests {
 
     #[test]
     fn a_daemon_still_there_after_agreeing_to_stop_is_still_ending() {
-        use crate::attach::{ATTACH_PROTOCOL_VERSION, Message, Reply};
+        use crate::attach::{Message, Reply};
         let (_scratch, claimed, server) = live_work();
         let answering = std::thread::spawn(move || {
             let (mut s, _) = server.accept().unwrap();
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
             let reply = Message::Reply(Reply {
-                ok: true,
-                message: None,
-                v: ATTACH_PROTOCOL_VERSION,
-                build: "b".into(),
-                name: "work".into(),
                 pid: 4242,
-                status: None,
-                waited: None,
+                ..test_reply(true)
             });
             s.write_all(&reply.encode().unwrap()).unwrap();
             server

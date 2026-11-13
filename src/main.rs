@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use neopane::attach::Transport;
+use neopane::attach::{OpenFile, Transport, Wait};
 use neopane::cli::{self, AttachSelf, Command, KillTarget, Start, Target, UsageError, report};
 use neopane::daemon::control::{self, Failure, Killed, Listed};
 use neopane::daemon::dir::{self, Address};
@@ -76,7 +76,7 @@ fn run(command: Command) -> Result<ExitCode> {
                 transport.unwrap_or_else(|| Transport::from_env(|w| eprintln!("{NAME}: {w}")));
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
-        Command::AttachSelf(attach) => Ok(attach_self(attach, inside(), false)),
+        Command::AttachSelf(attach) => Ok(attach_self(attach, inside(), Wait::UntilDone)),
         Command::DebugKeys => done(debug::keys::run()),
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
         Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
@@ -120,8 +120,9 @@ fn run_start(start: Start) -> ExitCode {
         return fail("--detach isn't built yet");
     }
     let inside = inside();
+    let wait = Wait::unless(start.no_wait);
     match start.attach_to_address() {
-        Ok(Some(attach)) => return attach_self(attach, inside, start.no_wait),
+        Ok(Some(attach)) => return attach_self(attach, inside, wait),
         Ok(None) => {}
         Err(err) => return usage_error(err),
     }
@@ -129,18 +130,20 @@ fn run_start(start: Start) -> ExitCode {
         let base = dir::base();
         // naming the daemon it runs in (#94 decision 24)
         if let Some(i) = &inside
-            && base.as_ref().is_ok_and(|b| i.is(&b.address(name)))
+            && base
+                .as_ref()
+                .is_ok_and(|b| i.address.same_daemon(&b.address(name)))
         {
-            return open_inside(i, &start.nvim_args, start.no_wait);
+            return open_inside(i, &start.nvim_args, wait);
         }
         if base.is_ok_and(|base| base.live(name)) {
             return match start.attach_to_running(name) {
-                Ok(attach) => attach_self(attach, inside, start.no_wait),
+                Ok(attach) => attach_self(attach, inside, wait),
                 Err(err) => usage_error(err),
             };
         }
     } else if let Some(i) = &inside {
-        return open_inside(i, &start.nvim_args, start.no_wait);
+        return open_inside(i, &start.nvim_args, wait);
     }
     let launch = launch::Launch {
         name: start.name,
@@ -161,9 +164,9 @@ fn inside() -> Option<find::Inside> {
 
 /// Inside daemon `inside`'s own Neovim, Neovim's arguments `args` open
 /// only `[+LINE] [--] FILE` (#94 decision 17).
-fn open_inside(inside: &find::Inside, args: &[OsString], no_wait: bool) -> ExitCode {
-    match cli::inside_file(args, &inside.name) {
-        Ok(Some((file, line))) => open_waited(inside, &file, line, no_wait),
+fn open_inside(inside: &find::Inside, args: &[OsString], wait: Wait) -> ExitCode {
+    match cli::inside_file(args, &inside.name, wait) {
+        Ok(Some(open)) => open_waited(inside, open),
         Ok(None) => already_inside(inside),
         Err(err) => usage_error(err),
     }
@@ -176,11 +179,14 @@ fn already_inside(inside: &find::Inside) -> ExitCode {
     ))
 }
 
-/// Opens `file` at `line` in `inside`'s Neovim, a waited file unless
-/// `no_wait` (ADR 0015): exits 0 once it's done, or once Neovim has it.
-fn open_waited(inside: &find::Inside, file: &OsStr, line: Option<u32>, no_wait: bool) -> ExitCode {
-    let shown = file.to_string_lossy();
-    let path = match std::path::absolute(file) {
+/// Opens `open`'s file, as typed, in `inside`'s Neovim, beside this
+/// terminal (ADR 0015): exits 0 once it's done, or for `--no-wait`, once
+/// Neovim has it.
+fn open_waited(inside: &find::Inside, open: OpenFile) -> ExitCode {
+    use std::os::unix::ffi::OsStringExt;
+    let typed = OsString::from_vec(open.file);
+    let shown = typed.to_string_lossy().into_owned();
+    let file = match std::path::absolute(&typed) {
         Ok(p) => p.into_os_string().into_encoded_bytes(),
         Err(e) => return fail(&format!("can't make the file's path absolute: {e}")),
     };
@@ -188,8 +194,10 @@ fn open_waited(inside: &find::Inside, file: &OsStr, line: Option<u32>, no_wait: 
         .map(|d| d.into_os_string().into_encoded_bytes())
         .unwrap_or_default();
     exit_on_interrupt();
-    let answer = control::open(&inside.address, cwd, path, line, !no_wait);
-    match control::opened_line(&inside.name, &shown, !no_wait, &answer) {
+    let wait = open.wait;
+    let open = OpenFile { file, ..open };
+    let answer = control::open(&inside.address, cwd, inside.tty.clone(), open);
+    match control::opened_line(&inside.name, &shown, wait, &answer) {
         None => ExitCode::SUCCESS,
         Some(line) => fail(&line),
     }
@@ -208,15 +216,22 @@ fn exit_on_interrupt() {
 /// A self-attach to a running daemon, found as #94 decision 23 says, or
 /// in the daemon whose own Neovim this runs in, its file opened there
 /// (decision 24). A daemon not found is a failed self-attach, held as one.
-fn attach_self(attach: AttachSelf, inside: Option<find::Inside>, no_wait: bool) -> ExitCode {
+fn attach_self(attach: AttachSelf, inside: Option<find::Inside>, wait: Wait) -> ExitCode {
     let started = std::time::Instant::now();
     let address = match find_daemon(dir::base, &attach.to, inside.as_ref()) {
         Ok(address) => address,
         Err(e) => return helper_exit(pane_helper::launcher_failed(e.to_string(), started)),
     };
-    if let Some(i) = inside.filter(|i| i.is(&address)) {
-        return match &attach.file {
-            Some(file) => open_waited(&i, file, attach.line, no_wait),
+    if let Some(i) = inside.filter(|i| i.address.same_daemon(&address)) {
+        return match attach.file {
+            Some(file) => open_waited(
+                &i,
+                OpenFile {
+                    file: file.into_encoded_bytes(),
+                    line: attach.line,
+                    wait,
+                },
+            ),
             None => already_inside(&i),
         };
     }
