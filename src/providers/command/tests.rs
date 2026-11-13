@@ -926,13 +926,7 @@ fn a_pair_takes_open_and_close_from_its_terminal_half_and_the_rest_from_its_layo
     let spec = Spec::of(&pair).unwrap();
     assert!(spec.pair);
     assert_eq!("ghostty+aerospace", spec.name);
-    let from = |cap: Capability| {
-        spec.commands
-            .iter()
-            .filter(|c| c.cap == cap)
-            .map(|c| c.cap)
-            .count()
-    };
+    let from = |cap: Capability| spec.commands.iter().filter(|c| c.cap == cap).count();
     for cap in [
         Capability::Open,
         Capability::Close,

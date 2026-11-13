@@ -8,6 +8,9 @@ use super::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
 };
 
+/// What a test runs with each ask.
+pub(crate) type OnAsk = Box<dyn FnMut(&Ask)>;
+
 #[derive(Default)]
 pub(crate) struct FakeProvider {
     pub caps: CapabilitySet,
@@ -27,7 +30,7 @@ pub(crate) struct FakeProvider {
     pub pair: bool,
     pub wants_title: bool,
     /// Run with each ask as it is asked.
-    pub on_ask: Option<Box<dyn FnMut(&Ask)>>,
+    pub on_ask: Option<OnAsk>,
     events: VecDeque<ProviderEvent>,
 }
 
