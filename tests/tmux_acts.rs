@@ -269,3 +269,38 @@ fn open_tab_page_opens_a_window_after_the_origins_running_the_attach() {
     drop(tmux);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn report_layout_puts_the_panes_a_zoom_hides_in_an_area_of_their_own() {
+    if !have_tmux() {
+        return;
+    }
+    let (tmux, dir) = server("tmux-zoomed");
+    let right = split(&tmux, "%0", &["-h"]);
+    tmux.run(&["resize-pane", "-Z", "-t", "%0"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&done(&tmux, "report_layout", &[])).unwrap();
+    let areas: Vec<(String, Vec<String>)> = report["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let ids = a["terminals"].as_array().unwrap();
+            let ids = ids.iter().map(|t| t["terminal"].as_str().unwrap().into());
+            (a["id"].as_str().unwrap().into(), ids.collect())
+        })
+        .collect();
+    assert_eq!(
+        areas,
+        [
+            ("@0".to_string(), vec!["%0".to_string()]),
+            ("@0~hidden".to_string(), vec![right]),
+        ]
+    );
+    assert_eq!(
+        report["areas"][0]["terminals"][0]["rect"],
+        serde_json::json!([0.0, 0.0, 1.0, 1.0])
+    );
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -46,7 +46,6 @@ impl Cell {
     }
 
     /// Its panes, in order, floating ones too.
-    #[cfg(test)]
     pub(super) fn panes(&self) -> Vec<&Cell> {
         match &self.kind {
             Kind::Pane(_) => vec![self],
