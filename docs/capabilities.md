@@ -183,7 +183,10 @@ last layout it read.
   terminal's cells plus its inset, divided by its share of the area, on
   each axis.
 - `focus` (optional): the terminal the user types into. Without `events`,
-  a change here is how the daemon learns the user moved focus.
+  a change here is how the daemon learns the user moved focus. A report
+  whose command started before a `focus` or `focus_direction` command
+  ended may have read focus before that act landed: its `focus` is
+  ignored, and the report the daemon runs after the act tells it.
 - Unknown fields are ignored.
 
 Without `events`, the daemon runs `report_layout` after each of its own

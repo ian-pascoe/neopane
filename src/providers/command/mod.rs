@@ -15,6 +15,11 @@
 //!   the live layout (`layout.rs`). Exit 69, or a command that can't start,
 //!   is unsupported; anything else fails. The first 64 KiB of stderr goes
 //!   to the log.
+//! - `report_layout` runs beside `focus` and `focus_direction`, in another
+//!   queue: a report started before one of them ended may have read focus
+//!   before it landed, so its `focus` is dropped. The daemon takes a
+//!   reported focus after the act for the user's own move
+//!   (`provider_focus.rs`), and reads the layout again after the act.
 //! - At its timeout its group gets SIGTERM, and SIGKILL 1 s later. The act
 //!   itself is timed out by `asks.rs`, at the same deadline: a run past it
 //!   answers nothing, but says the layout may have changed once it ends.
@@ -231,6 +236,8 @@ struct Running {
     /// Past its deadline: its group was sent SIGTERM, and it answers
     /// nothing.
     timed_out: bool,
+    /// `focus_acts_ended` as it started.
+    focus_acts_before: u64,
 }
 
 /// `events`, while the runner has it.
@@ -269,6 +276,11 @@ pub(crate) struct CommandProvider {
     /// Its own loop: its pipes, its children's exits and its timer.
     inner_loop: Loop,
     running: Vec<Running>,
+    /// How many `focus` and `focus_direction` runs have ended. A
+    /// `report_layout` that started before one ended may have read focus
+    /// before it landed: its `focus` is dropped, as `provider_focus.rs`
+    /// takes a reported focus after the act for the user's own move.
+    focus_acts_ended: u64,
     /// Timed-out runs' groups, and when they get SIGKILL.
     kills: Vec<(libc::pid_t, Instant)>,
     events: VecDeque<ProviderEvent>,
@@ -318,6 +330,7 @@ impl CommandProvider {
             exe: exe.map(Path::to_path_buf),
             inner_loop,
             running: Vec::new(),
+            focus_acts_ended: 0,
             kills: Vec::new(),
             events: VecDeque::new(),
             answers_due: Vec::new(),
@@ -543,11 +556,12 @@ impl CommandProvider {
     fn tend(&mut self) {
         let now = (self.clock)();
         self.tend_events(now);
+        let mut ended = Vec::new();
         let mut i = 0;
         while i < self.running.len() {
             let r = &mut self.running[i];
             r.run.read(&self.inner_loop);
-            let Some(ended) = r.run.ended(&self.inner_loop) else {
+            let Some(end) = r.run.ended(&self.inner_loop) else {
                 if !r.timed_out && r.due <= now {
                     r.timed_out = true;
                     signal_group(r.run.group(), libc::SIGTERM);
@@ -561,8 +575,20 @@ impl CommandProvider {
                 i += 1;
                 continue;
             };
-            let r = self.running.remove(i);
-            let outcome = self.outcome(r.cap, &ended);
+            ended.push((self.running.remove(i), end));
+        }
+        // focus acts first: a report that ended with one read before it
+        self.focus_acts_ended += ended
+            .iter()
+            .filter(|(r, _)| matches!(r.cap, Capability::Focus | Capability::FocusDirection))
+            .count() as u64;
+        for (r, end) in ended {
+            let mut outcome = self.outcome(r.cap, &end);
+            if let Outcome::Done(Answer::Layout(l)) = &mut outcome
+                && r.focus_acts_before < self.focus_acts_ended
+            {
+                l.current = None;
+            }
             if !r.timed_out {
                 self.events
                     .push_back(ProviderEvent::Answered { id: r.id, outcome });
@@ -651,6 +677,7 @@ impl PaneProvider for CommandProvider {
             run,
             due: now + timeout,
             timed_out: false,
+            focus_acts_before: self.focus_acts_ended,
         });
         self.arm_timer(now);
     }

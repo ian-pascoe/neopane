@@ -486,6 +486,20 @@ impl Live {
         until(|s: &String| s == want, || self.shown())
     }
 
+    /// Waits for Neovim's tab page `n` and tmux's `shown` window and pane,
+    /// then lets the reports after the focus act come back: a report read
+    /// before the act landed mustn't send either back.
+    fn stays_on(&self, n: u32, shown: &str) {
+        let want = (n.to_string(), shown.to_string());
+        let now = || {
+            let tab = remote_expr(&self.ending.sock, "tabpagenr()").unwrap_or_default();
+            (tab, self.shown())
+        };
+        assert_eq!(until(|got| *got == want, now), want, "{}", self.log());
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(now(), want, "it went back: {}", self.log());
+    }
+
     /// `:vsplit`, once its pane has attached and been placed: the new
     /// window's pane, left of `%0`.
     fn vsplit(&self) -> String {
@@ -549,10 +563,20 @@ fn tabnew_opens_a_tmux_window_and_gt_focuses_it() {
     let tab = now.lines().nth(1).unwrap().to_string();
     let s = until(|s: &serde_json::Value| s["panes"] == 2, || live.status());
     assert_eq!(s["panes"], 2, "its attach never came: {}", live.log());
+    // :tabnew focuses its window, and stays there
+    live.stays_on(2, &tab);
     live.ex("tabnext 1");
-    assert_eq!(live.until_shown("@0 %0"), "@0 %0", "{}", live.log());
+    live.stays_on(1, "@0 %0");
     live.normal("gt");
-    assert_eq!(live.until_shown(&tab), tab, "{}", live.log());
+    live.stays_on(2, &tab);
+    // back and forth at once: each focus act runs beside the report the
+    // one before it ended with, read before it landed
+    for _ in 0..5 {
+        live.ex("tabnext 1");
+        assert_eq!(live.until_shown("@0 %0"), "@0 %0", "{}", live.log());
+        live.normal("gt");
+        live.stays_on(2, &tab);
+    }
 }
 
 /// Only a tab page with a tab page area has its panes placed and sized,
