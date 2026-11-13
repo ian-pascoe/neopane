@@ -620,61 +620,97 @@ fn tabnew_opens_a_tmux_window_and_gt_focuses_it() {
     }
 }
 
+/// Which way a test resizes: `:vertical resize`, columns, or `:resize`,
+/// rows.
+#[derive(Clone, Copy)]
+enum Axis {
+    Columns,
+    Rows,
+}
+
+impl Axis {
+    /// The tmux formats of a pane's start and size along it.
+    fn formats(self) -> &'static str {
+        match self {
+            Axis::Columns => "#{pane_left} #{pane_width}",
+            Axis::Rows => "#{pane_top} #{pane_height}",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Axis::Columns => "vertical resize",
+            Axis::Rows => "resize",
+        }
+    }
+
+    /// The cells of window `win`'s pane along it, as Neovim has the window:
+    /// a pane's rows are its text, a statusline and the message rows.
+    fn cells(self, win: &str) -> String {
+        match self {
+            Axis::Columns => format!("winwidth({win})"),
+            Axis::Rows => format!("winheight({win}) + 1 + &cmdheight"),
+        }
+    }
+}
+
 impl Live {
-    /// The widths of tmux window `window`'s panes, left to right.
-    fn widths(&self, window: &str) -> Vec<i32> {
+    /// The sizes of tmux window `window`'s panes along `axis`, first to last.
+    fn sizes(&self, window: &str, axis: Axis) -> Vec<i32> {
         let mut list = self.tmux.command();
-        list.args([
-            "list-panes",
-            "-t",
-            window,
-            "-F",
-            "#{pane_left} #{pane_width}",
-        ]);
+        list.args(["list-panes", "-t", window, "-F", axis.formats()]);
         let out = list.output().unwrap().stdout;
         let mut panes: Vec<(i32, i32)> = text(&out)
             .lines()
             .filter_map(|l| {
-                let (left, width) = l.split_once(' ')?;
-                Some((left.parse().ok()?, width.parse().ok()?))
+                let (start, size) = l.split_once(' ')?;
+                Some((start.parse().ok()?, size.parse().ok()?))
             })
             .collect();
         panes.sort();
-        panes.into_iter().map(|(_, w)| w).collect()
+        panes.into_iter().map(|(_, n)| n).collect()
     }
 
     /// Waits for window `win`, of tab page `tab`, to be external, and its
-    /// pane, the `nth` from the left of tmux window `window`'s two, to be
-    /// its width: a size Neovim gives a window before it is external isn't
-    /// told.
-    fn until_fitted(&self, tab: u32, win: &str, window: &str, nth: usize) {
+    /// pane, the `nth` along `axis` of tmux window `window`'s two, to be its
+    /// size: a size Neovim gives a window before it is external isn't told.
+    fn until_fitted(&self, tab: u32, win: &str, window: &str, axis: Axis, nth: usize) {
         let fitted = format!(
             "execute('{tab}tabnext') .. \
-             (luaeval('vim.api.nvim_win_get_config({win}).external') ? winwidth({win}) : 0)"
+             (luaeval('vim.api.nvim_win_get_config({win}).external') ? {} : 0)",
+            axis.cells(win)
         );
         let fitted = || {
-            let w = remote_expr(&self.ending.sock, &fitted).and_then(|w| w.parse::<i32>().ok());
-            (w.unwrap_or(0), self.widths(window))
+            let n = remote_expr(&self.ending.sock, &fitted).and_then(|n| n.parse::<i32>().ok());
+            (n.unwrap_or(0), self.sizes(window, axis))
         };
-        let placed = |(w, widths): &(i32, Vec<i32>)| widths.len() == 2 && widths[nth] == *w;
+        let placed = |(n, sizes): &(i32, Vec<i32>)| sizes.len() == 2 && sizes[nth] == *n;
         let got = until(placed, fitted);
         assert!(placed(&got), "{got:?}: {}", self.log());
     }
 
-    /// `:vertical resize` of window `win`, of tab page `tab`, to each of
-    /// `sizes` gives its pane, the `nth` from the left of tmux window
-    /// `window`'s, that many columns, within one, before the next.
-    fn resizes(&self, tab: u32, win: &str, window: &str, nth: usize, sizes: &[i32]) {
+    /// `:vertical resize` or `:resize` of window `win`, of tab page `tab`,
+    /// to each of `sizes` gives its pane, the `nth` along `axis` of tmux
+    /// window `window`'s, that many columns, within one, or that many rows
+    /// and its statusline and message rows, before the next.
+    fn resizes(&self, tab: u32, win: &str, window: &str, axis: Axis, nth: usize, sizes: &[i32]) {
         for &n in sizes {
             // Neovim tells a tab page's layout only while it is current
-            let resize =
-                format!("execute('{tab}tabnext') .. win_execute({win}, 'vertical resize {n}')");
+            let resize = format!(
+                "execute('{tab}tabnext') .. win_execute({win}, '{} {n}')",
+                axis.command()
+            );
             remote_expr(&self.ending.sock, &resize).unwrap();
-            let sized = |w: &Vec<i32>| w.len() == 2 && (w[nth] - n).abs() <= 1;
-            let got = until(sized, || self.widths(window));
+            let (want, within) = match axis {
+                Axis::Columns => (n, 1),
+                // as Live starts Neovim, 'cmdheight' is 1
+                Axis::Rows => (n + 2, 0),
+            };
+            let sized = |w: &Vec<i32>| w.len() == 2 && (w[nth] - want).abs() <= within;
+            let got = until(sized, || self.sizes(window, axis));
             assert!(
                 sized(&got),
-                "{got:?} columns, not {n} for {win}: {}",
+                "{got:?} cells, not {want} for {win}: {}",
                 self.log()
             );
         }
@@ -698,10 +734,10 @@ fn vertical_resize_gives_the_tmux_pane_that_many_columns() {
     // a size Neovim gives a window before it is external isn't told:
     // resize once it is, fitted to its pane; the split too, not left at
     // Neovim's full width
-    live.until_fitted(2, left_win, "@1", 0);
-    live.until_fitted(2, right_win, "@1", 1);
-    live.resizes(2, right_win, "@1", 1, &[30, 60, 45]);
-    live.resizes(2, left_win, "@1", 0, &[30, 60, 45]);
+    live.until_fitted(2, left_win, "@1", Axis::Columns, 0);
+    live.until_fitted(2, right_win, "@1", Axis::Columns, 1);
+    live.resizes(2, right_win, "@1", Axis::Columns, 1, &[30, 60, 45]);
+    live.resizes(2, left_win, "@1", Axis::Columns, 0, &[30, 60, 45]);
 }
 
 /// The first tab page has no tab page area: its panes stay where they
@@ -715,7 +751,26 @@ fn vertical_resize_in_the_first_tab_page_gives_the_tmux_pane_that_many_columns()
     live.vsplit();
     let left_win = remote_expr(&live.ending.sock, "win_getid()").unwrap();
     assert_ne!(left_win, right_win);
-    live.until_fitted(1, &left_win, "@0", 0);
-    live.resizes(1, &left_win, "@0", 0, &[30, 60, 45]);
-    live.resizes(1, &right_win, "@0", 1, &[30, 60, 45]);
+    live.until_fitted(1, &left_win, "@0", Axis::Columns, 0);
+    live.resizes(1, &left_win, "@0", Axis::Columns, 0, &[30, 60, 45]);
+    live.resizes(1, &right_win, "@0", Axis::Columns, 1, &[30, 60, 45]);
+}
+
+/// `:resize` on the top window of a split, in the first tab page, gives
+/// its tmux pane that many rows, its statusline and its message row. (The
+/// bottom window's pane is two rows short: each pane has a message row and
+/// tmux a border between them, where Neovim's layout has one command line.)
+#[test]
+fn resize_gives_the_tmux_pane_that_many_rows() {
+    let Some(live) = Live::start("tmux-rr") else {
+        return;
+    };
+    let bottom_win = remote_expr(&live.ending.sock, "win_getid()").unwrap();
+    live.ex("split");
+    let s = until(|s: &serde_json::Value| s["panes"] == 2, || live.status());
+    assert_eq!(s["panes"], 2, "its attach never came: {}", live.log());
+    let top_win = remote_expr(&live.ending.sock, "win_getid()").unwrap();
+    assert_ne!(top_win, bottom_win);
+    live.until_fitted(1, &top_win, "@0", Axis::Rows, 0);
+    live.resizes(1, &top_win, "@0", Axis::Rows, 0, &[5, 15, 9]);
 }
