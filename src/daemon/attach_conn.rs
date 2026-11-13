@@ -3,7 +3,7 @@
 //! `docs/attach-protocol.md` is the reference.
 
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -349,27 +349,10 @@ pub(crate) fn attach_hello_of(
 /// terminal handed over, else of the device at `path`, the hello's tty, as
 /// a relayed attach has it. None if neither is a terminal.
 pub(crate) fn tty_device(tty: Option<&OwnedFd>, path: &[u8]) -> Option<u64> {
-    // SAFETY: a zeroed stat is valid for fstat and stat to fill.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let r = match tty {
-        // SAFETY: fstat on an fd we own.
-        Some(fd) => unsafe { libc::fstat(fd.as_raw_fd(), &mut st) },
-        None if !path.is_empty() => {
-            let path = std::ffi::CString::new(path).ok()?;
-            // SAFETY: stat on a NUL-terminated path.
-            unsafe { libc::stat(path.as_ptr(), &mut st) }
-        }
-        None => return None,
-    };
-    if r != 0 || st.st_mode & libc::S_IFMT != libc::S_IFCHR {
-        return None;
+    match tty {
+        Some(fd) => crate::providers::tty::of_fd(fd.as_fd()),
+        None => crate::providers::tty::of_path(path),
     }
-    // macOS's dev_t is signed; its process table's terminal isn't
-    #[cfg(target_os = "macos")]
-    let dev = u64::from(st.st_rdev as u32);
-    #[cfg(not(target_os = "macos"))]
-    let dev = st.st_rdev as u64;
-    Some(dev)
 }
 
 /// A hello's `file` made absolute against its terminal's `cwd`, if it

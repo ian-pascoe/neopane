@@ -125,7 +125,7 @@ impl RexProvider {
             events: VecDeque::new(),
             gone: false,
             finding: Vec::new(),
-            tty_of_pid: find::tty_of_pid,
+            tty_of_pid: crate::providers::tty::of_pid,
             trusted: false,
             last_find: None,
             deferred: Vec::new(),

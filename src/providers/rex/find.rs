@@ -97,87 +97,6 @@ pub(crate) fn verdict(
     }
 }
 
-/// `struct kinfo_proc` (<sys/sysctl.h>), which `libc` doesn't have: 648
-/// bytes on 64-bit macOS, `kp_eproc` at 296 and its `e_tdev` 276 into it.
-#[cfg(any(target_os = "macos", test))]
-const KINFO_PROC_SIZE: usize = 648;
-#[cfg(any(target_os = "macos", test))]
-const E_TDEV: usize = 296 + 276;
-
-/// The controlling terminal in a `kinfo_proc`, `kinfo`, if it is one whole
-/// and has one: `NODEV` is none.
-#[cfg(any(target_os = "macos", test))]
-fn e_tdev_of(kinfo: &[u8]) -> Option<u64> {
-    const NODEV: u32 = u32::MAX;
-    if kinfo.len() != KINFO_PROC_SIZE {
-        return None;
-    }
-    let tdev = u32::from_ne_bytes(kinfo[E_TDEV..E_TDEV + 4].try_into().ok()?);
-    (tdev != NODEV).then_some(u64::from(tdev))
-}
-
-/// Process `pid`'s controlling terminal: `sysctl KERN_PROC_PID`'s
-/// `kp_eproc.e_tdev`, which works for another user's process, as `login` is.
-#[cfg(target_os = "macos")]
-pub(crate) fn tty_of_pid(pid: u32) -> Option<u64> {
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_PID,
-        i32::try_from(pid).ok()?,
-    ];
-    let mut buf = [0u64; KINFO_PROC_SIZE / 8];
-    let mut len = KINFO_PROC_SIZE;
-    // SAFETY: `buf` is valid for `len` bytes, and `mib` for its length.
-    let r = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            buf.as_mut_ptr().cast(),
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    // a pid with no process answers no bytes
-    if r != 0 {
-        return None;
-    }
-    // SAFETY: `buf` holds `len` initialized bytes, at most its size.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), len) };
-    e_tdev_of(bytes)
-}
-
-/// Process `pid`'s controlling terminal: field 7 of `/proc/<pid>/stat`,
-/// `tty_nr`, as a `dev_t`.
-#[cfg(target_os = "linux")]
-pub(crate) fn tty_of_pid(pid: u32) -> Option<u64> {
-    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
-    tty_nr_of_stat(&stat).map(|nr| {
-        // the kernel's encoding: minor's low byte, major, then minor's rest
-        let major = (nr >> 8) & 0xfff;
-        let minor = (nr & 0xff) | ((nr >> 12) & 0xfff00);
-        libc::makedev(major, minor) as u64
-    })
-}
-
-/// Field 7 of a `/proc/<pid>/stat`, `tty_nr`, if not 0: none. Its second
-/// field, the command's name in parentheses, may hold anything.
-#[cfg(any(target_os = "linux", test))]
-fn tty_nr_of_stat(stat: &[u8]) -> Option<u32> {
-    let after = stat.iter().rposition(|&b| b == b')')?;
-    let rest = std::str::from_utf8(&stat[after + 1..]).ok()?;
-    // state, ppid, pgrp, session, tty_nr
-    let nr: i64 = rest.split_ascii_whitespace().nth(4)?.parse().ok()?;
-    u32::try_from(nr).ok().filter(|&n| n != 0)
-}
-
-/// Where neither way is built: unprovable.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn tty_of_pid(_pid: u32) -> Option<u64> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -336,14 +255,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_stat_lines_tty_is_its_seventh_field_past_any_parenthesis_in_its_name() {
-        let line = b"123 (a) (b c) S 1 123 123 34823 123 4194560";
-        assert_eq!(Some(34823), tty_nr_of_stat(line));
-        assert_eq!(None, tty_nr_of_stat(b"123 (sh) S 1 123 123 0 -1"));
-        assert_eq!(None, tty_nr_of_stat(b"garbage"));
-    }
-
     /// In a Rex pane, its own block, as a self-attach from it finds it, on
     /// macOS (and on Linux, #133). Skips elsewhere.
     #[test]
@@ -397,21 +308,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn a_kinfo_procs_terminal_is_its_e_tdev_unless_nodev_or_cut_short() {
-        let mut kinfo = vec![0u8; KINFO_PROC_SIZE];
-        kinfo[E_TDEV..E_TDEV + 4].copy_from_slice(&0x1000_0006u32.to_ne_bytes());
-        assert_eq!(Some(0x1000_0006), e_tdev_of(&kinfo));
-        kinfo[E_TDEV..E_TDEV + 4].copy_from_slice(&u32::MAX.to_ne_bytes());
-        assert_eq!(None, e_tdev_of(&kinfo));
-        assert_eq!(None, e_tdev_of(&kinfo[..KINFO_PROC_SIZE - 1]));
-        assert_eq!(None, e_tdev_of(&[]));
-    }
-
-    #[test]
-    fn a_process_with_no_terminal_or_none_at_all_has_no_tty() {
-        assert_eq!(None, tty_of_pid(u32::MAX - 1));
     }
 }
