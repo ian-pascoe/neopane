@@ -194,8 +194,9 @@ capability. With stdin not a terminal, it writes no title and runs no
 `find`, and the result is `ok (find not run)`.
 
 - `--config FILE`: the file; by default `$NEOPANE_CONFIG`, then the default
-  places, as [The file](#the-file) says. A file either names that isn't
-  there is an error, whose message says which named it.
+  places, as [The file](#the-file) says. A file that `--config` or the
+  variable names and that isn't there is an error; its message says which
+  named it.
 - `--provider P`: the hint; by default `$NEOPANE_PROVIDER`. `none` skips the
   file; `""` means no hint.
 - `--daemon-name N`: `attach.daemon`; by default the name a daemon started
