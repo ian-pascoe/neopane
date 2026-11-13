@@ -412,6 +412,64 @@ TERM_PROGRAM=ghostty TERM_PROGRAM_VERSION=1.2.3`.
   is shown by `TERM_PROGRAM` only when the inner one is tmux, and by no
   variable when it is zellij. The tty tells them apart in both directions.
 
+### Zoom
+
+Runs used tmux 3.8, 3.7c and 3.2a (private sockets `nprs7`–`nprs9`,
+`nprs77`, `nprs72`; killed afterwards). The window was 80x24 (80x23 on 3.2a)
+with `P | (A / B)`, and P was zoomed with `resize-pane -Z -t P`. The script
+reset the zoom to P before each command.
+
+- **Geometry while zoomed.** The zoomed pane reports the whole window, and
+  hidden panes keep their unzoomed values. Runtime 3.8: P `0,0 80x24`, A
+  `41,0 39x12`, B `41,13 39x11` (A and B as before the zoom). The same held on
+  3.7c and 3.2a. `stty size` inside: P `24 80`, A `12 39`, B `11 39`. Hidden
+  ptys keep their size. (Just after the splits, A's `stty` read `24 39` while
+  `pane_height` was 12; the pty size can lag the layout. *Cause not traced*.)
+- **A quirk: panes created hidden.** `split-window -d -Z -t P` (window stays
+  zoomed) made a new pane `%3` that reported `0,0 80x24`, the zoomed size,
+  though `#{window_layout}` placed it at `40x11` under P. After unzooming it
+  reported `0,13 40x11`. The same happened with `-t` a hidden pane. So while
+  `window_zoomed_flag` is 1, `pane_*` of any pane but the zoomed one is not
+  reliable.
+- **Is the zoomed pane always active?** For tiled panes, yes:
+  `window_set_active_pane` unzooms when the new active pane isn't visible
+  (`window.c:764-765`). Runtime: `select-pane -t A` (hidden) set zoomed=0 and
+  made A active. `select-pane -Z -t B` kept the zoom and moved it to B (B
+  active, 80 wide); `cmd-select-pane.c:280-287` pushes and pops the zoom. The
+  exception is 3.8 floats above a zoom: after `new-pane -d -A`,
+  `select-pane -t <float>` left zoomed=1 with the float active and P still
+  80 wide.
+- **Layouts.** `#{window_layout}` is the saved, unzoomed tree when zoomed
+  (`format.c:859-878` uses `saved_layout_root`). `#{window_visible_layout}`
+  is the live one (`format.c:883-897`). Runtime 3.8 while zoomed:
+  `window_layout` was the full `h[P, v[A, B]]` tree, and
+  `window_visible_layout` was `{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%0"}}`.
+  3.7c printed `d67e,80x24,0,0{40x24,0,0,0,39x24,41,0[…]}` and
+  `b25d,80x24,0,0,0`; 3.2a was the same shape.
+- **Which commands unzoom.** Runtime results, identical on 3.8, 3.7c and 3.2a
+  except where noted:
+
+  | Command | Zoom after |
+  |---|---|
+  | `select-pane -t <hidden>` | unzoomed |
+  | `select-pane -Z -t <hidden>` | kept, now on the target |
+  | `split-window -d -t <hidden>` or `-t <zoomed>` | unzoomed |
+  | `split-window -d -Z -t <zoomed>` | kept, still P (new pane hidden) |
+  | `split-window -Z -t <zoomed>` | kept, on the new pane |
+  | `resize-pane -x` on the zoomed or a hidden pane | unzoomed (`cmd-resize-pane.c:94-95`) |
+  | `resize-pane -Z -t <hidden>` | unzoomed (it toggles; it doesn't zoom the target, `cmd-resize-pane.c:86-90`) |
+  | `resize-pane -x` on a 3.8 float | kept (floats are skipped, `cmd-resize-pane.c:94`) |
+  | `join-pane -d` | unzoomed (`cmd-join-pane.c:473-474`) |
+  | `new-window -d`, `new-window` | kept (the zoomed window isn't touched) |
+  | `new-pane -d` (float) | unzoomed on 3.8 and 3.7c; command missing on 3.2a |
+  | `new-pane -d -A` (3.8) | kept; 3.7c: `unknown flag -A` |
+  | `kill-pane` (a hidden pane) | unzoomed (`cmd-kill-pane.c:81`) |
+  | `swap-pane -d` | unzoomed |
+  | `swap-pane -d -Z` (3.8) | kept, now on the swapped-in pane (`cmd-swap-pane.c:85`, `:200-207`) |
+  | `select-layout` | unzoomed (`cmd-select-layout.c:84`) |
+  | `break-pane` | unzoomed (source: `cmd-break-pane.c:128`; not run) |
+  | `kill-pane` the zoomed pane | unzoomed; the others took the space |
+
 ## Not confirmed
 
 - Why a sole `ignore-size` control client with `-C` resized on 3.2a but not
@@ -420,6 +478,8 @@ TERM_PROGRAM=ghostty TERM_PROGRAM_VERSION=1.2.3`.
 - Events lost between `wait-for -E` loops.
 - Why `wait-for -E -F '#{==:#{session_name},S}'` never matched.
 - How `select-layout` assigns panes to a hand-made layout's leaves.
+- Why a pane's pty size briefly lagged its layout size after `split-window -d`.
+- `break-pane` while zoomed (source only).
 - Herdr, Rex and Ghostty nesting in either direction (zellij was run; see
   Follow-ups).
 - Version claims below 3.2a were read from source and CHANGES, not run;
@@ -475,6 +535,15 @@ TERM_PROGRAM=ghostty TERM_PROGRAM_VERSION=1.2.3`.
 - `report_layout` can compute fractions from `#{window_layout}` or from
   `list-panes` `pane_*`. With `pane-border-status` set they differ by a row,
   so `pane_*` is the one that matches what the terminal shows.
+- Zoom: while `window_zoomed_flag` is 1, `report_layout` should treat the
+  window as showing only the zoomed pane (and 3.8 `-A` floats), with
+  `#{window_visible_layout}` or the zoomed pane's `pane_*`. The hidden panes'
+  `pane_*` hold stale geometry, or the whole window for panes created
+  hidden. `focus` on a hidden pane unzooms (`select-pane`) unless `-Z` is
+  passed. `place_beside`, `resize`, `open_beside` and `close` all unzoom, and
+  `open_tab_page` (`new-window`) doesn't. A provider that wants to keep the
+  user's zoom can pass `-Z` to `split-window`, `select-pane` and `swap-pane`.
+  Nothing keeps it for `join-pane`, `resize-pane` or `kill-pane`.
 - `resize` must find the split the two panes share in `#{window_layout}` and
   pick a pane that `-x`/`-y` will resolve to that split. Where none exists,
   it must fall back to `select-layout` with a whole recomputed layout.
