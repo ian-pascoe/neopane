@@ -108,6 +108,7 @@ impl Daemon {
             _ => {}
         }
         self.lifetime.kept = kept;
+        let pair = self.is_pair();
         // float group panes, and requests that failed: their ids expire
         while let Some(p) = self.panes.list.last_mut() {
             let failed = p.closing == Some(Close::RequestFailed);
@@ -116,7 +117,7 @@ impl Daemon {
             }
             if !p.is_self_attached()
                 && !failed
-                && let Some(t) = p.terminal.clone()
+                && let Some(t) = p.close_id(pair)
             {
                 self.act(asks::close(t));
             }

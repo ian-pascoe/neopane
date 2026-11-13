@@ -921,3 +921,151 @@ fn a_pane_provider_whose_find_wants_no_title_gets_none_written() {
         .count();
     assert_eq!(1, undos);
 }
+
+// A requested terminal's `find`, and pairs (#127)
+
+/// A fake pair: its terminal half opens and closes, its layout half finds
+/// and places.
+fn pair() -> FakeProvider {
+    let mut f = FakeProvider::with(&[
+        Capability::Open,
+        Capability::Close,
+        Capability::Find,
+        Capability::PlaceBeside,
+        Capability::Focus,
+    ]);
+    f.pair = true;
+    f
+}
+
+/// A daemon that chose `fake` from a pane showing window 1000, found as
+/// `L0`, then split window 1001 off it, opened by `open` to be placed: the
+/// open's id, and what keeps the choosing pane open.
+fn split_opened(fake: FakeProvider) -> (Fixture, AskId, crate::attach::PaneId, (UnixStream, Pty)) {
+    let (mut fx, _) = fixture_choosing(vec![fake]);
+    let (_first, h1, p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    found(&mut fx.d, "L0");
+    split_1001_off_1000(&mut fx);
+    let (ask, Ask::Open { pane, .. }) = last_ask(&mut fx.d) else {
+        panic!("not an open: {:?}", last_ask(&mut fx.d));
+    };
+    (fx, ask, pane, (h1, p1))
+}
+
+/// The pane provider is done with the last act asked.
+fn placed(d: &mut Daemon) {
+    let id = fake(d).last_id();
+    fake(d).answer(id, Outcome::Done(Answer::Nothing));
+    d.drain_provider().unwrap();
+}
+
+#[test]
+fn a_pairs_close_takes_the_terminal_halfs_id_and_placement_the_layout_halfs() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    // `open`'s id places nothing: nothing is asked of it
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::Open { .. }));
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    assert_eq!(None, fx.d.panes.by_id(id).unwrap().terminal);
+
+    // the layout half's `find` runs for it as it attaches, and its id places it
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    found(&mut fx.d, "L1");
+    let Ask::PlaceBeside {
+        terminal, origin, ..
+    } = last_ask(&mut fx.d).1
+    else {
+        panic!("not placed: {:?}", last_ask(&mut fx.d));
+    };
+    assert_eq!(
+        (TerminalId::from("L1"), TerminalId::from("L0")),
+        (terminal, origin)
+    );
+    assert_eq!(Reach::In, fx.d.panes.by_id(id).unwrap().reach);
+    placed(&mut fx.d);
+
+    // its window closes: `close` takes the terminal half's id
+    fx.d.give_up(id).unwrap();
+    assert_eq!(
+        Ask::Close {
+            terminal: TerminalId::from("T1")
+        },
+        last_ask(&mut fx.d).1
+    );
+}
+
+#[test]
+fn a_pairs_find_runs_even_when_its_terminal_attached_before_open_answered() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    let _h2 = attach_requested(&mut fx, pane);
+    // asked once the open is answered, layout acts going one at a time
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    // once: the choosing pane's, and its
+    assert_eq!(2, finds_asked(&mut fx.d));
+}
+
+#[test]
+fn a_pair_whose_open_printed_no_id_closes_nothing() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).answer(open, Outcome::Done(Answer::Nothing));
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    found(&mut fx.d, "L1");
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    let asked = fake(&mut fx.d).asks.len();
+    fx.d.give_up(id).unwrap();
+    assert_eq!(asked, fake(&mut fx.d).asks.len());
+}
+
+#[test]
+fn a_requested_terminal_find_fails_for_is_unplaced_and_still_in_reach() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    not_found(&mut fx.d, "exit 1");
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((Reach::In, None), (p.reach, p.terminal.clone()));
+    assert_eq!(Area::Own, p.area);
+    // never placed, the pane provider kept, with no warning
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::Find { .. }));
+    assert!(fx.d.provider.is_some());
+    assert!(!sent_to_nvim(&mut fx).contains("no pane provider"));
+}
+
+#[test]
+fn a_whole_tables_requested_terminal_is_found_only_when_its_open_printed_no_id() {
+    let mut whole = pair();
+    whole.pair = false;
+    // an id: no `find`
+    let (mut fx, open, pane, _keep) = split_opened(whole);
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(1, finds_asked(&mut fx.d));
+
+    let mut whole = pair();
+    whole.pair = false;
+    let (mut fx, open, pane, _keep) = split_opened(whole);
+    fake(&mut fx.d).answer(open, Outcome::Done(Answer::Nothing));
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    found(&mut fx.d, "T1");
+    // its id places it, and closes it
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::PlaceBeside { .. }));
+    placed(&mut fx.d);
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    fx.d.give_up(id).unwrap();
+    assert_eq!(
+        Ask::Close {
+            terminal: TerminalId::from("T1")
+        },
+        last_ask(&mut fx.d).1
+    );
+}

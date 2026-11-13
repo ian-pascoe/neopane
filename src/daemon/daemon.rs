@@ -1490,6 +1490,7 @@ impl Daemon {
                 l.fit = Fit::None;
             }
         }
+        let pair = self.is_pair();
         let mut i = self.panes.list.len();
         while i > 0 {
             i -= 1;
@@ -1511,7 +1512,7 @@ impl Daemon {
             // a requested terminal is closed, whether or not its helper
             // connected; a self-attached one goes back to its shell (#86 D10)
             if !p.is_self_attached()
-                && let Some(t) = p.terminal.clone()
+                && let Some(t) = p.close_id(pair)
             {
                 self.act(asks::close(t));
             }
@@ -1908,6 +1909,7 @@ impl Daemon {
         }
         for p in &mut self.panes.list {
             p.terminal = None;
+            p.close_terminal = None;
         }
         self.out_of_reach_but(None);
         self.focus = ProviderFocus::default();
@@ -1969,6 +1971,9 @@ impl Daemon {
                 Step::NotFound(ask, why) => self.not_found(&ask, &why)?,
                 Step::FallBack(ask @ Ask::Find { .. }) => self.find_fell_back(&ask)?,
                 Step::Done(ask, Answer::Terminal(t)) => self.on_opened(ask, t)?,
+                Step::Done(ask, Answer::Nothing) if opened_pane(&ask).is_some() => {
+                    self.opened_without_id(&ask)?
+                }
                 Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_reported(l)?,
                 Step::Done(Ask::Focus { .. }, _) => self.focus.ended(true, Instant::now()),
                 Step::Done(..) => {}
@@ -2015,13 +2020,24 @@ impl Daemon {
             return Ok(());
         };
         let wait = self.attach_timeout();
+        let pair = self.is_pair();
         let p = self.panes.by_id_mut(pane_id).unwrap();
-        p.terminal = Some(t.clone());
+        p.close_terminal = Some(t.clone());
+        p.open_answered = true;
         let handle = p.neovim_window_handle;
         let attaching = p.terminal_surface.is_none();
         if attaching {
             p.attach_due = Some(Instant::now() + wait);
         }
+        if pair {
+            // its id serves only `close`: the layout provider's `find`, as
+            // its terminal attaches, gives the one that places it
+            if attaching {
+                self.arm_attach_timer()?;
+            }
+            return self.place_tab_pages();
+        }
+        p.terminal = Some(t.clone());
         self.place_opened(pane_id);
         if attaching {
             self.arm_attach_timer()?;
@@ -2074,6 +2090,29 @@ impl Daemon {
         }
     }
 
+    /// The pane provider opened the terminal `ask` asked for, but printed
+    /// no id for it: a whole table's `find` is asked for one once it has
+    /// attached too.
+    fn opened_without_id(&mut self, ask: &Ask) -> Result<()> {
+        let Some(attach_id) = opened_pane(ask) else {
+            return Ok(());
+        };
+        let Some(p) = self.panes.by_attach_id_mut(&attach_id) else {
+            return Ok(());
+        };
+        p.open_answered = true;
+        let (id, attached) = (p.id, p.terminal_surface.is_some());
+        if attached && !self.is_pair() {
+            self.find_requested(id)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the pane provider is a pair (ADR 0006).
+    pub(super) fn is_pair(&self) -> bool {
+        self.provider.as_ref().is_some_and(|p| p.is_pair())
+    }
+
     /// An act that couldn't be done. A pane whose open failed is given up.
     fn fall_back(&mut self, ask: Ask) -> Result<()> {
         if ask == Ask::ReportLayout {
@@ -2095,10 +2134,11 @@ impl Daemon {
     /// group pane's floats are drawn in the pane, and a tab page's other
     /// windows ask for their own.
     pub(super) fn give_up(&mut self, id: u32) -> Result<()> {
+        let pair = self.is_pair();
         let p = self.panes.by_id_mut(id).unwrap();
         p.closing = Some(Close::RequestFailed);
         p.attach_due = None;
-        let (attach_id, terminal) = (p.attach_id, p.terminal.clone());
+        let (attach_id, terminal) = (p.attach_id, p.close_id(pair));
         if let Some(a) = attach_id {
             self.panes.ids.expire(&a);
         }

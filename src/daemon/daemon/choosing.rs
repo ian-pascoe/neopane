@@ -361,6 +361,55 @@ impl Daemon {
         Ok(())
     }
 
+    /// Requested pane `id`'s terminal attached, or its open answered: the
+    /// layout provider's `find` is asked for its id, if it has none from
+    /// its open, as in a pair, and it attached (ADR 0006). It stays in
+    /// reach whatever `find` says.
+    pub(super) fn find_requested(&mut self, id: u32) -> Result<()> {
+        let Some(p) = self.panes.by_id(id) else {
+            return Ok(());
+        };
+        let asks = !p.is_self_attached()
+            && p.reach == Reach::In
+            && p.closing.is_none()
+            && p.terminal.is_none()
+            && p.hello.is_some()
+            && p.terminal_surface.is_some();
+        if asks && self.ask_find(id) {
+            // no `find`: no id
+            self.no_terminal_id(id)?;
+        }
+        Ok(())
+    }
+
+    /// The pane provider's `find` gave requested pane `id` its terminal's
+    /// id `t`, which places it, as an open's id would.
+    fn found_opened(&mut self, id: u32, t: &TerminalId) -> Result<()> {
+        self.place_opened(id);
+        let handle = self.panes.by_id(id).and_then(|p| p.neovim_window_handle);
+        if handle.is_some() && handle == Some(self.nvim.current_win) {
+            self.focus_terminal(Some(t));
+        }
+        self.wait_for_report(id, Instant::now())
+    }
+
+    /// Requested pane `id` has no terminal id, nor will have: nothing
+    /// places it, and it is a layout area of its own.
+    fn no_terminal_id(&mut self, id: u32) -> Result<()> {
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return Ok(());
+        };
+        if p.area != Area::Unreported {
+            return Ok(());
+        }
+        p.area = Area::Own;
+        p.report_due = None;
+        if !self.nvim.ready {
+            return Ok(());
+        }
+        self.refit_to_areas()
+    }
+
     /// The choice running is refused, for `why`: the pane provider is
     /// dropped, with a warning.
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
@@ -376,14 +425,25 @@ impl Daemon {
         let Ask::Find { pane, .. } = ask else {
             return Ok(());
         };
+        let mut made = None;
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
+            // (c): opened by this pane provider, only its id was to find
+            if !p.is_self_attached() && p.reach == Reach::In {
+                made = Some(p.id);
+            }
             p.reach = Reach::In;
-            if let Answer::Terminal(t) = answer {
-                p.terminal = Some(t);
+            if let Answer::Terminal(t) = &answer {
+                p.terminal = Some(t.clone());
             }
             log::trace(Point::Found, u64::from(p.id));
         }
         self.confirm(pane)?;
+        if let Some(id) = made {
+            match answer {
+                Answer::Terminal(t) => self.found_opened(id, &t)?,
+                _ => self.no_terminal_id(id)?,
+            }
+        }
         // a live layout that came first places it now
         if let Some(l) = self.live_layout.clone()
             && self.apply_live_layout(&l)
@@ -406,6 +466,8 @@ impl Daemon {
                 log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
             } else {
                 log_info!("{NAME} daemon: pane {} has no terminal id: {why}", p.id);
+                let id = p.id;
+                self.no_terminal_id(id)?;
             }
         }
         if self.is_choosing(pane) {
@@ -423,7 +485,12 @@ impl Daemon {
         };
         let kept = self.provider.is_some() && self.asks.unsupported(Capability::Find);
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
+            let made = !p.is_self_attached() && p.reach == Reach::In;
             p.reach = if kept { Reach::In } else { Reach::Out };
+            let id = p.id;
+            if kept && made {
+                self.no_terminal_id(id)?;
+            }
         }
         if kept {
             self.confirm(pane)?;

@@ -358,6 +358,16 @@ impl Pane {
         }
     }
 
+    /// The id `close` takes for its terminal: in a pair, the one the
+    /// terminal provider's open printed, if any; else its terminal's id.
+    pub(crate) fn close_id(&self, pair: bool) -> Option<TerminalId> {
+        if pair {
+            self.close_terminal.clone()
+        } else {
+            self.terminal.clone()
+        }
+    }
+
     /// Whether its terminal attached of its own accord rather than for a
     /// pane the daemon asked for.
     pub(crate) fn is_self_attached(&self) -> bool {
