@@ -5,6 +5,7 @@
 
 use super::fallback::{Live, pump, started_with};
 use super::*;
+use crate::daemon::pane_layout::PaneLayout;
 
 /// A daemon over Neovim with no pane provider, its one pane attached.
 struct Lone {

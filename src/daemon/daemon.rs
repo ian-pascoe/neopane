@@ -28,7 +28,7 @@ use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
 use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing, SelfAttach};
-use super::pane_layout::{self, Axis, PaneLayout};
+use super::pane_layout::{self, Axis};
 use super::panes::Panes;
 use super::provider::{
     Answer, Ask, Capability, Direction, PaneProvider, ProviderEvent, TerminalId,
