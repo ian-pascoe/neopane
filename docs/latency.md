@@ -212,6 +212,9 @@ The built-in tmux pane provider (ADR 0016) runs each act as a process of
 neopane's own binary, which runs `tmux` once or more. Its budget is
 informational, not a gate: median ≤ 15 ms and p95 ≤ 40 ms for the focus
 acts, `focus` and `focus_direction`; `open_beside` is recorded beside them.
+That budget is pending: the built-in has no focus acts yet (SPI-1132 adds
+them), so it hasn't been measured, and is to be recorded below once they
+exist.
 
 ```sh
 scripts/latency-tmux.sh [N]
@@ -231,8 +234,8 @@ times `target/release/neopane` (`BIN` names another) and the `tmux` on
 
 Recorded at SPI-1134 (24cb5ff), the release profile, on a MacBook Pro (M1,
 8 cores), macOS 27.2.1, N = 55, the 1-minute load near 9: other builds ran
-alongside, so these are high. The tmux built-in had no `focus` or
-`focus_direction` yet (SPI-1132 adds them), so only `open_beside` was timed.
+alongside, so these are high. Only `open_beside` was timed: `focus` and
+`focus_direction` exited 69, absent from the table.
 
 | Act | tmux | Medians | p95s |
 |---|---|---|---|

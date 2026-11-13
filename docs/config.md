@@ -360,7 +360,8 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
   the server didn't answer, and `missing[]`, as `rex`'s, holds
   `{"capability": "open_float", "needs": "3.7"}` for each capability in use
   this tmux is too old for, or one `{"capability": null, "needs": "3.2"}`
-  below the floor.
+  below the floor. Its `needs` is a tmux version, a string, where `rex`'s
+  is an API revision, a number.
 - `default`: null unless `neopane.default` chose with no file; else
   `{"named": ["tmux", "rex"], "inside": [{"name": "tmux", "ok": false,
   "why": "…"}]}`: the built-ins the environment names, in order, and each
