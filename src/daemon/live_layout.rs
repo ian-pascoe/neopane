@@ -93,4 +93,17 @@ impl Area {
             _ => None,
         }
     }
+
+    /// The top left of its terminal's content, in cells of a screen of
+    /// `screen` cells, cols x rows, spanning its layout area: its rect's top
+    /// left, inside its inset. Row, col. None outside a live area.
+    pub(crate) fn content_corner(&self, screen: [u32; 2]) -> Option<[i32; 2]> {
+        let Area::Live { rect, inset, .. } = self else {
+            return None;
+        };
+        Some([
+            (rect[1] * f64::from(screen[1])).round() as i32 + i32::from(inset[1]),
+            (rect[0] * f64::from(screen[0])).round() as i32 + i32::from(inset[0]),
+        ])
+    }
 }

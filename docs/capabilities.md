@@ -181,7 +181,9 @@ last layout it read.
   the terminal's, such as a pane's frame: left, top, right, bottom. A
   tiled terminal's inset counts toward its area's size: the area is the
   terminal's cells plus its inset, divided by its share of the area, on
-  each axis.
+  each axis. The terminal's content starts inside it, at the rect's top
+  left moved by the inset's left and top: `open_float`'s `X`,`Y` count
+  from there.
 - `focus` (optional): the terminal the user types into. Without `events`,
   a change here is how the daemon learns the user moved focus. A report
   whose command started before a `focus` or `focus_direction` command
@@ -259,8 +261,9 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
   `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
   the new pane's id.
 - `open_float`: `new-pane -d -t ORIGIN` with `-x -y -X -Y`, running the
-  attach command, its content on the float group: `X`,`Y` are made the
-  window's from `ORIGIN`'s `pane_left` and `pane_top`. 3.7's flags give
+  attach command, its content on the float group: `X`,`Y` count from the
+  top left of `ORIGIN`'s content, inside its inset, which is its
+  `pane_left` and `pane_top`, and are made the window's from there. 3.7's flags give
   the content, a size under the window's; 3.8's give the frame, so it
   passes `X-1`, `Y-1`, `COLS+2`, `ROWS+2`. The frame stays: a float without
   one merges into the pane beneath. Prints the new pane's id; below 3.7,
@@ -382,7 +385,7 @@ Each is `<NAME>_` and the name below.
 | `SIZE` | integer, cells | the terminal's size along the split |
 | `RATIO` | e.g. `0.5`, `0.3333` | the terminal's share of the room it splits with `ORIGIN`: at most 4 decimals, a `.`, no exponent |
 | `COLS`, `ROWS` | integer, cells | `open`, `open_beside`: a guess at the new terminal's size, its share beside its origin pane; `open_tab_page`: the origin's layout area; `open_float`: the float group's size |
-| `X`, `Y` | integer, may be negative | the float group's top-left, in cells from `ORIGIN`'s top-left |
+| `X`, `Y` | integer, may be negative | the float group's top-left, in cells from the top-left of `ORIGIN`'s content: its `rect`'s top-left, as `report_layout` gives it, moved right and down by its `inset`'s left and top |
 | `ORIGIN_COLS`, `ORIGIN_ROWS` | integer, cells | `ORIGIN`'s size |
 | `AREA_BOUNDS` | `x,y,w,h`, each as `RATIO` | the float as fractions of `ORIGIN`'s layout area; unset outside a live layout |
 | `COUNT` | integer, 1–20 | `focus_direction`'s steps |

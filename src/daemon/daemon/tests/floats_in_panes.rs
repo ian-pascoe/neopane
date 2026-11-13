@@ -177,6 +177,36 @@ fn a_group_whose_pane_went_stays_in_the_pane_it_was_drawn_in_next() {
     assert!(drawn(&d, 52).is_empty());
 }
 
+/// Pane 50's rect inside its area, with `inset` of it a frame or status
+/// line and its terminal the rest.
+fn inset_left_pane(d: &mut Daemon, inset: [u16; 4]) {
+    let [l, t, r, b] = inset.map(u32::from);
+    let p = d.panes.by_id_mut(50).unwrap();
+    p.terminal_surface = Some(Surface::for_test(60 - l - r, 40 - t - b));
+    p.area = Area::Live {
+        id: "w".into(),
+        rect: [0.0, 0.0, 0.5, 1.0],
+        floating: false,
+        inset,
+    };
+}
+
+#[test]
+fn a_group_drawn_in_a_pane_moves_in_from_its_content_inside_its_inset() {
+    for (inset, at) in [([0, 1, 0, 0], (4, 5)), ([1, 1, 1, 1], (4, 4))] {
+        let Fixture {
+            mut d,
+            nvim_end: _nvim,
+        } = two_panes(no_open_float());
+        inset_left_pane(&mut d, inset);
+        // at the screen's row 5, column 5: the cell under it in pane 50
+        enter_float(&mut d, 10, 2000, [5, 5], 20, 5);
+        d.on_current(1001).unwrap();
+        d.draw().unwrap();
+        assert_eq!(vec![(10, at.0, at.1)], drawn(&d, 50), "{inset:?}");
+    }
+}
+
 #[test]
 fn an_oversized_group_shrinks_the_screen_to_the_pane_and_grows_it_back() {
     let mut fx = two_panes(None);

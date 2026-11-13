@@ -88,8 +88,9 @@ const LAID_OUT_GRID: u32 = u32::MAX;
 pub struct Opts<'a> {
     /// Draws the messages and the screen's floats.
     pub focused: bool,
-    /// The pane's top left on grid 1, which spans the Rex window: screen
-    /// floats move by it, then into the pane.
+    /// The top left of the pane's content on grid 1, inside its inset, grid
+    /// 1 spanning its layout area: screen floats move by it, then into the
+    /// pane.
     pub origin: [i32; 2],
     /// Screen floats shown elsewhere, with every float hanging from them.
     pub skip: &'a [u32],

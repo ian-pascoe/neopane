@@ -167,13 +167,13 @@ fn focus(clients: &[u8]) -> Option<String> {
     latest.map(|(_, pane)| pane.to_string())
 }
 
-/// The top left of the pane `line`, a line of `PANES`, describes, in
-/// cells of its window, as `report_layout` gives its rect; and its
-/// window's size. None if it can't read it.
-pub(super) fn reported_corner(line: &[u8]) -> Option<([i64; 2], [u32; 2])> {
+/// The top left of the content of the pane `line`, a line of `PANES`,
+/// describes, in cells of its window: its reported rect's, inside its
+/// inset. And its window's size. None if it can't read it.
+pub(super) fn content_corner(line: &[u8]) -> Option<([i64; 2], [u32; 2])> {
     let line = std::str::from_utf8(line).ok()?;
     let p = Pane::parse(line.lines().next()?)?;
-    let ([x, y, _, _], _) = p.reported();
+    let [x, y, _, _] = p.cells;
     let [ww, wh] = p.window_size;
     Some(([x as i64, y as i64], [ww as u32, wh as u32]))
 }

@@ -64,19 +64,16 @@ impl Geometry<'_> {
         }
     }
 
-    /// Where pane `p`'s top left sits on grid 1, which spans its layout
-    /// area while it's current: row, col.
+    /// Where the top left of pane `p`'s content, its terminal's, inside its
+    /// inset, sits on grid 1, which spans its layout area while it's
+    /// current: row, col.
     pub(crate) fn pane_origin(&self, p: &Pane) -> [i32; 2] {
-        let Some(r) = p.area.rect() else {
-            return [0, 0];
-        };
         let Some(screen) = self.grids.get(1) else {
             return [0, 0];
         };
-        [
-            (r[1] * f64::from(screen.height)).round() as i32,
-            (r[0] * f64::from(screen.width)).round() as i32,
-        ]
+        p.area
+            .content_corner([screen.width, screen.height])
+            .unwrap_or([0, 0])
     }
 
     /// No terminal yet: the smallest window, as Neovim allows.

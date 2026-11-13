@@ -5751,6 +5751,41 @@ mod tests {
         approx([0.55, 0.08, 0.3, 0.4], *b);
     }
 
+    /// The cells `open_float` is asked for, x and y, a float group at row
+    /// 4, column 110 of the 200 x 50 screen being given, from a current pane
+    /// that's the right half of the screen's area, `inset` of its rect a
+    /// frame or status line, its terminal the rest.
+    fn group_cells_from_an_origin_inset_by(inset: [u16; 4]) -> (i32, i32) {
+        let Fixture { mut d, .. } = fixture();
+        show_picker(&mut d);
+        let [l, t, r, b] = inset.map(u32::from);
+        let origin = d.panes.by_win_mut(999).unwrap();
+        origin.area = Area::Live {
+            id: "w".into(),
+            rect: [0.5, 0.0, 0.5, 1.0],
+            floating: false,
+            inset,
+        };
+        origin.terminal_surface = Some(Surface::for_test(100 - l - r, 50 - t - b));
+        d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 110]);
+        d.reconcile_layers();
+        let asked = fake(&mut d).asked();
+        let [Ask::OpenFloat { x, y, .. }] = &asked[..] else {
+            panic!("{asked:?}");
+        };
+        (*x, *y)
+    }
+
+    #[test]
+    fn a_float_groups_cells_are_from_its_origin_panes_content_inside_its_inset() {
+        // the screen's row 4 is the content's row 3 under a status line
+        assert_eq!((10, 3), group_cells_from_an_origin_inset_by([0, 1, 0, 0]));
+        // and inside a frame, its column 110 is the content's 9
+        assert_eq!((9, 3), group_cells_from_an_origin_inset_by([1, 1, 1, 1]));
+        // with no inset, the rect's top left is the content's
+        assert_eq!((10, 4), group_cells_from_an_origin_inset_by([0; 4]));
+    }
+
     #[test]
     fn a_float_groups_cells_and_size_are_the_screens_while_its_origin_pane_has_no_live_area() {
         let Fixture { mut d, .. } = fixture();

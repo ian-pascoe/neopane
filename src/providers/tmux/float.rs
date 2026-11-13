@@ -6,7 +6,7 @@
 use std::ffi::OsString;
 
 use super::Failure;
-use super::layout::{PANES, reported_corner};
+use super::layout::{PANES, content_corner};
 use super::panes::{attach_words, pane_id, printed_pane};
 use super::server::{Server, older_than};
 use crate::providers::builtin::Given;
@@ -44,16 +44,16 @@ pub(super) fn open_float(given: &Given) -> Result<String, Failure> {
 }
 
 /// `new-pane`'s `-x -y -X -Y` for a float group of `size` cells at `at`
-/// cells from the top left of the origin's rect, as `report_layout` gives
-/// it, the origin being `shown`, its line of `PANES`; or why it can't
-/// read it.
+/// cells from the top left of the origin's content, inside the inset
+/// `report_layout` gives it, the origin being `shown`, its line of
+/// `PANES`; or why it can't read it.
 fn placement(
     geometry: Geometry,
     at: [i64; 2],
     size: [u32; 2],
     shown: &[u8],
 ) -> Result<[i64; 4], String> {
-    let (corner, window) = reported_corner(shown).ok_or_else(|| {
+    let (corner, window) = content_corner(shown).ok_or_else(|| {
         format!(
             "tmux gave the origin's place as {:?}",
             String::from_utf8_lossy(shown).trim()
@@ -114,8 +114,8 @@ impl Geometry {
 }
 
 /// `new-pane`'s `-x -y -X -Y` for a float group of `size` cells, cols and
-/// rows, at `at` cells from the origin's top left, the origin's rect
-/// being at `origin` in its window of `window` cells: the content lands
+/// rows, at `at` cells from the top left of the origin's content, which
+/// is at `origin` in its window of `window` cells: the content lands
 /// on the group, but for 3.7's, which can't be as big as the window.
 fn flags(
     geometry: Geometry,
@@ -165,13 +165,13 @@ mod tests {
 
     /// Recorded from tmux 3.8, `pane-border-status top`: `%0` is the left
     /// half of an 80x24 window, its content from row 1, the status line
-    /// on row 0. `report_layout` gives its rect from row 0, and the group's
-    /// `X`,`Y` are from that rect's top left: the content lands at 10,3,
-    /// not a row lower.
+    /// on row 0. `report_layout` gives its rect from row 0 with an inset
+    /// of 1 at the top, and the group's `X`,`Y` are from its content's top
+    /// left, inside that inset: 10,2 lands the content at 10,3.
     #[test]
-    fn under_a_top_status_line_the_group_is_placed_from_the_reported_rect() {
+    fn under_a_top_status_line_the_group_is_placed_from_the_origins_content() {
         let line = b"@0 80 24 %0 0 1 40 23 1 top 0\n";
-        let at = |g| placement(g, [10, 3], [20, 5], line).unwrap();
+        let at = |g| placement(g, [10, 2], [20, 5], line).unwrap();
         assert_eq!(at(Geometry::Content), [20, 5, 10, 3]);
         assert_eq!(at(Geometry::Frame), [22, 7, 9, 2]);
         // without the status line, the content's top left is the rect's
@@ -179,6 +179,16 @@ mod tests {
         let at = |g| placement(g, [10, 4], [20, 6], line).unwrap();
         assert_eq!(at(Geometry::Content), [20, 6, 51, 4]);
         assert!(placement(Geometry::Frame, [0, 0], [1, 1], b"%0 0 1\n").is_err());
+    }
+
+    /// A floating origin, tmux 3.8's `%4` with its content at 20,5 inside
+    /// a frame from 19,4: the group's `X`,`Y` are from its content too.
+    #[test]
+    fn from_a_floating_origin_the_group_is_placed_from_its_content() {
+        let line = b"@0 80 24 %4 20 5 30 10 0 off 1\n";
+        let at = |g| placement(g, [2, 3], [5, 2], line).unwrap();
+        assert_eq!(at(Geometry::Content), [5, 2, 22, 8]);
+        assert_eq!(at(Geometry::Frame), [7, 4, 21, 7]);
     }
 
     /// A group may start left of or above its origin, and its frame off
