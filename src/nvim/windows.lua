@@ -20,7 +20,8 @@ local last
 -- once none is left
 local last_buf
 -- tab page made after setup -> { back = the window current before it }.
--- Its windows show in a tab page area, and it closes with the last.
+-- Its windows show in a tab page area, or whole in the pane it opened in,
+-- and it closes with the last.
 -- The record also holds its window layout, as the daemon is told of it, and
 -- how many of its windows are being reopened (`reopening`).
 local floating = {}
@@ -777,12 +778,13 @@ api.nvim_create_autocmd('WinNew', {
     if not dir then
       -- the first window of a new tab page, as :tabnew, Neogit and Diffview
       -- open. External windows follow the current tab page, so it opens
-      -- over them: its windows get a tab page area.
+      -- over them: its windows get a tab page area, or the pane of the
+      -- window it opened from.
       local tab = api.nvim_win_get_tabpage(win)
       if api.nvim_win_get_config(win).relative == '' and not anchor_of(tab) then
         floating[tab] = floating[tab] or { back = last }
         home[win] = tab
-        note('split', win, false, false, 0, tab)
+        note('split', win, false, false, (last and shown(last)) and last or 0, tab)
         schedule_layout(tab)
       end
       return
@@ -858,11 +860,35 @@ api.nvim_create_autocmd('BufWinEnter', {
 
 -- The window of tab page `tab` to go to: its own a pane shows focused last,
 -- else its first a pane shows.
--- #118: in the current pane first, once a pane shows several tab pages.
 local function own_window(tab)
   local mine = own_windows()[tab]
   return mine and own_focused(tab, mine.wins, shown)
 end
+
+-- For each pane holding several tab pages, as the daemon last said: its
+-- window last current in each, the one it shows first
+local held_by_pane = {}
+
+--- The panes holding several tab pages hold `panes` now.
+function M.panes_hold(panes)
+  held_by_pane = panes
+end
+
+-- Tab page `tab`'s window last current in the pane showing `win`, if that
+-- pane holds one of its windows
+local function in_pane_of(win, tab)
+  if not win then return end
+  for _, wins in ipairs(held_by_pane) do
+    if wins[1] == win then
+      for _, w in ipairs(wins) do
+        if w ~= win and api.nvim_win_is_valid(w) and tab_of(w) == tab then return w end
+      end
+    end
+  end
+end
+
+-- the window `M.go` made current, its tab page with it, since the last report
+local went
 
 -- a tab page was entered since the last report
 local tab_entered = false
@@ -884,13 +910,17 @@ local function report()
   local tab = api.nvim_get_current_tabpage()
   local entered = tab_entered
   tab_entered = false
+  local chosen = went
+  went = nil
   -- a buffer opened in an anchor: on to the pane it went to
   if is_anchor(cur) and evict(api.nvim_win_get_tabpage(cur)) then return end
   -- :tabnext, gt, a tabline click or a tab page closing went to the tab
-  -- page's last current window, which may have closed or be another tab
-  -- page's that only sat in it: its own instead
-  if entered and (is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)) then
-    local to = own_window(tab)
+  -- page's last current window, which may have closed, be another tab
+  -- page's that only sat in it, or be in another pane: its last current in
+  -- the current pane instead, if it has one there, else its own anywhere
+  if entered and cur ~= chosen then
+    local to = in_pane_of(last, tab)
+    if not to and (is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)) then to = own_window(tab) end
     if to and to ~= cur then
       api.nvim_set_current_win(to)
       return
@@ -1058,6 +1088,8 @@ function M.go(win)
   end
   local tab = home[win]
   if tab and tab ~= api.nvim_get_current_tabpage() and api.nvim_tabpage_is_valid(tab) and api.nvim_win_is_valid(win) then
+    -- where it goes, though its tab page's last current window be elsewhere
+    went = win
     api.nvim_set_current_tabpage(tab)
   end
   if api.nvim_get_current_win() ~= win then api.nvim_set_current_win(win) end

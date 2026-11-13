@@ -181,6 +181,17 @@ pub(crate) fn carry(nvim: &mut Nvim, groups: &[Vec<i64>]) {
     }
 }
 
+/// Tells Neovim, for each pane holding several tab pages, its window last
+/// current in each: `gt` and the like go to the tab page's one in the
+/// current pane (ADR 0011).
+pub(crate) fn panes_hold(nvim: &mut Nvim, panes: &[Vec<i64>]) {
+    nvim.exec_lua(&format!("{NAME}.panes_hold(...)"), 1);
+    msgpack::write_array_header(nvim.writer(), panes.len() as u32);
+    for p in panes {
+        write_wins(nvim, p);
+    }
+}
+
 /// Asks for our channel id: the response to the returned id starts with it.
 #[doc(hidden)]
 pub fn ask_channel(nvim: &mut Nvim) -> u32 {
@@ -1601,12 +1612,14 @@ mod tests {
         let tab = h.last_current();
         let tab_note = h.split_note(tab).unwrap();
         assert!(tab_note.tab != 0);
+        // from the window current before, whose pane it opens in when it
+        // gets no tab page area
         assert_eq!(
             Split {
                 win: tab,
                 side_by_side: false,
                 before: false,
-                from: 0,
+                from: first,
                 tab: tab_note.tab
             },
             tab_note
@@ -4351,6 +4364,31 @@ mod tests {
         h.nvim.flush().unwrap();
         h.gone = b;
         assert!(h.until(|x| x.kind(x.gone).is_none()));
+        h.notes.clear();
+        h.input("gt");
+        h.want = a;
+        assert!(h.until(Harness::is_current));
+        h.barrier();
+        assert_eq!("1", h.tabpagenr());
+        assert_eq!(
+            a,
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+                .parse::<i64>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn gt_goes_to_the_tab_pages_last_current_window_in_the_current_pane_if_it_holds_one() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let [a, b, c] = two_tab_pages(&mut h);
+        // one pane shows c and holds a, last current there of the first tab
+        // page; b, in another, was current after it
+        panes_hold(&mut h.nvim, &[vec![c, a]]);
+        h.focus_pane(b);
+        h.focus_pane(c);
         h.notes.clear();
         h.input("gt");
         h.want = a;

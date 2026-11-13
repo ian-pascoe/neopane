@@ -1337,6 +1337,94 @@ fn with_laststatus_0_the_window_above_shows_a_blank_statusline_drawn_for_it() ->
     expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
 }
 
+/// The tabline `text`, in statusline cells.
+fn tabline_of(text: &str) -> Vec<Cell> {
+    text.chars()
+        .map(|c| Cell::init(c.to_string(), STL))
+        .collect()
+}
+
+// A pane showing tab page 2's layout (ADR 0012): `gt` swaps the whole pane
+// from one tab page's windows to the other's, nothing of the first left.
+#[test]
+fn a_pane_swapped_to_tab_page_two_shows_its_layout_whole() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // tab page 1: a beside b; tab page 2: c above d
+    add_window(&mut gs, 2, 6, 3, 'a');
+    add_window(&mut gs, 3, 5, 3, 'b');
+    add_window(&mut gs, 4, 12, 1, 'c');
+    add_window(&mut gs, 5, 12, 1, 'd');
+    gs.cursor_grid = 2;
+    let shown = |grid, row, col, cols, rows| Shown {
+        grid,
+        row,
+        col,
+        cols,
+        rows,
+        statusline: None,
+    };
+    let first = [shown(2, 0, 0, 6, 4), shown(3, 0, 7, 5, 4)];
+    let seps = [Separator {
+        row: 0,
+        col: 6,
+        rows: 4,
+    }];
+    let tabline = tabline_of("1:ab  2:cd ");
+    let mut view = PaneView::init(12, 6);
+    let mut t = test_terminal(12, 6)?;
+    let mut out = Vec::new();
+    let opts = Opts {
+        tabline: Some(&tabline),
+        ..Opts::default()
+    };
+    let laid = LaidOut {
+        wins: &first,
+        separators: &seps,
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, opts, &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("1:ab  2:cd ", "SSSSSSSSSSS"),
+            ("a0    │b0   ", "......|....."),
+        ],
+    )?;
+
+    // `gt`: tab page 2's windows, current d, under the tabline it redrew
+    gs.cursor_grid = 5;
+    let second = [shown(4, 0, 0, 12, 2), shown(5, 2, 0, 12, 2)];
+    let tabline = tabline_of("1:ab  2:cd ");
+    let opts = Opts {
+        tabline: Some(&tabline),
+        tabline_dirty: true,
+        ..Opts::default()
+    };
+    let laid = LaidOut {
+        wins: &second,
+        separators: &[],
+        separator: separator(),
+    };
+    out.clear();
+    assert!(view.frame_laid_out(&mut gs, laid, opts, &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("1:ab  2:cd ", "SSSSSSSSSSS"),
+            ("c0          ", "............"),
+            ("[c]         ", "SSSSSSSSSSSS"),
+            ("d0          ", "............"),
+            ("[d]         ", "SSSSSSSSSSSS"),
+        ],
+    )?;
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
+}
+
 // The tabline over layout areas (ADR 0008): fitted to the current pane's
 // area, whose tabline panes show it end to end; a pane of another area
 // shows the same row from its start, cut at its width or blank past it.

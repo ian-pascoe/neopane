@@ -49,6 +49,9 @@ pub(crate) struct NvimSession {
     /// the next list.
     pub shown: Vec<i64>,
     shown_next: Vec<i64>,
+    /// For each pane holding several tab pages, its window last current in
+    /// each, as Neovim was last told.
+    pub held: Vec<Vec<i64>>,
 }
 
 impl NvimSession {
@@ -71,6 +74,7 @@ impl NvimSession {
             carried: Vec::new(),
             shown: Vec::new(),
             shown_next: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -273,6 +277,17 @@ impl NvimSession {
         }
         windows::carry(&mut self.client, &groups);
         self.carried = groups;
+    }
+
+    /// Tells Neovim `held`, each pane's window last current in each tab page
+    /// it holds, for the panes holding several, if that changed: `gt` goes
+    /// to the one in the current pane. The caller flushes.
+    pub(crate) fn tell_panes_hold(&mut self, held: Vec<Vec<i64>>) {
+        if !self.ready || held == self.held {
+            return;
+        }
+        windows::panes_hold(&mut self.client, &held);
+        self.held = held;
     }
 
     /// Tells Neovim the windows panes show, which `fill` adds to a list, if
