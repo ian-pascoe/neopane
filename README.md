@@ -530,7 +530,8 @@ stuck    -       -        -         (didn't answer in 2 s)
 - UNSAVED: how many buffers have unsaved changes.
 - PROVIDER: the pane provider (a pair as `T+L`), `(choosing)` while your
   config runs or the choice is being confirmed, or `none`,
-  `none (config error)`, `none (find refused)` or `none (hint none)`.
+  `none (can't start)`, `none (config error)`, `none (find refused)` or
+  `none (hint none)`.
 - DIRECTORY: Neovim's global working directory, `~` standing for `$HOME`.
 - A daemon of another attach protocol version shows its build and version
   instead; one that didn't answer, why.

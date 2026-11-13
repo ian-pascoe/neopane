@@ -93,11 +93,15 @@ choice, or its own timeout (`timeouts.find`) if that is longer.
 
 With no config, `find` refusing the built-in default's choice goes only to
 the daemon's log, with no warning: the default guessed from variables that
-may have leaked into a terminal from whatever started it.
+may have leaked into a terminal from whatever started it. So does the
+default's choice failing to start, as Rex does when stale `REX_SERVER` or
+`REX_SESSION` name a server that's gone or a session it doesn't have.
 
 `list` and `status` show the result as the pane provider's name (a pair's
 as `T+L`), `(choosing)` while the file runs or `find` hasn't answered, or
-`none`, `none (config error)`, `none (find refused)` or `none (hint none)`.
+`none`, `none (can't start)`, `none (config error)`, `none (find refused)`
+or `none (hint none)`. `none (can't start)` means the pane provider chosen
+couldn't be started or reached, or went before `find` answered.
 
 ## Pane provider tables
 
@@ -223,7 +227,9 @@ neopane: tmux: find didn't confirm this terminal (exit 1: tmux find: this termin
 ```
 
 With no file, `find` refusing the built-in default's choice warns of
-nothing: it goes to the log, and `list` shows `none (find refused)`.
+nothing: it goes to the log, and `list` shows `none (find refused)`. Its
+choice failing to start, such as Rex unreachable, warns of nothing either,
+and `list` shows `none (can't start)`.
 
 ## `provider check`
 

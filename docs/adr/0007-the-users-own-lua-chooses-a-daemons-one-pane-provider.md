@@ -18,6 +18,13 @@ isn't needed. With no config, `find` refusing the default's guess goes only
 to the log, and `list` and `status` show `none (find refused)`; a config's
 choice refused still warns, quoting `find`'s first stderr line.
 
+Amended for SPI-1142: with no config, the default's guess failing to start
+is quiet too, as when stale `REX_SERVER` or `REX_SESSION` leak into a
+terminal after Rex quit: Rex can't be reached, or refuses the session and
+is gone before `find` answers. It goes only to the log, and `list` and
+`status` show `none (can't start)`, as they do when a config's choice can't
+start, which still warns.
+
 Amended by ADR 0016 (SPI-1131): with no config, the built-in default chooses
 tmux's built-in table in a tmux pane (`TERM_PROGRAM=tmux` and `TMUX` set),
 before Rex; `<name>.default` returns that table there.
