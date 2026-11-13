@@ -92,6 +92,49 @@ pub(crate) fn read(
     l
 }
 
+/// Where two blocks are in one of Rex's splits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sides {
+    /// The split is side by side, `horizontal` in Rex's words.
+    pub side_by_side: bool,
+    /// The first block asked for is the split's `before`.
+    pub first_before: bool,
+}
+
+/// How blocks `a` and `b` split their room in the layouts of `wins`, Rex's
+/// windows in a view, if they are the two sides of one split: None when
+/// either is a split itself, or they're in no split together.
+pub(crate) fn sides(wins: &[Value], a: &str, b: &str) -> Option<Sides> {
+    for w in wins {
+        let Some(Value::Array(layers)) = client::get(w, "layers") else {
+            continue;
+        };
+        for layer in layers {
+            if let Some(found) = client::get(layer, "layout").and_then(|n| sides_in(n, a, b)) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn sides_in(node: &Value, a: &str, b: &str) -> Option<Sides> {
+    let split = client::get(node, "split")?;
+    let (before, after) = (client::get(split, "before")?, client::get(split, "after")?);
+    let leaves = (
+        client::get_str(before, "block_id"),
+        client::get_str(after, "block_id"),
+    );
+    let side_by_side = client::get_str(split, "direction") != Some("vertical");
+    if leaves == (Some(a), Some(b)) || leaves == (Some(b), Some(a)) {
+        return Some(Sides {
+            side_by_side,
+            first_before: leaves.0 == Some(a),
+        });
+    }
+    sides_in(before, a, b).or_else(|| sides_in(after, a, b))
+}
+
 /// The first block of floating layer `layer`, if it's one of `float_blocks`,
 /// and the layer's bounds, if it has them whole.
 fn framed_block(layer: &Value, float_blocks: &[TerminalId]) -> Option<(String, [f64; 4])> {
