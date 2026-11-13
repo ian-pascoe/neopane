@@ -1,5 +1,5 @@
 //! A pane layout: how a window pane's windows share it, side by side or one
-//! above another, as Neovim lays out splits (ADR 0009). neorex, not Neovim,
+//! above another, as Neovim lays out splits (ADR 0009). neopane, not Neovim,
 //! splits, closes, resizes and lays them out, since every window a pane shows
 //! stays external.
 //!

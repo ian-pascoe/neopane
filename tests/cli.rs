@@ -6,12 +6,12 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use neorex::name::NAME;
+use neopane::name::NAME;
 
 /// The binary Cargo built for this test. Cargo names it, as Rust 1.100's
 /// build directory no longer has it beside the test's own binary.
 fn exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_neorex"))
+    PathBuf::from(env!("CARGO_BIN_EXE_neopane"))
 }
 
 fn run_in(dir: &Path, args: &[&str]) -> Output {
@@ -34,12 +34,12 @@ fn text(bytes: &[u8]) -> &str {
 #[test]
 fn help_and_version_go_to_stdout() {
     for (args, want) in [
-        (&["--help"][..], neorex::cli::help()),
-        (&["help"], neorex::cli::help()),
-        (&["list", "-h"], neorex::cli::help()),
-        (&["help", "debug"], neorex::cli::debug_help()),
-        (&["-v"], neorex::cli::version()),
-        (&["version"], neorex::cli::version()),
+        (&["--help"][..], neopane::cli::help()),
+        (&["help"], neopane::cli::help()),
+        (&["list", "-h"], neopane::cli::help()),
+        (&["help", "debug"], neopane::cli::debug_help()),
+        (&["-v"], neopane::cli::version()),
+        (&["version"], neopane::cli::version()),
     ] {
         let out = run(args);
         assert_eq!(out.status.code(), Some(0), "{args:?}");
@@ -56,7 +56,7 @@ fn the_first_line_of_the_version_is_the_build() {
         .arg(exe())
         .output()
         .unwrap();
-    assert_eq!(text(&out.stdout), format!("{}\n", neorex::attach::build()));
+    assert_eq!(text(&out.stdout), format!("{}\n", neopane::attach::build()));
 }
 
 #[test]
@@ -127,16 +127,6 @@ fn commands_built_later_exit_1() {
 }
 
 #[test]
-fn pane_points_at_attach() {
-    let out = run(&["pane", "/tmp/x/sock", "3"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        text(&out.stderr),
-        format!("{NAME}: pane was replaced by attach --pane (this came from an older daemon)\n")
-    );
-}
-
-#[test]
 fn a_command_word_naming_a_file_says_so() {
     let dir = std::env::temp_dir().join(format!("{NAME}-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -144,7 +134,7 @@ fn a_command_word_naming_a_file_says_so() {
     let out = run_in(&dir, &["version"]);
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(text(&out.stdout), neorex::cli::version());
+    assert_eq!(text(&out.stdout), neopane::cli::version());
     assert_eq!(
         text(&out.stderr),
         format!("{NAME}: version is a command; to open the file, run {NAME} ./version\n")
@@ -173,7 +163,7 @@ fn daemon(tmpdir: &Path, args: &[&str]) -> Output {
     Command::new(exe())
         .arg("daemon")
         .args(args)
-        .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
+        .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -210,7 +200,7 @@ fn the_daemon_says_why_it_didnt_start_on_its_ready_pipe() {
             "error {} isn't a private directory (owner {uid}, mode 0755); set {} to another \
              place\n",
             base.display(),
-            neorex::daemon::dir::tmpdir_var()
+            neopane::daemon::dir::tmpdir_var()
         )
     );
     std::fs::remove_dir_all(&tmp).unwrap();
@@ -233,7 +223,7 @@ fn listening_daemon_with(
         .arg("daemon")
         .args(args)
         .envs(env.iter().copied())
-        .env(neorex::daemon::dir::tmpdir_var(), tmpdir)
+        .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
         .env_remove("REX_SERVER")
         .env_remove("REX_SESSION")
         .stdin(Stdio::null())
@@ -251,7 +241,7 @@ fn listening_daemon_with(
 /// A launcher's first attach to the daemon at `sock`: a self-attach,
 /// relayed, from no terminal. Its connection.
 fn first_attach(sock: &Path) -> std::os::unix::net::UnixStream {
-    use neorex::attach::{Hello, Message, Purpose, Size, Terminal, Transport};
+    use neopane::attach::{Hello, Message, Purpose, Size, Terminal, Transport};
     use std::io::Write;
     let terminal = Terminal {
         transport: Transport::Relay,
@@ -390,7 +380,7 @@ fn an_unknown_transport_is_warned_of_and_fd_used() {
 /// over its stdin and stdout, against a fake daemon.
 #[test]
 fn the_relay_test_tool_relays_stdin_and_stdout() {
-    use neorex::attach::{Accept, End, Ending, Frame, Message, Purpose, Transport};
+    use neopane::attach::{Accept, End, Ending, Frame, Message, Purpose, Transport};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
@@ -431,8 +421,8 @@ fn the_relay_test_tool_relays_stdin_and_stdout() {
     assert_eq!("1-abcdefghij", pane.to_string());
     assert_eq!(Transport::Relay, terminal.transport);
     let accept = Message::Accept(Accept {
-        v: neorex::attach::ATTACH_PROTOCOL_VERSION,
-        build: neorex::attach::build().to_string(),
+        v: neopane::attach::ATTACH_PROTOCOL_VERSION,
+        build: neopane::attach::build().to_string(),
         daemon: "d".into(),
         log: b"/l".to_vec(),
         features: vec![],
@@ -523,7 +513,7 @@ fn provider_types_writes_both_files_then_keeps_luarc() {
         };
         command.output().unwrap()
     };
-    let docs = format!("{}/blob/main/docs/config.md", neorex::cli::repo_url());
+    let docs = format!("{}/blob/main/docs/config.md", neopane::cli::repo_url());
 
     // the XDG default, under HOME
     let out = types(&[], None);
@@ -538,7 +528,7 @@ fn provider_types_writes_both_files_then_keeps_luarc() {
     let dir = home.join(".config").join(NAME);
     let meta = std::fs::read_to_string(dir.join(format!("types/{NAME}.lua"))).unwrap();
     assert!(
-        meta.starts_with(&format!("---@meta\n-- {}\n", neorex::attach::build())),
+        meta.starts_with(&format!("---@meta\n-- {}\n", neopane::attach::build())),
         "{meta}"
     );
     let luarc = std::fs::read_to_string(dir.join(".luarc.json")).unwrap();

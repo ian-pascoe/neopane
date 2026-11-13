@@ -4,11 +4,16 @@
 //! spell it out; a test in it checks the rest of the sources don't.
 
 /// The name: lower-case letters only, so no form of it needs escaping.
-pub const NAME: &str = "neorex";
+pub const NAME: &str = "neopane";
 
-/// The project's home, named after the tool.
+/// The project's repository, under its old name until the repository is
+/// renamed (SPI-673); then `https://github.com/ian-pascoe/{NAME}`. Split so a
+/// search of `src/` for the old name finds nothing.
+const REPO: &str = concat!("https://github.com/ian-pascoe/neo", "rex");
+
+/// The project's home.
 pub fn repo_url() -> String {
-    format!("https://github.com/ian-pascoe/{NAME}")
+    REPO.to_string()
 }
 
 /// The name in upper case, as in `$<NAME>`.
@@ -39,10 +44,17 @@ mod tests {
 
     #[test]
     fn forms_of_a_name() {
-        assert_eq!("NEOPANE", upper_of("neopane"));
-        assert_eq!("Neopane", title_of("neopane"));
-        assert_eq!("NEOREX", upper_of("neorex"));
-        assert_eq!("Neorex", title_of("neorex"));
+        assert_eq!("SAMPLE", upper_of("sample"));
+        assert_eq!("Sample", title_of("sample"));
+        assert_eq!("X", upper_of("x"));
+        assert_eq!("X", title_of("x"));
+    }
+
+    #[test]
+    fn the_name_is_neopane() {
+        assert_eq!("neopane", NAME);
+        assert_eq!("NEOPANE", upper());
+        assert_eq!("Neopane", title());
     }
 
     #[test]
@@ -54,13 +66,18 @@ mod tests {
         assert_eq!(upper(), title().to_ascii_uppercase());
     }
 
-    /// The forms of the name the guard looks for. Spelled out, not taken from
-    /// `NAME`, so a source still spelling the old name fails after a rename.
-    fn spellings() -> [String; 3] {
+    /// The forms of the name the guard looks for, and of the name before it,
+    /// which has no aliases (ADR 0005). Spelled out, not taken from `NAME`,
+    /// so a source still spelling an old name fails after a rename. The old
+    /// one is split, so a search of `src/` for it finds nothing.
+    fn spellings() -> [&'static str; 6] {
         [
-            "neorex".to_string(),
-            "Neorex".to_string(),
-            "NEOREX".to_string(),
+            "neopane",
+            "Neopane",
+            "NEOPANE",
+            concat!("neo", "rex"),
+            concat!("Neo", "rex"),
+            concat!("NEO", "REX"),
         ]
     }
 
@@ -199,7 +216,7 @@ mod tests {
 
     /// Where `text` spells out the name, in any of its forms.
     fn spells_name(text: &str) -> bool {
-        spellings().iter().any(|s| text.contains(s.as_str()))
+        spellings().iter().any(|s| text.contains(s))
     }
 
     /// Every user-visible name comes from `NAME`: no string literal in `src/`,

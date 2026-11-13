@@ -1,4 +1,4 @@
-//! `neorex debug-panes SOCKET`: a stand-in daemon. Takes terminals from
+//! `neopane debug-panes SOCKET`: a stand-in daemon. Takes terminals from
 //! helpers run with the attach commands it prints, and drives them: shows
 //! input and resizes. `q` in a pane closes it; Ctrl+C here closes them all.
 

@@ -1,4 +1,4 @@
--- neorex in Neovim: every window except one hidden anchor per tab page is
+-- neopane in Neovim: every window except one hidden anchor per tab page is
 -- external, shown in its own Rex pane. Run once with nvim_exec_lua(tool,
 -- tool_title, chan, cols, rows), `tool` the tool's name and `tool_title`
 -- it capitalised; returns { first window, its anchor }.
@@ -159,7 +159,7 @@ local laid_sizes = {}
 local last_activity = 0
 -- statusline formats we've set, to tell them from ones the user set
 local ours = {}
--- laststatus=3 was set, and is 2 while neorex runs: every pane shows the one
+-- laststatus=3 was set, and is 2 while neopane runs: every pane shows the one
 -- statusline a global one would, the current window's
 local mirroring = false
 -- window -> { text = the current window's statusline we last gave it, own = what
@@ -1268,7 +1268,7 @@ local function padding(width, columns)
   return '%<' .. string.rep(' ', columns - width)
 end
 
--- The built-in tabline as neorex draws it (ADR 0002), the copy: Neovim
+-- The built-in tabline as neopane draws it (ADR 0002), the copy: Neovim
 -- 0.12's draw_tabline, labelling each tab page from its own windows and
 -- laid out to the tabline width. 'tabline' reads this while a user or plugin
 -- leaves it empty, and only this exact value is ours.
@@ -1492,7 +1492,7 @@ function M.tabline_click(_, clicks, button)
   if not ok then api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {}) end
 end
 
--- Draws the copy again, where neorex's own records changed and Neovim draws
+-- Draws the copy again, where neopane's own records changed and Neovim draws
 -- the tabline no more than it would without them.
 local function redraw_copy()
   if vim.go.tabline == builtin_copy then vim.cmd.redrawtabline() end
@@ -1574,7 +1574,7 @@ end
 -- autocommands, which fire no OptionSet.
 api.nvim_create_autocmd('OptionSet', { group = group, pattern = 'tabline', callback = fit_tabline })
 api.nvim_create_autocmd({ 'SafeState', 'VimResized' }, { group = group, callback = fit_tabline })
--- and the copy goes as neorex stops: 'tabline' is empty again
+-- and the copy goes as neopane stops: 'tabline' is empty again
 api.nvim_create_autocmd('VimLeavePre', {
   group = group,
   callback = function()

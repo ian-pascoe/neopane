@@ -1,5 +1,8 @@
 # Neovim's screen is the size of the current pane's layout area
 
+`g:neorex_tabline_width` below is its name until the rename, then
+`g:neopane_tabline_width` (ADR 0005).
+
 Amended by ADR 0010 before implementation: a float group with no float group
 pane stays in the window pane that was current when one of its floats last
 became current, rather than following the current pane. While it is current

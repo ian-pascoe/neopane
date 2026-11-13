@@ -42,7 +42,7 @@ pub fn size(nvim: &mut Nvim, win: i64, cols: u32, rows: u32) {
 
 /// Fits every `'tabline'` to the tabline width `cols`, the tabline panes'
 /// columns, while that's narrower than Neovim's screen; None while it isn't.
-/// An empty one is neorex's copy of the built-in tabline, laid out to it.
+/// An empty one is neopane's copy of the built-in tabline, laid out to it.
 pub(crate) fn set_tabline_width(nvim: &mut Nvim, cols: Option<u32>) {
     nvim.exec_lua(&format!("{NAME}.set_tabline_width(...)"), 1);
     match cols {
@@ -774,7 +774,7 @@ mod tests {
             Some(h)
         }
 
-        /// A reference: a clean Neovim without neorex, on a screen of `cols`
+        /// A reference: a clean Neovim without neopane, on a screen of `cols`
         /// x `rows`, its windows all in their tab pages' layouts.
         fn reference(cols: u32, rows: u32) -> Option<Harness> {
             let mut h = Harness::spawn(&CLEAN, cols, rows)?;
@@ -1012,7 +1012,7 @@ mod tests {
             g.row_text(r).starts_with(want)
         }
 
-        /// Waits until Neovim runs a command that says `neorex_win` 4242, after
+        /// Waits until Neovim runs a command that says `neopane_win` 4242, after
         /// everything typed before it.
         fn barrier(&mut self) {
             self.input(&format!(":call rpcnotify(0, '{NAME}_win', 4242)<CR>"));
@@ -2121,7 +2121,7 @@ mod tests {
         let Some(mut h) = Harness::start_sized(60, 10) else {
             return;
         };
-        // reads g:neorex_tabline_width, never vim.o.columns
+        // reads g:neopane_tabline_width, never vim.o.columns
         h.sync(&format!(
             "_G.tl = function() return 'L%=R' .. (vim.g.{NAME}_tabline_width or 60) end\n\
              vim.o.tabline = '%!v:lua.tl()'\n\
@@ -2321,7 +2321,7 @@ mod tests {
              \x20 callback = function() vim.o.tabline = 'L%=R' end,\n\
              })",
         );
-        // neorex's copy of the built-in tabline, until the autocommand sets one
+        // neopane's copy of the built-in tabline, until the autocommand sets one
         assert!(h.until(|x| !x.tabline_text().trim().is_empty()));
         h.tabline_log = Some(Vec::new());
         h.input(":enew<CR>");
@@ -2418,7 +2418,7 @@ mod tests {
         }
     }
 
-    /// neorex on a screen `cols` wide, maybe with a tabline width, and a
+    /// neopane on a screen `cols` wide, maybe with a tabline width, and a
     /// reference as wide as the tabline: the same steps build the same tab
     /// pages in both.
     struct Pair {
@@ -2455,7 +2455,7 @@ mod tests {
             }
         }
 
-        /// Runs each step in both, then in neorex its Lua to adopt windows
+        /// Runs each step in both, then in neopane its Lua to adopt windows
         /// with, rather than adopting them all.
         fn steps_adopting(&mut self, steps: &[(&str, &str)]) {
             for (s, adopt) in steps {
@@ -2464,7 +2464,7 @@ mod tests {
             }
         }
 
-        /// neorex's tabline, to the tabline width, is the reference's, cell
+        /// neopane's tabline, to the tabline width, is the reference's, cell
         /// for cell, once both have drawn what they've been told.
         fn expect_same(&mut self) {
             // after what the steps scheduled
@@ -2475,7 +2475,7 @@ mod tests {
             self.expect_same_now();
         }
 
-        /// neorex's tabline, to the tabline width, is the reference's, cell
+        /// neopane's tabline, to the tabline width, is the reference's, cell
         /// for cell, as they are.
         fn expect_same_now(&self) {
             let want = self.r.tabline_cells(self.w);
@@ -2502,7 +2502,7 @@ mod tests {
     ];
 
     #[test]
-    fn with_no_tabline_width_the_built_in_tabline_is_drawn_as_without_neorex() {
+    fn with_no_tabline_width_the_built_in_tabline_is_drawn_as_without_neopane() {
         let Some(mut p) = Pair::new(60, None) else {
             return;
         };
@@ -2708,7 +2708,7 @@ mod tests {
         };
         p.steps(TWO_TABS);
         p.expect_same();
-        // closes the windows that followed into it too, which neorex reopens
+        // closes the windows that followed into it too, which neopane reopens
         p.steps(&["vim.cmd.tabclose()"]);
         p.expect_same();
         assert!(p.h.tabline_text().starts_with(" 2+ ~/s/p/two.txt "));
@@ -2753,7 +2753,7 @@ mod tests {
                 ("vim.cmd('tabnew three')", ""),
                 ("vim.cmd('tabnew four')", &adopt_current()),
                 // closes the first tab page's windows, which followed into it;
-                // neorex reopens them, while focus goes to the second's
+                // neopane reopens them, while focus goes to the second's
                 ("vim.cmd.tabclose()", &adopt_current()),
             ]);
             p.expect_same();
@@ -3114,7 +3114,7 @@ mod tests {
                 separator: '|',
                 statuslines: false,
             })));
-        // 3 is 2 while neorex runs: every window has its own statusline
+        // 3 is 2 while neopane runs: every window has its own statusline
         h.input(":set laststatus=3<CR>");
         assert!(h.until(|x| last_options(x).is_some_and(|o| o.statuslines)));
         assert_eq!(
@@ -3363,7 +3363,7 @@ mod tests {
             return;
         };
 
-        // set before neorex started: Neovim alone would draw no statusline here
+        // set before neopane started: Neovim alone would draw no statusline here
         assert!(h.until(|x| {
             x.wins[0] != 0 && x.grid_height(x.wins[0]) == 9 && x.row_starts(x.wins[0], 8, "GLOBAL")
         }));
@@ -3430,7 +3430,7 @@ mod tests {
         let stl = |h: &mut Harness| h.eval_str("return vim.wo[float][0].statusline");
 
         // lualine's globalstatus gives the current float the statusline, for
-        // laststatus=3 to show; at the 2 neorex sets, Neovim would draw it in
+        // laststatus=3 to show; at the 2 neopane sets, Neovim would draw it in
         // the float, over what's under it, as a picker's input over its list
         h.sync(
             "_G.float = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, \
@@ -3762,7 +3762,7 @@ mod tests {
         );
     }
 
-    /// Parses a `neorex_layout` note of tab page 7 with `flat` numbers.
+    /// Parses a `neopane_layout` note of tab page 7 with `flat` numbers.
     fn parse_layout_note(flat: &[i64]) -> rpc::Result<Option<Note>> {
         let mut buf = Vec::new();
         msgpack::write_array_header(&mut buf, 2);

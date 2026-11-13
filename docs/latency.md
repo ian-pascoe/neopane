@@ -1,19 +1,19 @@
 # Latency checks
 
 The latency criteria L1–L9 (#92, decision 30) are timed from trace
-timestamps the daemon writes to its log at `NEOREX_LOG=debug`. This page says
+timestamps the daemon writes to its log at `NEOPANE_LOG=debug`. This page says
 what each criterion times, how to produce it, how a change is judged, and
 holds the baseline every later check compares against: the numbers from the
 build that added the traces (#97), not a moving `main` (#95, decision 2).
 
 ## Traces
 
-At `NEOREX_LOG=debug` the daemon keeps a trace line for each point below, in
+At `NEOPANE_LOG=debug` the daemon keeps a trace line for each point below, in
 a buffer it writes to the log with the next log line, when the buffer fills,
 and as it ends. Every log is kept. At `info` and `warn` a
 trace point is one atomic load: no syscall and no allocation.
 
-A trace line is `neorex trace <point> <id> <t> [<from>]`. `t` is the
+A trace line is `neopane trace <point> <id> <t> [<from>]`. `t` is the
 monotonic clock in nanoseconds (`CLOCK_UPTIME_RAW` on macOS, `CLOCK_MONOTONIC`
 on Linux), the same in every process. The id is a pane's, unless said
 otherwise.
@@ -39,7 +39,7 @@ otherwise.
 ## Reading a log
 
 ```sh
-neorex debug-latency LOG
+neopane debug-latency LOG
 ```
 
 prints N, the median and the 95th percentile (nearest rank), in
@@ -71,11 +71,11 @@ happens in between, which a scripted scenario makes so.
 
 `scripts/latency.sh SCENARIO [N]` runs one scenario in a Rex session of its
 own, made with `rex new` and killed at the end, then prints the table above
-for it. It needs `rex` and `jq`, and times `target/release/neorex` (build it
+for it. It needs `rex` and `jq`, and times `target/release/neopane` (build it
 first; `BIN` names another). It runs Neovim with `--clean`, and types through
 `rex send` into the pane Rex has focused, as Rex would from the keyboard. It keeps
-each daemon's files under `/tmp/neorex-latency/SCENARIO/`, and the log it
-read as `/tmp/neorex-latency/SCENARIO.log`. Run it with N ≥ 50 (it defaults
+each daemon's files under `/tmp/neopane-latency/SCENARIO/`, and the log it
+read as `/tmp/neopane-latency/SCENARIO.log`. Run it with N ≥ 50 (it defaults
 to 50), and nothing else busy on the machine.
 
 | Scenario | Criteria | What it does |
@@ -86,7 +86,7 @@ to 50), and nothing else busy on the machine.
 | `switch` | L2 next | Two windows; N times: `l` typed into the pane that isn't the current pane, which makes its window current and is held behind that switch. |
 | `tabs` | L3 | Two tab pages of two windows each; N `gt`s, 400 ms apart. |
 | `resize` | L5 | A split's terminal resized smaller and back, N times each, through Rex's `terminal.resize`. |
-| `exec` | L6 | N launches of `neorex --clean -O a b`, each quit with `:qa!`. |
+| `exec` | L6 | N launches of `neopane --clean -O a b`, each quit with `:qa!`. |
 | `place` | L8 | N times: `:tabnew \| vsplit \| vsplit \| vsplit`, then `:tabclose`. |
 
 A Rex session made with `rex new` that no Rex app window shows is 80×24, so

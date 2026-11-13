@@ -266,7 +266,7 @@ fn a_terminal_hanging_up_closes_every_window_its_pane_draws() {
     fx.d.pane_gone(origin).unwrap();
     assert_eq!(None, fx.d.stopped);
     assert!(fx.d.changes.is_closing(1000) && fx.d.changes.is_closing(1002));
-    assert_eq!(2, sent_by(fx).neorex_closes());
+    assert_eq!(2, sent_by(fx).name_closes());
 }
 
 #[test]

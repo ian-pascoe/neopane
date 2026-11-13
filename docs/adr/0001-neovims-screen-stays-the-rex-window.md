@@ -1,5 +1,8 @@
 # Neovim's screen stays the size of the Rex window; only the tabline is fitted
 
+`g:neorex_tabline_width` below is its name until the rename, then
+`g:neopane_tabline_width` (ADR 0005).
+
 Widened by ADR 0008: the Rex window is one kind of layout area, and Neovim's
 screen is the size of the current pane's layout area; within an area, all of
 this still holds. Its floating panes are Rex floating panes; neorex's own kind

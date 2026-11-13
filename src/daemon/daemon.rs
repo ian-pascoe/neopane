@@ -1375,7 +1375,7 @@ impl Daemon {
         let area = self.geometry().window_size(p);
         let current = p.neovim_window_handle.unwrap_or(win);
         let was = layout.lay_out(area, current).of(win);
-        // told without the statusline neorex draws it
+        // told without the statusline neopane draws it
         let rows = match was {
             Some(w) if rows != 0 && self.draws_statusline(&w, area) => rows + 1,
             _ => rows,
@@ -2753,7 +2753,7 @@ impl Daemon {
         (wins, laid.separators)
     }
 
-    /// Whether neorex draws window `w`, laid out in `area`, its statusline: a
+    /// Whether neopane draws window `w`, laid out in `area`, its statusline: a
     /// window with another below it always has one, and with `'laststatus'`
     /// 0 Neovim draws it none.
     fn draws_statusline(&self, w: &pane_layout::Placed, area: [u32; 2]) -> bool {
@@ -2960,7 +2960,7 @@ fn set_targets(f: &mut Forwarder, rects: &[Rect]) {
 }
 
 /// Mouse events on the windows of a pane layout drawn go to the rows of
-/// their grids they show there, a statusline neorex draws no grid's.
+/// their grids they show there, a statusline neopane draws no grid's.
 fn set_windows(f: &mut Forwarder, grids: &Grids, shown: &[Shown]) {
     f.set_windows(shown.iter().flat_map(|s| {
         let runs = grids
@@ -6328,7 +6328,7 @@ mod tests {
         }
 
         /// How many windows it asked Neovim to close.
-        fn neorex_closes(&self) -> usize {
+        fn name_closes(&self) -> usize {
             self.nvim.matches(&format!("{NAME}.close")).count()
         }
 
@@ -6402,7 +6402,7 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(direction, dir);
-            assert_eq!(0, sent.neorex_closes());
+            assert_eq!(0, sent.name_closes());
         }
     }
 
@@ -6503,7 +6503,7 @@ mod tests {
         assert_eq!(vec![unplaced], pane_ids(&fx.d));
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6551,7 +6551,7 @@ mod tests {
         assert_eq!(1, fx.d.panes.list.len());
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     /// The sizes a daemon asked Neovim to give windows, in order: window,
@@ -6627,7 +6627,7 @@ mod tests {
         let mut fx = fixture();
         fx.d.provider = None;
         fx.d.nvim.ready = true;
-        // the pane neorex was run in, 81 x 24: its window 81 x 23, over the
+        // the pane neopane was run in, 81 x 24: its window 81 x 23, over the
         // command line
         let mut p = Pane::from_neovim_window(1, 1000);
         p.terminal_surface = Some(Surface::for_test(81, 24));
@@ -6900,7 +6900,7 @@ mod tests {
         assert!(fx.d.panes.list.is_empty());
         let sent = sent_by(fx);
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6915,7 +6915,7 @@ mod tests {
         let sent = sent_by(fx);
         // its terminal was closed as its request failed
         assert!(sent.asks.is_empty());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6931,7 +6931,7 @@ mod tests {
         assert_eq!(2, fx.d.asks.waiting());
         let sent = sent_by(fx);
         assert_eq!(vec!["open_float"], sent.capabilities());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -6948,7 +6948,7 @@ mod tests {
         let sent = sent_by(fx);
         // Rex closed the pane itself
         assert!(sent.asks.is_empty());
-        assert_eq!(1, sent.neorex_closes());
+        assert_eq!(1, sent.name_closes());
     }
 
     #[test]
@@ -6962,7 +6962,7 @@ mod tests {
         let sent = sent_by(fx);
         // only the floating pane's own request, from the setup: Rex closed it
         assert_eq!(vec!["open_float"], sent.capabilities());
-        assert_eq!(1, sent.neorex_closes());
+        assert_eq!(1, sent.name_closes());
     }
 
     /// A ready daemon with panes in blocks for windows 1 and 2, only window 2
@@ -6998,7 +6998,7 @@ mod tests {
             sent.asks[0]
         );
         // the window is already gone
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 
     #[test]
@@ -7021,7 +7021,7 @@ mod tests {
             assert_eq!(None, fx.d.stopped);
             let sent = sent_by(fx);
             assert!(sent.asks.is_empty(), "reopened={reopened}");
-            assert_eq!(0, sent.neorex_closes());
+            assert_eq!(0, sent.name_closes());
         }
     }
 
@@ -7035,6 +7035,6 @@ mod tests {
         assert!(deciding(&fx.d));
         let sent = sent_by(fx);
         assert_eq!(vec!["close"], sent.capabilities());
-        assert_eq!(0, sent.neorex_closes());
+        assert_eq!(0, sent.name_closes());
     }
 }

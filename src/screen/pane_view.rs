@@ -53,7 +53,7 @@ pub struct Shown {
     pub col: u32,
     pub cols: u32,
     pub rows: u32,
-    /// A statusline neorex draws in the rect's last row, blank in this
+    /// A statusline neopane draws in the rect's last row, blank in this
     /// highlight, for a window above another that Neovim draws none for
     /// (`'laststatus'` 0).
     pub statusline: Option<u32>,
@@ -988,7 +988,7 @@ pub(crate) struct Run {
 
 /// The runs of rect `s`'s rows that show rows of grid `g`: its first rows,
 /// and the grid's last in the rect's last row when it is cut short. A
-/// statusline neorex draws is in none. Rows past the grid's end, not yet
+/// statusline neopane draws is in none. Rows past the grid's end, not yet
 /// resized, are in the first.
 pub(crate) fn runs(g: &Grid, s: &Shown) -> impl Iterator<Item = Run> {
     let cut = s.statusline.is_none() && g.height > s.rows;

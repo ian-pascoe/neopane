@@ -1,11 +1,11 @@
 [package]
-name = "neorex"
+name = "neopane"
 version = "0.0.0"
 edition = "2024"
 # let-chains need 1.88; `cargo +1.87 check` fails
 rust-version = "1.88"
 license = "MIT"
-description = "A Rex-native Neovim frontend"
+description = "One Neovim in the background, shown in every terminal attached to it: panes for Neovim"
 repository = "https://github.com/ian-pascoe/neorex"
 publish = false
 

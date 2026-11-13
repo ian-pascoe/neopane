@@ -74,7 +74,7 @@ pub(crate) struct Forwarder {
     pub targets: [Target; MAX_TARGETS],
     pub targets_len: u8,
     /// The windows of a pane layout as drawn, below the tabline, each without
-    /// a statusline neorex draws: mouse events under the floats go to the one
+    /// a statusline neopane draws: mouse events under the floats go to the one
     /// under them; off them (on a separator, say) nowhere, but below them all,
     /// on the messages, to `grid`. Empty for a pane showing one window, which
     /// `grid` takes them all for.
@@ -672,7 +672,7 @@ mod tests {
     fn mouse_events_in_a_pane_layout_go_to_the_window_under_them_and_off_them_nowhere() {
         // two windows side by side under the tabline, a separator at column
         // 5, and the messages below: the left one's last row a statusline of
-        // neorex's; the right one cut to 4 rows, its last its statusline,
+        // neopane's; the right one cut to 4 rows, its last its statusline,
         // its grid's row 7
         let mut f = Forwarder {
             grid: 2,
@@ -714,7 +714,7 @@ mod tests {
         };
         assert_eq!(Some((3, 1, 2)), press(&mut f, 2, 8));
         assert_eq!(Some((2, 0, 4)), press(&mut f, 1, 4));
-        // the separator, the statusline neorex draws: no grid's
+        // the separator, the statusline neopane draws: no grid's
         assert_eq!(None, press(&mut f, 2, 5));
         assert_eq!(None, press(&mut f, 4, 1));
         assert_eq!(None, f.grab);

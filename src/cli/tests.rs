@@ -492,8 +492,9 @@ fn hidden_commands() {
         assert_eq!(refused(line), takes, "{line}");
     }
     assert_eq!(refused("debug-relay /bin/x list"), takes);
-    assert_eq!(parsed("pane s 3"), Ok(Command::Replaced));
-    assert_eq!(parsed("pane"), Ok(Command::Replaced));
+    // `pane`, which older daemons ran, is no command word: a file
+    assert!(matches!(parsed("pane s 3"), Ok(Command::Start(_))));
+    assert!(matches!(parsed("pane"), Ok(Command::Start(_))));
 }
 
 #[test]

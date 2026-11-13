@@ -52,8 +52,6 @@ pub enum Command {
         file: Option<OsString>,
         line: Option<u32>,
     },
-    /// `pane`, which older daemons ran: it exits 1 with [`PANE_REPLACED`].
-    Replaced,
     /// `daemon NAME [--dedup] [--detach] -- NVIM-ARGS…`, which the launcher
     /// starts.
     Daemon {
@@ -106,10 +104,6 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// What `pane` exits 1 with, after `<name>: `.
-pub const PANE_REPLACED: &str =
-    "pane was replaced by attach --pane (this came from an older daemon)";
-
 /// The command words a person types. Each runs its command even when a file
 /// of that name exists.
 pub const COMMAND_WORDS: [&str; 7] = [
@@ -161,7 +155,6 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         b"detach" => Err(UsageError(format!(
             "detach isn't available yet; to open a file named detach, run {NAME} ./detach"
         ))),
-        b"pane" => Ok(Command::Replaced),
         b"daemon" => daemon(rest),
         b"config-child" => Ok(Command::ConfigChild),
         b"debug-keys" | b"debug-events" | b"debug-tui" | b"debug-panes" | b"debug-rex"
