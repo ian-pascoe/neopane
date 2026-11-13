@@ -245,8 +245,9 @@ Recorded at SPI-1132 (f9298e1), the same machine and profile, N = 55, the
 1-minute load between 7 and 9, other agents' builds and tests alongside.
 On tmux 3.8, `focus` is over the budget's median by a few ms and inside its
 p95, and `focus_direction`, at two `tmux` calls, is over both. On 3.2a,
-`focus` is inside it, and `focus_direction` a ms over its median. Each `tmux` call took about as long as `open_beside`'s one,
-so the time is tmux's own start and connection under load, not the acts'.
+`focus` is inside it, and `focus_direction` a ms over its median. Each
+`tmux` call took about as long as `open_beside`'s one, so the time is
+tmux's own start and connection under load, not the acts'.
 
 | Act | tmux | Medians | p95s |
 |---|---|---|---|
