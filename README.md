@@ -12,7 +12,7 @@ closes its window. Focusable floats, such as pickers, open in Rex floating
 panes, along with any floats attached to them. The completion menu,
 unfocusable floats like notifications, and statuslines are drawn inside the
 pane they belong to. With a pane provider that has no `open_float`, past
-four floating panes, or when one fails to open, a picker is drawn inside the
+four float group panes, or when one fails to open, a picker is drawn inside the
 pane it was last entered from, and while it's current and too big for that
 pane, Neovim's screen shrinks to the pane so the picker lays itself out to
 fit.

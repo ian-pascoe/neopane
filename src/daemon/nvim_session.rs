@@ -31,6 +31,12 @@ pub(crate) enum Shrink {
     Shrunk(i64),
 }
 
+impl Shrink {
+    pub(crate) fn is_shrunk(self) -> bool {
+        matches!(self, Shrink::Shrunk(_))
+    }
+}
+
 pub(crate) struct NvimSession {
     pub client: Nvim,
     /// Neovim's current window, as the Lua last said; 0 before setup.

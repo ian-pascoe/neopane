@@ -92,28 +92,87 @@ fn close_float(d: &mut Daemon, grid: u32) {
     d.draw().unwrap();
 }
 
+/// A pane provider that can open and close, but not `open_float`.
+fn no_open_float() -> Option<FakeProvider> {
+    Some(FakeProvider::with(&[
+        Capability::OpenBeside,
+        Capability::OpenTabPage,
+        Capability::Close,
+    ]))
+}
+
 #[test]
-fn without_open_float_a_picker_is_drawn_in_the_pane_it_was_last_current_in() {
+fn without_open_float_a_picker_is_drawn_in_the_pane_it_was_last_current_in_cut() {
     let Fixture {
         mut d,
         nvim_end: _nvim,
-    } = two_panes(None);
-    // over the right pane's part of the screen, but current from the left
-    enter_float(&mut d, 10, 2000, [5, 80], 50, 10);
-    assert_eq!(Shrink::No, d.nvim.shrink);
-    assert_eq!(vec![(10, 5, 10)], drawn(&d, 50));
-    assert!(drawn(&d, 51).is_empty());
+    } = two_panes(no_open_float());
+    // over the right pane's part of the screen, current from the left: too
+    // wide for it, so the screen shrinks while it's current
+    enter_float(&mut d, 10, 2000, [5, 40], 80, 10);
+    assert_eq!(Shrink::Shrunk(2000), d.nvim.shrink);
 
-    // the user goes to the other pane: it stays
+    // the user goes to the other pane: the screen grows back, the picker
+    // stays, moved in and cut at the pane's 60 columns
     d.on_current(1001).unwrap();
-    assert_eq!(vec![(10, 5, 10)], drawn(&d, 50));
+    assert_eq!([120, 40], d.nvim.editor_size);
+    d.draw().unwrap();
+    assert_eq!(vec![(10, 5, 0)], drawn(&d, 50));
+    assert_eq!(80, d.grids.get(10).unwrap().width);
+    assert_eq!(
+        60,
+        d.panes
+            .by_id(50)
+            .unwrap()
+            .terminal_surface
+            .as_ref()
+            .unwrap()
+            .view
+            .cols
+    );
     assert!(drawn(&d, 51).is_empty());
 
-    // one of its floats becomes current from there: it moves
+    // one of its floats becomes current from there: it moves, the screen
+    // shrinking to that pane
     d.on_current_float(2000).unwrap();
+    assert_eq!([60, 40], d.nvim.editor_size);
+    d.grids.get_mut(1).unwrap().resize(60, 40);
+    put_float(&mut d, 10, 2000, [5, 5], 50, 10);
+    d.draw().unwrap();
     assert!(drawn(&d, 50).is_empty());
-    assert_eq!(vec![(10, 5, 10)], drawn(&d, 51));
+    assert_eq!(vec![(10, 5, 5)], drawn(&d, 51));
+    assert_eq!(0, open_floats(&mut d));
     assert!(d.panes.list.iter().all(|p| p.layer.is_none()));
+}
+
+#[test]
+fn a_group_whose_pane_went_stays_in_the_pane_it_was_drawn_in_next() {
+    let Fixture {
+        mut d,
+        nvim_end: _nvim,
+    } = two_panes(no_open_float());
+    enter_float(&mut d, 10, 2000, [5, 5], 20, 5);
+    d.on_current(1001).unwrap();
+    assert_eq!(vec![(10, 5, 5)], drawn(&d, 50));
+    // its pane goes: the current pane takes it
+    let i = d.panes.index_of(50).unwrap();
+    d.panes.remove(i, &d.event_loop);
+    d.draw().unwrap();
+    // moved into it, from the right half of the screen
+    assert_eq!(vec![(10, 5, 0)], drawn(&d, 51));
+
+    // and keeps it when another pane becomes current
+    let mut p = Pane::from_neovim_window(52, 1000);
+    p.terminal_surface = Some(Surface::for_test(60, 40));
+    p.area = Area::Live {
+        id: "w".into(),
+        rect: [0.0, 0.0, 0.5, 1.0],
+        floating: false,
+    };
+    d.panes.add(p);
+    d.on_current(1000).unwrap();
+    assert_eq!(vec![(10, 5, 0)], drawn(&d, 51));
+    assert!(drawn(&d, 52).is_empty());
 }
 
 #[test]
@@ -157,7 +216,7 @@ fn an_oversized_group_shrinks_the_screen_to_the_pane_and_grows_it_back() {
 }
 
 #[test]
-fn a_group_with_a_float_group_pane_shrinks_nothing() {
+fn a_group_with_a_float_group_pane_shrinks_nothing_until_its_open_fails() {
     let Fixture {
         mut d,
         nvim_end: _nvim,
@@ -166,6 +225,14 @@ fn a_group_with_a_float_group_pane_shrinks_nothing() {
     assert_eq!(1, open_floats(&mut d));
     assert_eq!(Shrink::No, d.nvim.shrink);
     assert_eq!([120, 40], d.nvim.editor_size);
+
+    // its float group pane won't come, and its float is current: drawn in
+    // the pane, it shrinks the screen
+    let f = fake(&mut d);
+    f.answer(f.last_id(), Outcome::Failed("no room".into()));
+    d.drain_provider().unwrap();
+    assert_eq!(Shrink::Shrunk(2000), d.nvim.shrink);
+    assert_eq!([60, 40], d.nvim.editor_size);
 }
 
 #[test]
@@ -203,27 +270,41 @@ fn exit_69_draws_every_group_after_in_a_pane_and_a_failure_only_its_own() {
 }
 
 #[test]
-fn a_fifth_group_is_drawn_in_a_pane_for_life() {
+fn a_fifth_higher_group_takes_the_lowest_groups_float_group_pane() {
     let Fixture {
         mut d,
         nvim_end: _nvim,
     } = two_panes(Some(FakeProvider::opening()));
-    for i in 0..5u32 {
-        enter_float(
-            &mut d,
-            10 + i,
-            2000 + i64::from(i),
-            [5, 10 * i as i32],
-            5,
-            3,
-        );
+    let enter = |d: &mut Daemon, i: u32| {
+        enter_float(d, 10 + i, 2000 + i64::from(i), [5, 10 * i as i32], 5, 3);
+    };
+    // each opens
+    for i in 0..4 {
+        enter(&mut d, i);
+        let f = fake(&mut d);
+        f.opened(f.last_id(), &format!("t{}", 10 + i));
+        d.drain_provider().unwrap();
     }
     assert_eq!(4, float_group_panes(&d));
-    assert_eq!(vec![(14, 5, 40)], drawn(&d, 50));
-    // one of the four closes: the fifth stays where it is
-    close_float(&mut d, 10);
-    assert_eq!(3, float_group_panes(&d));
-    assert_eq!(vec![(14, 5, 40)], drawn(&d, 50));
+    assert!(drawn(&d, 50).is_empty());
+
+    // a fifth, the top-most: it gets one, and the lowest loses its own,
+    // drawn in its pane instead
+    enter(&mut d, 4);
+    assert_eq!(4, float_group_panes(&d));
+    assert!(d.panes.by_layer_key(2004).is_some());
+    assert!(d.panes.by_layer_key(2000).is_none());
+    assert!(
+        fake(&mut d)
+            .asked()
+            .contains(&asks::close(TerminalId::from("t10")))
+    );
+    assert_eq!(vec![(10, 5, 0)], drawn(&d, 50));
+
+    // the fifth closes: the lowest is among the top four again
+    close_float(&mut d, 14);
+    assert!(d.panes.by_layer_key(2000).is_some());
+    assert_eq!(4, float_group_panes(&d));
 }
 
 #[test]

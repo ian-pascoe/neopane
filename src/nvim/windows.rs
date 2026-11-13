@@ -4599,6 +4599,11 @@ mod tests {
         assert!(h.until(|x| x.grids.get(1).is_some_and(|g| g.width == 30)));
         assert_eq!("30+ /1", seen(&mut h));
 
+        // one that runs once, set up since
+        h.sync(&format!(
+            "_G.once = 0\n\
+             vim.api.nvim_create_autocmd('VimResized', {{ buffer = vim.api.nvim_win_get_buf({float}), once = true, callback = function() _G.once = _G.once + 1 end }})"
+        ));
         // grown back with another window current: Neovim doesn't
         h.sync(&format!("vim.api.nvim_set_current_win({main})"));
         h.nvim.ui_try_resize(60, 10).unwrap();
@@ -4606,6 +4611,11 @@ mod tests {
         h.nvim.flush().unwrap();
         // run again, in the float, at the size just asked; the global one isn't
         assert_eq!("30+ 60+ /2", seen(&mut h));
+        // run again: the one that runs once doesn't
+        resized_again(&mut h.nvim, &[float]);
+        h.nvim.flush().unwrap();
+        assert_eq!("30+ 60+ 60+ /2", seen(&mut h));
+        assert_eq!("1", h.eval_str("return tostring(_G.once)"));
         assert_eq!(
             main.to_string(),
             h.eval_str("return tostring(vim.api.nvim_get_current_win())")

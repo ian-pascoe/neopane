@@ -90,9 +90,9 @@ pub struct Opts<'a> {
     /// The pane's top left on grid 1, which spans the Rex window: screen
     /// floats move by it, then into the pane.
     pub origin: [i32; 2],
-    /// Editor floats shown elsewhere, with every float hanging from them.
+    /// Screen floats shown elsewhere, with every float hanging from them.
     pub skip: &'a [u32],
-    /// Editor floats drawn here, with every float hanging from them, even
+    /// Screen floats drawn here, with every float hanging from them, even
     /// when the pane isn't focused: float groups with no float group pane
     /// last current in it (ADR 0010).
     pub own: &'a [u32],
@@ -118,7 +118,7 @@ pub(crate) struct Rect {
     pub(crate) height: u32,
     pub(crate) on_screen: bool,
     pub(crate) on_msg: bool,
-    /// The editor float it hangs from, itself included; 0 if none.
+    /// The screen float it hangs from, itself included; 0 if none.
     pub(crate) top: u32,
 }
 
@@ -1032,7 +1032,7 @@ fn movable(r: Rect) -> bool {
     r.on_screen && !r.on_msg
 }
 
-/// Hang from the same editor float, or overlap or touch.
+/// Hang from the same screen float, or overlap or touch.
 fn together(a: Rect, b: Rect) -> bool {
     if a.top != 0 && a.top == b.top {
         return true;

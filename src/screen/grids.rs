@@ -182,13 +182,13 @@ impl Grids {
 
     /// The floats over grid `base`, and over the screen too if `screen`
     /// (floats on grid 1 and the message grid), lowest first. Floats hanging
-    /// from an editor float in `skip` are left out. At most `MAX_FLOATS`: the
+    /// from a screen float in `skip` are left out. At most `MAX_FLOATS`: the
     /// top-most ones.
     pub fn floats_over(&self, base: u32, screen: bool, skip: &[u32]) -> Vec<Placed> {
         self.floats_over_with(base, screen, skip, &[])
     }
 
-    /// `floats_over`, and the floats of the editor floats in `own` even
+    /// `floats_over`, and the floats of the screen floats in `own` even
     /// without `screen`: float groups drawn in this pane though it isn't the
     /// current one (ADR 0010).
     pub(crate) fn floats_over_with(
@@ -1084,7 +1084,7 @@ mod tests {
             },
             all[2]
         );
-        // left out with the editor float it hangs from
+        // left out with the screen float it hangs from
         assert_eq!(2, gs.floats_over(2, true, &[5]).len());
     }
 

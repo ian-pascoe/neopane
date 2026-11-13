@@ -1113,8 +1113,9 @@ end
 api.nvim_create_autocmd('TabEnter', { group = group, callback = bring_carried })
 
 -- runs autocommand `a`, of `nvim_get_autocmds`, for buffer `buf`, as Neovim
--- would; one whose callback returns true is deleted
+-- would; one that runs once, or whose callback returns true, is deleted
 local function run_autocmd(a, buf)
+  if a.once then pcall(api.nvim_del_autocmd, a.id) end
   local ok, res = true, nil
   if type(a.callback) == 'function' then
     local ev = { id = a.id, event = a.event, group = a.group, match = '', buf = buf, file = '' }
