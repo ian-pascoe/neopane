@@ -292,8 +292,8 @@ fn full_cuts_nothing() {
 fn documented(object: &str) -> BTreeSet<&'static str> {
     let keys: &[&str] = match object {
         "top" => &[
-            "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "default",
-            "problems", "result",
+            "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "tmux",
+            "default", "problems", "result",
         ],
         "config" => &["path", "state"],
         "attach" => &["tty", "pid", "cwd", "daemon", "provider"],
@@ -313,6 +313,7 @@ fn documented(object: &str) -> BTreeSet<&'static str> {
         "capability" => &["state", "argv", "timeout", "fallback", "why"],
         "find" => &["ran", "title", "exit", "seconds", "id", "verdict", "why"],
         "rex" => &["server", "version", "api_revision", "missing", "find"],
+        "tmux" => &["path", "version", "socket", "answers", "error", "missing"],
         "problem" => &["level", "path", "message"],
         "result" => &["state", "message", "refused"],
         "default" => &["named", "inside"],
@@ -376,6 +377,7 @@ fn json_has_the_documented_keys() {
     assert_eq!("not run", v["find"]["verdict"]);
     assert_eq!(false, v["find"]["ran"]);
     assert_eq!(Value::Null, v["rex"]);
+    assert_eq!(Value::Null, v["tmux"]);
     let why = "a half's one-step capability is ignored; only a table returned whole gets one";
     assert_eq!(
         serde_json::json!({ "state": "ignored", "why": why }),
@@ -824,4 +826,154 @@ fn rexs_find_disproves_another_terminals_rex_block() {
         )),
         "{written}"
     );
+}
+
+/// `provider check` with `args` in a pane of a tmux server whose `TMUX` is
+/// `tmux`, its `PATH` being `path`.
+fn in_tmux(home: &Home, tmux: &str, path: &std::ffi::OsStr, args: &[&str]) -> Output {
+    home.command(args)
+        .env("TMUX", tmux)
+        .env("TERM_PROGRAM", "tmux")
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+/// The lines of `out`'s tmux section.
+fn tmux_section(out: &Output) -> Vec<&str> {
+    let mut lines = stdout(out).lines().skip_while(|l| !l.starts_with("tmux  "));
+    let head = lines
+        .next()
+        .unwrap_or_else(|| panic!("no tmux section:\n{}", stdout(out)));
+    std::iter::once(head)
+        .chain(lines.take_while(|l| l.starts_with("  ")))
+        .collect()
+}
+
+#[test]
+fn the_default_tmux_tables_report_has_a_tmux_section_naming_tmux_its_server_and_version() {
+    if !support::have_tmux() {
+        return;
+    }
+    let home = Home::new("tmux");
+    let tmux = support::TmuxServer::start(&home.dir, &[], &[]);
+    let path = std::env::var_os("PATH").unwrap();
+    let out = in_tmux(&home, &tmux.tmux_var(), &path, &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let which = Command::new("sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .unwrap();
+    let version = Command::new("tmux").arg("-V").output().unwrap();
+    let version = text(&version.stdout)
+        .trim()
+        .trim_start_matches("tmux ")
+        .to_string();
+    let section = tmux_section(&out);
+    assert_eq!(
+        section[..4],
+        [
+            format!("tmux  {}", text(&which.stdout).trim()),
+            format!("  version  {version}"),
+            format!("  socket  {}", tmux.socket.display()),
+            "  server  answers".to_string(),
+        ]
+    );
+
+    let out = in_tmux(&home, &tmux.tmux_var(), &path, &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    keys_in(&v["tmux"], "tmux");
+    assert_eq!(v["tmux"]["version"], version.as_str());
+    assert_eq!(v["tmux"]["socket"], tmux.socket.to_str().unwrap());
+    assert_eq!(v["tmux"]["answers"], true);
+    assert_eq!(v["tmux"]["error"], Value::Null);
+    drop(tmux);
+}
+
+/// A `tmux` in `dir` that says it's `version`, and answers whatever it's
+/// asked of a server with nothing.
+fn fake_tmux(dir: &std::path::Path, version: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = dir.join("tmux");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\n[ \"$1\" = -V ] && echo 'tmux {version}'\nexit 0\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_tmux_too_old_for_a_capability_in_use_says_it_exits_69() {
+    let home = Home::new("tmux-3.4");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_tmux(&bin, "3.4");
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    assert_eq!(
+        tmux_section(&out)[1..],
+        [
+            "  version  3.4",
+            "  socket  /tmp/nowhere",
+            "  server  answers",
+            "  open_float  exits 69: needs tmux 3.7, this is 3.4",
+            "  events  exits 69: needs tmux 3.8, this is 3.4",
+        ]
+    );
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["tmux"]["missing"],
+        serde_json::json!([
+            { "capability": "open_float", "needs": "3.7" },
+            { "capability": "events", "needs": "3.8" },
+        ])
+    );
+
+    // below the floor, every capability
+    fake_tmux(&bin, "3.1c");
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
+    assert!(
+        tmux_section(&out).contains(&"  missing  every capability (needs tmux 3.2, this is 3.1c)"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_changed_copy_of_the_tmux_table_gets_the_section_for_what_it_still_runs() {
+    let home = Home::new("tmux-copy").with_config(
+        r#"return { provider = function()
+          local t = {name}.builtin.tmux()
+          t.name = "mine"
+          t.events = nil
+          t.open_beside = { "my-split", "{attach}" }
+          return t
+        end }"#,
+    );
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_tmux(&bin, "3.4");
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let section = tmux_section(&out);
+    assert!(
+        section.contains(&"  open_float  exits 69: needs tmux 3.7, this is 3.4"),
+        "{section:?}"
+    );
+    assert!(
+        !section.iter().any(|l| l.starts_with("  events")),
+        "{section:?}"
+    );
+
+    // a table that runs no built-in has none
+    let home = Home::new("tmux-none").with_config(
+        r#"return { provider = function() return { name = "x", open = { "o" } } end }"#,
+    );
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(Value::Null, v["tmux"], "{v}");
+    let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
+    assert!(!stdout(&out).contains("\ntmux  "), "{}", stdout(&out));
 }

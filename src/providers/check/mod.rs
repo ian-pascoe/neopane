@@ -27,10 +27,11 @@ use std::time::Duration;
 
 use super::choose::{self, ChooseBy, ConfigFile, HINT_NONE};
 use super::command::commands_env;
+use super::tmux::{self, check::TmuxReport};
 use crate::attach::env_value;
 use crate::config::check::Severity;
 use crate::config::wire::{Called, Ran as LuaRan};
-use crate::config::{self, Attach, Builtin, Choice, Outcome, Problems};
+use crate::config::{self, Attach, Builtin, BuiltinTable, Capability, Choice, Outcome, Problems};
 use crate::name::{NAME, upper};
 
 pub(crate) use find::Find;
@@ -85,6 +86,8 @@ pub(crate) struct Check {
     pub find: Find,
     /// For `"rex"`.
     pub rex: Option<rex::RexReport>,
+    /// For a table whose capabilities run the built-in tmux command.
+    pub tmux: Option<TmuxReport>,
     /// What `<name>.default` came to, when it chose: what it named and the
     /// `inside` proofs it ran.
     pub default: Option<config::Defaulted>,
@@ -192,6 +195,7 @@ fn gather(o: &Options) -> Check {
         problems: Problems::default(),
         find: Find::NotRun("the config failed".into()),
         rex: None,
+        tmux: None,
         default: None,
         result: Verdict::None { warning: None },
     };
@@ -222,9 +226,41 @@ fn gather(o: &Options) -> Check {
     }
     if let Some((choice, how)) = &check.chose {
         let (choice, how) = (choice.clone(), *how);
+        let uses = runs_builtin(&choice, BuiltinTable::Tmux);
+        if !uses.is_empty() {
+            check.tmux = Some(tmux::check::probe(&check.attach, &uses));
+        }
         decide(&mut check, &choice, how, o.no_find, tty.as_ref());
     }
     check
+}
+
+/// The capabilities of `choice`'s tables that run built-in `table`'s
+/// command, `{exe} provider builtin NAME`, whatever follows: a copied and
+/// changed table's too.
+fn runs_builtin(choice: &Choice, table: BuiltinTable) -> Vec<Capability> {
+    let tables: Vec<&config::Provider> = match choice {
+        Choice::Whole(p) => vec![p],
+        Choice::Pair(pair) => pair.terminal.iter().chain(pair.layout.iter()).collect(),
+        Choice::None | Choice::Builtin(_) => Vec::new(),
+    };
+    let words = ["{exe}", "provider", "builtin", table.name()];
+    let mut caps: Vec<Capability> = tables
+        .iter()
+        .flat_map(|p| p.capabilities.iter())
+        .filter(|(_, command)| {
+            command.argv.len() > words.len()
+                && command
+                    .argv
+                    .iter()
+                    .zip(words)
+                    .all(|(w, want)| w == want.as_bytes())
+        })
+        .map(|(cap, _)| *cap)
+        .collect();
+    caps.sort();
+    caps.dedup();
+    caps
 }
 
 /// Runs config `file` in the config child, as the daemon would, and checks

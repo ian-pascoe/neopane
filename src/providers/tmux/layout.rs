@@ -39,6 +39,11 @@ pub(super) fn report_layout(given: &Given) -> Result<String, String> {
     Ok(layout(&panes, &clients)?.to_string())
 }
 
+/// The focused pane, as `report_layout` reports it, if any.
+pub(super) fn focused(server: &Server) -> Result<Option<String>, String> {
+    Ok(focus(&server.run(&["list-clients", "-F", CLIENTS])?))
+}
+
 /// The report `report_layout` prints, from what `list-panes -a -F PANES`
 /// and `list-clients -F CLIENTS` printed.
 fn layout(panes: &[u8], clients: &[u8]) -> Result<Value, String> {

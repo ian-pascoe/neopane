@@ -268,6 +268,7 @@ The report's sections:
 | `default` | when `neopane.default` chose with no file: the built-ins the environment names (`default  names tmux and rex`), and each `inside` it asked, as `  inside.tmux  no: <why>` |
 | `whole`, `terminal`, `layout` | each table in use, by its role: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`). A pair's terminal side lists the one-step capabilities too, absent from a pair, and either side lists any it gave that are ignored. `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`), `reach` (its context variables, with this attach's values) and `find vars` show for a table that gives the layout, so not for a terminal side; `attach timeout`, such as `5 s (default)`, for one that opens terminals, so not for a layout side |
 | `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
+| `tmux` | for a table whose capabilities run `{exe} provider builtin tmux`, such as `neopane.builtin.tmux()` or a changed copy of it: the `tmux` on `PATH` (or `not on PATH`), its version, the socket `TMUX` names, whether the server answers (or why not), and each capability in use that this tmux is too old for, such as `open_float  exits 69: needs tmux 3.7, this is 3.4` and `events  exits 69: needs tmux 3.8, this is 3.4`; below 3.2, `missing  every capability (needs tmux 3.2, this is 3.1c)` |
 | `rex` | for `"rex"`: the server's URL, version and API revision (`server.version`'s, else the one its welcome agreed), and, for a server older than this build speaks, `missing  every capability (needs Rex API revision N, this server has M)`: Rex doesn't say which revision each method came in, so it isn't told capability by capability |
 | `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)` (the path where the system names it: on macOS, and for a pseudo-terminal on Linux), or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
 | `errors`, `warnings` | every problem, with its path |
@@ -327,6 +328,7 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
  "one_step":[],
  "find":{"ran":true,"title":"neopane-k3j9x2qpa8","exit":0,"seconds":0.412,"id":"31337","verdict":"accepted","why":null},
  "rex":null,
+ "tmux":null,
  "default":null,
  "problems":[],
  "result":{"state":"ok","message":null}}
@@ -352,6 +354,14 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
   one `{"capability": null, "needs": N}` for a server older than this build
   speaks (null: every capability); `find` is `proven`, `disproved`,
   `unprovable`, or null when it didn't run.
+- `tmux`: null unless a table in use runs `{exe} provider builtin tmux`;
+  else `{"path", "version", "socket", "answers", "error", "missing"}`:
+  `path`, `version` and `socket` are null when unknown, `error` says why
+  the server didn't answer, and `missing[]`, as `rex`'s, holds
+  `{"capability": "open_float", "needs": "3.7"}` for each capability in use
+  this tmux is too old for, or one `{"capability": null, "needs": "3.2"}`
+  below the floor. Its `needs` is a tmux version, a string, where `rex`'s
+  is an API revision, a number.
 - `default`: null unless `neopane.default` chose with no file; else
   `{"named": ["tmux", "rex"], "inside": [{"name": "tmux", "ok": false,
   "why": "…"}]}`: the built-ins the environment names, in order, and each
@@ -381,7 +391,11 @@ commands").
 On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
 config, and each Neovim window gets a tmux pane of its own, split beside the
 pane it came from; on tmux 3.7 or newer, a group of floats you enter gets a
-tmux floating pane. The default knows tmux by its own variables,
+tmux floating pane. On tmux 3.8 or newer, moving between panes with tmux's
+own keys, or clicking one, moves Neovim's current window there at once;
+older tmux has no way to tell neopane unasked, so the move is learned at the
+next key you type or the next focus report. `neopane provider check` shows
+what your tmux can do. The default knows tmux by its own variables,
 `TERM_PROGRAM=tmux` and `TMUX`, and where Rex's are set too, asks
 `neopane.inside.tmux` (see [The default](#the-default)); its `find` then
 checks the terminal is a pane of that tmux server, by its tty, so a `TMUX`

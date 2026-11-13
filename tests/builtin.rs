@@ -196,3 +196,81 @@ fn open_float_is_unsupported_below_tmux_3_7_naming_its_version() {
     assert!(err.contains("tmux 3.6 has no floating panes"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn events_is_unsupported_below_tmux_3_8_naming_its_version() {
+    let dir = scratch("tmux-noevents");
+    let fake = dir.join("tmux");
+    // a tmux 3.7 that fails anything but -V, so only the version is asked
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1\" = -V ] && echo 'tmux 3.7c' && exit 0\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(exe())
+        .args(["provider", "builtin", "tmux", "events"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "events")
+        .env("TMUX", "/tmp/nowhere,1,0")
+        .env("PATH", &dir)
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(69), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty());
+    let err = text(&out.stderr);
+    assert!(err.contains("tmux 3.7c can't wait for events"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The events `events` waits for, as the ticket names them.
+const EVENTS: [&str; 9] = [
+    "window-layout-changed",
+    "window-pane-changed",
+    "session-window-changed",
+    "client-session-changed",
+    "window-linked",
+    "window-unlinked",
+    "client-attached",
+    "client-detached",
+    "client-active",
+];
+
+#[test]
+fn events_keeps_a_waiter_on_each_of_its_events_past_the_second_a_bad_one_would_fail_in() {
+    if !have_tmux() || !have_tmux_events() {
+        return;
+    }
+    let dir = scratch("tmux-waitable");
+    let tmux = TmuxServer::start(&dir, &[], &[]);
+    let mut events = Command::new(exe())
+        .args(["provider", "builtin", "tmux", "events"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "events")
+        .env("TMUX", tmux.tmux_var())
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // a name tmux can't wait on fails at once, and is dropped within 1 s
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let gone = events.try_wait().unwrap();
+    let waiting: Vec<(&str, String)> = EVENTS
+        .iter()
+        .map(|e| (*e, tmux.run(&["wait-for", "-E", "-l", e])))
+        .collect();
+    let _ = events.kill();
+    // its waiters, left by the kill, hold its stderr until the server ends
+    drop(tmux);
+    let out = events.wait_with_output().unwrap();
+    assert_eq!(gone, None, "events ended: {}", text(&out.stderr));
+    for (event, waiters) in &waiting {
+        assert_eq!(waiters.lines().count(), 1, "{event}: {waiters:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
