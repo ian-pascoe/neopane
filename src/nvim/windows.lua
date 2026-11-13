@@ -19,12 +19,17 @@ local last
 -- the buffer a window a pane could show showed last, for a new window
 -- once none is left
 local last_buf
--- tab page made after setup -> { back = the window current before it }.
--- Its windows show in a tab page area, or whole in the pane it opened in,
--- and it closes with the last.
+-- tab page with a place of its own -> { back = the window current before
+-- it }: one made after setup, or one Neovim started with, as `-p` and a
+-- session open them, from when it first became current. Its windows show in
+-- a tab page area, or whole in the pane it opened in, and it closes with the
+-- last.
 -- The record also holds its window layout, as the daemon is told of it, and
 -- how many of its windows are being reopened (`reopening`).
 local floating = {}
+-- the tab pages Neovim started with that haven't been current yet, but the
+-- first: tab page -> true
+local unvisited = {}
 -- a tab page without a tab page area -> its window layout, as the daemon is
 -- told of it: the daemon decides which tab pages it places
 local layouts = {}
@@ -663,6 +668,8 @@ end
 --- it's gone.
 function M.show(win, w, h)
   if not shown(win) then return 0 end
+  -- the terminal is its tab page's place: it never moves into an area
+  if home[win] then unvisited[home[win]] = nil end
   -- `win` and its home tab page become current, carried floats moving in
   M.go(win)
   if api.nvim_win_get_config(win).external then
@@ -1279,6 +1286,28 @@ for _, k in ipairs({ 'p', '<C-p>' }) do
     if previous and steps_to(previous) then return previous end
   end), { desc = 'Go to the window current before' })
 end
+
+-- <C-w>T: Neovim's copies the window into a new tab page, with a new id
+-- (0.12). Ours is `:tab split`, then the old window closes as :close closes
+-- it, its pane with it; the new tab page gets its place as any does.
+-- Refused for its home tab page's only window, as Neovim refuses a tab
+-- page's only window. With a count N, before tab page N.
+vim.keymap.set('n', '<C-w>T', function()
+  local win = api.nvim_get_current_win()
+  if not shown(win) then return vim.cmd('wincmd T') end
+  local tab = tab_of(win)
+  local alone = true
+  for _, w in ipairs(api.nvim_list_wins()) do
+    if w ~= win and shown(w) and tab_of(w) == tab then alone = false end
+  end
+  if alone then return api.nvim_echo({ { 'Already only one window' } }, false, {}) end
+  local count = vim.v.count
+  local view = vim.fn.winsaveview()
+  vim.cmd((count > 0 and tostring(count - 1) or '') .. 'tab split')
+  vim.fn.winrestview(view)
+  local ok, err = pcall(api.nvim_win_close, win, false)
+  if not ok then api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {}) end
+end, { desc = 'Move the window to a new tab page' })
 
 api.nvim_create_autocmd('WinEnter', {
   group = group,
@@ -2046,9 +2075,9 @@ api.nvim_create_autocmd('QuitPre', {
   end,
 })
 
--- A window of tab page `tab`, made after setup, closed: once none is left,
--- close the tab page too, from another one, as external windows would go
--- with it.
+-- A window of tab page `tab`, one with a place of its own, closed: once
+-- none is left, close the tab page too, from another one, as external
+-- windows would go with it.
 local function close_tab(tab)
   local t = floating[tab]
   -- windows being reopened in it are still to come
@@ -2161,6 +2190,9 @@ api.nvim_create_autocmd('TabClosed', {
     for tab in pairs(layouts) do
       if not api.nvim_tabpage_is_valid(tab) then layouts[tab] = nil end
     end
+    for tab in pairs(unvisited) do
+      if not api.nvim_tabpage_is_valid(tab) then unvisited[tab] = nil end
+    end
   end,
 })
 
@@ -2170,18 +2202,42 @@ end
 -- The windows Neovim started with, as `-o` and `-O` open them: each is
 -- noted split off the one before it, the way the layout has them, so they
 -- are laid out as Neovim had them. Returns the last window of `node`.
-local function note_startup_splits(node, dir, from)
+local function note_startup_splits(node, dir, from, tab)
   if node[1] == 'leaf' then
-    if from then note('split', node[2], dir == 'row', false, from, 0) end
+    if from then note('split', node[2], dir == 'row', false, from, tab) end
     return node[2]
   end
   local last = from
   for i, child in ipairs(node[2]) do
-    last = note_startup_splits(child, i == 1 and dir or node[1], last)
+    last = note_startup_splits(child, i == 1 and dir or node[1], last, tab)
   end
   return last
 end
-note_startup_splits(vim.fn.winlayout())
+note_startup_splits(vim.fn.winlayout(), nil, nil, 0)
+
+-- The other tab pages Neovim started with, as `-p` and a session open them,
+-- get their place as each first becomes current, as one made later does:
+-- its first window opens from the window current before, the rest split
+-- off it as Neovim has them.
+for _, tab in ipairs(api.nvim_list_tabpages()) do
+  if tab ~= api.nvim_get_current_tabpage() then unvisited[tab] = true end
+end
+api.nvim_create_autocmd('TabEnter', {
+  group = group,
+  callback = function()
+    local tab = api.nvim_get_current_tabpage()
+    if not unvisited[tab] then return end
+    unvisited[tab] = nil
+    local node = vim.fn.winlayout(api.nvim_tabpage_get_number(tab))
+    local first = node
+    while first[1] ~= 'leaf' do first = first[2][1] end
+    floating[tab] = { back = last }
+    layouts[tab] = nil
+    note('split', first[2], false, false, (last and shown(last)) and last or 0, tab)
+    note_startup_splits(node, nil, nil, tab)
+    schedule_layout(tab)
+  end,
+})
 
 local first = api.nvim_get_current_win()
 M.adopt(first, cols, rows)

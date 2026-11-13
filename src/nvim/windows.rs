@@ -237,7 +237,7 @@ pub enum Note {
     Cmdheight(i64),
     /// `<C-w>h/j/k/l` was typed: Rex knows where the panes sit, not Neovim.
     Direction(Move),
-    /// Where the windows of a tab page made after setup sit in it.
+    /// Where the windows of a tab page sit in it.
     Layout(Layout),
     /// The options a pane layout splits and closes windows by.
     Options(SplitOptions),
@@ -453,8 +453,9 @@ pub struct Split {
     pub(crate) before: bool,
     /// The window it was split from, or 0.
     pub(crate) from: i64,
-    /// The tab page made after setup it belongs to, which Neovim shows
-    /// over the first one's windows, else 0.
+    /// The tab page it belongs to, if that gets a place of its own: one
+    /// made after setup, or one Neovim started with, as `-p` opens them,
+    /// once it first became current (ADR 0012). Else 0.
     pub(crate) tab: i64,
 }
 
@@ -3881,31 +3882,36 @@ mod tests {
             return;
         };
         h.boot();
-        // the records windows.lua keeps of tab pages without a tab page area,
-        // found through the closures of its module
+        // the records windows.lua keeps of tab pages' layouts, those without
+        // a place of their own and those with, found through the closures of
+        // its module
         let count = |h: &mut Harness| {
             h.eval_str(&format!(
-                "local function find(f, seen)\n\
+                "local function find(f, seen, want)\n\
                  \x20 if seen[f] then return end\n\
                  \x20 seen[f] = true\n\
                  \x20 for i = 1, math.huge do\n\
                  \x20   local n, v = debug.getupvalue(f, i)\n\
                  \x20   if not n then return end\n\
-                 \x20   if n == 'layouts' then return v end\n\
+                 \x20   if n == want then return v end\n\
                  \x20   if type(v) == 'function' then\n\
-                 \x20     local got = find(v, seen)\n\
+                 \x20     local got = find(v, seen, want)\n\
                  \x20     if got then return got end\n\
                  \x20   end\n\
                  \x20 end\n\
                  end\n\
-                 local seen, layouts = {{}}\n\
-                 for _, f in pairs(_G['{NAME}']) do\n\
-                 \x20 if type(f) == 'function' then layouts = layouts or find(f, seen) end\n\
+                 local function count(want)\n\
+                 \x20 local seen, found = {{}}\n\
+                 \x20 for _, f in pairs(_G['{NAME}']) do\n\
+                 \x20   if type(f) == 'function' then found = found or find(f, seen, want) end\n\
+                 \x20 end\n\
+                 \x20 return vim.tbl_count(assert(found, 'no ' .. want))\n\
                  end\n\
-                 return tostring(vim.tbl_count(assert(layouts, 'no layouts')))",
+                 return tostring(count('layouts') + count('floating'))",
             ))
         };
-        // both tab pages were current, so both have one
+        // both tab pages were current, so both have one: the first without
+        // a place, b with one since it was first current
         h.sync("vim.cmd('tabnext')");
         h.sync("vim.cmd('tabnext')");
         assert_eq!("2", count(&mut h));

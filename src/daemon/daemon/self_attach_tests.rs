@@ -57,10 +57,10 @@ pub(super) struct Rig {
     sock: String,
     /// Neovim's `--listen` socket, and the test's channel on it.
     pub(super) listen: String,
-    query: crate::nvim::nvim::Nvim,
+    pub(super) query: crate::nvim::nvim::Nvim,
     pub(super) terms: Vec<Term>,
     /// Files the test made, removed as it ends.
-    files: Vec<String>,
+    pub(super) files: Vec<String>,
 }
 
 impl Drop for Rig {
@@ -82,7 +82,7 @@ impl Rig {
 
     /// Neovim started with `args`, `provider` the pane provider and
     /// `terminal` its id for the first pane.
-    fn start_with(
+    pub(super) fn start_with(
         args: &[&str],
         provider: Option<Box<dyn PaneProvider>>,
         terminal: Option<TerminalId>,
@@ -229,7 +229,7 @@ impl Rig {
     }
 
     /// Runs Lua `code` returning a list of ints, on the test's own channel.
-    fn ints(&mut self, code: &str) -> Vec<i64> {
+    pub(super) fn ints(&mut self, code: &str) -> Vec<i64> {
         ints(&mut self.query, code)
     }
 
@@ -241,7 +241,7 @@ impl Rig {
     }
 
     /// The windows on each of `files`, once Neovim is set up.
-    fn wins_on(&mut self, files: &[String]) -> Vec<i64> {
+    pub(super) fn wins_on(&mut self, files: &[String]) -> Vec<i64> {
         self.pump(|r| r.d.nvim.ready);
         files.iter().map(|f| self.win_on(f)).collect()
     }
@@ -283,7 +283,7 @@ fn ints(nvim: &mut crate::nvim::nvim::Nvim, code: &str) -> Vec<i64> {
 
 /// `-p` with three files, named for test `tag`, holding one line each:
 /// `alpha`, `bravo`, `charlie`.
-fn three_files(tag: &str) -> Vec<String> {
+pub(super) fn three_files(tag: &str) -> Vec<String> {
     ["alpha", "bravo", "charlie"]
         .iter()
         .map(|word| {
@@ -297,7 +297,7 @@ fn three_files(tag: &str) -> Vec<String> {
         .collect()
 }
 
-fn remove(files: &[String]) {
+pub(super) fn remove(files: &[String]) {
     for f in files {
         let _ = std::fs::remove_file(f);
     }
