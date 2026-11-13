@@ -344,6 +344,13 @@ struct Tabline {
     col: u32,
 }
 
+/// The terminals of the panes a move is between: the one placed, and the
+/// one it is placed beside.
+struct Terminals {
+    moved: TerminalId,
+    origin: TerminalId,
+}
+
 /// The moves `plan` of a tab page, to ask as `capability`; the tab page has
 /// no tab page area if `no_area`.
 struct TabPlan {
@@ -1961,7 +1968,7 @@ impl Daemon {
     fn placement_ask(&self, m: &PaneMove, capability: Capability, no_area: bool) -> Option<Ask> {
         let moved = self.panes.by_win(m.win)?;
         let beside = self.panes.by_win(m.beside)?;
-        let (moved, origin) = takes_part_together(moved, beside, no_area)?;
+        let Terminals { moved, origin } = terminals_to_place(moved, beside, no_area)?;
         let dir = Direction::of_split(m.side_by_side, false);
         let (size, ratio) = (m.size, 1.0 - m.ratio);
         Some(match capability {
@@ -3279,7 +3286,7 @@ impl Daemon {
 /// the first, is never moved, only resized, its panes left where they
 /// opened: there a self-attached pane is resized too, once it has a
 /// terminal, and only against a pane the live layout has in its layout area
-/// (see `takes_part_together`).
+/// (see `terminals_to_place`).
 fn takes_part(p: &Pane, no_area: bool) -> bool {
     p.closing.is_none() && (!p.is_self_attached() || (no_area && p.terminal.is_some()))
 }
@@ -3288,11 +3295,7 @@ fn takes_part(p: &Pane, no_area: bool) -> bool {
 /// in placing their tab page's panes (see `takes_part`): each has a terminal
 /// of its own, and without a tab page area, the live layout has both in one
 /// layout area.
-fn takes_part_together(
-    moved: &Pane,
-    beside: &Pane,
-    no_area: bool,
-) -> Option<(TerminalId, TerminalId)> {
+fn terminals_to_place(moved: &Pane, beside: &Pane, no_area: bool) -> Option<Terminals> {
     let (a, b) = (moved.terminal.clone()?, beside.terminal.clone()?);
     if a == b
         || (no_area
@@ -3302,7 +3305,10 @@ fn takes_part_together(
     {
         return None;
     }
-    Some((a, b))
+    Some(Terminals {
+        moved: a,
+        origin: b,
+    })
 }
 
 /// How far window `win`, node `at` of `tab`'s layout, has got toward a pane;
