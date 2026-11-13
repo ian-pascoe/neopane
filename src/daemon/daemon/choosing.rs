@@ -111,24 +111,10 @@ impl Daemon {
     /// the config child while the loop goes on: what needs the pane
     /// provider waits for its answer.
     fn run_config(&mut self, id: u32, file: &Path) -> Result<()> {
-        let p = self.panes.by_id(id).unwrap();
-        let hello = p.hello.as_deref().unwrap();
-        let attach = crate::config::Attach {
-            env: hello.env.clone(),
-            cwd: hello.cwd.clone(),
-            tty: hello.tty.clone(),
-            pid: hello.pid,
-            daemon: self.name.clone(),
-            provider: hello.hint.clone(),
-        };
+        let hello = self.panes.by_id(id).and_then(|p| p.hello.as_deref());
+        let attach = hello.unwrap().for_config(&self.name);
         match ConfigRun::start(Path::new(&self.exe), file, attach) {
-            Ok(run) => {
-                log_info!("{NAME} daemon: pane {id} runs {}", file.display());
-                self.event_loop.add_read(run.fd(), Token::Config as usize)?;
-                self.panes.by_id_mut(id).unwrap().reach = Reach::Finding;
-                self.config_run = Some((id, run));
-                Ok(())
-            }
+            Ok(run) => self.wait_for_config(id, run),
             Err(e) => {
                 let line = format!("config: can't run {}: {e}", file.display());
                 log_warn!("{NAME} daemon: {line}");
@@ -136,6 +122,18 @@ impl Daemon {
                 self.take_choice(id, Chosen::ConfigError)
             }
         }
+    }
+
+    /// Self-attached pane `id` chooses with the config `run`, started:
+    /// its answer is watched for on the loop.
+    pub(super) fn wait_for_config(&mut self, id: u32, run: ConfigRun) -> Result<()> {
+        log_info!("{NAME} daemon: pane {id} runs {}", run.file.display());
+        self.event_loop.add_read(run.fd(), Token::Config as usize)?;
+        if let Some(p) = self.panes.by_id_mut(id) {
+            p.reach = Reach::Finding;
+        }
+        self.config_run = Some((id, run));
+        Ok(())
     }
 
     /// The config's run for a choice is done: what it chose is taken, as

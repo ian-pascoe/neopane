@@ -175,6 +175,9 @@ pub(crate) struct Daemon {
     pub test_choose: Option<TestChoose>,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
+    /// The config the first self-attach started running, before Neovim
+    /// started, for `start` to wait for.
+    pub first_config: Option<crate::providers::choose::ConfigRun>,
     /// Warnings for Neovim held until it is set up (`warn_when_ready`).
     held_warnings: Vec<String>,
     // Dropped last, in this order: the loop, then the pane provider, then
@@ -413,6 +416,7 @@ impl Daemon {
             #[cfg(test)]
             test_choose: None,
             first_choice: None,
+            first_config: None,
             held_warnings: Vec::new(),
             event_loop,
             provider,
@@ -451,9 +455,10 @@ impl Daemon {
         self.nvim
             .attach_ui(cols, rows)
             .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
-        match self.first_choice.take() {
-            Some(chosen) => self.take_choice(id, chosen)?,
-            None => self.choose_or_reach(id)?,
+        match (self.first_choice.take(), self.first_config.take()) {
+            (Some(chosen), _) => self.take_choice(id, chosen)?,
+            (None, Some(run)) => self.wait_for_config(id, run)?,
+            (None, None) => self.choose_or_reach(id)?,
         }
         self.nvim.client.flush()?;
         Ok(())

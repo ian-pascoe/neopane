@@ -46,6 +46,21 @@ pub(crate) struct AttachHello {
     pub hint: Option<String>,
 }
 
+impl AttachHello {
+    /// The `attach` a config chooses with (#93 decision 7), the daemon being
+    /// named `daemon`.
+    pub(crate) fn for_config(&self, daemon: &str) -> crate::config::Attach {
+        crate::config::Attach {
+            env: self.env.clone(),
+            cwd: self.cwd.clone(),
+            tty: self.tty.clone(),
+            pid: self.pid,
+            daemon: daemon.to_string(),
+            provider: self.hint.clone(),
+        }
+    }
+}
+
 /// Whether a pane's terminal is in the pane provider's reach (ADR 0006):
 /// a window opened from a pane out of reach is drawn in that pane.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

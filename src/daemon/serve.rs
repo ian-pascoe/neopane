@@ -24,6 +24,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
-use crate::providers::choose::{self, Chosen};
+use crate::providers::choose::{self, Chosen, ConfigRun};
 
 /// `serve` is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -614,15 +615,22 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // the config file, from the start environment only (ADR 0007)
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let config_file = choose::config_path(&std::env::vars_os().collect::<Vec<_>>(), &cwd);
-    // with no config to run, it chooses now: connecting to Rex goes on as
-    // Neovim starts; a config runs once the loop does
+    // it chooses now: the config, or connecting to Rex, goes on as Neovim
+    // starts
+    let mut config_run = None;
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
-        Some(h) if choose::config_for(config_file.as_deref(), h.hint.as_deref()).is_some() => None,
-        Some(h) => Some(choose::choose(
-            &h.env,
-            h.hint.as_deref(),
-            &mut choose::connect(),
-        )),
+        Some(h) => match choose::config_for(config_file.as_deref(), h.hint.as_deref()) {
+            // one that can't start is tried again, and warned of, at `start`
+            Some(file) => {
+                config_run = ConfigRun::start(Path::new(&exe), file, h.for_config(&name)).ok();
+                None
+            }
+            None => Some(choose::choose(
+                &h.env,
+                h.hint.as_deref(),
+                &mut choose::connect(),
+            )),
+        },
         None => Some(Chosen::None {
             why: "no hello".into(),
             warn: false,
@@ -634,6 +642,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let mut d;
     let choice = FirstChoice {
         chosen,
+        config_run,
         config_file,
     };
     match start_daemon(dir, nvim_args, config, &server, exe, &mut first, choice) {
@@ -685,10 +694,12 @@ fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::S
     }
 }
 
-/// What the first attach chose before Neovim started, if it did, and the
-/// config file the daemon found at start.
+/// What the first attach chose before Neovim started, or the config it
+/// started running to choose, and the config file the daemon found at
+/// start.
 struct FirstChoice {
     chosen: Option<Chosen>,
+    config_run: Option<ConfigRun>,
     config_file: Option<std::path::PathBuf>,
 }
 
@@ -721,6 +732,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     d.log = dir.log();
     d.lifetime.unsaved_file = Some(dir.unsaved());
     d.first_choice = choice.chosen;
+    d.first_config = choice.config_run;
     d.config_file = choice.config_file;
     d.start(first)?;
     Ok((child, d))
