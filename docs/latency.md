@@ -212,9 +212,8 @@ The built-in tmux pane provider (ADR 0016) runs each act as a process of
 neopane's own binary, which runs `tmux` once or more. Its budget is
 informational, not a gate: median ≤ 15 ms and p95 ≤ 40 ms for the focus
 acts, `focus` and `focus_direction`; `open_beside` is recorded beside them.
-That budget is pending: the built-in has no focus acts yet (SPI-1132 adds
-them), so it hasn't been measured, and is to be recorded below once they
-exist.
+`focus` is one `tmux` call; `focus_direction` two, `list-clients` for the
+window the latest client shows, then its guarded steps.
 
 ```sh
 scripts/latency-tmux.sh [N]
@@ -241,3 +240,19 @@ alongside, so these are high. Only `open_beside` was timed: `focus` and
 |---|---|---|---|
 | `open_beside` | 3.8 | 18.825, 17.729, 18.373 | 32.292, 21.356, 21.674 |
 | `open_beside` | 3.2a | 14.257 | 21.164 |
+
+Recorded at SPI-1132 (f9298e1), the same machine and profile, N = 55, the
+1-minute load between 7 and 9, other agents' builds and tests alongside.
+On tmux 3.8, `focus` is over the budget's median by a few ms and inside its
+p95, and `focus_direction`, at two `tmux` calls, is over both. On 3.2a,
+`focus` is inside it, and `focus_direction` a ms over its median. Each `tmux` call took about as long as `open_beside`'s one,
+so the time is tmux's own start and connection under load, not the acts'.
+
+| Act | tmux | Medians | p95s |
+|---|---|---|---|
+| `focus` | 3.8 | 17.728, 16.404, 18.015 | 33.708, 30.620, 26.630 |
+| `focus_direction` | 3.8 | 37.368, 37.032, 37.553 | 43.139, 43.975, 45.280 |
+| `open_beside` | 3.8 | 17.281, 17.464, 16.831 | 19.530, 20.640, 19.501 |
+| `focus` | 3.2a | 9.831 | 14.390 |
+| `focus_direction` | 3.2a | 16.610 | 19.901 |
+| `open_beside` | 3.2a | 10.345 | 11.761 |
