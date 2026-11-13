@@ -299,3 +299,124 @@ fn with_no_config_a_guess_find_refuses_is_logged_and_never_warned_of() {
     drop(tmux);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Whether the installed tmux has `wait-for -E`, 3.8, for `events`. Under
+/// CI on macOS, where Homebrew's is 3.8, it must; elsewhere an older one
+/// skips.
+fn have_tmux_events() -> bool {
+    let new_enough = tmux_version().is_some_and(|v| v >= (3, 8));
+    assert!(
+        new_enough || std::env::var_os("CI").is_none() || !cfg!(target_os = "macos"),
+        "tmux is older than 3.8"
+    );
+    new_enough
+}
+
+/// With a user's client attached, `select-pane` in tmux moves Neovim's
+/// current window to that pane's window, through `events`; its waiters
+/// are no client, and a pane still hears focus-out.
+#[test]
+fn in_tmux_3_8_select_pane_moves_neovims_current_window_and_no_client_is_added() {
+    if !have_nvim() || !have_tmux() || !have_tmux_events() {
+        return;
+    }
+    let tmp = scratch("tmux-events");
+    let exe = exe();
+    let tmux = TmuxServer::start(
+        &tmp,
+        &[
+            (&neopane::daemon::dir::tmpdir_var(), tmp.as_os_str()),
+            ("XDG_CONFIG_HOME", tmp.as_os_str()),
+            ("XDG_STATE_HOME", tmp.as_os_str()),
+        ],
+        &[exe.to_str().unwrap(), "--name", "ev"],
+    );
+    tmux.run(&["set", "-g", "focus-events", "on"]);
+    let mut client = tmux.attach();
+    let clients = || tmux.run(&["list-clients", "-F", "#{client_name}"]);
+    let attached = || tmux.run(&["display-message", "-p", "-t", "%0", "#{session_attached}"]);
+    assert_eq!(
+        until(|c: &String| c.lines().count() == 1, clients)
+            .lines()
+            .count(),
+        1
+    );
+    let sock = base_of(&tmp).join("ev/nvim.sock");
+    let ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let log = || std::fs::read_to_string(base_of(&tmp).join("ev/log")).unwrap_or_default();
+    let status = || json(&under(&tmp, &["status", "--json", "--name", "ev"]));
+    let waiters = || tmux.run(&["wait-for", "-E", "-l", "window-pane-changed"]);
+
+    until_expr(&sock, "1", |_| true).expect("ev's Neovim never answered");
+    let s = until(|s: &serde_json::Value| s["provider"] == "tmux", status);
+    assert_eq!(s["provider"], "tmux", "{}", log());
+    let w = until(|w: &String| !w.is_empty(), waiters);
+    assert!(!w.is_empty(), "events never waited: {}", log());
+    let first = remote_expr(&sock, "win_getid()").unwrap();
+
+    // :vsplit's window is current; its pane isn't tmux's active one
+    remote_expr(&sock, "execute('vsplit')").unwrap();
+    let s = until(|s: &serde_json::Value| s["panes"] == 2, status);
+    assert_eq!(s["panes"], 2, "its attach never came: {}", log());
+    let second = remote_expr(&sock, "win_getid()").unwrap();
+    assert_ne!(first, second);
+    let panes = tmux.run(&["list-panes", "-t", "%0", "-F", "#{pane_id}"]);
+    let new = panes.lines().find(|p| *p != "%0").unwrap().to_string();
+
+    // back in Neovim to the first, which is tmux's active pane; then to the
+    // new pane and back in tmux, Neovim following each move
+    remote_expr(&sock, "execute('wincmd p')").unwrap();
+    assert_eq!(remote_expr(&sock, "win_getid()"), Some(first.clone()));
+    for (pane, win) in [(new.as_str(), &second), ("%0", &first), (&new, &second)] {
+        tmux.run(&["select-pane", "-t", pane]);
+        let now = until_expr(&sock, "win_getid()", |w| w == win);
+        assert_eq!(now.as_deref(), Some(win.as_str()), "{pane}: {}", log());
+    }
+
+    // the waiters are no client
+    assert!(!waiters().is_empty(), "events stopped: {}", log());
+    assert_eq!(clients().lines().count(), 1, "{}", clients());
+    assert_eq!(attached(), "1");
+
+    // a pane that asked for focus reports still hears focus-out
+    let heard = tmp.join("heard");
+    let recorder = format!(
+        "printf '\\033[?1004h'; stty raw -echo; exec cat > {}",
+        heard.display()
+    );
+    let session = tmux.run(&["display-message", "-p", "-t", "%0", "#{session_id}:"]);
+    let pane = tmux.run(&[
+        "new-window",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &session,
+        "sh",
+        "-c",
+        &recorder,
+    ]);
+    std::thread::sleep(Duration::from_millis(500));
+    {
+        use std::io::Write;
+        client.keys.write_all(b"\x1b[O").unwrap();
+    }
+    let got = until(
+        |h: &Vec<u8>| h.windows(3).any(|w| w == b"\x1b[O"),
+        || std::fs::read(&heard).unwrap_or_default(),
+    );
+    assert!(
+        got.windows(3).any(|w| w == b"\x1b[O"),
+        "{pane} heard {got:?}: {}",
+        log()
+    );
+
+    drop(client);
+    drop(ending);
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -6,7 +6,8 @@
 //!   [`SETTLE`], with every waiter that ended meanwhile armed again too, it
 //!   prints one line: `{"focus":"%N"}` if the focused pane, found as
 //!   `report_layout` finds it, changed, else a bare line, so the layout is
-//!   read again.
+//!   read again. Its first line, once the waiters are armed, is where focus
+//!   starts, if a client shows any: the daemon follows moves from there.
 //! - A waiter that fails at once, within [`AT_ONCE`], is dropped; one that
 //!   fails later, such as at a server's restart, is armed again, and fails
 //!   at once if the server is gone. Once every waiter is gone, it fails.
@@ -102,7 +103,13 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
         waiters.arm(event);
     }
     let mut live = EVENTS.len();
+    // where focus starts: the daemon follows only moves from there
     let mut focus = waiters.focus();
+    if let Some(pane) = &focus
+        && !print(&json!({ "focus": pane }).to_string())
+    {
+        return Failure::Failed("the reader is gone".into());
+    }
     while live > 0 {
         let Some(first) = waiters.next(None) else {
             continue;
@@ -343,7 +350,9 @@ mod tests {
             ..Fake::default()
         };
         let (lines, _) = run(&mut fake);
-        assert_eq!(lines, ["", r#"{"focus":"%3"}"#, ""]);
+        // where focus starts, first
+        let start = r#"{"focus":"%0"}"#;
+        assert_eq!(lines, [start, "", r#"{"focus":"%3"}"#, ""]);
         assert_eq!(
             fake.armed[EVENTS.len()..],
             [
@@ -395,14 +404,14 @@ mod tests {
     }
 
     #[test]
-    fn with_no_focus_known_no_focus_is_printed() {
+    fn once_no_client_shows_focus_a_bare_line_is_printed() {
         let mut fake = Fake {
             script: then_all_fail(vec![woke("client-detached"), Step::Quiet]),
             focus: [Some("%1".into()), None].into(),
             ..Fake::default()
         };
         let (lines, _) = run(&mut fake);
-        assert_eq!(lines, [""]);
+        assert_eq!(lines, [r#"{"focus":"%1"}"#, ""]);
     }
 
     #[test]

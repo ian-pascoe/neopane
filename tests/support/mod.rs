@@ -301,6 +301,70 @@ impl TmuxServer {
     pub fn tmux_var(&self) -> String {
         format!("{},{},0", self.socket.display(), self.pid.unwrap())
     }
+
+    /// A user's client, `tmux attach`, in a pty of its own, 80x24: what it
+    /// draws is read and dropped. Detached as it drops.
+    pub fn attach(&self) -> TmuxClient {
+        let (mut master, mut slave) = (-1, -1);
+        let mut size = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: valid out-pointers; no name or termios.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut size,
+            )
+        };
+        assert_eq!(0, rc);
+        // SAFETY: openpty made both, and they are ours alone.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let mut cmd = self.command();
+        cmd.args(["attach", "-t", "%0"])
+            .env("TERM", "xterm-256color")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        let keys = File::from(master.try_clone().unwrap());
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut master = File::from(master);
+            let mut buf = [0u8; 4096];
+            while let Ok(1..) = master.read(&mut buf) {}
+        });
+        TmuxClient { child, keys }
+    }
+}
+
+/// A user's `tmux attach` in a pty, from [`TmuxServer::attach`].
+pub struct TmuxClient {
+    child: std::process::Child,
+    /// The pty's master: what's written is what the user's terminal sends.
+    pub keys: File,
+}
+
+impl Drop for TmuxClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for TmuxServer {
