@@ -1026,8 +1026,9 @@ impl Daemon {
                 None => {
                     // its tab page's Rex floating pane is on its way: open
                     // beside that once it's made, or ask for its own if the
-                    // open failed
-                    if self.tab_floating_pane_pending(sp.tab) {
+                    // open failed. Split off a window of its tab page with
+                    // no pane yet, made in the same flush: that one opens it.
+                    if self.tab_floating_pane_pending(sp.tab) || self.origin_awaits_pane(sp) {
                         return Ok(());
                     }
                     let from = self.split_from(sp).and_then(|f| f.terminal.clone());
@@ -1264,6 +1265,16 @@ impl Daemon {
             return Some(t.clone());
         }
         self.any_terminal(|q| q.tab == sp.tab && q.layer.is_none() && !q.is_self_attached())
+    }
+
+    /// Whether the window a tab page's window was split off as `sp` is one of
+    /// that tab page's, drawn and waiting for its pane, as `:tabnew | vsplit`
+    /// leaves the tab page's first window.
+    fn origin_awaits_pane(&self, sp: windows::Split) -> bool {
+        sp.from != 0
+            && self.panes.by_win(sp.from).is_none()
+            && self.grids.grid_of(sp.from).is_some()
+            && self.changes.split_of(sp.from).tab == sp.tab
     }
 
     /// The terminal of the first pane `keep` keeps that has one.

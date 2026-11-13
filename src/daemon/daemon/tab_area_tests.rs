@@ -238,3 +238,37 @@ fn ctrl_w_capital_t_moves_a_window_to_a_new_tab_page_and_refuses_a_tab_pages_onl
         capabilities(&rig)
     );
 }
+
+/// `:tabnew | vsplit` in one flush: the tab page's first window opens its
+/// tab page area, and the split opens beside it as Neovim put it, as when
+/// they are made one at a time. Not the other way round, which opens the
+/// first window below the split at Neovim's full width, there for good
+/// without `place_beside`.
+#[test]
+fn a_split_made_in_the_same_flush_as_its_tab_page_opens_beside_its_first_window() {
+    let Some((mut rig, _)) = tabs("tp-flush", 1, FakeProvider::opening()) else {
+        return;
+    };
+    let wins = rig.ints(
+        "vim.cmd('tabnew')\n\
+         local first = vim.api.nvim_get_current_win()\n\
+         vim.cmd('vsplit')\n\
+         return { first, vim.api.nvim_get_current_win() }",
+    );
+    let (first, split) = (wins[0], wins[1]);
+    until_asked(&mut rig, 1);
+    assert_eq!(vec!["open_tab_page"], capabilities(&rig));
+    let area = rig.d.panes.by_win(first).expect("the first window's pane");
+    assert_ne!(0, area.tab);
+    answer_last(&mut rig, "t5");
+
+    until_asked(&mut rig, 2);
+    let asks = asked(&rig);
+    let Ask::OpenBeside { origin, dir, .. } = &asks[1] else {
+        panic!("{:?}", capabilities(&rig));
+    };
+    assert_eq!("t5", origin.as_str());
+    // :vsplit without 'splitright': left of the first
+    assert_eq!(Direction::Left, *dir);
+    assert!(rig.d.panes.by_win(split).is_some());
+}
