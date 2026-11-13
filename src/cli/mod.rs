@@ -145,6 +145,41 @@ impl Start {
     }
 }
 
+impl Start {
+    /// The bare `--address A`, kept by `--no-wait`: `attach --address A`
+    /// (#94 decision 16). None without `--address`.
+    pub fn attach_to_address(&self) -> Result<Option<AttachSelf>, UsageError> {
+        let Some(address) = &self.address else {
+            return Ok(None);
+        };
+        let (file, line) = attach_words(&self.nvim_args).map_err(|_| attach_takes())?;
+        Ok(Some(AttachSelf {
+            to: Target::Address(Address::from_arg(address.clone())),
+            provider: self.provider.clone(),
+            file,
+            line,
+        }))
+    }
+}
+
+/// What `<name> [ARGS]` opens inside daemon `daemon`'s own Neovim (#94
+/// decision 17): `[+LINE] [--] FILE`, its file and line; None for nothing.
+pub fn inside_file(
+    words: &[OsString],
+    daemon: &str,
+) -> Result<Option<(OsString, Option<u32>)>, UsageError> {
+    let only = || {
+        UsageError(format!(
+            "inside {daemon}'s Neovim, only [+LINE] FILE can be opened; use :tabedit, :vsplit \
+             or :source there"
+        ))
+    };
+    match attach_words(words).map_err(|_| only())? {
+        (Some(file), line) => Ok(Some((file, line))),
+        (None, _) => Ok(None),
+    }
+}
+
 /// A command line that can't be run: exit 2. Displayed as one line,
 /// `<name>: <why> (see <name> --help)`.
 #[derive(Debug, PartialEq, Eq)]

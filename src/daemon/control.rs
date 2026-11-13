@@ -30,7 +30,9 @@ pub enum Failure {
     /// Refused before any answer, as an older daemon refuses a hello it
     /// can't read.
     Refused(End),
-    /// It couldn't be asked, or hung up without a reply: why.
+    /// It hung up without a reply.
+    HungUp,
+    /// It couldn't be asked: why.
     Failed(String),
 }
 
@@ -42,6 +44,7 @@ impl std::fmt::Display for Failure {
                 write!(f, "didn't answer in {} s", crate::util::seconds(*within))
             }
             Failure::Refused(z) => write!(f, "refused: {}", z.message),
+            Failure::HungUp => f.write_str("it hung up without an answer"),
             Failure::Failed(why) => f.write_str(why),
         }
     }
@@ -50,7 +53,16 @@ impl std::fmt::Display for Failure {
 /// Sends the daemon at `address` a control request for `purpose`, and
 /// waits up to `within` for its reply.
 pub fn ask(address: &Address, purpose: Purpose, within: Duration) -> Result<Reply, Failure> {
-    let due = Instant::now() + within;
+    request(address, purpose, Some(within))
+}
+
+/// `ask`, waiting for the reply as long as it takes without `within`.
+fn request(
+    address: &Address,
+    purpose: Purpose,
+    within: Option<Duration>,
+) -> Result<Reply, Failure> {
+    let due = within.map(|w| (Instant::now() + w, w));
     let mut stream = address
         .connect()
         .map_err(|e| Failure::Failed(format!("can't connect: {e}")))?;
@@ -64,10 +76,11 @@ pub fn ask(address: &Address, purpose: Purpose, within: Duration) -> Result<Repl
     let hello = Message::Hello(Hello::new(purpose))
         .encode()
         .expect("a control request fits a frame");
-    timeout(stream.set_write_timeout(Some(within)))
+    let write_within = within.unwrap_or(STATUS_WITHIN);
+    timeout(stream.set_write_timeout(Some(write_within)))
         .and_then(|()| stream.write_all(&hello))
         .map_err(|e| Failure::Failed(format!("can't send the request: {e}")))?;
-    read_reply(&mut stream, due, within)
+    read_reply(&mut stream, due)
 }
 
 /// Setting a socket's timeout, which macOS refuses with EINVAL once the
@@ -80,8 +93,9 @@ fn timeout(set: io::Result<()>) -> io::Result<()> {
     }
 }
 
-/// Reads frames from `stream` until the reply, or a refusal, by `due`.
-fn read_reply(stream: &mut UnixStream, due: Instant, within: Duration) -> Result<Reply, Failure> {
+/// Reads frames from `stream` until the reply, or a refusal, by `due`, and
+/// the time it was given, if it has one.
+fn read_reply(stream: &mut UnixStream, due: Option<(Instant, Duration)>) -> Result<Reply, Failure> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 16 << 10];
     loop {
@@ -96,16 +110,18 @@ fn read_reply(stream: &mut UnixStream, due: Instant, within: Duration) -> Result
                 Err(e) => return Err(Failure::Failed(format!("can't read its answer: {e}"))),
             }
         }
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(Failure::NoAnswer(within));
+        if let Some((due, within)) = due {
+            let left = due.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Failure::NoAnswer(within));
+            }
+            // never 0, which would mean none
+            let left = left.max(Duration::from_millis(1));
+            timeout(stream.set_read_timeout(Some(left)))
+                .map_err(|e| Failure::Failed(format!("can't read its answer: {e}")))?;
         }
-        // never 0, which would mean none
-        let left = left.max(Duration::from_millis(1));
-        timeout(stream.set_read_timeout(Some(left)))
-            .map_err(|e| Failure::Failed(format!("can't read its answer: {e}")))?;
         match stream.read(&mut chunk) {
-            Ok(0) => return Err(Failure::Failed("it hung up without an answer".into())),
+            Ok(0) => return Err(Failure::HungUp),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(e)
                 if matches!(
@@ -113,12 +129,63 @@ fn read_reply(stream: &mut UnixStream, due: Instant, within: Duration) -> Result
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                let within = due.map_or(Duration::ZERO, |(_, w)| w);
                 return Err(Failure::NoAnswer(within));
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(Failure::Failed(format!("can't read its answer: {e}"))),
         }
     }
+}
+
+/// How long `--no-wait` waits for Neovim to open its file.
+pub const NO_WAIT_WITHIN: Duration = Duration::from_secs(10);
+
+/// Asks the daemon at `address` to open `file`, absolute, made so against
+/// `cwd`, the cursor on `line`: with `wait`, it answers once the file is
+/// done, however long that takes; else once Neovim has it, within
+/// `NO_WAIT_WITHIN`.
+pub fn open(
+    address: &Address,
+    cwd: Vec<u8>,
+    file: Vec<u8>,
+    line: Option<u32>,
+    wait: bool,
+) -> Result<Reply, Failure> {
+    let purpose = Purpose::Open {
+        pid: Some(std::process::id()),
+        cwd,
+        file,
+        line,
+        wait,
+    };
+    request(address, purpose, (!wait).then_some(NO_WAIT_WITHIN))
+}
+
+/// How an `open` of `shown` in daemon `daemon`, `wait`ed for or not, went,
+/// as one line after `<name>: `; None when it went well (#94 decisions 17
+/// and 28).
+pub fn opened_line(
+    daemon: &str,
+    shown: &str,
+    wait: bool,
+    answer: &Result<Reply, Failure>,
+) -> Option<String> {
+    Some(match answer {
+        Ok(r) if r.ok && (!wait || r.waited == Some(true)) => return None,
+        Ok(r) if r.ok => format!("{daemon} can't wait for a file (an older build); not waiting"),
+        Ok(r) => r
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("{daemon} didn't open {shown}")),
+        Err(Failure::NoAnswer(within)) => format!(
+            "{daemon} hasn't opened {shown} in {} s (is Neovim waiting at a prompt?)",
+            crate::util::seconds(*within)
+        ),
+        Err(Failure::Refused(z)) => z.message.clone(),
+        Err(Failure::HungUp) => format!("{daemon} ended before {shown} was done"),
+        Err(e @ Failure::Failed(_)) => format!("{daemon}: {e}"),
+    })
 }
 
 /// A status request.
@@ -224,7 +291,7 @@ pub fn no_reply(address: &Address, e: &Failure) -> String {
             None => format!("{who} {e}"),
         },
         Failure::Refused(z) => format!("{who} refused: {}", z.message),
-        Failure::Failed(why) => format!("{who}: {why}"),
+        Failure::HungUp | Failure::Failed(_) => format!("{who}: {e}"),
     }
 }
 
@@ -317,6 +384,48 @@ mod tests {
     }
 
     #[test]
+    fn how_an_open_went_is_one_line_none_when_it_went_well() {
+        use crate::attach::{ATTACH_PROTOCOL_VERSION, End, Refusal};
+        let reply = |ok: bool, message: Option<&str>, waited: Option<bool>| {
+            Ok(Reply {
+                ok,
+                message: message.map(String::from),
+                v: ATTACH_PROTOCOL_VERSION,
+                build: "b".into(),
+                name: "work".into(),
+                pid: 1,
+                status: None,
+                waited,
+            })
+        };
+        let line = |wait, answer| opened_line("work", "notes.md", wait, &answer);
+        assert_eq!(None, line(true, reply(true, None, Some(true))));
+        assert_eq!(None, line(false, reply(true, None, None)));
+        assert_eq!(
+            Some("work can't wait for a file (an older build); not waiting".into()),
+            line(true, reply(true, None, None))
+        );
+        let unsaved = "notes.md's terminal closed with unsaved changes";
+        assert_eq!(
+            Some(unsaved.into()),
+            line(true, reply(false, Some(unsaved), Some(true)))
+        );
+        assert_eq!(
+            Some("work hasn't opened notes.md in 10 s (is Neovim waiting at a prompt?)".into()),
+            line(false, Err(Failure::NoAnswer(NO_WAIT_WITHIN)))
+        );
+        assert_eq!(
+            Some("work ended before notes.md was done".into()),
+            line(true, Err(Failure::HungUp))
+        );
+        let z = End::refusal(Refusal::Stopping, "the daemon is ending");
+        assert_eq!(
+            Some("the daemon is ending".into()),
+            line(true, Err(Failure::Refused(z)))
+        );
+    }
+
+    #[test]
     fn nothing_listening_fails_to_connect() {
         let at = std::env::temp_dir().join(format!(
             "{}-control-none-{}.sock",
@@ -349,7 +458,7 @@ mod tests {
         // fails with EINVAL
         drop(theirs);
         let within = Duration::from_secs(1);
-        let got = read_reply(&mut ours, Instant::now() + within, within);
+        let got = read_reply(&mut ours, Some((Instant::now() + within, within)));
         assert_eq!(Ok(reply), got);
     }
 

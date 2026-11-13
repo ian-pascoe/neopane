@@ -829,3 +829,46 @@ fn a_running_name_takes_only_line_and_file() {
     assert_eq!(running("+3"), beyond("+3"));
     assert_eq!(running("+3 +4 f"), beyond("+4"));
 }
+
+#[test]
+fn inside_a_daemons_neovim_only_line_and_file_open() {
+    let inside = |line: &str| inside_file(&args(line), "work");
+    let file = |f: &str, line| Ok(Some((OsString::from(f), line)));
+    assert_eq!(inside("notes.md"), file("notes.md", None));
+    // as less and visudo call $EDITOR
+    assert_eq!(inside("+12 notes.md"), file("notes.md", Some(12)));
+    assert_eq!(inside("-- notes.md"), file("notes.md", None));
+    assert_eq!(inside("+3 -- -x"), file("-x", Some(3)));
+    // nothing to open
+    assert_eq!(inside(""), Ok(None));
+    assert_eq!(inside("--"), Ok(None));
+    let only = Err(UsageError(
+        "inside work's Neovim, only [+LINE] FILE can be opened; use :tabedit, :vsplit or \
+         :source there"
+            .into(),
+    ));
+    for line in [
+        "-p a b", "-O a", "-S s.vim", "+cmd f", "a b", "+3", "-- a b",
+    ] {
+        assert_eq!(inside(line), only, "{line}");
+    }
+}
+
+#[test]
+fn the_bare_address_with_no_wait_attaches_to_it() {
+    let start = started("--no-wait --address /a/sock +3 f.txt");
+    assert_eq!(
+        start.attach_to_address(),
+        Ok(Some(AttachSelf {
+            to: Target::Address(Address::from_arg("/a/sock".into())),
+            provider: None,
+            file: Some("f.txt".into()),
+            line: Some(3),
+        }))
+    );
+    assert_eq!(started("--no-wait f").attach_to_address(), Ok(None));
+    assert_eq!(
+        started("--no-wait --address /a a b").attach_to_address(),
+        Err(UsageError("attach takes [+LINE] [FILE]".into()))
+    );
+}

@@ -76,7 +76,7 @@ fn run(command: Command) -> Result<ExitCode> {
                 transport.unwrap_or_else(|| Transport::from_env(|w| eprintln!("{NAME}: {w}")));
             Ok(helper_exit(pane_helper::run(&address, want, transport)))
         }
-        Command::AttachSelf(attach) => Ok(attach_self(attach)),
+        Command::AttachSelf(attach) => Ok(attach_self(attach, inside(), false)),
         Command::DebugKeys => done(debug::keys::run()),
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
         Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
@@ -111,21 +111,36 @@ fn write_types(config: Option<OsString>) -> ExitCode {
     }
 }
 
-/// The bare form (#94 decisions 13 and 15): `--name N` attaches when N is
+/// The bare form (#94 decisions 13, 15 and 17): in a daemon's own
+/// `:terminal`, it opens a file there; else `--name N` attaches when N is
 /// running, else starts it; without it, a daemon named after this directory
-/// starts.
+/// starts. `--no-wait` matters only inside.
 fn run_start(start: Start) -> ExitCode {
-    if let Some(option) = unbuilt_option(&start) {
-        return fail(&format!("{option} isn't built yet"));
+    if start.detach {
+        return fail("--detach isn't built yet");
+    }
+    let inside = inside();
+    match start.attach_to_address() {
+        Ok(Some(attach)) => return attach_self(attach, inside, start.no_wait),
+        Ok(None) => {}
+        Err(err) => return usage_error(err),
     }
     if let Some(name) = &start.name {
-        let running = dir::base().is_ok_and(|base| base.live(name));
-        if running {
+        let base = dir::base();
+        // naming the daemon it runs in (#94 decision 24)
+        if let Some(i) = &inside
+            && base.as_ref().is_ok_and(|b| i.is(&b.address(name)))
+        {
+            return open_inside(i, &start.nvim_args, start.no_wait);
+        }
+        if base.is_ok_and(|base| base.live(name)) {
             return match start.attach_to_running(name) {
-                Ok(attach) => attach_self(attach),
+                Ok(attach) => attach_self(attach, inside, start.no_wait),
                 Err(err) => usage_error(err),
             };
         }
+    } else if let Some(i) = &inside {
+        return open_inside(i, &start.nvim_args, start.no_wait);
     }
     let launch = launch::Launch {
         name: start.name,
@@ -134,16 +149,77 @@ fn run_start(start: Start) -> ExitCode {
     helper_exit(launch::run(&start.nvim_args, launch))
 }
 
-/// A self-attach to a running daemon, found as #94 decision 23 says. A
-/// daemon not found is a failed self-attach, held as one.
-fn attach_self(attach: AttachSelf) -> ExitCode {
+/// The daemon whose own Neovim this runs in, as `$<NAME>` proves (#94
+/// decision 17); unproven, it's ignored with a warning.
+fn inside() -> Option<find::Inside> {
+    let var = std::env::var_os(find::inside_var());
+    let tty = find::this_tty();
+    find::prove_inside(var.as_deref(), tty.as_deref(), &mut |w| {
+        eprintln!("{NAME}: {w}")
+    })
+}
+
+/// Inside daemon `inside`'s own Neovim, Neovim's arguments `args` open
+/// only `[+LINE] [--] FILE` (#94 decision 17).
+fn open_inside(inside: &find::Inside, args: &[OsString], no_wait: bool) -> ExitCode {
+    match cli::inside_file(args, &inside.name) {
+        Ok(Some((file, line))) => open_waited(inside, &file, line, no_wait),
+        Ok(None) => already_inside(inside),
+        Err(err) => usage_error(err),
+    }
+}
+
+fn already_inside(inside: &find::Inside) -> ExitCode {
+    fail(&format!(
+        "already inside {}'s Neovim; open a file with {NAME} FILE",
+        inside.name
+    ))
+}
+
+/// Opens `file` at `line` in `inside`'s Neovim, a waited file unless
+/// `no_wait` (ADR 0015): exits 0 once it's done, or once Neovim has it.
+fn open_waited(inside: &find::Inside, file: &OsStr, line: Option<u32>, no_wait: bool) -> ExitCode {
+    let shown = file.to_string_lossy();
+    let path = match std::path::absolute(file) {
+        Ok(p) => p.into_os_string().into_encoded_bytes(),
+        Err(e) => return fail(&format!("can't make the file's path absolute: {e}")),
+    };
+    let cwd = std::env::current_dir()
+        .map(|d| d.into_os_string().into_encoded_bytes())
+        .unwrap_or_default();
+    exit_on_interrupt();
+    let answer = control::open(&inside.address, cwd, path, line, !no_wait);
+    match control::opened_line(&inside.name, &shown, !no_wait, &answer) {
+        None => ExitCode::SUCCESS,
+        Some(line) => fail(&line),
+    }
+}
+
+/// Ctrl-C exits 1, quietly (#94 decision 28).
+fn exit_on_interrupt() {
+    extern "C" fn quit(_: libc::c_int) {
+        // SAFETY: _exit is async-signal-safe.
+        unsafe { libc::_exit(1) }
+    }
+    // SAFETY: `quit` only calls _exit.
+    unsafe { libc::signal(libc::SIGINT, quit as *const () as libc::sighandler_t) };
+}
+
+/// A self-attach to a running daemon, found as #94 decision 23 says, or
+/// in the daemon whose own Neovim this runs in, its file opened there
+/// (decision 24). A daemon not found is a failed self-attach, held as one.
+fn attach_self(attach: AttachSelf, inside: Option<find::Inside>, no_wait: bool) -> ExitCode {
     let started = std::time::Instant::now();
-    let inside = std::env::var_os(find::inside_var());
-    let warn = &mut |w: String| eprintln!("{NAME}: {w}");
-    let address = match find_daemon(dir::base, &attach.to, inside.as_deref(), warn) {
+    let address = match find_daemon(dir::base, &attach.to, inside.as_ref()) {
         Ok(address) => address,
         Err(e) => return helper_exit(pane_helper::launcher_failed(e.to_string(), started)),
     };
+    if let Some(i) = inside.filter(|i| i.is(&address)) {
+        return match &attach.file {
+            Some(file) => open_waited(&i, file, attach.line, no_wait),
+            None => already_inside(&i),
+        };
+    }
     // made absolute here, links not resolved: the daemon has its own
     // working directory
     let file = match attach.file.map(std::path::absolute).transpose() {
@@ -183,9 +259,11 @@ fn list(json: bool) -> ExitCode {
 
 /// The daemon `to` names, found as `attach` finds one.
 fn found(to: &Target) -> std::result::Result<Address, NotFound> {
-    let inside = std::env::var_os(find::inside_var());
-    let warn = &mut |w: String| eprintln!("{NAME}: {w}");
-    find_daemon(dir::base, to, inside.as_deref(), warn)
+    let inside = match to {
+        Target::Found => inside(),
+        _ => None,
+    };
+    find_daemon(dir::base, to, inside.as_ref())
 }
 
 /// `status [--name N | --address A] [--json]` (#94 decision 31).
@@ -256,13 +334,6 @@ fn kill(to: KillTarget, force: bool) -> ExitCode {
         }
     }
     ExitCode::from(u8::from(failed))
-}
-
-/// The first of `start`'s options that does nothing yet.
-fn unbuilt_option(start: &Start) -> Option<&'static str> {
-    [(start.detach, "--detach"), (start.no_wait, "--no-wait")]
-        .into_iter()
-        .find_map(|(given, option)| given.then_some(option))
 }
 
 fn stdout_is_terminal() -> bool {
