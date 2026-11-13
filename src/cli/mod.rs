@@ -158,6 +158,19 @@ impl Start {
         })
     }
 
+    /// The file the unsaved-file question asks about, as typed, and its
+    /// line: Neovim's arguments are exactly `[+LINE] [--] FILE`, and there's
+    /// no `--detach` (#94 decision 19).
+    pub fn question_file(&self) -> Option<(OsString, Option<u32>)> {
+        if self.detach {
+            return None;
+        }
+        match attach_words(&self.nvim_args) {
+            Ok((Some(file), line)) => Some((file, line)),
+            _ => None,
+        }
+    }
+
     /// The bare `--address A`, kept by `--no-wait`: `attach --address A`
     /// (#94 decision 16). None without `--address`.
     pub fn attach_to_address(&self) -> Result<Option<AttachSelf>, UsageError> {

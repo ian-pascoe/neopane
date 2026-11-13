@@ -100,52 +100,7 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S], launch: Launch) -> Result<pane_helper
     // warned of before the daemon starts, which warns in its log
     let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
     let base = dir::base()?;
-    let (name, dedup) = match launch.name {
-        Some(name) => (name, None),
-        None => (
-            default_name(&std::env::current_dir().unwrap_or_default()),
-            Some("--dedup"),
-        ),
-    };
-
-    let exe = std::env::current_exe()?.canonicalize()?;
-    let mut command = Command::new(&exe);
-    // `ps` shows `<name> daemon NAME`
-    command
-        .arg0(NAME)
-        .args(["daemon", &name])
-        .args(dedup)
-        .arg("--")
-        .args(nvim_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // out of the pane's session, so closing the pane doesn't signal it
-    // SAFETY: setsid is async-signal-safe, and touches no memory.
-    unsafe {
-        command.pre_exec(|| match libc::setsid() {
-            -1 => Err(std::io::Error::last_os_error()),
-            _ => Ok(()),
-        });
-    }
-    let mut daemon = command.spawn()?;
-
-    let mut line = String::new();
-    let stdout = daemon.stdout.take().expect("piped");
-    let _ = BufReader::new(stdout).read_line(&mut line);
-    let name = match ready(&line) {
-        Ready::Ok(name) => name,
-        Ready::Error(why) => {
-            gone(&mut daemon);
-            return Err(Error::Refused(why).into());
-        }
-        Ready::Nothing => {
-            let said = gone(&mut daemon);
-            return Err(Error::DaemonFailed(said, base.to_string()).into());
-        }
-    };
-    // (from here it writes to its log, not to this pipe)
-    drop(daemon.stderr.take());
+    let name = spawn(&base, nvim_args, launch.name, false)?;
     // the daemon warns of a level it doesn't know
     if log::from_env().0 == LogLevel::Debug {
         let mut traces = Traces::new();
@@ -167,6 +122,121 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S], launch: Launch) -> Result<pane_helper
         transport,
         opening,
     ))
+}
+
+/// `--detach` (#94 decision 18): starts a kept daemon, named `name` or
+/// after this directory, and returns its name once its Neovim has answered.
+/// No terminal is needed.
+pub fn detach<S: AsRef<OsStr>>(nvim_args: &[S], name: Option<String>) -> Result<String> {
+    let base = dir::base()?;
+    spawn(&base, nvim_args, name, true)
+}
+
+/// Starts the daemon `name`, else one named after this directory,
+/// de-duplicated, in a session of its own, and reads its ready line: the
+/// name it took.
+fn spawn<S: AsRef<OsStr>>(
+    base: &dir::Base,
+    nvim_args: &[S],
+    name: Option<String>,
+    detach: bool,
+) -> Result<String> {
+    let (name, dedup) = match name {
+        Some(name) => (name, None),
+        None => (
+            default_name(&std::env::current_dir().unwrap_or_default()),
+            Some("--dedup"),
+        ),
+    };
+
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let mut command = Command::new(&exe);
+    // `ps` shows `<name> daemon NAME`
+    command
+        .arg0(NAME)
+        .args(["daemon", &name])
+        .args(dedup)
+        .args(detach.then_some("--detach"))
+        .arg("--")
+        .args(nvim_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // out of the pane's session, so closing the pane doesn't signal it
+    // SAFETY: setsid is async-signal-safe, and touches no memory.
+    unsafe {
+        command.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    let mut daemon = command.spawn()?;
+
+    let mut line = String::new();
+    let stdout = daemon.stdout.take().expect("piped");
+    let _ = BufReader::new(stdout).read_line(&mut line);
+    match ready(&line) {
+        Ready::Ok(name) => {
+            // (from here it writes to its log, not to this pipe)
+            drop(daemon.stderr.take());
+            Ok(name)
+        }
+        Ready::Error(why) => {
+            gone(&mut daemon);
+            Err(Error::Refused(why).into())
+        }
+        Ready::Nothing => {
+            let said = gone(&mut daemon);
+            Err(Error::DaemonFailed(said, base.to_string()).into())
+        }
+    }
+}
+
+/// The unsaved-file question (#94 decision 19), for FILE as typed, whose
+/// changes daemons `holding` hold, the first by name asked about.
+pub fn unsaved_question(file: &str, holding: &[String]) -> String {
+    let (first, others) = holding.split_first().expect("a daemon holds it");
+    let also = match others {
+        [] => String::new(),
+        _ => format!(" (also in {})", others.join(", ")),
+    };
+    format!(
+        "{NAME}: {file} has unsaved changes in {first}{also}, which no terminal shows. Attach to \
+         it? [Y/n] "
+    )
+}
+
+/// What the unsaved-file question was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// `y`, `Y` or Enter: attach.
+    Yes,
+    /// `n` or `N`: start the daemon as asked.
+    No,
+    /// End of input, as Ctrl-D: nothing starts.
+    Quit,
+}
+
+/// Asks `question` on `out` and reads a line of `input`, until it is an
+/// answer. At the end of input the line is ended, for the shell's prompt.
+pub fn ask(question: &str, input: &mut impl BufRead, out: &mut impl std::io::Write) -> Answer {
+    loop {
+        let _ = out.write_all(question.as_bytes());
+        let _ = out.flush();
+        let mut line = String::new();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => {
+                let _ = out.write_all(b"\n");
+                return Answer::Quit;
+            }
+            Ok(_) => {}
+        }
+        match line.trim_end_matches(['\n', '\r']) {
+            "" | "y" | "Y" => return Answer::Yes,
+            "n" | "N" => return Answer::No,
+            _ => {}
+        }
+    }
 }
 
 /// The name of a daemon started in `cwd`: from its last component.
@@ -191,8 +261,46 @@ fn gone(daemon: &mut Child) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ready, default_name, ready};
+    use super::{Answer, Ready, ask, default_name, ready, unsaved_question};
+    use crate::name::NAME;
     use std::path::Path;
+
+    #[test]
+    fn the_unsaved_file_question_names_the_first_daemon_and_the_others() {
+        let names = |n: &[&str]| n.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            format!(
+                "{NAME}: notes.md has unsaved changes in notes, which no terminal shows. Attach \
+                 to it? [Y/n] "
+            ),
+            unsaved_question("notes.md", &names(&["notes"]))
+        );
+        assert_eq!(
+            format!(
+                "{NAME}: notes.md has unsaved changes in notes (also in notes-2, notes-3), which \
+                 no terminal shows. Attach to it? [Y/n] "
+            ),
+            unsaved_question("notes.md", &names(&["notes", "notes-2", "notes-3"]))
+        );
+    }
+
+    #[test]
+    fn the_question_is_asked_until_it_is_answered() {
+        let asked = |typed: &str| {
+            let mut out = Vec::new();
+            let answer = ask("Q? ", &mut typed.as_bytes(), &mut out);
+            (answer, String::from_utf8(out).unwrap())
+        };
+        for yes in ["y\n", "Y\n", "\n"] {
+            assert_eq!((Answer::Yes, "Q? ".into()), asked(yes), "{yes:?}");
+        }
+        for no in ["n\n", "N\n"] {
+            assert_eq!((Answer::No, "Q? ".into()), asked(no), "{no:?}");
+        }
+        assert_eq!((Answer::Quit, "Q? \n".into()), asked(""));
+        assert_eq!((Answer::Yes, "Q? Q? Q? ".into()), asked("x\nyes\ny\n"));
+        assert_eq!((Answer::Quit, "Q? Q? \n".into()), asked("x\n"));
+    }
 
     #[test]
     fn a_daemon_is_named_after_the_directory_it_started_in() {

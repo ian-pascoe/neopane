@@ -925,3 +925,26 @@ fn the_bare_address_with_no_wait_attaches_to_it() {
         Err(UsageError("attach takes [+LINE] [FILE]".into()))
     );
 }
+
+#[test]
+fn the_unsaved_file_question_is_only_for_one_file_to_start_with() {
+    let file = |f: &str| Some((OsString::from(f), None));
+    assert_eq!(file("notes.md"), started("notes.md").question_file());
+    assert_eq!(file("-n"), started("-- -n").question_file());
+    assert_eq!(
+        Some((OsString::from("notes.md"), Some(12))),
+        started("+12 -- notes.md").question_file()
+    );
+    assert_eq!(file("f"), started("--name work f").question_file());
+    for line in [
+        "",
+        "+12",
+        "-O a b",
+        "a b",
+        "-n notes.md",
+        "notes.md -c q",
+        "--detach notes.md",
+    ] {
+        assert_eq!(None, started(line).question_file(), "{line}");
+    }
+}

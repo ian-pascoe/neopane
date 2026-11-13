@@ -230,6 +230,28 @@ impl Base {
         names
     }
 
+    /// The live daemons, by name, whose `unsaved` file lists `file`: those
+    /// unattached with its changes unsaved (#94 decision 19). Paths match
+    /// with links resolved as far as they exist, and normalised past that.
+    pub fn holding_unsaved(&self, file: &Path) -> Vec<String> {
+        let file = resolved(file);
+        self.running()
+            .into_iter()
+            .filter(|name| {
+                let Ok(text) = fs::read(self.0.join(name).join(UNSAVED)) else {
+                    return false;
+                };
+                let mut lines = text.split(|&b| b == b'\n');
+                lines.next() == Some(b"unsaved 1")
+                    && lines.filter(|l| l.starts_with(b"/")).any(|l| {
+                        // SAFETY: bytes Neovim gave as a file name.
+                        let l = unsafe { OsStr::from_encoded_bytes_unchecked(l) };
+                        resolved(Path::new(l)) == file
+                    })
+            })
+            .collect()
+    }
+
     /// The base directory at `path`, unchecked.
     #[cfg(test)]
     pub(crate) fn at(path: &Path) -> Base {
@@ -240,6 +262,38 @@ impl Base {
 impl std::fmt::Display for Base {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.display())
+    }
+}
+
+/// `path`, made absolute and normalised, then with links resolved in as
+/// much of it as exists: two paths to one file, there or not yet, are the
+/// same.
+fn resolved(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normal = PathBuf::new();
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    for c in absolute.components() {
+        match c {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            c => normal.push(c),
+        }
+    }
+    let mut rest = Vec::new();
+    let mut at = normal.as_path();
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            return rest.iter().rev().fold(real, |p, c| p.join(c));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return normal,
+        }
     }
 }
 
@@ -851,5 +905,42 @@ mod tests {
         let err = claim_name(&base, "wwww", true).unwrap_err();
         assert!(matches!(err, Error::PathTooLong { .. }), "{err}");
         assert!(fs::symlink_metadata(base.0.join("wwww")).is_err());
+    }
+
+    #[test]
+    fn the_daemons_holding_a_files_unsaved_changes_are_found_by_name() {
+        let scratch = Scratch::new();
+        let base = scratch.base();
+        let files = scratch.0.join("files");
+        fs::create_dir(&files).unwrap();
+        fs::write(files.join("notes.md"), "").unwrap();
+        std::os::unix::fs::symlink(files.join("notes.md"), files.join("link.md")).unwrap();
+        // as Neovim names them: macOS's /var is /private/var
+        let real = files.canonicalize().unwrap();
+        let listed = |p: PathBuf| p.into_os_string().into_encoded_bytes();
+        let held = |name: &str, unsaved: &[Vec<u8>]| {
+            let d = claim(&base, name).unwrap();
+            d.unsaved().write(unsaved).unwrap();
+            d
+        };
+        let _b = held("b", &[listed(real.join("notes.md"))]);
+        let _a = held("a", &[b"/x".to_vec(), listed(real.join("notes.md"))]);
+        let _c = held("c", &[listed(real.join("other.md"))]);
+        // its daemon gone: stale
+        drop(held("0", &[listed(real.join("notes.md"))]));
+        fs::write(
+            scratch.0.join("0").join(UNSAVED),
+            format!("unsaved 1\n{}\n", real.join("notes.md").display()),
+        )
+        .unwrap();
+        let holding = |file: PathBuf| base.holding_unsaved(&file);
+        let both = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(both, holding(files.join("notes.md")));
+        // links resolved where the file is there
+        assert_eq!(both, holding(files.join("link.md")));
+        // normalised where it isn't
+        assert_eq!(vec!["c"], holding(files.join("sub/../other.md")));
+        assert_eq!(vec!["c"], holding(real.join("./other.md")));
+        assert!(holding(files.join("none.md")).is_empty());
     }
 }

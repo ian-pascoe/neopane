@@ -305,6 +305,10 @@ const MAX_DIRECTION_COUNT: u32 = 20;
 /// More rows than any terminal has: a 'cmdheight' past it is as good.
 const MAX_MSG_ROWS: u32 = 1000;
 
+/// Neovim's screen in a kept daemon before its first attach: a terminal's
+/// usual size.
+const KEPT_SIZE: [u32; 2] = [80, 24];
+
 /// Most sizes kept for windows not yet in a pane.
 const MAX_PENDING_SIZES: usize = 16;
 
@@ -445,6 +449,20 @@ impl Daemon {
             *first = pane.into_self_attach();
         }
         started
+    }
+
+    /// Starts a kept daemon (`--detach`): talking to Neovim at `KEPT_SIZE`,
+    /// unattached and asked to stay, with no pane. The first attach takes
+    /// the current window, and the rest of its tab page follows it.
+    pub(crate) fn start_kept(&mut self) -> Result<()> {
+        debug_assert!(self.panes.list.is_empty());
+        self.lifetime.asked_to_stay = true;
+        self.lifetime.stage = lifetime::Stage::Unattached;
+        let [cols, rows] = KEPT_SIZE;
+        self.nvim
+            .attach_ui(cols, rows)
+            .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
+        Ok(())
     }
 
     /// `start`, once pane `id` is added.
@@ -1367,11 +1385,13 @@ impl Daemon {
         if let Some(e) = err {
             log_warn!("neovim error: {}", String::from_utf8_lossy(e));
         } else if id == self.nvim.channel_req {
-            // the first window is the self-attached pane's (#83)
-            let Some(first) = self.panes.self_attached_awaiting_window() else {
-                return Ok(());
+            // the first window is the self-attached pane's (#83); a kept
+            // daemon's, with none, the screen's but its last row
+            let size = match self.panes.self_attached_awaiting_window() {
+                Some(first) => self.geometry().window_size(first),
+                None if self.lifetime.asked_to_stay => [KEPT_SIZE[0], KEPT_SIZE[1] - self.msg_rows],
+                None => return Ok(()),
             };
-            let size = self.geometry().window_size(first);
             let mut result = result;
             let chan = windows::parse_channel(&mut result)?;
             self.nvim.setup_req = windows::setup(&mut self.nvim.client, chan, size[0], size[1]);

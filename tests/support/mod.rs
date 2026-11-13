@@ -70,6 +70,18 @@ pub fn in_pty_drawn(
     env: &[(&str, &std::ffi::OsStr)],
     cols: u16,
 ) -> (std::process::Child, Drawn) {
+    let (child, drawn, _keys) = in_pty_typed(tmpdir, cwd, args, env, cols);
+    (child, drawn)
+}
+
+/// `in_pty_drawn`, with the terminal's end to type into.
+pub fn in_pty_typed(
+    tmpdir: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &std::ffi::OsStr)],
+    cols: u16,
+) -> (std::process::Child, Drawn, File) {
     let (mut master, mut slave) = (-1, -1);
     let mut size = libc::winsize {
         ws_row: 24,
@@ -108,6 +120,7 @@ pub fn in_pty_drawn(
         .stderr(slave)
         .spawn()
         .unwrap();
+    let keys = File::from(master.try_clone().unwrap());
     let drawn = Drawn::default();
     let kept = drawn.clone();
     std::thread::spawn(move || {
@@ -118,7 +131,7 @@ pub fn in_pty_drawn(
             kept.lock().unwrap().extend_from_slice(&buf[..n]);
         }
     });
-    (child, drawn)
+    (child, drawn, keys)
 }
 
 /// What Neovim at `sock` makes of `expr`, if it answers.

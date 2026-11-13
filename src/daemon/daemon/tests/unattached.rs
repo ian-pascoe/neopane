@@ -116,7 +116,7 @@ fn with_unsaved_changes_the_daemon_stays_listing_them_until_none_are_left() {
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
     assert_eq!(None, rig.fx.d.stopped);
-    assert_eq!(Stage::StayingForUnsaved, rig.fx.d.lifetime.stage);
+    assert_eq!(Stage::Unattached, rig.fx.d.lifetime.stage);
     assert_eq!(Some("unsaved 1\n/a\n".into()), rig.unsaved());
     // an unnamed buffer isn't listed: no file has its changes
     rig.told(&["/a", "", "/b"], 0);
@@ -309,7 +309,7 @@ fn an_unattached_daemon_drops_its_pane_provider_once_its_closes_are_answered() {
     group.terminal = Some(TerminalId::from("block:f"));
     rig.last_pane_goes();
     rig.told(&["/a"], FIRST_ASK);
-    assert_eq!(Stage::StayingForUnsaved, rig.fx.d.lifetime.stage);
+    assert_eq!(Stage::Unattached, rig.fx.d.lifetime.stage);
     let (close, ask) = fake(&mut rig.fx.d).asks.last().cloned().expect("a close");
     assert_eq!(asks::close(TerminalId::from("block:f")), ask);
     // no terminal in its reach, but its close unanswered: kept
@@ -333,4 +333,40 @@ fn an_unattached_daemon_drops_its_pane_provider_once_its_closes_are_answered() {
     let id = rig.fx.d.panes.list.last().unwrap().id;
     assert_eq!(Some(id), rig.fx.d.panes.by_win(1000).map(|p| p.id));
     assert_eq!(pane::Reach::In, rig.fx.d.panes.by_id(id).unwrap().reach);
+}
+
+#[test]
+fn a_kept_daemon_outlives_its_last_pane_with_nothing_unsaved_listing_what_is() {
+    let mut rig = Rig::new();
+    rig.fx.d.lifetime.asked_to_stay = true;
+    rig.last_pane_goes();
+    rig.told(&[], FIRST_ASK);
+    assert_eq!(None, rig.fx.d.stopped);
+    assert_eq!(None, rig.unsaved());
+    // changes are listed while they last, and their going ends nothing
+    rig.told(&["/a"], 0);
+    assert_eq!(Some("unsaved 1\n/a\n".into()), rig.unsaved());
+    rig.told(&[], 0);
+    assert_eq!(None, rig.fx.d.stopped);
+    assert_eq!(None, rig.unsaved());
+    // nor does Neovim's silence
+    rig.fx.d.unattach_wait_over().unwrap();
+    assert_eq!(None, rig.fx.d.stopped);
+    // attached again and gone again, it stays: the flag lasts its life
+    let helper = rig.self_attach(None);
+    list_answer(&mut rig.fx, 2000, &[1000]);
+    let id = rig.fx.d.panes.list.last().unwrap().id;
+    drop(helper);
+    rig.fx.d.pane_gone(id).unwrap();
+    assert!(deciding(&rig.fx.d));
+    rig.told(&[], FIRST_ASK + 1);
+    assert_eq!(None, rig.fx.d.stopped);
+}
+
+#[test]
+fn status_says_a_kept_daemon_is_kept() {
+    let mut rig = Rig::new();
+    assert_eq!(Some(false), rig.fx.d.status().kept);
+    rig.fx.d.lifetime.asked_to_stay = true;
+    assert_eq!(Some(true), rig.fx.d.status().kept);
 }
