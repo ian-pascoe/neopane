@@ -629,12 +629,10 @@ fn vertical_resize_gives_the_tmux_pane_that_many_columns() {
     let Some(live) = Live::start("tmux-rl") else {
         return;
     };
-    // the tab page's window, once its pane has attached
-    let right_win = remote_expr(&live.ending.sock, "execute('tabnew') .. win_getid()").unwrap();
-    let s = until(|s: &serde_json::Value| s["panes"] == 2, || live.status());
-    assert_eq!(s["panes"], 2, "its attach never came: {}", live.log());
-    // Neovim makes a window in the current tab page, whatever focus did
-    live.ex("2tabnext | vsplit");
+    // the tab page's window and its split, made in one flush
+    let both = "execute('tabnew') .. win_getid() .. execute('vsplit') .. ' ' .. win_getid()";
+    let both = remote_expr(&live.ending.sock, both).unwrap();
+    let (right_win, split) = both.split_once(' ').unwrap();
     let s = until(|s: &serde_json::Value| s["panes"] == 3, || live.status());
     assert_eq!(s["panes"], 3, "its attach never came: {}", live.log());
     // none until the window is there
@@ -648,15 +646,21 @@ fn vertical_resize_gives_the_tmux_pane_that_many_columns() {
     let two = until(|w: &Vec<i32>| w.len() == 2, widths);
     assert_eq!(two.len(), 2, "{two:?}: {}", live.log());
     // a size Neovim gives a window before it is external isn't told:
-    // resize once it is, fitted to its pane
-    let fitted = format!(
-        "luaeval('vim.api.nvim_win_get_config({right_win}).external') ? winwidth({right_win}) : 0"
-    );
-    let fitted = || {
-        let w = remote_expr(&live.ending.sock, &fitted).and_then(|w| w.parse::<i32>().ok());
-        (w.unwrap_or(0), widths())
+    // resize once it is, fitted to its pane; the split too, not left at
+    // Neovim's full width
+    let width = |win: &str| {
+        format!("(luaeval('vim.api.nvim_win_get_config({win}).external') ? winwidth({win}) : 0)")
     };
-    let placed = |(w, widths): &(i32, Vec<i32>)| widths.len() == 2 && widths.contains(w);
+    let fitted = format!("{} .. ' ' .. {}", width(right_win), width(split));
+    let fitted = || {
+        let ws = remote_expr(&live.ending.sock, &fitted).unwrap_or_default();
+        let mut ws: Vec<i32> = ws.split(' ').filter_map(|w| w.parse().ok()).collect();
+        let mut panes = widths();
+        ws.sort();
+        panes.sort();
+        (ws, panes)
+    };
+    let placed = |(ws, panes): &(Vec<i32>, Vec<i32>)| panes.len() == 2 && ws == panes;
     let got = until(placed, fitted);
     assert!(placed(&got), "{got:?}: {}", live.log());
     // no width before each is within a cell of the next, nor its rest

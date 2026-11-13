@@ -31,8 +31,9 @@ pub(crate) struct Geometry<'a> {
 
 impl Geometry<'_> {
     /// A guess at a new split's terminal size, cols x rows: half the pane it
-    /// splits (`from`). The first of a tab page gets its origin's layout
-    /// area's, which `open_tab_page` is given.
+    /// splits (`from`), or of the size that pane was opened at while its
+    /// terminal hasn't attached. The first of a tab page gets its origin's
+    /// layout area's, which `open_tab_page` is given.
     pub(crate) fn new_pane_size(
         &self,
         sp: windows::Split,
@@ -42,14 +43,10 @@ impl Geometry<'_> {
         if first_of_tab {
             return self.screen_size();
         }
-        let Some(p) = from else {
+        let Some([cols, rows]) = from.and_then(Pane::known_size) else {
             return GUESS_SIZE;
         };
-        let Some(s) = &p.terminal_surface else {
-            return GUESS_SIZE;
-        };
-        let cols = s.view.cols.max(1);
-        let rows = s.view.rows.max(2);
+        let (cols, rows) = (cols.max(1), rows.max(2));
         if sp.side_by_side {
             return [(cols / 2).max(1), rows];
         }
