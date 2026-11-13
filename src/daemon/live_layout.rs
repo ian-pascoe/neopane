@@ -41,11 +41,13 @@ pub(crate) struct PlacedTerminal {
 /// Where a pane is, as the live layout last said (#92 decision 17).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Area {
-    /// In layout area `id`, at `rect`, as fractions of it: x, y, w, h.
+    /// In layout area `id`, at `rect`, as fractions of it: x, y, w, h;
+    /// `inset` of `rect`'s cells at each edge not its terminal's.
     Live {
         id: String,
         rect: [f64; 4],
         floating: bool,
+        inset: [u16; 4],
     },
     /// A layout area of its own.
     Own,
@@ -63,6 +65,7 @@ impl LiveLayout {
             id: a.id.clone(),
             rect: p.rect,
             floating: p.floating,
+            inset: p.inset,
         })
     }
 

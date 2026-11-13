@@ -190,11 +190,22 @@ fn left(p: &Pane) -> f64 {
 }
 
 /// The size of pane `p`'s layout area, in its cells: its cells over its
-/// share of the area (ADR 0008). Neovim's screen is this, for the current
-/// pane. None while it's in no area, or has no terminal.
+/// share of the area (ADR 0008). A tiled pane's share counts its inset, the
+/// cells of its rect that aren't its terminal's, such as a frame; a floating
+/// one's doesn't. Neovim's screen is this, for the current pane. None while
+/// it's in no area, or has no terminal.
 pub(crate) fn area_size(p: &Pane) -> Option<[u32; 2]> {
     let s = p.terminal_surface.as_ref()?;
-    let (cols, rows) = (s.view.cols, s.view.rows);
+    let (mut cols, mut rows) = (s.view.cols, s.view.rows);
+    if let Area::Live {
+        floating: false,
+        inset: [l, t, r, b],
+        ..
+    } = p.area
+    {
+        cols += u32::from(l) + u32::from(r);
+        rows += u32::from(t) + u32::from(b);
+    }
     match &p.area {
         Area::Unreported => None,
         Area::Own => Some([cols, rows]),
