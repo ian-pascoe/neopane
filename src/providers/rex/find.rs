@@ -255,6 +255,8 @@ mod tests {
         }
     }
 
+    /// In a Rex pane, its own block, as a self-attach from it finds it, on
+    /// macOS (and on Linux, #133). Skips elsewhere.
     #[test]
     fn live_find_proves_its_own_block() {
         let var = |name: &str| std::env::var(name).ok();

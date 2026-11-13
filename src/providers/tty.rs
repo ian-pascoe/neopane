@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn a_processs_terminal_is_the_device_of_its_controlling_ttys_path() {
+    fn the_terminal_of_a_process_is_the_device_of_its_controlling_ttys_path() {
         let (_master, slave, path) = pty();
         let ours = of_path(&path);
         assert!(ours.is_some());
