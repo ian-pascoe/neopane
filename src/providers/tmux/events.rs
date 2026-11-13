@@ -2,12 +2,14 @@
 //! attaching a client. One waiter per event of [`EVENTS`], each a `tmux
 //! wait-for -E NAME`, which ends at that event anywhere on the server.
 //!
-//! - A waiter that ends with the event is armed again at once; after
-//!   [`SETTLE`], with every waiter that ended meanwhile armed again too, it
-//!   prints one line: `{"focus":"%N"}` if the focused pane, found as
-//!   `report_layout` finds it, changed, else a bare line, so the layout is
-//!   read again. Its first line, once the waiters are armed, is where focus
-//!   starts, if a client shows any: the daemon follows moves from there.
+//! - A waiter that ends with the event is armed again at once. Once no
+//!   waiter has ended for [`SETTLE`] since the last was armed again, so
+//!   that it has registered with the server and what it missed meanwhile
+//!   shows in the read, it prints one line: `{"focus":"%N"}` if the focused
+//!   pane, found as `report_layout` finds it, changed, else a bare line, so
+//!   the layout is read again. Its first line, once the waiters are armed
+//!   and have settled likewise, is where focus starts, if a client shows
+//!   any: the daemon follows moves from there.
 //! - A waiter that fails at once, within [`AT_ONCE`], is dropped; one that
 //!   fails later, such as at a server's restart, is armed again, and fails
 //!   at once if the server is gone. Once every waiter is gone, it fails.
@@ -50,6 +52,9 @@ pub(super) const EVENTS: [&str; 9] = [
 
 /// How long after an event it waits for the rest of its burst.
 const SETTLE: Duration = Duration::from_millis(30);
+
+/// The longest a burst settles, however many waiters keep ending.
+const MOST_SETTLE: Duration = Duration::from_millis(250);
 
 /// A waiter failing sooner than this after it was armed failed at once.
 const AT_ONCE: Duration = Duration::from_secs(1);
@@ -103,7 +108,9 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
         waiters.arm(event);
     }
     let mut live = EVENTS.len();
-    // where focus starts: the daemon follows only moves from there
+    // where focus starts, read once the waiters have registered, so what
+    // happens meanwhile is in it: the daemon follows only moves from there
+    settle(waiters, None, &mut live);
     let mut focus = waiters.focus();
     if let Some(pane) = &focus
         && !print(&json!({ "focus": pane }).to_string())
@@ -114,20 +121,7 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
         let Some(first) = waiters.next(None) else {
             continue;
         };
-        let mut woke = false;
-        let mut ended = Some(first);
-        let due = Instant::now() + SETTLE;
-        while let Some(e) = ended {
-            woke |= e.woke;
-            if e.woke || e.ran >= AT_ONCE {
-                waiters.arm(e.event);
-            } else {
-                live -= 1;
-            }
-            let left = due.saturating_duration_since(Instant::now());
-            ended = waiters.next(Some(left));
-        }
-        if !woke {
+        if !settle(waiters, Some(first), &mut live) {
             continue;
         }
         let now = waiters.focus();
@@ -143,6 +137,35 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
         }
     }
     Failure::Failed("every waiter failed".into())
+}
+
+/// Takes `first`, then every waiter that ends until none has for
+/// [`SETTLE`] since the last was armed again, so a read after it sees
+/// what a waiter that was registering missed; at most [`MOST_SETTLE`] in
+/// all, past which those still ending start the next burst. One that
+/// woke, or failed late, is armed again; one that failed at once is
+/// dropped from `live`. Whether any woke.
+fn settle(waiters: &mut impl Waiters, first: Option<Ended>, live: &mut usize) -> bool {
+    let start = Instant::now();
+    let mut due = start + SETTLE;
+    let mut woke = false;
+    let mut ended = first;
+    loop {
+        if let Some(e) = ended.take() {
+            woke |= e.woke;
+            if e.woke || e.ran >= AT_ONCE {
+                waiters.arm(e.event);
+                due = (Instant::now() + SETTLE).min(start + MOST_SETTLE);
+            } else {
+                *live -= 1;
+            }
+        }
+        let left = due.saturating_duration_since(Instant::now());
+        ended = waiters.next(Some(left));
+        if ended.is_none() {
+            return woke;
+        }
+    }
 }
 
 /// tmux's waiters: each a `tmux wait-for -E EVENT`, waited for on a thread
@@ -253,6 +276,15 @@ mod tests {
         End(Ended),
         /// No waiter ends within the settle.
         Quiet,
+        /// A waiter ends after a while, real time.
+        Late(Duration, Ended),
+    }
+
+    /// What the loop asked of a fake, in order.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        Next(Option<Duration>),
+        Focus,
     }
 
     /// Waiters that end as their script says; focus is each of `focus` in
@@ -263,6 +295,7 @@ mod tests {
         armed: Vec<&'static str>,
         focus: VecDeque<Option<String>>,
         last_focus: Option<String>,
+        calls: Vec<Call>,
     }
 
     impl Waiters for Fake {
@@ -271,9 +304,14 @@ mod tests {
         }
 
         fn next(&mut self, within: Option<Duration>) -> Option<Ended> {
+            self.calls.push(Call::Next(within));
             loop {
                 match self.script.pop_front() {
                     Some(Step::End(e)) => return Some(e),
+                    Some(Step::Late(after, e)) => {
+                        std::thread::sleep(after);
+                        return Some(e);
+                    }
                     Some(Step::Quiet) if within.is_some() => return None,
                     Some(Step::Quiet) => continue,
                     None if within.is_some() => return None,
@@ -283,6 +321,7 @@ mod tests {
         }
 
         fn focus(&mut self) -> Option<String> {
+            self.calls.push(Call::Focus);
             if let Some(f) = self.focus.pop_front() {
                 self.last_focus = f;
             }
@@ -306,10 +345,21 @@ mod tests {
         })
     }
 
-    /// Every waiter failing at once, after `steps`.
-    fn then_all_fail(mut steps: Vec<Step>) -> VecDeque<Step> {
-        steps.extend(EVENTS.map(|e| failed(e, Duration::ZERO)));
-        steps.into()
+    /// A quiet start, `steps`, then every waiter failing at once.
+    fn then_all_fail(steps: Vec<Step>) -> VecDeque<Step> {
+        let mut all = vec![Step::Quiet];
+        all.extend(steps);
+        all.extend(EVENTS.map(|e| failed(e, Duration::ZERO)));
+        all.into()
+    }
+
+    /// Whether, before each focus read, the loop last waited a whole
+    /// settle for more waiters to end: what `calls` says.
+    fn settled_before_each_read(calls: &[Call]) -> bool {
+        calls.iter().enumerate().all(|(i, c)| {
+            *c != Call::Focus
+                || matches!(calls[..i].last(), Some(Call::Next(Some(d))) if *d >= SETTLE - Duration::from_millis(3))
+        })
     }
 
     /// What `fake` printed, and why it ended.
@@ -417,10 +467,54 @@ mod tests {
     #[test]
     fn it_ends_once_the_reader_is_gone() {
         let mut fake = Fake {
-            script: vec![woke("window-linked"), Step::Quiet].into(),
+            script: vec![Step::Quiet, woke("window-linked"), Step::Quiet].into(),
             ..Fake::default()
         };
         let why = watch(&mut fake, |_| false);
         assert!(matches!(why, Failure::Failed(w) if w.contains("reader")));
+    }
+
+    #[test]
+    fn it_settles_before_reading_where_focus_starts_taking_an_event_meanwhile_into_it() {
+        let mut fake = Fake {
+            script: {
+                // what ends while the waiters register goes into the start
+                let mut steps: VecDeque<Step> =
+                    vec![woke("window-pane-changed"), Step::Quiet].into();
+                steps.extend(then_all_fail(Vec::new()).into_iter().skip(1));
+                steps
+            },
+            focus: [Some("%4".into())].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [r#"{"focus":"%4"}"#]);
+        assert_eq!(fake.armed[EVENTS.len()..], ["window-pane-changed"]);
+        // a settle first, not a read
+        assert!(
+            matches!(fake.calls[0], Call::Next(Some(_))),
+            "{:?}",
+            fake.calls
+        );
+        assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    #[test]
+    fn a_waiter_armed_again_late_in_a_burst_has_a_whole_settle_before_the_read() {
+        let late = Ended {
+            event: "window-layout-changed",
+            woke: true,
+            ran: Duration::from_secs(5),
+        };
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                woke("window-pane-changed"),
+                Step::Late(Duration::from_millis(25), late),
+                Step::Quiet,
+            ]),
+            ..Fake::default()
+        };
+        run(&mut fake);
+        assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
     }
 }
