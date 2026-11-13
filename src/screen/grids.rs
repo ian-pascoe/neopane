@@ -5,8 +5,8 @@
 
 use indexmap::IndexMap;
 
-use super::grid::Grid;
-use super::style::{self, Style};
+use super::grid::{Cell, Grid};
+use super::style::{self, Attr, STATUSLINE_BASE, Style};
 use crate::nvim::msgpack::{Decoder, Token};
 use crate::nvim::rpc;
 
@@ -27,6 +27,12 @@ pub struct Grids {
     /// The highlights of StatusLine and StatusLineNC, likewise.
     pub statusline_hl: u32,
     pub statusline_nc_hl: u32,
+    /// The statuslines neopane draws windows Neovim draws none for
+    /// (`'laststatus'` 0), by grid: their cells as Neovim would draw them,
+    /// as last evaluated, highlighted from `STATUSLINE_BASE`.
+    pub statuslines: IndexMap<u32, Vec<Cell>>,
+    /// The grids whose statusline changed since the renderer last drew it.
+    pub statuslines_dirty: Vec<u32>,
 }
 
 impl Default for Grids {
@@ -41,6 +47,8 @@ impl Default for Grids {
             separator_hl: 0,
             statusline_hl: 0,
             statusline_nc_hl: 0,
+            statuslines: IndexMap::new(),
+            statuslines_dirty: Vec::new(),
         }
     }
 }
@@ -155,6 +163,42 @@ impl Grids {
             }
         }
         None
+    }
+
+    /// Sets the statuslines neopane draws: `attrs` are their highlights, and
+    /// `lines` each window's grid and cells, whose `hl` is an index into
+    /// `attrs`. They're kept highlighted from `STATUSLINE_BASE`. Replaces the
+    /// last ones whole, marking those that changed. Whether any did.
+    #[doc(hidden)]
+    pub fn set_statuslines(
+        &mut self,
+        attrs: Vec<Attr>,
+        mut lines: IndexMap<u32, Vec<Cell>>,
+    ) -> bool {
+        for cells in lines.values_mut() {
+            for c in cells.iter_mut() {
+                c.hl = STATUSLINE_BASE + c.hl.min(attrs.len().saturating_sub(1) as u32);
+            }
+        }
+        let all = attrs != self.style.statusline_attrs;
+        let mut changed = all || lines.len() != self.statuslines.len();
+        for (grid, cells) in &lines {
+            if all || self.statuslines.get(grid) != Some(cells) {
+                changed = true;
+                if !self.statuslines_dirty.contains(grid) {
+                    self.statuslines_dirty.push(*grid);
+                }
+            }
+        }
+        self.style.statusline_attrs = attrs;
+        self.statuslines = lines;
+        changed
+    }
+
+    /// Forgets the statuslines of all grids but `keep`.
+    pub(crate) fn keep_statuslines(&mut self, keep: &[u32]) {
+        self.statuslines.retain(|g, _| keep.contains(g));
+        self.statuslines_dirty.retain(|g| keep.contains(g));
     }
 
     /// Makes grid `grid` window `win`'s, floating on the screen with its
@@ -409,6 +453,7 @@ impl Grids {
                 let id = expect_int::<u32>(d)?;
                 self.grids.swap_remove(&id);
                 self.wins.swap_remove(&id);
+                self.statuslines.swap_remove(&id);
                 Ok(1)
             }
             Event::WinPos | Event::WinExternalPos | Event::WinFloatPos => {

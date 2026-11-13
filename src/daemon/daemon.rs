@@ -58,6 +58,7 @@ pub(crate) mod control;
 mod lifetime;
 mod open;
 mod self_attach;
+mod statuslines;
 use attaches::PENDING_BASE;
 
 /// The daemon is a top layer: any error will do.
@@ -104,6 +105,8 @@ pub(crate) struct Daemon {
     pub msg_rows: u32,
     /// The options panes laying out several windows split and close them by.
     pub split_options: windows::SplitOptions,
+    /// The ask for the statuslines neopane draws (`ask_statuslines`).
+    pub statuslines_ask: statuslines::OneAsk,
     /// Sizes Neovim gave windows not yet in a pane: window, cols, rows, as a
     /// `Resized` note has them. A window that joins a pane layout takes its.
     pub pending_sizes: Vec<(i64, u32, u32)>,
@@ -394,6 +397,7 @@ impl Daemon {
             tabline_rows: 0,
             msg_rows: 1,
             split_options: windows::SplitOptions::default(),
+            statuslines_ask: statuslines::OneAsk::default(),
             pending_sizes: Vec::new(),
             tab_layouts: IndexMap::new(),
             live_layout: None,
@@ -1294,6 +1298,7 @@ impl Daemon {
                         if self.grids.apply_redraw(&mut params)? {
                             self.reconcile()?;
                             self.draw()?;
+                            self.ask_statuslines()?;
                             // once Neovim has drawn its start: before, it
                             // would wait at a hit-enter prompt
                             if self.nvim.ready && !self.held_warnings.is_empty() {
@@ -1348,6 +1353,7 @@ impl Daemon {
             windows::Note::Cwd(dir) => self.told.dir = Some(dir),
             windows::Note::Terminals(ptys) => self.told.terminals = ptys,
             windows::Note::Done { buf, by_pane } => self.on_done(buf, by_pane),
+            windows::Note::Statuslines => self.ask_statuslines()?,
         }
         Ok(())
     }
@@ -1376,7 +1382,8 @@ impl Daemon {
         if show_now {
             self.draw()?;
         }
-        if self.on_window_answer(id, err, result)?
+        if self.on_statuslines_answer(id, err, result)?
+            || self.on_window_answer(id, err, result)?
             || self.on_nested_answer(id, err, result)?
             || self.on_open_answer(id, err, result)?
         {
@@ -2795,6 +2802,7 @@ impl Daemon {
 
     /// Draws every pane that changed.
     fn draw(&mut self) -> Result<()> {
+        self.forget_unneeded_statuslines();
         let focused = self.current_pane_id();
         // floats in floating panes stay out of the others
         let mut skip: Vec<u32> = Vec::with_capacity(SKIP_MAX);
@@ -3039,15 +3047,10 @@ impl Daemon {
 
     /// The windows of pane `p`'s layout as drawn, and the separators between.
     fn laid_out_view(&self, p: &Pane) -> (Vec<Shown>, Vec<Separator>) {
-        let Some(layout) = &p.layout else {
-            return (Vec::new(), Vec::new());
-        };
-        let area = self.geometry().window_size(p);
-        let laid = layout.lay_out(area, p.neovim_window_handle.unwrap_or(0));
+        let (laid, separators) = self.laid_out_wins(p);
         let wins = laid
-            .wins
             .iter()
-            .filter_map(|w| {
+            .filter_map(|&(w, ours)| {
                 let hl = if w.win == self.nvim.current_win {
                     self.grids.statusline_hl
                 } else {
@@ -3059,9 +3062,26 @@ impl Daemon {
                     col: w.col,
                     cols: w.cols,
                     rows: w.rows,
-                    statusline: self.draws_statusline(w, area).then_some(hl),
+                    statusline: ours.then_some(hl),
                 })
             })
+            .collect();
+        (wins, separators)
+    }
+
+    /// The windows of pane `p`'s layout, laid out in its window area, each
+    /// with whether neopane draws its statusline (`draws_statusline`), and
+    /// the separators between.
+    fn laid_out_wins(&self, p: &Pane) -> (Vec<(pane_layout::Placed, bool)>, Vec<Separator>) {
+        let Some(layout) = &p.layout else {
+            return (Vec::new(), Vec::new());
+        };
+        let area = self.geometry().window_size(p);
+        let laid = layout.lay_out(area, p.neovim_window_handle.unwrap_or(0));
+        let wins = laid
+            .wins
+            .iter()
+            .map(|w| (*w, self.draws_statusline(w, area)))
             .collect();
         (wins, laid.separators)
     }
@@ -3320,6 +3340,7 @@ mod tests {
     mod fallback;
     mod floats_in_panes;
     mod in_layout;
+    mod statuslines;
     mod tab_layouts;
     mod tabs;
     mod unattached;

@@ -53,9 +53,10 @@ pub struct Shown {
     pub col: u32,
     pub cols: u32,
     pub rows: u32,
-    /// A statusline neopane draws in the rect's last row, blank in this
-    /// highlight, for a window above another that Neovim draws none for
-    /// (`'laststatus'` 0).
+    /// A statusline neopane draws in the rect's last row, for a window above
+    /// another that Neovim draws none for (`'laststatus'` 0): the grid's
+    /// cells in `Grids::statuslines`, filled out in this highlight, or
+    /// blank in it until Neovim has evaluated them.
     pub statusline: Option<u32>,
 }
 
@@ -490,6 +491,14 @@ impl PaneView {
         } else {
             for s in &wins {
                 let g = grids.get(s.grid).unwrap();
+                let last = (s.row + s.rows).saturating_sub(1);
+                if s.statusline.is_some()
+                    && s.rows > 0
+                    && last < area_rows
+                    && grids.statuslines_dirty.contains(&s.grid)
+                {
+                    dirty.set(last as usize);
+                }
                 for i in 0..s.rows {
                     let r = s.row + i;
                     if r >= area_rows {
@@ -570,6 +579,7 @@ impl PaneView {
         {
             let cols = self.cols.min(MAX_COLS as u32);
             let gmap = &grids.grids;
+            let stls = &grids.statuslines;
             let style = &mut grids.style;
             let mut base = [Cell::default(); MAX_COLS];
             let mut line = [Cell::default(); MAX_COLS];
@@ -585,7 +595,13 @@ impl PaneView {
                         && r + 1 == s.row + s.rows
                     {
                         let n = s.cols.min(cols - s.col) as usize;
-                        base[s.col as usize..s.col as usize + n].fill(Cell::init(" ", hl));
+                        let to = &mut base[s.col as usize..s.col as usize + n];
+                        to.fill(Cell::init(" ", hl));
+                        if let Some(text) = stls.get(&s.grid) {
+                            let m = n.min(text.len());
+                            to[..m].copy_from_slice(&text[..m]);
+                            blank_cut_wide(&mut to[..m], text.get(m));
+                        }
                         continue;
                     }
                     let Some(gr) = shown_row(g, s, r - s.row) else {
@@ -635,6 +651,9 @@ impl PaneView {
             let g = grids.grids.get_mut(&s.grid).unwrap();
             g.dirty.unset_all();
             g.scrolls_len = 0;
+            if s.statusline.is_some() {
+                grids.statuslines_dirty.retain(|&d| d != s.grid);
+            }
         }
 
         self.full = false;
@@ -1203,6 +1222,7 @@ fn blend_cell(style: &mut Style, cell: Cell, line: &[Cell], i: usize) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::style::Attr;
 
     #[test]
     fn a_windows_runs_and_rect_rows_follow_the_rows_it_shows() {
@@ -1265,6 +1285,71 @@ mod tests {
     fn add_grid(gs: &mut Grids, id: u32, w: u32, h: u32) {
         gs.grids.insert(id, Grid::default());
         gs.grids.get_mut(&id).unwrap().resize(w, h);
+    }
+
+    #[test]
+    fn a_statusline_drawn_for_neovim_shows_its_text_and_redraws_as_it_changes() {
+        let mut gs = Grids::default();
+        add_grid(&mut gs, 2, 6, 2);
+        add_grid(&mut gs, 3, 6, 2);
+        let wins = [
+            Shown {
+                grid: 2,
+                cols: 6,
+                rows: 3,
+                statusline: Some(7),
+                ..Shown::default()
+            },
+            Shown {
+                grid: 3,
+                row: 3,
+                cols: 6,
+                rows: 2,
+                ..Shown::default()
+            },
+        ];
+        let laid = LaidOut {
+            wins: &wins,
+            separators: &[],
+            separator: Cell::default(),
+        };
+        let mut view = PaneView::init(6, 6);
+        let mut out = Vec::new();
+        // not evaluated yet: blank
+        assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+        assert!(!contains(&out, "ab"));
+
+        // a wide character cut by the window's edge loses its left half
+        let cells = |text: &str| -> Vec<Cell> {
+            let mut v: Vec<Cell> = text.chars().map(|c| Cell::init(c.to_string(), 0)).collect();
+            v.push(Cell::init("\u{754c}", 0));
+            v.push(Cell {
+                len: 0,
+                ..Cell::default()
+            });
+            v
+        };
+        let line = |cells: Vec<Cell>| [(2, cells)].into_iter().collect();
+        assert!(gs.set_statuslines(vec![Attr::default()], line(cells("abcde"))));
+        out.clear();
+        assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+        assert!(
+            contains(&out, "abcde"),
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(!contains(&out, "\u{754c}"));
+        // unchanged: nothing drawn
+        assert!(!gs.set_statuslines(vec![Attr::default()], line(cells("abcde"))));
+        out.clear();
+        assert!(!view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+        // changed: only that row
+        assert!(gs.set_statuslines(vec![Attr::default()], line(cells("xy"))));
+        out.clear();
+        assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+        assert!(contains(&out, "xy\u{754c}"));
+        assert!(contains(&out, "\x1b[3;1H"));
+        assert!(!contains(&out, "\x1b[1;1H"));
     }
 
     #[test]

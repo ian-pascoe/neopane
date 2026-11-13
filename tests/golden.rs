@@ -14,7 +14,7 @@ use neopane::screen::grid::{Cell, Grid};
 use neopane::screen::grids::{Grids, Placed, WinKind};
 use neopane::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown, tabline_slice};
 use neopane::screen::render;
-use neopane::screen::style::{Attr, Shape, Style, Underline};
+use neopane::screen::style::{Attr, STATUSLINE_BASE, Shape, Style, Underline};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -676,7 +676,8 @@ impl Multi {
                                 | Note::Cwd(_)
                                 | Note::Terminals(_)
                                 | Note::Opened(_)
-                                | Note::Done { .. } => {}
+                                | Note::Done { .. }
+                                | Note::Statuslines => {}
                             }
                         }
                     }
@@ -1395,6 +1396,124 @@ fn with_laststatus_0_the_window_above_shows_a_blank_statusline_drawn_for_it() ->
         ],
     )?;
     expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))
+}
+
+#[test]
+fn with_laststatus_0_the_window_above_shows_its_statusline_text_drawn_for_it() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    // Neovim draws neither a statusline: each grid is text only
+    add_window(&mut gs, 2, 8, 2, 'a');
+    add_window(&mut gs, 3, 8, 2, 'b');
+    for id in [2, 3] {
+        gs.get_mut(id).unwrap().resize(8, 2);
+    }
+    gs.cursor_grid = 3;
+    // the statusline Neovim would draw the window above, `%f%1*%m%*`, not
+    // current: StatusLineNC, then User1 combined with it, as Neovim evaluates
+    // it, to the window's width but the fill; highlights by index
+    let nc = Attr {
+        reverse: true,
+        ..Attr::default()
+    };
+    let user1 = Attr {
+        fg: Some(0xff0000),
+        ..nc
+    };
+    let line = |text: &str, user1_from: usize| -> Vec<Cell> {
+        text.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                let a = if i < user1_from { 0 } else { 1 };
+                Cell::init(c.to_string(), a)
+            })
+            .collect()
+    };
+    gs.set_statuslines(
+        vec![nc, user1],
+        [(2, line("a.txt", 5))].into_iter().collect(),
+    );
+    let wins = [
+        Shown {
+            grid: 2,
+            row: 0,
+            col: 0,
+            cols: 8,
+            rows: 3,
+            statusline: Some(STL),
+        },
+        Shown {
+            grid: 3,
+            row: 3,
+            col: 0,
+            cols: 8,
+            rows: 2,
+            statusline: None,
+        },
+    ];
+    let mut view = PaneView::init(8, 6);
+    let mut t = test_terminal(8, 6)?;
+    let mut out = Vec::new();
+    let laid = LaidOut {
+        wins: &wins,
+        separators: &[],
+        separator: separator(),
+    };
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    // `n` StatusLineNC, `u` User1 over it; the rest the fill, in the
+    // statusline's own highlight
+    let expect = |t: &Vt, gs: &Grids, row: (&str, &str)| -> Result<()> {
+        let (text, marks) = row;
+        for (c, (ch, m)) in text.chars().zip(marks.chars()).enumerate() {
+            let hl = match m {
+                'n' => STATUSLINE_BASE,
+                'u' => STATUSLINE_BASE + 1,
+                _ => STL,
+            };
+            let pc = t.cell(c as u32, 2)?;
+            if let Err(err) = expect_cell(&pc, &gs.style, Cell::init(ch.to_string(), hl)) {
+                eprintln!(
+                    "golden: col {c}: want {ch:?}\nghostty:\n{}",
+                    t.plain_string()?
+                );
+                return Err(err);
+            }
+        }
+        Ok(())
+    };
+    expect_written(
+        &t,
+        &gs.style,
+        &[("a0      ", "........"), ("a1      ", "........")],
+    )?;
+    expect(&t, &gs, ("a.txt   ", "nnnnnSSS"))?;
+    for (r, text) in [(3, "b0"), (4, "b1")] {
+        for (c, ch) in text.chars().enumerate() {
+            let pc = t.cell(c as u32, r)?;
+            expect_cell(&pc, &gs.style, Cell::init(ch.to_string(), TEXT))?;
+        }
+    }
+    expect_cursor(&t, &gs.style, Some(render::Cursor { row: 3, col: 0 }))?;
+
+    // the buffer is modified: Neovim evaluates `a.txt [+]`, cut to the
+    // window's width; only that row is drawn again
+    assert!(gs.set_statuslines(
+        vec![nc, user1],
+        [(2, line("a.txt [+]", 5))].into_iter().collect(),
+    ));
+    out.clear();
+    assert!(view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    t.feed(&out);
+    expect(&t, &gs, ("a.txt [+", "nnnnnuuu"))?;
+    // the same again: nothing drawn
+    assert!(!gs.set_statuslines(
+        vec![nc, user1],
+        [(2, line("a.txt [+]", 5))].into_iter().collect(),
+    ));
+    out.clear();
+    assert!(!view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    Ok(())
 }
 
 /// The tabline `text`, in statusline cells.

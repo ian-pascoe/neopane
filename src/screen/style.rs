@@ -26,10 +26,16 @@ pub struct Style {
     /// from `BLEND_BASE`. Good for one frame: cleared by `clear_blends`. At
     /// most `MAX_BLENDED`.
     pub blended: Vec<Blended>,
+    /// The highlights of the statuslines neopane draws for Neovim, with ids
+    /// from `STATUSLINE_BASE`: Neovim's groups combined as it would draw them,
+    /// which it never defines an id for. Replaced by each evaluation.
+    pub statusline_attrs: Vec<Attr>,
 }
 
 /// Ids from here are blended highlights, never Neovim's.
 pub(crate) const BLEND_BASE: u32 = 1 << 31;
+/// Ids from here to `BLEND_BASE` are statusline highlights, never Neovim's.
+pub const STATUSLINE_BASE: u32 = 1 << 30;
 const MAX_BLENDED: usize = 512;
 
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +102,10 @@ impl Style {
         if hl >= BLEND_BASE {
             let i = (hl - BLEND_BASE) as usize;
             return self.blended.get(i).map(|b| b.attr).unwrap_or_default();
+        }
+        if hl >= STATUSLINE_BASE {
+            let i = (hl - STATUSLINE_BASE) as usize;
+            return self.statusline_attrs.get(i).copied().unwrap_or_default();
         }
         self.attrs.get(hl as usize).copied().unwrap_or_default()
     }
@@ -266,7 +276,7 @@ fn read_cursor_mode(d: &mut Decoder<'_>) -> rpc::Result<CursorMode> {
 }
 
 /// An `rgb_attr` map. Unknown keys, such as `url`, are skipped.
-fn read_attr(d: &mut Decoder<'_>) -> rpc::Result<Attr> {
+pub(crate) fn read_attr(d: &mut Decoder<'_>) -> rpc::Result<Attr> {
     let mut a = Attr::default();
     let n = rpc::expect_map(d)?;
     for _ in 0..n {

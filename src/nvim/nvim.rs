@@ -253,6 +253,30 @@ impl Nvim {
     }
 }
 
+impl Nvim {
+    /// Closes Neovim's stdin, which makes it exit, and waits up to `limit`
+    /// for it. Whether it exited; if not, it's killed. For tests: one stuck
+    /// as it exits, at a prompt no one can answer, fails rather than hangs.
+    #[cfg(test)]
+    pub(crate) fn close_within(&mut self, limit: std::time::Duration) -> bool {
+        let _ = self.flush();
+        self.writer = None;
+        let Some(child) = &mut self.child else {
+            return true;
+        };
+        let start = std::time::Instant::now();
+        while start.elapsed() < limit {
+            if let Ok(Some(_)) = child.try_wait() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+}
+
 impl Drop for Nvim {
     /// Closes Neovim's stdin, which makes it exit, then waits for it if it's
     /// ours.
