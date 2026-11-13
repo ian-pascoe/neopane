@@ -80,7 +80,8 @@ Options (before NVIM-ARGS):
   --provider P   A hint for your config when this terminal chooses the pane
                  provider; none: no pane provider.
   --detach       Start the daemon without showing it, and print its name.
-  --no-wait      In a daemon's :terminal, open FILE and return at once.
+  --no-wait      In a daemon's :terminal, open FILE and return once Neovim
+                 has its window (else exit 1 after 10 s).
   -h, --help     Show this help.
   -v, --version  Show the version.
 

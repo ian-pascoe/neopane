@@ -1,6 +1,6 @@
 //! Waited files (ADR 0015, #94 decisions 17 and 28): an `open` control
-//! request opens its file in a new window split off Neovim's current one. It
-//! is answered once Neovim has the window, or with `wait`, once the file is
+//! request opens its file in a new window split off the window showing the
+//! caller's `:terminal`, else off Neovim's current one. It is answered once Neovim has the window, or with `wait`, once the file is
 //! done: no window shows its buffer, or the buffer went. Neovim is asked
 //! without blocking the loop, as it may wait at a prompt (E325).
 

@@ -239,7 +239,8 @@ ignored: work keeps rex`.
 
 In a daemon's own `:terminal`, `neopane notes.md` opens `notes.md` in a new
 window of that Neovim, split off the window showing that `:terminal` (else
-the current one), so a pane beside the terminal's in Rex, and returns once you're done with it: no window shows it any more
+the current one), so a pane beside the terminal's in Rex, and returns once
+you're done with it: no window shows it any more
 (`:wq`, `:q`, `ZZ`, `:bd`, or its window showing another buffer), or its
 buffer is unloaded or deleted. `:w` alone isn't done. It prints nothing and
 exits 0, with no time limit. `neopane +12 notes.md` puts the cursor on line
