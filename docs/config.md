@@ -324,7 +324,8 @@ commands").
 
 On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
 config, and each Neovim window gets a tmux pane of its own, split beside the
-pane it came from. The default knows tmux by its own variables,
+pane it came from; on tmux 3.7 or newer, a group of floats you enter gets a
+tmux floating pane. The default knows tmux by its own variables,
 `TERM_PROGRAM=tmux` and `TMUX`; its `find` then checks the terminal is a
 pane of that tmux server, by its tty, so a `TMUX` leaked into another
 terminal chooses nothing. A config gets the same table from
