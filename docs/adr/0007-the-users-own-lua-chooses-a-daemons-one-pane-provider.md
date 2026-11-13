@@ -1,5 +1,23 @@
 # The user's own Lua chooses a daemon's one pane provider, which may pair a terminal provider with a layout provider
 
+Amended by SPI-1135, amending #93 decisions 27 and 29: `<name>.default`
+reads only the environment while it names one built-in. When it names
+several, it asks each multiplexer's `inside` in order and takes the first
+that proves, off the daemon's loop. A list of fallbacks tried by `find` was
+rejected again: it would make a config that returns the default behave
+differently from no config. It names tmux by `TERM_PROGRAM=tmux` and `TMUX`,
+and Rex by `REX_SERVER` and `REX_SESSION`. tmux is the only multiplexer
+proved today, its proof cut at 0.5 s; other built-in multiplexers would join
+the naming and the order with their own built-ins. After the multiplexers
+comes Rex if named, else none: Rex is never proven there, its own `find`
+proves it. One Rust function is both the config's `<name>.default` and the
+daemon's default with no config file, so the two never differ.
+`<name>.inside.tmux` runs `find`'s whole check, tmux's version and then the
+tty search, so it is true exactly when `find` would accept; `TMUX_PANE`
+isn't needed. With no config, `find` refusing the default's guess goes only
+to the log, and `list` and `status` show `none (find refused)`; a config's
+choice refused still warns, quoting `find`'s first stderr line.
+
 Amended by ADR 0016 (SPI-1131): with no config, the built-in default chooses
 tmux's built-in table in a tmux pane (`TERM_PROGRAM=tmux` and `TMUX` set),
 before Rex; `<name>.default` returns that table there.

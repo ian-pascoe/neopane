@@ -196,3 +196,106 @@ fn a_float_lands_on_its_group(border_status: &str) {
     drop(tmux);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn in_a_tmux_pane_with_rexs_variables_leaked_into_it_the_default_proves_tmux() {
+    if !have_nvim() || !have_tmux() {
+        return;
+    }
+    let tmp = scratch("tmux-nest");
+    let exe = exe();
+    // a tmux run in a Rex pane, its server holding Rex's variables
+    let tmux = TmuxServer::start(
+        &tmp,
+        &[
+            (&neopane::daemon::dir::tmpdir_var(), tmp.as_os_str()),
+            ("XDG_CONFIG_HOME", tmp.as_os_str()),
+            ("XDG_STATE_HOME", tmp.as_os_str()),
+            (
+                "REX_SERVER",
+                std::ffi::OsStr::new("unix:///nowhere/rex.sock"),
+            ),
+            ("REX_SESSION", std::ffi::OsStr::new("session:s")),
+        ],
+        &[exe.to_str().unwrap(), "--name", "work"],
+    );
+    let sock = base_of(&tmp).join("work/nvim.sock");
+    let ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let log = || std::fs::read_to_string(base_of(&tmp).join("work/log")).unwrap_or_default();
+    let status = || json(&under(&tmp, &["status", "--json", "--name", "work"]));
+
+    assert!(
+        until_expr(&sock, "1", |_| true).is_some(),
+        "work's Neovim never answered: {}",
+        log()
+    );
+    let s = until(|s: &serde_json::Value| s["provider"] == "tmux", status);
+    assert_eq!(s["provider"], "tmux", "{}", log());
+    assert!(
+        log().contains("inside.tmux: yes, tmux pane %0"),
+        "{}",
+        log()
+    );
+
+    drop(ending);
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn with_no_config_a_guess_find_refuses_is_logged_and_never_warned_of() {
+    if !have_nvim() || !have_tmux() {
+        return;
+    }
+    let tmp = scratch("tmux-leak");
+    let tmux = TmuxServer::start(&tmp, &[], &[]);
+    let tmux_var = tmux.tmux_var();
+    // a terminal tmux doesn't run, with tmux's variables leaked into it
+    let helper = in_pty_with(
+        &tmp,
+        &tmp,
+        &["--name", "work"],
+        &[
+            ("TERM_PROGRAM", std::ffi::OsStr::new("tmux")),
+            ("TMUX", std::ffi::OsStr::new(&tmux_var)),
+        ],
+        160,
+    );
+    let sock = base_of(&tmp).join("work/nvim.sock");
+    let ending = Ending {
+        sock: sock.clone(),
+        helpers: vec![helper],
+        tmp: tmp.clone(),
+    };
+    let log = || std::fs::read_to_string(base_of(&tmp).join("work/log")).unwrap_or_default();
+    let status = || json(&under(&tmp, &["status", "--json", "--name", "work"]));
+
+    assert!(
+        until_expr(&sock, "1", |_| true).is_some(),
+        "work's Neovim never answered: {}",
+        log()
+    );
+    let s = until(
+        |s: &serde_json::Value| s["provider"] != "(choosing)",
+        status,
+    );
+    assert_eq!(s["provider"], "none (find refused)", "{}", log());
+    let logged = until(|l: &String| l.contains("not warned of"), log);
+    assert!(
+        logged
+            .contains("tmux: find didn't confirm this terminal (exit 1: tmux find: this terminal"),
+        "{logged}"
+    );
+    // give a warning time to show, then look
+    std::thread::sleep(Duration::from_millis(500));
+    let messages = remote_expr(&sock, "execute('messages')").unwrap_or_default();
+    assert!(!messages.contains("no pane provider"), "{messages}");
+
+    drop(ending);
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

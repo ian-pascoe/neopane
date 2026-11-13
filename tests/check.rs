@@ -292,8 +292,8 @@ fn full_cuts_nothing() {
 fn documented(object: &str) -> BTreeSet<&'static str> {
     let keys: &[&str] = match object {
         "top" => &[
-            "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "problems",
-            "result",
+            "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "default",
+            "problems", "result",
         ],
         "config" => &["path", "state"],
         "attach" => &["tty", "pid", "cwd", "daemon", "provider"],
@@ -314,7 +314,8 @@ fn documented(object: &str) -> BTreeSet<&'static str> {
         "find" => &["ran", "title", "exit", "seconds", "id", "verdict", "why"],
         "rex" => &["server", "version", "api_revision", "missing", "find"],
         "problem" => &["level", "path", "message"],
-        "result" => &["state", "message"],
+        "result" => &["state", "message", "refused"],
+        "default" => &["named", "inside"],
         _ => unreachable!(),
     };
     keys.iter().copied().collect()
@@ -803,7 +804,8 @@ fn rexs_find_disproves_another_terminals_rex_block() {
     let _ = leader.kill();
     let _ = leader.wait();
     drop(other);
-    assert_eq!(Some(1), code, "{written}");
+    // with no config, a guess refused is none, and no error (SPI-1135)
+    assert_eq!(Some(0), code, "{written}");
     let find = written
         .lines()
         .find(|l| l.starts_with("find  "))
@@ -813,11 +815,12 @@ fn rexs_find_disproves_another_terminals_rex_block() {
         find.starts_with("find  disproved: REX_BLOCK names another terminal (/dev/"),
         "{find}"
     );
-    // the Neovim message names no terminal
+    // the message a config's choice would warn with names no terminal
     assert!(
         written.contains(&format!(
-            "result  error: {NAME}: rex: find didn't confirm this terminal (REX_BLOCK names \
-             another terminal); no pane provider\r\n"
+            "result  none (find refused): {NAME}: rex: find didn't confirm this terminal \
+             (REX_BLOCK names another terminal); no pane provider; with no config, the daemon \
+             logs this and warns of nothing, {NAME}.default having guessed\r\n"
         )),
         "{written}"
     );

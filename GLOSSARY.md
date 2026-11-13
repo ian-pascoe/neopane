@@ -194,6 +194,14 @@ _Avoid_: combination, combo
 A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex` or `tmux`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
 _Avoid_: default provider, bundled provider
 
+**Built-in default**:
+What chooses the pane provider with no config, and what `<name>.default` returns to one: the one built-in provider the attach's environment names, running nothing; naming several, as in a tmux started from a Rex pane, the first multiplexer whose inside proof proves, else Rex if named, else none. Its guess, if its `find` refuses it, is only logged.
+_Avoid_: default provider, fallback
+
+**Inside proof**:
+A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, asking the multiplexer within 0.5 s, and why. It accepts exactly what that built-in's `find` accepts, and the built-in default asks it where variables name several built-ins.
+_Avoid_: detection, nesting check
+
 **Built-in command**:
 What a built-in provider's table runs for a capability: neopane itself, asked for one capability of one built-in, as `{exe} provider builtin tmux find`.
 _Avoid_: helper (an attach's), shim

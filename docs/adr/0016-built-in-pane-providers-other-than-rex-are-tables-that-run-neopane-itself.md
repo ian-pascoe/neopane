@@ -1,5 +1,9 @@
 # Built-in pane providers other than Rex are tables whose every capability runs neopane itself
 
+Amended by SPI-1135 (ADR 0007): where the environment names several
+built-ins, the default proves which multiplexer the attach is in with
+`<name>.inside`, and its refused guess is only logged.
+
 Built-in pane providers other than Rex are pane provider tables whose every
 capability runs neopane's own binary (`{exe}`), which speaks the capability
 contract for that multiplexer: `{exe} provider builtin NAME CAPABILITY`

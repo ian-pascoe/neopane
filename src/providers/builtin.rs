@@ -19,7 +19,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 use super::tmux;
-use crate::config::{BuiltinTable, Capability};
+use crate::config::{Attach, BuiltinTable, Capability, Proof};
 use crate::name::{NAME, upper};
 
 /// Exit statuses, as `docs/capabilities.md` gives them.
@@ -67,6 +67,16 @@ fn run(words: &[OsString], given: &Given) -> u8 {
     }
     match table {
         BuiltinTable::Tmux => tmux::run(cap, given),
+    }
+}
+
+/// Built-in `table`'s `inside` proof for `attach`: whether its terminal is
+/// directly one of that multiplexer's panes, and why, within
+/// [`INSIDE_TIME`](crate::config::INSIDE_TIME). It runs commands with the
+/// environment `find` would get, and never fails.
+pub(crate) fn inside(table: BuiltinTable, attach: &Attach) -> Proof {
+    match table {
+        BuiltinTable::Tmux => tmux::inside(attach),
     }
 }
 

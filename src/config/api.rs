@@ -16,7 +16,7 @@ use mlua::{Lua, Table, Value};
 
 use super::builtin::tree_of_table;
 use super::tree::Tree;
-use super::wire::Request;
+use super::wire::{Attach, Request};
 use super::{Builtin, BuiltinTable};
 use crate::name::NAME;
 use crate::util::seconds;
@@ -74,7 +74,12 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
         builtin.raw_set(table.name(), f)?;
     }
     api.raw_set("builtin", builtin)?;
-    api.raw_set("inside", lua.create_table()?)?;
+    let inside_fns = lua.create_table()?;
+    for table in BuiltinTable::ALL {
+        let f = lua.create_function(move |_, attach: Value| Ok(inside(&attach, table)))?;
+        inside_fns.raw_set(table.name(), f)?;
+    }
+    api.raw_set("inside", inside_fns)?;
     let time = request.time;
     let run = lua.create_function(move |lua, (argv, opts): (Value, Value)| {
         Ok(match run(lua, argv, opts, deadline, time)? {
@@ -100,27 +105,50 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
 /// Sends the config's output to stderr, and wraps `run` and `which`.
 const PRELUDE: &str = include_str!("prelude.lua");
 
-/// `<name>.default(attach)`: `"rex"`, a built-in table, or nil. Never
-/// raises.
+/// `<name>.default(attach)`: `"rex"`, a built-in table, or nil, as the
+/// daemon's own default chooses, proofs and all. Never raises.
 fn default(lua: &Lua, attach: Value) -> mlua::Result<Value> {
-    let env = match attach {
-        Value::Table(t) => t.raw_get::<Value>("env").ok(),
-        _ => None,
-    };
-    let var = |name: &str| -> Option<Vec<u8>> {
-        match &env {
-            Some(Value::Table(env)) => match env.raw_get::<Value>(name) {
-                Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
-                _ => None,
-            },
-            _ => None,
-        }
-    };
-    Ok(match super::default_of(|name| var(name)) {
+    Ok(match super::default(&attach_of(&attach)).chose {
         Some(super::DefaultName::Rex) => Value::String(lua.create_string(Builtin::Rex.name())?),
         Some(super::DefaultName::Table(table)) => built_in(lua, table)?,
         None => Value::Nil,
     })
+}
+
+/// `<name>.inside.NAME(attach)`: whether the attach's terminal is directly
+/// a pane of built-in `table`'s multiplexer, and why. Never raises.
+fn inside(attach: &Value, table: BuiltinTable) -> (bool, String) {
+    let proof = crate::providers::builtin::inside(table, &attach_of(attach));
+    (proof.ok, proof.why)
+}
+
+/// What a proof reads of a Lua `attach`: its `env`'s string names and
+/// values, and its `tty`; anything else, or missing, counts as unset.
+fn attach_of(attach: &Value) -> Attach {
+    let Value::Table(t) = attach else {
+        return Attach::default();
+    };
+    let env = match t.raw_get::<Value>("env") {
+        Ok(Value::Table(env)) => env
+            .pairs::<Value, Value>()
+            .filter_map(|pair| match pair {
+                Ok((Value::String(k), Value::String(v))) => {
+                    Some((k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let tty = match t.raw_get::<Value>("tty") {
+        Ok(Value::String(s)) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    Attach {
+        env,
+        tty,
+        ..Attach::default()
+    }
 }
 
 /// A fresh copy of built-in `table`'s table.

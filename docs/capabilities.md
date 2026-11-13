@@ -247,7 +247,9 @@ that socket with `-S`, and names the pane it acts on with `-t`.
 - `find`: the pane of the server whose tty is `TTY`, compared by device,
   as tmux itself tells a client inside it; `%N`, else exit 1. No context
   or find variables: `TMUX` leaks into terminals tmux doesn't run. It
-  refuses tmux older than 3.2, naming the version.
+  refuses tmux older than 3.2, naming the version, and a terminal of no
+  pane with `this terminal (TTY) isn't a pane of the tmux server at
+  SOCKET`. `<name>.inside.tmux` runs the same check.
 - `open_beside`: `split-window -d`, `-h` or `-v` and `-b` from
   `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
   the new pane's id.

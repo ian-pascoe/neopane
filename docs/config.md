@@ -3,8 +3,9 @@
 Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
 chooses: tmux in a tmux pane, Rex inside Rex, else none (see
-[Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md` is the contract
-of a pane provider's commands.
+[The default](#the-default) and
+[Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md`
+is the contract of a pane provider's commands.
 
 ## The file
 
@@ -90,6 +91,10 @@ accepts it; anything else means no pane provider, with a warning, so a
 nobody sees. The file's 3 s are its own: `find` then has 3 s to confirm the
 choice, or its own timeout (`timeouts.find`) if that is longer.
 
+With no config, `find` refusing the built-in default's choice goes only to
+the daemon's log, with no warning: the default guessed from variables that
+may have leaked into a terminal from whatever started it.
+
 `list` and `status` show the result as the pane provider's name (a pair's
 as `T+L`), `(choosing)` while the file runs or `find` hasn't answered, or
 `none`, `none (config error)`, `none (find refused)` or `none (hint none)`.
@@ -129,14 +134,52 @@ Also `require("neopane")`.
 
 | | |
 |---|---|
-| `neopane.default(attach)` | What the daemon chooses with no file: tmux's table, as `neopane.builtin.tmux()` returns it, when `TERM_PROGRAM` is `tmux` and `TMUX` is set and not empty; else `"rex"` when `REX_SERVER` and `REX_SESSION` are both set; else nil. Reads only the environment, ignores the hint, never raises |
+| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's table, as `neopane.builtin.tmux()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
 | `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
 | `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
 | `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`. They take no options, and raise on any |
-| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is a multiplexer's own pane. Empty for now |
+| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane, asking the multiplexer, within 0.5 s: `tmux`. They read `attach.env` and `attach.tty`, and never raise |
 | `neopane.os` | `"macos"` or `"linux"` |
 | `neopane.version` | The daemon's version |
 | `neopane.config_dir` | The absolute directory of the file that ran |
+
+## The default
+
+`neopane.default(attach)`, which chooses with no file, names built-ins from
+the environment only:
+
+- tmux: `TERM_PROGRAM` is `tmux` and `TMUX` is set and not empty.
+- Rex: `REX_SERVER` and `REX_SESSION` are both set, even if empty.
+
+Naming one, it chooses that one and runs nothing. A multiplexer's panes
+inherit the variables of whatever started its server, though: a tmux started
+in a Rex pane gives its panes Rex's variables, and a terminal started from a
+tmux shell has tmux's. Naming several, it asks each multiplexer's `inside`
+in turn (tmux's, for now), and takes the first that proves; else Rex if
+named, else none. Rex is never proven there: its `find` proves it. The
+daemon runs the proofs off its loop, and new windows wait for them as they
+do for a config.
+
+`neopane.inside.tmux(attach)` runs tmux's `find`'s whole check: tmux must be
+3.2 or newer, and the attach's tty a pane of the tmux server `TMUX` names.
+So it is true exactly when `find` would accept the attach; `TMUX_PANE` isn't
+needed. Its `why`:
+
+| | |
+|---|---|
+| `true, "tmux pane %4"` | the pane |
+| `"TMUX isn't set"` | |
+| `"the attach has no tty"` | |
+| `"can't run tmux: <error>"` | tmux isn't on the attach's `PATH`, say |
+| `"tmux: <first stderr line>"` | tmux failed, as when no server listens at the socket |
+| `"tmux didn't answer in 0.5 s"` | |
+| `"tmux 3.1c is too old: the built-in tmux needs 3.2 or newer"` | |
+| `"the attach's tty \"/some/file\" isn't one"` | `tty` is set but isn't a terminal's |
+| `"this terminal (/dev/ttys003) isn't a pane of the tmux server at <socket>"` | |
+
+Its `find` still confirms the choice, and refusing it goes only to the log:
+the default guessed. `provider check` shows what it named and each proof's
+answer.
 
 ## Errors
 
@@ -171,11 +214,16 @@ A file `$NEOPANE_CONFIG` names that isn't there warns with its path:
 neopane: config: /home/me/my.lua isn't there (NEOPANE_CONFIG names it); no pane provider
 ```
 
-A `find` that refuses the choosing attach warns too:
+A `find` that refuses the choosing attach warns too, quoting its first
+stderr line:
 
 ```text
 neopane: aerospace: find didn't confirm this terminal (exit 1); no pane provider
+neopane: tmux: find didn't confirm this terminal (exit 1: tmux find: this terminal (/dev/ttys029) isn't a pane of the tmux server at /private/tmp/tmux-501/default); no pane provider
 ```
+
+With no file, `find` refusing the built-in default's choice warns of
+nothing: it goes to the log, and `list` shows `none (find refused)`.
 
 ## `provider check`
 
@@ -217,12 +265,13 @@ The report's sections:
 | `attach` | its tty (or `no terminal`), pid, working directory, daemon name and hint |
 | `ran` | how long the file took and the lines it printed; or its Lua error, with Lua's traceback where it gives one, the timeout, or why it ended without answering |
 | `chose` | none, `"rex"`, a table, a pair or one side alone, its name and Lua path, and whether `provider()` or `neopane.default` chose |
+| `default` | when `neopane.default` chose with no file: the built-ins the environment names (`default  names tmux and rex`), and each `inside` it asked, as `  inside.tmux  no: <why>` |
 | `whole`, `terminal`, `layout` | each table in use, by its role: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`). A pair's terminal side lists the one-step capabilities too, absent from a pair, and either side lists any it gave that are ignored. `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`), `reach` (its context variables, with this attach's values) and `find vars` show for a table that gives the layout, so not for a terminal side; `attach timeout`, such as `5 s (default)`, for one that opens terminals, so not for a layout side |
 | `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
 | `rex` | for `"rex"`: the server's URL, version and API revision (`server.version`'s, else the one its welcome agreed), and, for a server older than this build speaks, `missing  every capability (needs Rex API revision N, this server has M)`: Rex doesn't say which revision each method came in, so it isn't told capability by capability |
 | `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)` (the path where the system names it: on macOS, and for a pseudo-terminal on Linux), or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
 | `errors`, `warnings` | every problem, with its path |
-| `result` | `ok`, `none` or `error`, quoting the exact message Neovim would show |
+| `result` | `ok`, `none` or `error`, quoting the exact message Neovim would show; or `none (find refused): <message>` when `find` refused the default's choice with no file, which the daemon only logs |
 
 For example, in Ghostty, for the config in
 [Ghostty with AeroSpace](#ghostty-with-aerospace):
@@ -256,9 +305,9 @@ result  ok
 ```
 
 It exits 0 for a pane provider, or for none by design (`provider()` returned
-`nil` or `false`, or the hint is `none`), also when `find` wasn't run; 1 for
-an error, or a `find` refusing this terminal; 2 for a usage error. Warnings
-don't change it.
+`nil` or `false`, the hint is `none`, or with no file, a `find` refusing the
+default's choice), also when `find` wasn't run; 1 for an error, or a `find`
+refusing a config's choice; 2 for a usage error. Warnings don't change it.
 
 ### `--json`
 
@@ -278,6 +327,7 @@ don't change it.
  "one_step":[],
  "find":{"ran":true,"title":"neopane-k3j9x2qpa8","exit":0,"seconds":0.412,"id":"31337","verdict":"accepted","why":null},
  "rex":null,
+ "default":null,
  "problems":[],
  "result":{"state":"ok","message":null}}
 ```
@@ -302,10 +352,16 @@ don't change it.
   one `{"capability": null, "needs": N}` for a server older than this build
   speaks (null: every capability); `find` is `proven`, `disproved`,
   `unprovable`, or null when it didn't run.
+- `default`: null unless `neopane.default` chose with no file; else
+  `{"named": ["tmux", "rex"], "inside": [{"name": "tmux", "ok": false,
+  "why": "…"}]}`: the built-ins the environment names, in order, and each
+  `inside` asked.
 - `problems[]`: `level` is `error` or `warning`; `path` is the Lua path, the
   file's name for its own table, or null.
 - `result.state`: `ok`, `none` or `error`; `message` is what Neovim would
-  show, or null.
+  show, or null. `refused`, there only when `find` refused the default's
+  choice with no file (`state` `none`), is the warning a config's choice
+  would have shown.
 
 As with `list --json`, fields are only ever added, never removed, renamed,
 or changed in type or meaning; a missing one means unknown.
@@ -326,10 +382,12 @@ On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
 config, and each Neovim window gets a tmux pane of its own, split beside the
 pane it came from; on tmux 3.7 or newer, a group of floats you enter gets a
 tmux floating pane. The default knows tmux by its own variables,
-`TERM_PROGRAM=tmux` and `TMUX`; its `find` then checks the terminal is a
-pane of that tmux server, by its tty, so a `TMUX` leaked into another
-terminal chooses nothing. A config gets the same table from
-`neopane.builtin.tmux()`, and may change any capability of it:
+`TERM_PROGRAM=tmux` and `TMUX`, and where Rex's are set too, asks
+`neopane.inside.tmux` (see [The default](#the-default)); its `find` then
+checks the terminal is a pane of that tmux server, by its tty, so a `TMUX`
+leaked into another terminal chooses nothing, and says so only in the log. A
+config gets the same table from `neopane.builtin.tmux()`, and may change any
+capability of it:
 
 ```lua
 return {

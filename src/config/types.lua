@@ -91,13 +91,15 @@
 ---@field version string The daemon's version
 ---@field config_dir string The absolute directory of the file that ran
 ---@field builtin __NAME__.Builtin Functions that each return a fresh built-in pane provider table. "rex" is only a name.
----@field inside table<string, fun(attach: __NAME__.Attach): boolean, string> Functions telling whether the attach runs inside a terminal multiplexer, and why. They never raise.
+---@field inside table<string, fun(attach: __NAME__.Attach): boolean, string> Functions telling whether the attach's terminal is directly a multiplexer's own pane, asking it within 0.5 s, and why: tmux. They read attach.env and attach.tty, and never raise.
 __NAME__ = {}
 
----What `provider` returns by default: tmux's table, as __NAME__.builtin.tmux()
----returns it, when TERM_PROGRAM is "tmux" and TMUX is set and not empty; else
----"rex" when REX_SERVER and REX_SESSION are both set; else nil. Reads only the
----environment; never raises.
+---What `provider` returns by default, as the daemon chooses with no config: of
+---the built-ins the environment names (tmux when TERM_PROGRAM is "tmux" and
+---TMUX is set and not empty, "rex" when REX_SERVER and REX_SESSION are both
+---set), the one named, running nothing; naming several, the first multiplexer
+---whose __NAME__.inside proves, else "rex" if named; else nil. tmux's is its
+---table, as __NAME__.builtin.tmux() returns it. Never raises.
 ---@param attach __NAME__.Attach
 ---@return "rex"|__NAME__.Provider|nil
 function __NAME__.default(attach) end

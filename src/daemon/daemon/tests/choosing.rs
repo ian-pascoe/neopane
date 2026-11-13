@@ -204,7 +204,7 @@ fn choosing_blocks_no_key_and_its_find_confirms_the_choosing_pane() {
 
 #[test]
 fn a_choice_its_find_refuses_drops_the_pane_provider_with_a_warning() {
-    // REX_* leaked into a terminal Rex doesn't run
+    // a config chose Rex in a terminal Rex doesn't run
     let (mut fx, _) = fixture_choosing(vec![finding()]);
     let (id, _helper, _pty) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     let _ = sent_to_nvim(&mut fx);
@@ -284,6 +284,122 @@ fn a_refused_choice_draws_the_waiting_windows_in_the_choosing_pane() {
     not_found(&mut fx.d, "REX_BLOCK names another terminal");
     let p = fx.d.panes.by_id(id).unwrap();
     assert!(p.holds(1001), "not drawn in the choosing pane");
+}
+
+/// A self-attach's hello from a terminal whose environment names tmux and
+/// Rex both, as a tmux pane in a Rex pane, or a terminal they leaked into.
+fn nested_hello() -> Vec<u8> {
+    use crate::daemon::attach_conn::{self_hello, test_terminal};
+    let mut t = test_terminal(80, 24);
+    t.env = env_of("session:s", BLOCK);
+    t.env.push((b"TERM_PROGRAM".to_vec(), b"tmux".to_vec()));
+    t.env.push((b"TMUX".to_vec(), b"/tmp/t,1,0".to_vec()));
+    self_hello(t)
+}
+
+/// A daemon with no pane provider and no config, Neovim set up, whose
+/// default's `inside` proofs each wait for the test's go, then fail; what
+/// the default chooses is then the fake `finding`. The go.
+fn fixture_proving() -> (Fixture, std::sync::mpsc::Sender<()>) {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    fx.d.prove = std::sync::Arc::new(move |_, _| {
+        let _ = wait.lock().unwrap().recv();
+        crate::config::Proof {
+            ok: false,
+            why: "this terminal isn't a pane of the tmux server at /tmp/t".into(),
+        }
+    });
+    fx.d.test_of_default = Some(Box::new(|choice| {
+        // REX_* named too: Rex, unproven
+        assert_eq!(
+            &crate::config::Choice::Builtin(crate::config::Builtin::Rex),
+            choice
+        );
+        Chosen::Provider {
+            held: Box::new(finding()),
+            spent: Duration::ZERO,
+        }
+    }));
+    (fx, go)
+}
+
+/// Waits up to 5 s for the default's proofs to be done, and has the daemon
+/// take what it chose, as its loop would.
+fn proofs_done(d: &mut Daemon) {
+    let fd = d.default_run.as_ref().expect("the default proves").1.fd();
+    let due = Instant::now() + Duration::from_secs(5);
+    while d.default_run.is_some() {
+        assert!(
+            crate::util::wait_readable(fd, due),
+            "the proofs never ended"
+        );
+        d.on_default().unwrap();
+    }
+}
+
+#[test]
+fn the_defaults_proofs_run_off_the_loop_and_its_windows_wait_for_them() {
+    let (mut fx, go) = fixture_proving();
+    let (id, _helper, pty) = attach_showing_1000(&mut fx, &nested_hello());
+    split_1001_off_1000(&mut fx);
+    let _ = sent_to_nvim(&mut fx);
+    // the proof hangs, and the loop goes on: status answers, and a key
+    // goes to Neovim at once
+    assert!(fx.d.default_run.is_some());
+    assert_eq!("(choosing)", fx.d.provider_shown());
+    assert_eq!(Reach::Finding, fx.d.panes.by_id(id).unwrap().reach);
+    // SAFETY: writing to the pty's master, as typing does.
+    assert_eq!(2, unsafe {
+        libc::write(pty.master, b"x\r".as_ptr().cast(), 2)
+    });
+    fx.d.on_input(id).unwrap();
+    assert!(sent_to_nvim(&mut fx).contains("nvim_input"));
+    assert!(fx.d.panes.by_win(1001).is_none(), "drawn before the choice");
+
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    assert_eq!(Some(id), choosing_id(&fx.d));
+    found(&mut fx.d, BLOCK);
+    assert!(fx.d.provider.is_some());
+    let p = fx.d.panes.by_win(1001).expect("a pane of its own");
+    assert!(!p.is_self_attached());
+}
+
+#[test]
+fn a_refusal_of_the_defaults_guess_is_only_logged() {
+    let (mut fx, go) = fixture_proving();
+    let (id, _helper, _pty) = attach_showing_1000(&mut fx, &nested_hello());
+    split_1001_off_1000(&mut fx);
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    let _ = sent_to_nvim(&mut fx);
+    // stale REX_*: Rex runs, but not this terminal
+    not_found(&mut fx.d, "REX_BLOCK names another terminal");
+    assert!(fx.d.provider.is_none());
+    assert_eq!("none (find refused)", fx.d.provider_shown());
+    let sent = sent_to_nvim(&mut fx);
+    assert!(!sent.contains("find didn't confirm"), "{sent:?}");
+    assert!(!sent.contains("no pane provider"), "{sent:?}");
+    // the window that waited is drawn in the choosing pane
+    assert!(fx.d.panes.by_id(id).unwrap().holds(1001));
+}
+
+#[test]
+fn the_defaults_guess_unanswered_is_refused_quietly_too() {
+    let (mut fx, go) = fixture_proving();
+    let _first = attach_showing_1000(&mut fx, &nested_hello());
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    let _ = sent_to_nvim(&mut fx);
+    fx.d.time_out_choice(Instant::now() + Duration::from_secs(4))
+        .unwrap();
+    assert!(fx.d.provider.is_none());
+    assert_eq!("none (find refused)", fx.d.provider_shown());
+    let sent = sent_to_nvim(&mut fx);
+    assert!(!sent.contains("no pane provider"), "{sent:?}");
 }
 
 /// A daemon whose fake pane provider was chosen in Rex session `session:a`

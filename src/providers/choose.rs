@@ -3,10 +3,10 @@
 //! one, chooses: it runs in the config child, on a thread of its own so the
 //! daemon's loop never waits for it (`ConfigRun`), and what it returned is
 //! checked by the daemon (`by_config`). With no file, the built-in
-//! `<name>.default` chooses, run in the daemon itself: tmux's table in a
-//! tmux pane, Rex when the attach's environment has `REX_SERVER` and
-//! `REX_SESSION`, else none (`config::default_of`). The hint `none` skips
-//! both.
+//! `<name>.default` chooses, run in the daemon itself (`config::default_of`):
+//! the one built-in the attach's environment names, tmux's table or Rex,
+//! else none; naming several, the multiplexers' `inside` proofs decide, run
+//! on a thread of their own (`DefaultRun`). The hint `none` skips both.
 //!
 //! Choosing Rex only starts connecting to it, which never blocks: the
 //! daemon's loop takes the steps, and its `find` confirms the choice.
@@ -25,7 +25,7 @@ use super::command::{CommandProvider, Spec, commands_env};
 use super::rex::RexProvider;
 use crate::attach::env_value;
 use crate::config::check::Severity;
-use crate::config::{self, Builtin, Choice, Problems};
+use crate::config::{self, Builtin, BuiltinTable, Choice, Problems, Proof};
 use crate::daemon::pane::AttachHello;
 use crate::daemon::provider::PaneProvider;
 use crate::log::{log_info, log_warn};
@@ -64,41 +64,139 @@ pub(crate) enum Chosen {
     ConfigError,
 }
 
-/// What the in-process `<name>.default` chooses for an attach whose
-/// environment is `env`: the config's own `<name>.default`, so the two
-/// never differ.
-pub(crate) fn default_choice(env: &Env) -> Choice {
-    config::default(&config::Attach {
-        env: env.to_vec(),
-        ..Default::default()
-    })
+/// A multiplexer's `inside` proof for an attach: the real one is
+/// [`builtin::inside`](super::builtin::inside). Tests fake it.
+pub(crate) type Prove = Arc<dyn Fn(BuiltinTable, &config::Attach) -> Proof + Send + Sync>;
+
+/// The `Prove` the daemon runs with.
+pub(crate) fn prove() -> Prove {
+    Arc::new(super::builtin::inside)
 }
 
-/// Chooses with the built-in default for a self-attach with environment
-/// `env`, working directory `cwd` and `hint`, connecting to Rex through
-/// `connect` if that's the choice; a table's `{exe}` is `exe`, the
-/// daemon's own binary.
+/// What the built-in default came to for a self-attach.
+pub(crate) enum ByDefault {
+    /// Chosen at once, from the environment alone.
+    Now(Chosen),
+    /// Proving, off the daemon's loop: the environment names several
+    /// built-ins.
+    Proving(DefaultRun),
+}
+
+/// Chooses with the built-in default for self-attach `attach` with
+/// `hint` (`config::default_of`, the config's own `<name>.default`, so the
+/// two never differ). One built-in named, or none, is chosen at once,
+/// connecting to Rex through `connect` if that's the choice; several are
+/// proved through `prove` on a thread of its own, whose outcome
+/// `by_proofs` takes. A table's `{exe}` is `exe`, the daemon's own binary.
 pub(crate) fn choose(
-    env: &Env,
-    cwd: &[u8],
+    attach: &config::Attach,
     hint: Option<&str>,
     exe: &Path,
     connect: &mut Connect,
-) -> Chosen {
+    prove: &Prove,
+) -> ByDefault {
     if hint == Some(HINT_NONE) {
-        return Chosen::None {
+        return ByDefault::Now(Chosen::None {
             why: format!("the hint is {HINT_NONE}"),
             warn: false,
+        });
+    }
+    if config::proves(config::env_of(attach)) {
+        return match DefaultRun::start(attach.clone(), prove.clone()) {
+            Ok(run) => ByDefault::Proving(run),
+            Err(e) => ByDefault::Now(Chosen::None {
+                why: format!("the default can't prove which built-in: {e}"),
+                warn: false,
+            }),
         };
     }
-    match default_choice(env) {
-        Choice::None => Chosen::None {
+    let defaulted = config::default_of(config::env_of(attach), |table| {
+        unreachable!("proved {table:?} naming one built-in")
+    });
+    ByDefault::Now(by_proofs(
+        &defaulted,
+        &attach.env,
+        &attach.cwd,
+        exe,
+        connect,
+    ))
+}
+
+/// What the default came to, `defaulted`, for the choosing attach, whose
+/// environment is `env` and working directory `cwd`; its proofs go to the
+/// log.
+pub(crate) fn by_proofs(
+    defaulted: &config::Defaulted,
+    env: &Env,
+    cwd: &[u8],
+    exe: &Path,
+    connect: &mut Connect,
+) -> Chosen {
+    for (table, proof) in &defaulted.proofs {
+        let said = if proof.ok { "yes" } else { "no" };
+        log_info!(
+            "{NAME} daemon: the default: inside.{}: {said}, {}",
+            table.name(),
+            proof.why
+        );
+    }
+    match defaulted.choice() {
+        Choice::None if defaulted.named.is_empty() => Chosen::None {
             why: "neither tmux's variables (TERM_PROGRAM=tmux, TMUX) nor Rex's (REX_SERVER, \
                   REX_SESSION) are set"
                 .into(),
             warn: false,
         },
+        Choice::None => Chosen::None {
+            why: "no multiplexer the environment names proved this terminal its pane".into(),
+            warn: false,
+        },
         choice => of_choice(&choice, env, cwd, exe, connect),
+    }
+}
+
+/// The built-in default proving which built-in a self-attach is in, on a
+/// thread of its own, so the daemon's loop never waits for it. Its `fd`
+/// turns readable once the outcome is in.
+pub(crate) struct DefaultRun {
+    /// Its end comes when the thread is done.
+    done: PipeReader,
+    outcome: mpsc::Receiver<config::Defaulted>,
+}
+
+impl DefaultRun {
+    /// Starts the default for `attach`, its proofs through `prove`.
+    pub(crate) fn start(attach: config::Attach, prove: Prove) -> std::io::Result<Self> {
+        let (done, tell_done) = std::io::pipe()?;
+        let (tell, outcome) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("default".into())
+            .spawn(move || {
+                let defaulted =
+                    config::default_of(config::env_of(&attach), |table| prove(table, &attach));
+                let _ = tell.send(defaulted);
+                // closing it wakes the loop
+                drop(tell_done);
+            })?;
+        Ok(DefaultRun { done, outcome })
+    }
+
+    /// What the loop watches: readable once the outcome is in.
+    pub(crate) fn fd(&self) -> RawFd {
+        self.done.as_raw_fd()
+    }
+
+    /// The outcome, once it is in; a thread that failed proved nothing.
+    pub(crate) fn outcome(&self) -> Option<config::Defaulted> {
+        match self.outcome.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(config::Defaulted {
+                named: Vec::new(),
+                proofs: Vec::new(),
+                chose: None,
+            }),
+        }
     }
 }
 
@@ -355,50 +453,48 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_default_chooses_rex_only_with_rex_server_and_rex_session_set() {
-        let rex = Choice::Builtin(Builtin::Rex);
-        let both = [("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")];
-        assert_eq!(rex, default_choice(&env(&both)));
-        // set, even if empty
-        assert_eq!(
-            rex,
-            default_choice(&env(&[("REX_SERVER", ""), ("REX_SESSION", "")]))
-        );
-        assert_eq!(Choice::None, default_choice(&env(&both[..1])));
-        assert_eq!(Choice::None, default_choice(&env(&both[1..])));
-        assert_eq!(
-            Choice::None,
-            default_choice(&env(&[("TMUX", "/tmp/t,1,0")]))
-        );
-    }
-
-    #[test]
-    fn the_default_chooses_tmuxs_table_with_term_program_tmux_and_tmux_set() {
-        let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
-        let inside = [("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")];
-        assert_eq!(tmux, default_choice(&env(&inside)));
-        // the innermost: Rex's variables leak into tmux run in a Rex pane
-        let rex = [("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")];
-        assert_eq!(tmux, default_choice(&env(&[inside, rex].concat())));
-        // TMUX leaks into terminals tmux doesn't run
-        assert_eq!(
-            Choice::None,
-            default_choice(&env(&[("TERM_PROGRAM", "ghostty"), ("TMUX", "/tmp/t,1,0")]))
-        );
-        assert_eq!(Choice::None, default_choice(&env(&inside[..1])));
-        assert_eq!(
-            Choice::None,
-            default_choice(&env(&[("TERM_PROGRAM", "tmux"), ("TMUX", "")]))
-        );
-    }
-
     fn exe() -> &'static Path {
         Path::new("/opt/np/bin/np")
     }
 
     fn connects_nowhere() -> Connect {
         Box::new(|url| panic!("connected to {url}"))
+    }
+
+    fn attach(env: Vec<(Vec<u8>, Vec<u8>)>) -> config::Attach {
+        config::Attach {
+            env,
+            cwd: b"/".to_vec(),
+            tty: b"/dev/ttys003".to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn never() -> Prove {
+        Arc::new(|table, _| panic!("proved {table:?}"))
+    }
+
+    /// The default for an attach with environment `env` and `hint`,
+    /// chosen at once.
+    fn now(env: Vec<(Vec<u8>, Vec<u8>)>, hint: Option<&str>, connect: &mut Connect) -> Chosen {
+        match choose(&attach(env), hint, exe(), connect, &never()) {
+            ByDefault::Now(chosen) => chosen,
+            ByDefault::Proving(_) => panic!("proving"),
+        }
+    }
+
+    /// What `run` came to, once it is in.
+    fn outcome_of(run: &DefaultRun) -> config::Defaulted {
+        assert!(
+            crate::util::wait_readable(run.fd(), Instant::now() + Duration::from_secs(5)),
+            "no outcome"
+        );
+        loop {
+            if let Some(outcome) = run.outcome() {
+                return outcome;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn none(c: Chosen) -> (String, bool) {
@@ -509,21 +605,9 @@ mod tests {
     #[test]
     fn the_hint_none_or_no_rex_chooses_none_quietly() {
         let in_rex = env(&[("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")]);
-        let (_, warn) = none(choose(
-            &in_rex,
-            b"/",
-            Some("none"),
-            exe(),
-            &mut connects_nowhere(),
-        ));
+        let (_, warn) = none(now(in_rex, Some("none"), &mut connects_nowhere()));
         assert!(!warn);
-        let (_, warn) = none(choose(
-            &env(&[]),
-            b"/",
-            None,
-            exe(),
-            &mut connects_nowhere(),
-        ));
+        let (_, warn) = none(now(env(&[]), None, &mut connects_nowhere()));
         assert!(!warn);
     }
 
@@ -532,7 +616,7 @@ mod tests {
         // stale REX_*: a Ghostty window started from a Rex shell, Rex since quit
         let stale = env(&[("REX_SERVER", "unix:///gone"), ("REX_SESSION", "session:s")]);
         let mut refused: Connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
-        let (why, warn) = none(choose(&stale, b"/", None, exe(), &mut refused));
+        let (why, warn) = none(now(stale, None, &mut refused));
         assert!(warn);
         assert!(why.starts_with("rex: can't reach Rex: "), "{why}");
     }
@@ -546,12 +630,55 @@ mod tests {
             assert_eq!("unix:///s", url);
             Ok(ours.take().unwrap())
         });
-        let Chosen::Provider { held, spent } =
-            choose(&in_rex, b"/", Some("tmux"), exe(), &mut connect)
-        else {
+        let Chosen::Provider { held, spent } = now(in_rex, Some("tmux"), &mut connect) else {
             panic!("chose none");
         };
         assert_eq!("rex", held.name());
         assert!(spent < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn several_built_ins_named_are_proved_off_the_caller() {
+        // a pane of tmux, run in a Rex pane: Rex's variables leak into it
+        let both = env(&[
+            ("TERM_PROGRAM", "tmux"),
+            ("TMUX", "/tmp/t,1,0"),
+            ("REX_SERVER", "unix:///s"),
+            ("REX_SESSION", "session:s"),
+        ]);
+        let (go, wait) = mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        let prove: Prove = Arc::new(move |table, attach| {
+            assert_eq!(table, BuiltinTable::Tmux);
+            assert_eq!(attach.tty, b"/dev/ttys003");
+            wait.lock().unwrap().recv().unwrap();
+            Proof {
+                ok: true,
+                why: "tmux pane %4".into(),
+            }
+        });
+        let ByDefault::Proving(run) = choose(
+            &attach(both.clone()),
+            None,
+            exe(),
+            &mut connects_nowhere(),
+            &prove,
+        ) else {
+            panic!("chose at once");
+        };
+        // the proof waits, and so does nothing but its outcome
+        assert!(run.outcome().is_none());
+        go.send(()).unwrap();
+        let outcome = outcome_of(&run);
+        assert_eq!(
+            outcome.chose,
+            Some(config::DefaultName::Table(BuiltinTable::Tmux))
+        );
+        let Chosen::Provider { held, .. } =
+            by_proofs(&outcome, &both, b"/", exe(), &mut connects_nowhere())
+        else {
+            panic!("chose none");
+        };
+        assert_eq!("tmux", held.name());
     }
 }
