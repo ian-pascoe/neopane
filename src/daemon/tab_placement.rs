@@ -264,6 +264,9 @@ pub(crate) struct Tab {
     pub layout: Layout,
     /// What was done to place its panes, the last time.
     pub placed: Option<TabPlacement>,
+    /// Its panes are left where they opened, having no tab page area, and
+    /// only resized: `placed` is what they were sized from.
+    pub in_place: bool,
     /// By node: the window was drawn, so if it isn't now, it closed.
     pub seen: NodeSet,
 }
@@ -274,6 +277,7 @@ impl Tab {
         Tab {
             layout,
             placed: None,
+            in_place: false,
             seen: NodeSet::EMPTY,
         }
     }
