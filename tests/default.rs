@@ -4,6 +4,9 @@
 //! when it guessed wrong. Through `provider check`, which chooses as the
 //! daemon does: with no config, and with a config returning
 //! `<name>.default(attach)`, which must answer the same.
+//!
+//! The tests that need tmux skip without it, as `tests/tmux.rs`'s do:
+//! `have_tmux` panics instead when `CI` is set.
 
 mod support;
 
