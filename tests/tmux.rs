@@ -87,7 +87,9 @@ fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
 }
 
 /// With the status line on top, `%0`'s rect starts on the window's top
-/// row, above its content, and the group is placed from it.
+/// row, above its content, its inset the status line: the group is
+/// placed from its content, and lands over the row of the screen `%0`
+/// draws beneath it.
 #[test]
 fn under_a_top_status_line_a_float_still_lands_on_its_group() {
     a_float_lands_on_its_group("top");
@@ -95,7 +97,8 @@ fn under_a_top_status_line_a_float_still_lands_on_its_group() {
 
 /// A float opened in a daemon in a tmux window whose
 /// `pane-border-status` is `border_status` gets a tmux floating pane on
-/// its group, and Neovim leaves the float where it opened it.
+/// its group, over the row of the screen it was opened at, as the pane
+/// beneath draws it, and Neovim leaves the float where it opened it.
 fn a_float_lands_on_its_group(border_status: &str) {
     if !have_nvim() || !have_tmux() {
         return;
@@ -141,6 +144,41 @@ fn a_float_lands_on_its_group(border_status: &str) {
     let s = until(|s: &serde_json::Value| s["provider"] == "tmux", status);
     assert_eq!(s["provider"], "tmux", "{}", log());
 
+    // the screen's row 3, as %0 draws it: where a float no one enters,
+    // drawn in %0, shows MARK, in rows of the window
+    remote_expr(
+        &sock,
+        "luaeval('(function() \
+         local b = vim.api.nvim_create_buf(false, true) \
+         vim.api.nvim_buf_set_lines(b, 0, -1, false, {\"MARK\"}) \
+         return vim.api.nvim_open_win(b, false, {relative = \"editor\", \
+         row = 3, col = 40, width = 4, height = 1, focusable = false}) end)()')",
+    )
+    .unwrap();
+    let tiled = tmux
+        .run(&["list-panes", "-a", "-F", "#{pane_id} #{pane_top}"])
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    let [pane, top] = tiled.split(' ').collect::<Vec<_>>()[..] else {
+        panic!("{tiled}");
+    };
+    // untrimmed: its first rows may be blank
+    let marked = || {
+        let out = tmux
+            .command()
+            .args(["capture-pane", "-p", "-t", pane])
+            .output()
+            .unwrap();
+        text(&out.stdout).lines().position(|l| l.contains("MARK"))
+    };
+    let row = until(Option::is_some, marked).expect("the mark was never drawn")
+        + top.parse::<usize>().unwrap();
+    // the status line takes the window's top row: %0's content is below it
+    let content_top = if border_status == "top" { "1" } else { "0" };
+    assert_eq!(top, content_top, "{tiled}");
+
     // a float 20x5 entered, as a picker is, at row 3, column 10 of the
     // screen, which is %0's
     let win = remote_expr(
@@ -152,8 +190,11 @@ fn a_float_lands_on_its_group(border_status: &str) {
     let now = until(|f: &Vec<String>| f.len() == 1, floats);
     assert_eq!(now.len(), 1, "no float opened: {}", log());
     let float = now[0].split(' ').collect::<Vec<_>>();
-    // its content lands on the group: %0's rect is at the window's top left
+    // its content lands on the group: the screen spans %0's window, its
+    // status line too
     assert_eq!(float[2..], ["10", "3", "20", "5"], "{now:?}: {}", log());
+    // over the screen's row 3, as %0 draws it
+    assert_eq!(float[3], row.to_string(), "{now:?}: {}", log());
     let started = tmux.run(&[
         "display-message",
         "-p",
