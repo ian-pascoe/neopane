@@ -81,17 +81,6 @@ fn in_a_tmux_pane_a_split_opens_a_tmux_pane_and_close_removes_it() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The installed tmux's major and minor version, from `tmux -V`, such as
-/// `(3, 7)` for `tmux 3.7c`; None if it can't be read.
-fn tmux_version() -> Option<(u32, u32)> {
-    let out = std::process::Command::new("tmux").arg("-V").output().ok()?;
-    let shown = String::from_utf8_lossy(&out.stdout);
-    let digits = shown.trim_start_matches(|c: char| !c.is_ascii_digit());
-    let (major, rest) = digits.split_once('.')?;
-    let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    Some((major.parse().ok()?, minor.parse().ok()?))
-}
-
 #[test]
 fn in_a_tmux_pane_a_float_opens_a_tmux_floating_pane_on_its_group() {
     a_float_lands_on_its_group("off");
@@ -298,18 +287,6 @@ fn with_no_config_a_guess_find_refuses_is_logged_and_never_warned_of() {
     drop(ending);
     drop(tmux);
     let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// Whether the installed tmux has `wait-for -E`, 3.8, for `events`. Under
-/// CI on macOS, where Homebrew's is 3.8, it must; elsewhere an older one
-/// skips.
-fn have_tmux_events() -> bool {
-    let new_enough = tmux_version().is_some_and(|v| v >= (3, 8));
-    assert!(
-        new_enough || std::env::var_os("CI").is_none() || !cfg!(target_os = "macos"),
-        "tmux is older than 3.8"
-    );
-    new_enough
 }
 
 /// With a user's client attached, `select-pane` in tmux moves Neovim's

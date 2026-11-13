@@ -242,6 +242,29 @@ pub fn have_tmux() -> bool {
     ran
 }
 
+/// The installed tmux's major and minor version, from `tmux -V`, such as
+/// `(3, 7)` for `tmux 3.7c`; None if it can't be read.
+pub fn tmux_version() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("tmux").arg("-V").output().ok()?;
+    let shown = String::from_utf8_lossy(&out.stdout);
+    let digits = shown.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let (major, rest) = digits.split_once('.')?;
+    let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Whether the installed tmux has `wait-for -E`, 3.8, for `events`. Under
+/// CI on macOS, where Homebrew's is 3.8, it must; elsewhere an older one
+/// skips.
+pub fn have_tmux_events() -> bool {
+    let new_enough = tmux_version().is_some_and(|v| v >= (3, 8));
+    assert!(
+        new_enough || std::env::var_os("CI").is_none() || !cfg!(target_os = "macos"),
+        "tmux is older than 3.8"
+    );
+    new_enough
+}
+
 /// A private tmux server, on a socket of its own under `dir` and no
 /// config, started without the user's `TMUX` or `TMUX_PANE`, or any
 /// variable of `<name>`'s or Rex's but those in `env`: one detached
