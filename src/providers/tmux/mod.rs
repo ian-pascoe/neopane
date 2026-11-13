@@ -30,6 +30,7 @@ pub(crate) mod check;
 mod events;
 mod find;
 mod float;
+mod focus;
 mod inside;
 mod layout;
 mod panes;
@@ -69,6 +70,8 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Events => finish(cap, Err::<Option<String>, _>(events::events(given))),
         Capability::Resize => finish(cap, resize::resize(given).map(|()| None)),
         Capability::PlaceBeside => finish(cap, resize::place_beside(given).map(|()| None)),
+        Capability::Focus => finish(cap, focus::focus(given).map(|()| None)),
+        Capability::FocusDirection => finish(cap, focus::focus_direction(given).map(|()| None)),
         _ => UNSUPPORTED,
     }
 }

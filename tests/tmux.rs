@@ -348,6 +348,11 @@ fn in_tmux_3_8_select_pane_moves_neovims_current_window_and_no_client_is_added()
     // new pane and back in tmux, Neovim following each move
     remote_expr(&sock, "execute('wincmd p')").unwrap();
     assert_eq!(remote_expr(&sock, "win_getid()"), Some(first.clone()));
+    // with `focus`, the daemon focuses its pane: let that act land and
+    // end before tmux moves, or it lands after the move and undoes it
+    let active = || tmux.run(&["display-message", "-p", "-t", "%0", "#{pane_active}"]);
+    assert_eq!(until(|a: &String| a == "1", active), "1", "{}", log());
+    std::thread::sleep(Duration::from_millis(500));
     for (pane, win) in [(new.as_str(), &second), ("%0", &first), (&new, &second)] {
         tmux.run(&["select-pane", "-t", pane]);
         let now = until_expr(&sock, "win_getid()", |w| w == win);

@@ -209,6 +209,10 @@ mod tests {
                  \"place_beside\" }},\n  \
                    resize = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"resize\" }},\n  \
+                   focus = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"focus\" }},\n  \
+                   focus_direction = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"focus_direction\" }},\n  \
                    report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"report_layout\" }},\n  \
                    events = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \"events\" }},\n  \

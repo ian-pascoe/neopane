@@ -147,3 +147,84 @@ fn place_beside_moves_the_pane_at_its_size_and_leaves_focus_alone() {
     drop(tmux);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The window and pane each attached client shows.
+fn shown(tmux: &TmuxServer) -> String {
+    tmux.run(&["list-clients", "-F", "#{window_id} #{pane_id}"])
+}
+
+#[test]
+fn focus_selects_the_pane_and_its_window_and_unzooms_to_reach_it() {
+    if !have_tmux() {
+        return;
+    }
+    let (tmux, dir) = server("tmux-focus");
+    let one = split(&tmux, "%0", &["-h"]);
+    let other = tmux.run(&["new-window", "-d", "-P", "-F", "#{pane_id}"]);
+    let client = tmux.attached();
+    assert_eq!(shown(&tmux), "@0 %0");
+    let focus = |t: &str| done(&tmux, "focus", &[("TERMINAL", t)]);
+    focus(&other);
+    assert_eq!(shown(&tmux), format!("@1 {other}"));
+    focus(&one);
+    assert_eq!(shown(&tmux), format!("@0 {one}"));
+    // %0 zoomed hides `one`: focusing it unzooms, as select-pane does
+    tmux.run(&["resize-pane", "-Z", "-t", "%0"]);
+    assert_eq!(of(&tmux, "%0", "#{window_zoomed_flag}"), "1");
+    focus(&one);
+    assert_eq!(shown(&tmux), format!("@0 {one}"));
+    assert_eq!(of(&tmux, "%0", "#{window_zoomed_flag}"), "0");
+    // a pane that isn't one
+    let out = act(&tmux, "focus", &[("TERMINAL", "@1")]);
+    assert_eq!(out.status.code(), Some(1));
+    drop(client);
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn focus_direction_steps_in_the_shown_window_and_stops_at_its_edge() {
+    if !have_tmux() {
+        return;
+    }
+    let (tmux, dir) = server("tmux-focus-direction");
+    // %0 | B | C, and another window shown by no client
+    let b = split(&tmux, "%0", &["-h"]);
+    let c = split(&tmux, &b, &["-h"]);
+    tmux.run(&["new-window", "-d"]);
+    let client = tmux.attached();
+    let step = |dir: &str, count: &str| {
+        done(
+            &tmux,
+            "focus_direction",
+            &[("DIRECTION", dir), ("COUNT", count)],
+        )
+    };
+    step("right", "1");
+    assert_eq!(shown(&tmux), format!("@0 {b}"));
+    // five steps right go as far as C, and no further round
+    step("right", "5");
+    assert_eq!(shown(&tmux), format!("@0 {c}"));
+    step("right", "1");
+    assert_eq!(shown(&tmux), format!("@0 {c}"));
+    step("up", "1");
+    assert_eq!(shown(&tmux), format!("@0 {c}"));
+    step("left", "2");
+    assert_eq!(shown(&tmux), "@0 %0");
+    step("left", "1");
+    assert_eq!(shown(&tmux), "@0 %0");
+    // with no client, in tmux's own current window
+    drop(client);
+    step("right", "1");
+    assert_eq!(of(&tmux, &b, "#{pane_active}"), "1");
+    for (dir, count) in [("sideways", "1"), ("left", "0"), ("left", "21")] {
+        let out = act(
+            &tmux,
+            "focus_direction",
+            &[("DIRECTION", dir), ("COUNT", count)],
+        );
+        assert_eq!(out.status.code(), Some(1), "{dir} {count}");
+    }
+    drop(tmux);
+    let _ = std::fs::remove_dir_all(&dir);
+}

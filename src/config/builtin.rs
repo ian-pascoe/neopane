@@ -47,6 +47,8 @@ impl BuiltinTable {
                 Capability::Events,
                 Capability::PlaceBeside,
                 Capability::Resize,
+                Capability::Focus,
+                Capability::FocusDirection,
             ],
         }
     }
@@ -194,6 +196,11 @@ mod tests {
                     "{exe} provider builtin tmux place_beside".to_string()
                 ),
                 ("resize", "{exe} provider builtin tmux resize".to_string()),
+                ("focus", "{exe} provider builtin tmux focus".to_string()),
+                (
+                    "focus_direction",
+                    "{exe} provider builtin tmux focus_direction".to_string()
+                ),
             ]
         );
         assert!(t.settings.is_empty());
