@@ -4211,6 +4211,24 @@ mod tests {
         );
     }
 
+    /// `:split` in tab page 1, then each window external, its pane the size
+    /// Neovim laid it out at: the top window and its rows, the bottom one
+    /// and its rows, and their width.
+    fn split_adopted(h: &mut Harness) -> ((i64, u32), (i64, u32), u32) {
+        h.lua("vim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 2));
+        let [(top, w, th), (bottom, _, bh)] = window_sizes(h)[..] else {
+            panic!("{:?}", window_sizes(h))
+        };
+        for (win, rows) in [(top, th), (bottom, bh)] {
+            adopt(&mut h.nvim, win, 1, 1);
+            // the text and a statusline
+            size(&mut h.nvim, win, w, rows + 1);
+        }
+        h.sync("");
+        ((top, th), (bottom, bh), w)
+    }
+
     /// Neovim resizes a window again before the pane provider's resize of
     /// its pane for the last size has come back: that pane's fit, landing
     /// after it, would put the window back at the last size. The newer size
@@ -4221,17 +4239,7 @@ mod tests {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;
         };
-        h.lua("vim.cmd('split')");
-        assert!(h.until(|x| window_sizes(x).len() == 2));
-        let [(top, w, th), (bottom, _, bh)] = window_sizes(&h)[..] else {
-            panic!("{:?}", window_sizes(&h))
-        };
-        for (win, rows) in [(top, th), (bottom, bh)] {
-            adopt(&mut h.nvim, win, 1, 1);
-            // the text and a statusline
-            size(&mut h.nvim, win, w, rows + 1);
-        }
-        h.sync("");
+        let ((top, th), (bottom, bh), w) = split_adopted(&mut h);
         let rows = th + bh;
         // `:resize 5`, told; its pane isn't resized yet
         h.lua(&format!("vim.api.nvim_win_set_height({top}, 5)"));
@@ -4263,17 +4271,7 @@ mod tests {
         let Some(mut h) = Harness::start_sized(120, 30) else {
             return;
         };
-        h.lua("vim.cmd('split')");
-        assert!(h.until(|x| window_sizes(x).len() == 2));
-        let [(top, w, th), (bottom, _, bh)] = window_sizes(&h)[..] else {
-            panic!("{:?}", window_sizes(&h))
-        };
-        for (win, rows) in [(top, th), (bottom, bh)] {
-            adopt(&mut h.nvim, win, 1, 1);
-            // the text and a statusline
-            size(&mut h.nvim, win, w, rows + 1);
-        }
-        h.sync("");
+        let ((top, th), (bottom, bh), w) = split_adopted(&mut h);
         let rows = th + bh;
         for cells in [5, th] {
             h.lua(&format!("vim.api.nvim_win_set_height({top}, {cells})"));
