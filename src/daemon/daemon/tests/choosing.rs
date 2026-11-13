@@ -208,7 +208,10 @@ fn a_choice_its_find_refuses_drops_the_pane_provider_with_a_warning() {
     let (mut fx, _) = fixture_choosing(vec![finding()]);
     let (id, _helper, _pty) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     let _ = sent_to_nvim(&mut fx);
+    // status says so
+    assert_eq!("(choosing)", fx.d.provider_shown());
     not_found(&mut fx.d, "REX_BLOCK names another terminal");
+    assert_eq!("none (find refused)", fx.d.provider_shown());
 
     assert!(fx.d.provider.is_none());
     assert_eq!(None, choosing_id(&fx.d));

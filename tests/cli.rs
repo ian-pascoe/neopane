@@ -108,10 +108,7 @@ fn usage_errors_are_one_line_and_exit_2() {
 #[test]
 fn commands_built_later_exit_1() {
     for (args, what) in [
-        (&["list"][..], "list"),
-        (&["status"], "status"),
-        (&["kill", "--all"], "kill"),
-        (&["provider", "check"], "provider check"),
+        (&["provider", "check"][..], "provider check"),
         (&["--detach"], "--detach"),
     ] {
         let out = run(args);
@@ -690,8 +687,9 @@ fn have_nvim() -> bool {
 }
 
 /// `neopane` with `args` in a pseudo-terminal of its own, in `cwd`, its
-/// daemons under `tmpdir`, with no pane provider or config around it. What
-/// it draws is read and dropped.
+/// daemons under `tmpdir`, with no pane provider or config around it, and
+/// Neovim's swap files under `tmpdir` too. What it draws is read and
+/// dropped.
 fn in_pty(tmpdir: &Path, cwd: &Path, args: &[&str]) -> std::process::Child {
     let (mut master, mut slave) = (-1, -1);
     let mut size = libc::winsize {
@@ -719,6 +717,7 @@ fn in_pty(tmpdir: &Path, cwd: &Path, args: &[&str]) -> std::process::Child {
         .current_dir(cwd)
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
         .env("XDG_CONFIG_HOME", tmpdir)
+        .env("XDG_STATE_HOME", tmpdir)
         .env_remove(&upper)
         .env_remove(format!("{upper}_CONFIG"))
         .env_remove(format!("{upper}_PROVIDER"))
@@ -838,4 +837,331 @@ fn a_name_started_twice_attaches_and_attach_opens_a_file_at_its_line() {
         Path::new(&file).canonicalize().unwrap(),
         tmp.join("f.txt").canonicalize().unwrap()
     );
+}
+
+/// `neopane` with `args`, its daemons under `tmpdir`, from no daemon's
+/// Neovim.
+fn under(tmpdir: &Path, args: &[&str]) -> Output {
+    Command::new(exe())
+        .args(args)
+        .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
+        .env_remove(NAME.to_ascii_uppercase())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// The base directory under `tmpdir`.
+fn base_of(tmpdir: &Path) -> PathBuf {
+    // SAFETY: getuid can't fail.
+    tmpdir.join(format!("{NAME}-{}", unsafe { libc::getuid() }))
+}
+
+/// `$HOME`, as `list` shortens paths by it.
+fn home() -> Option<Vec<u8>> {
+    std::env::var_os("HOME").map(std::ffi::OsString::into_encoded_bytes)
+}
+
+fn json(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)))
+}
+
+#[test]
+fn list_with_none_running_prints_the_header_and_says_so() {
+    let tmp = scratch("list0");
+    let out = under(&tmp, &["list"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out.stdout),
+        "NAME  PANES  UNSAVED  PROVIDER  DIRECTORY\n"
+    );
+    assert_eq!(text(&out.stderr), format!("{NAME}: no daemon is running\n"));
+    let out = under(&tmp, &["list", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "{\"daemons\":[]}\n");
+    // kill: none to end
+    let out = under(&tmp, &["kill"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stderr), format!("{NAME}: no daemon is running\n"));
+    let out = under(&tmp, &["kill", "--all"]);
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    let out = under(&tmp, &["status"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon is running; start one with {NAME} [FILE]\n")
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn list_asks_every_daemon_skips_stale_ones_and_kill_all_ends_them() {
+    let tmp = scratch("list2");
+    // two live, each waiting for its launcher's attach, and one gone
+    let mut daemons: Vec<_> = ["work", "notes", "gone"]
+        .into_iter()
+        .map(|name| {
+            let (child, said) = listening_daemon(&tmp, &[name, "--"]);
+            assert_eq!(said, format!("ok {name}\n"));
+            child
+        })
+        .collect();
+    let mut gone = daemons.pop().unwrap();
+    gone.kill().unwrap();
+    gone.wait().unwrap();
+    // they start in this test's directory, as Neovim would
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .into_os_string()
+        .into_encoded_bytes();
+    let dir = neopane::daemon::control::shown_dir(&cwd, home().as_deref());
+    let out = under(&tmp, &["list"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "NAME   PANES  UNSAVED  PROVIDER  DIRECTORY\n\
+             notes  0      0        none      {dir}\n\
+             work   0      0        none      {dir}\n"
+        )
+    );
+    // the JSON's shape: README.md documents it
+    let out = under(&tmp, &["list", "--json"]);
+    let listed = json(&out);
+    let daemons_json = listed["daemons"].as_array().unwrap();
+    assert_eq!(2, daemons_json.len());
+    let work = &daemons_json[1];
+    let keys: Vec<&str> = work
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "name",
+            "address",
+            "pid",
+            "build",
+            "v",
+            "same_version",
+            "dir",
+            "panes",
+            "unsaved",
+            "provider",
+            "capabilities",
+            "unsupported",
+            "kept",
+            "log",
+            "terminals"
+        ]
+    );
+    let base = base_of(&tmp);
+    assert_eq!(work["name"], "work");
+    assert_eq!(work["address"], base.join("work/sock").to_str().unwrap());
+    assert_eq!(work["pid"], daemons[0].id());
+    assert_eq!(work["build"], neopane::attach::build());
+    assert_eq!(work["v"], neopane::attach::ATTACH_PROTOCOL_VERSION);
+    assert_eq!(work["same_version"], true);
+    assert_eq!(work["dir"], String::from_utf8_lossy(&cwd).as_ref());
+    assert_eq!(work["panes"], 0);
+    assert_eq!(work["unsaved"], serde_json::json!([]));
+    assert_eq!(work["provider"], "none");
+    assert_eq!(work["kept"], false);
+    assert_eq!(work["log"], base.join("work/log").to_str().unwrap());
+
+    let out = under(&tmp, &["kill"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "{NAME}: 2 daemons are running (notes, work); choose one with --name, or use --all\n"
+        )
+    );
+    let out = under(&tmp, &["kill", "--all"]);
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    for d in &mut daemons {
+        // ended by request, never a signal
+        let status = d.wait().unwrap();
+        assert_eq!(None, std::os::unix::process::ExitStatusExt::signal(&status));
+    }
+    let out = under(&tmp, &["list", "--json"]);
+    assert_eq!(text(&out.stdout), "{\"daemons\":[]}\n");
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+/// A daemon of attach protocol version 0, named `old`, faked: its
+/// directory locked and its address answering every request with only the
+/// frozen fields, for the rest of the test. With `refusal`, it refuses
+/// everything with that message.
+fn older_daemon(tmpdir: &Path, refusal: Option<&'static str>) {
+    use neopane::attach::{Message, Reply};
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::DirBuilderExt;
+    let base = base_of(tmpdir);
+    // the daemons started first made it
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&base);
+    let dir = base.join("old");
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    let lock = File::open(&dir).unwrap();
+    // SAFETY: flock on an fd we own.
+    assert_eq!(0, unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) });
+    let server = std::os::unix::net::UnixListener::bind(dir.join("sock")).unwrap();
+    std::thread::spawn(move || {
+        let _lock = lock;
+        while let Ok((mut s, _)) = server.accept() {
+            let mut buf = [0u8; 4096];
+            // finding it connects and hangs up
+            if !matches!(s.read(&mut buf), Ok(1..)) {
+                continue;
+            }
+            let reply = Message::Reply(Reply {
+                ok: refusal.is_none(),
+                message: refusal.map(String::from),
+                v: 0,
+                build: format!("{NAME} 0.0.9"),
+                name: "old".into(),
+                pid: 77,
+                status: None,
+                waited: None,
+            });
+            let _ = s.write_all(&reply.encode().unwrap());
+            // open until the client hangs up, as a daemon is
+            while matches!(s.read(&mut buf), Ok(1..)) {}
+        }
+    });
+}
+
+#[test]
+fn a_daemon_of_another_version_shows_only_its_frozen_fields() {
+    let tmp = scratch("older");
+    older_daemon(&tmp, None);
+    let out = under(&tmp, &["list"]);
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "NAME  PANES  UNSAVED  PROVIDER  DIRECTORY\n\
+             old   -      -        -         ({NAME} 0.0.9, attach protocol 0)\n"
+        )
+    );
+    let out = under(&tmp, &["status", "--name", "old"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "old\n  pid        77\n  build      {NAME} 0.0.9, attach protocol 0\n  \
+             (another version: only its name, pid and build are known)\n"
+        )
+    );
+    let out = under(&tmp, &["status", "--json"]);
+    assert_eq!(
+        json(&out),
+        serde_json::json!({
+            "name": "old", "address": base_of(&tmp).join("old/sock").to_str().unwrap(),
+            "pid": 77, "build": format!("{NAME} 0.0.9"), "v": 0, "same_version": false,
+        })
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn kill_all_ends_those_it_can_and_exits_1_naming_the_rest() {
+    let tmp = scratch("killall");
+    let (mut work, said) = listening_daemon(&tmp, &["work", "--"]);
+    assert_eq!(said, "ok work\n");
+    older_daemon(&tmp, Some("old has unsaved changes: x"));
+    let out = under(&tmp, &["kill", "--all"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: old has unsaved changes: x\n")
+    );
+    let status = work.wait().unwrap();
+    assert_eq!(None, std::os::unix::process::ExitStatusExt::signal(&status));
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn status_shows_unsaved_files_the_directory_and_terminals_and_kill_keeps_them_in_swap() {
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("kill");
+    // as Neovim names it: macOS's /var is /private/var
+    let real = tmp.canonicalize().unwrap();
+    std::fs::write(tmp.join("f.txt"), "one\n").unwrap();
+    std::fs::create_dir(tmp.join("sub")).unwrap();
+    let sock = base_of(&tmp).join("work/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    ending.helpers.push(in_pty(
+        &tmp,
+        &tmp,
+        &["--name", "work", "--provider", "none", "f.txt"],
+    ));
+    until_expr(&sock, "1", |_| true).expect("work's Neovim never answered");
+    let changed = "execute('cd sub | call setline(1, \"two\") | hide terminal sleep 30')";
+    remote_expr(&sock, changed).expect("Neovim answers");
+    let status = || under(&tmp, &["status", "--json"]);
+    // told at its next SafeState
+    let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let work = loop {
+        let work = json(&status());
+        let told = work["terminals"].as_array().is_some_and(|t| !t.is_empty())
+            && work["unsaved"].as_array().is_some_and(|u| !u.is_empty())
+            && work["dir"] == real.join("sub").to_str().unwrap();
+        if told || std::time::Instant::now() > due {
+            break work;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(
+        work["unsaved"],
+        serde_json::json!([real.join("f.txt").to_str().unwrap()])
+    );
+    assert_eq!(work["dir"], real.join("sub").to_str().unwrap());
+    let ptys = "join(map(filter(nvim_list_chans(), 'get(v:val, \"pty\", \"\") != \"\"'), \
+                'v:val.pty'))";
+    let pty = remote_expr(&sock, ptys);
+    assert_eq!(work["terminals"], serde_json::json!([pty.unwrap()]));
+    assert_eq!(work["panes"], 1);
+    assert_eq!(work["provider"], "none (hint none)");
+    let out = under(&tmp, &["status"]);
+    let shown = text(&out.stdout);
+    assert!(shown.starts_with("work\n  directory  "), "{shown}");
+    let unsaved = format!("\n  unsaved    {}\n", real.join("f.txt").display());
+    assert!(shown.contains(&unsaved), "{shown}");
+
+    // refused while something is unsaved
+    let out = under(&tmp, &["kill"]);
+    assert_eq!(out.status.code(), Some(1));
+    let refusal = text(&out.stderr);
+    assert!(
+        refusal.starts_with(&format!("{NAME}: work has unsaved changes: ")),
+        "{refusal}"
+    );
+    assert!(
+        refusal.ends_with(" (save them, or kill --force to keep them only in swap files)\n"),
+        "{refusal}"
+    );
+    assert!(remote_expr(&sock, "1").is_some(), "it ended");
+
+    // forced, it ends, and the changes are in a swap file
+    let out = under(&tmp, &["kill", "--force", "--name", "work"]);
+    assert_eq!((out.status.code(), text(&out.stderr)), (Some(0), ""));
+    assert!(!base_of(&tmp).join("work/sock").exists());
+    let swap = std::fs::read_dir(tmp.join("nvim/swap")).map(|d| {
+        d.flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with("f.txt.swp"))
+    });
+    assert!(swap.unwrap_or(false), "no swap file for f.txt");
+    // the attach ended `stopped`: 0
+    let helper = ending.helpers.pop().unwrap();
+    let status = helper.wait_with_output().unwrap().status;
+    assert_eq!(status.code(), Some(0));
 }

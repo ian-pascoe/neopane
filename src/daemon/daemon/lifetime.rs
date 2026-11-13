@@ -69,6 +69,11 @@ impl Lifetime {
     pub(crate) fn is_attached(&self) -> bool {
         self.stage == Stage::Attached
     }
+
+    /// The unsaved changes, as Neovim last told.
+    pub(crate) fn unsaved(&self) -> &[Vec<u8>] {
+        &self.unsaved
+    }
 }
 
 impl Daemon {
@@ -85,6 +90,10 @@ impl Daemon {
     /// none is. Every pane left goes, opens not yet asked are dropped, and
     /// Neovim is asked about its unsaved changes.
     pub(super) fn go_unattached(&mut self, last: Option<u32>) -> Result<()> {
+        // stopping by request: it ends however its panes went
+        if self.stopping {
+            return Ok(());
+        }
         let before = self.lifetime.kept.take().filter(|k| {
             self.grids.grid_of(k.win).is_some()
                 && !self.changes.is_closing(k.win)

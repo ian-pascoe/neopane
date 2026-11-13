@@ -4,9 +4,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use neopane::attach::Transport;
-use neopane::cli::{self, AttachSelf, Command, Start, UsageError};
+use neopane::cli::{self, AttachSelf, Command, KillTarget, Start, Target, UsageError, report};
+use neopane::daemon::control::{self, Failure, Killed, Listed};
 use neopane::daemon::dir::{self, Address};
-use neopane::daemon::find::{self, find_daemon};
+use neopane::daemon::find::{self, NotFound, find_daemon};
 use neopane::daemon::{launch, pane_helper, serve};
 use neopane::debug;
 use neopane::name::NAME;
@@ -43,6 +44,9 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::DebugHelp => Ok(print(&cli::debug_help())),
         Command::Version => Ok(print(&cli::version())),
         Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
+        Command::List { json } => Ok(list(json)),
+        Command::Status { to, json } => Ok(status(&to, json)),
+        Command::Kill { to, force } => Ok(kill(to, force)),
         Command::ProviderShow(name) => {
             match neopane::config::show::show(name.as_deref(), neopane::attach::build()) {
                 Ok(lua) => Ok(print(&lua)),
@@ -153,6 +157,105 @@ fn attach_self(attach: AttachSelf) -> ExitCode {
         provider: attach.provider,
     };
     helper_exit(pane_helper::run_self(&address, transport, opening))
+}
+
+/// `$HOME`, for showing paths under it as `~`.
+fn home() -> Option<Vec<u8>> {
+    std::env::var_os("HOME").map(OsString::into_encoded_bytes)
+}
+
+/// `list [--json]` (#94 decisions 29 and 30): every running daemon, asked
+/// at once.
+fn list(json: bool) -> ExitCode {
+    let base = match dir::base() {
+        Ok(b) => b,
+        Err(e) => return fail(&e.to_string()),
+    };
+    let listed = control::list(&base, control::LIST_WITHIN);
+    if json {
+        return print(&report::list_json(&listed));
+    }
+    if listed.is_empty() {
+        eprintln!("{NAME}: no daemon is running");
+    }
+    print(&report::list_table(&listed, home().as_deref()))
+}
+
+/// The daemon `to` names, found as `attach` finds one.
+fn found(to: &Target) -> std::result::Result<Address, NotFound> {
+    let inside = std::env::var_os(find::inside_var());
+    let warn = &mut |w: String| eprintln!("{NAME}: {w}");
+    find_daemon(dir::base, to, inside.as_deref(), warn)
+}
+
+/// `status [--name N | --address A] [--json]` (#94 decision 31).
+fn status(to: &Target, json: bool) -> ExitCode {
+    let address = match found(to) {
+        Ok(a) => a,
+        Err(e) => return fail(&e.to_string()),
+    };
+    let reply = match control::ask(&address, control::status_purpose(), control::STATUS_WITHIN) {
+        Ok(r) => r,
+        Err(e) => return fail(&control::no_reply(&address, &e)),
+    };
+    if json {
+        let l = Listed {
+            name: reply.name.clone(),
+            address,
+            answer: Ok(reply),
+        };
+        return print(&format!("{}\n", report::daemon_json(&l)));
+    }
+    print(&report::status_text(
+        &reply,
+        &address.to_string(),
+        home().as_deref(),
+    ))
+}
+
+/// `kill [--name N | --address A | --all] [--force]` (#94 decision 32):
+/// `stop`, then waiting for the daemon to be gone. One line per refusal
+/// or failure.
+fn kill(to: KillTarget, force: bool) -> ExitCode {
+    let addresses = match to {
+        KillTarget::One(t) => match found(&t) {
+            Ok(a) => vec![a],
+            Err(NotFound::NoneRunning) => return fail("no daemon is running"),
+            Err(NotFound::Several(names)) => {
+                return fail(&format!(
+                    "{} daemons are running ({}); choose one with --name, or use --all",
+                    names.len(),
+                    names.join(", ")
+                ));
+            }
+            Err(e) => return fail(&e.to_string()),
+        },
+        KillTarget::All => match dir::base() {
+            Ok(base) => base.running().iter().map(|n| base.address(n)).collect(),
+            Err(e) => return fail(&e.to_string()),
+        },
+    };
+    let killing: Vec<_> = addresses
+        .into_iter()
+        .map(|a| {
+            let thread = std::thread::spawn({
+                let a = a.clone();
+                move || control::kill(&a, force, control::KILL_WITHIN)
+            });
+            (a, thread)
+        })
+        .collect();
+    let mut failed = false;
+    for (address, thread) in killing {
+        let killed = thread
+            .join()
+            .unwrap_or_else(|_| Killed::NoAnswer(Failure::Failed("killing it failed".into())));
+        if let Some(line) = control::killed_line(&address, &killed) {
+            eprintln!("{NAME}: {line}");
+            failed = true;
+        }
+    }
+    ExitCode::from(u8::from(failed))
 }
 
 /// The first of `start`'s options that does nothing yet.

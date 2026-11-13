@@ -1866,6 +1866,57 @@ function M.unsaved_at_safe_state(ask)
   unsaved_ask = ask
 end
 
+-- Neovim's global working directory, as the daemon was last told: its
+-- status shows it without asking Neovim.
+local cwd_told
+local function report_cwd()
+  local dir = vim.fn.getcwd(-1, -1)
+  if dir == cwd_told then return end
+  cwd_told = dir
+  pcall(note, 'cwd', dir)
+end
+report_cwd()
+api.nvim_create_autocmd('DirChanged', { group = group, callback = report_cwd })
+
+-- terminal buffer -> the pty of its running job. The daemon is told them
+-- all as they change: a terminal attaching from one is Neovim's own.
+local terminal_ptys = {}
+local function report_terminals()
+  local ptys = {}
+  for _, pty in pairs(terminal_ptys) do ptys[#ptys + 1] = pty end
+  table.sort(ptys)
+  -- a terminal's job ends as Neovim exits, its channel to the daemon closed:
+  -- an error then would wait at a more-prompt nobody sees
+  pcall(note, 'terminals', ptys)
+end
+local function track_terminal(buf)
+  local chan = vim.bo[buf].channel
+  if chan <= 0 then return false end
+  local ok, info = pcall(api.nvim_get_chan_info, chan)
+  if not ok or not info.pty or info.pty == '' then return false end
+  terminal_ptys[buf] = info.pty
+  return true
+end
+local any_terminal = false
+for _, buf in ipairs(api.nvim_list_bufs()) do
+  if vim.bo[buf].buftype == 'terminal' and track_terminal(buf) then any_terminal = true end
+end
+if any_terminal then report_terminals() end
+api.nvim_create_autocmd('TermOpen', {
+  group = group,
+  callback = function(args)
+    if track_terminal(args.buf) then report_terminals() end
+  end,
+})
+api.nvim_create_autocmd('TermClose', {
+  group = group,
+  callback = function(args)
+    if terminal_ptys[args.buf] == nil then return end
+    terminal_ptys[args.buf] = nil
+    report_terminals()
+  end,
+})
+
 -- :q in the last window quits Neovim: make it the tab's only ordinary window
 -- first. If Neovim then refuses (unsaved changes), `restore` or the daemon
 -- adopts it again.

@@ -24,7 +24,7 @@ const NESTED_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Neovim, waiting for Neovim's terminals, as request `req`, until
 /// `deadline`.
 pub(crate) struct NestedCheck {
-    arrived: Arrived,
+    pub(super) arrived: Arrived,
     pub(super) req: u32,
     deadline: Instant,
 }
@@ -131,6 +131,21 @@ impl Daemon {
                 attach_conn::refuse(a.stream, z);
                 Ok(())
             }
+            Ok(
+                hello @ Hello {
+                    purpose: Purpose::Status { .. } | Purpose::Stop { .. },
+                    ..
+                },
+            ) => {
+                let hello = hello.clone();
+                self.on_control(a.stream, hello)
+            }
+            // ending: no attach is taken
+            Ok(_) if self.stopping => {
+                log_info!("{NAME} daemon: refused a hello: the daemon is ending");
+                attach_conn::refuse_stopping(a.stream);
+                Ok(())
+            }
             Ok(Hello {
                 purpose: Purpose::Requested { .. },
                 ..
@@ -139,7 +154,7 @@ impl Daemon {
                 purpose: Purpose::SelfAttach { .. },
                 ..
             }) => self.attach_self(a),
-            // control requests come later
+            // `open` comes later
             Ok(h) => {
                 let z = End::refusal(
                     Refusal::Hello,

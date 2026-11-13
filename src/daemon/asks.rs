@@ -236,6 +236,15 @@ impl Asks {
         before - self.queue.len()
     }
 
+    /// Drops every act waiting its turn, never asked: the daemon is ending.
+    /// How many it dropped.
+    pub(crate) fn drop_waiting(&mut self) -> usize {
+        let dropped = self.queue.len() + usize::from(self.focus_waiting.is_some());
+        self.queue.clear();
+        self.focus_waiting = None;
+        dropped
+    }
+
     /// Logs a failed act, and `why`; its capability's first failure warns in
     /// Neovim too, as #93 decision 20 words it, with the first line of `why`
     /// cut to 200 characters.

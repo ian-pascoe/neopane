@@ -196,6 +196,68 @@ pub(crate) fn send_end(stream: &UnixStream, end: End) {
     }
 }
 
+/// The reply to a control request, from the daemon named `name`: `ok`,
+/// any `message`, and what `status` adds.
+pub(crate) fn reply(
+    name: &str,
+    ok: bool,
+    message: Option<String>,
+    status: Option<attach::Status>,
+) -> attach::Reply {
+    attach::Reply {
+        ok,
+        message,
+        v: ATTACH_PROTOCOL_VERSION,
+        build: attach::build().to_string(),
+        name: name.to_string(),
+        pid: std::process::id(),
+        status,
+        waited: None,
+    }
+}
+
+/// What `status` says of the daemon at `address`, logging to `log`, while
+/// it has nothing more to tell: no pane, no pane provider, nothing unsaved,
+/// and Neovim's directory unknown.
+pub(crate) fn idle_status(address: &super::dir::Address, log: &str) -> attach::Status {
+    attach::Status {
+        address: address.as_arg().as_encoded_bytes().to_vec(),
+        panes: 0,
+        unsaved: Vec::new(),
+        provider: super::daemon::control::NoProvider::None.to_string(),
+        dir: None,
+        // until #124
+        kept: Some(false),
+        capabilities: Some(Vec::new()),
+        unsupported: Some(Vec::new()),
+        log: Some(log.as_bytes().to_vec()),
+        terminals: Some(Vec::new()),
+    }
+}
+
+/// Refuses an attach that came as the daemon ends, `stopping`.
+pub(crate) fn refuse_stopping(stream: UnixStream) {
+    refuse(
+        stream,
+        End::refusal(Refusal::Stopping, "the daemon is ending"),
+    );
+}
+
+/// How long a control request's reply may wait for room in its socket: a
+/// status naming many files may not fit at once.
+const REPLY_WITHIN: Duration = Duration::from_millis(500);
+
+/// Sends `reply`, the last frame, and hangs up. A peer that doesn't take it
+/// within `REPLY_WITHIN` is hung up on.
+pub(crate) fn send_reply(stream: &UnixStream, reply: attach::Reply) {
+    let Ok(bytes) = Message::Reply(reply).encode() else {
+        return;
+    };
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(REPLY_WITHIN));
+    let _ = (&*stream).write_all(&bytes);
+}
+
 /// The `a` frame accepting an attach: this build, the daemon's name and its
 /// log's path.
 pub(crate) fn accept_frame(daemon: &str, log: &str) -> Vec<u8> {

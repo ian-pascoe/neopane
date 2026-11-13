@@ -253,7 +253,12 @@ peer check, with no terminal and no 300 ms minimum. The daemon answers with one
   optional fields below. Status never waits on Neovim.
 - `stop` works across versions. Without `force`, a daemon with unsaved
   changes answers `ok: false` with a `message` naming them and keeps
-  running; with it, it ends, the changes kept in swap files.
+  running; with it, it ends, the changes kept in swap files. Ending, it
+  refuses new attaches `stopping`, ends its attaches `stopped`, asks the
+  pane provider to `close` the terminals it requested, giving that 2 s, then
+  closes Neovim's channel and releases its lock.
+- A daemon still waiting for its launcher's attach answers `status` with no
+  panes and pane provider `none`, and a `stop` ends it before Neovim starts.
 - `open` needs a version match, `cwd` and `file`. Its reply waits on Neovim
   without blocking the loop; with `wait`, until the file is done.
 

@@ -4,6 +4,7 @@
 
 mod help;
 mod nvim_args;
+pub mod report;
 
 use std::ffi::{OsStr, OsString};
 
@@ -27,6 +28,21 @@ pub enum Command {
     DebugHelp,
     /// `-v`, `--version`, `version`.
     Version,
+    /// `list [--json]`: every running daemon (#94 decisions 29 and 30).
+    List {
+        json: bool,
+    },
+    /// `status [--name N | --address A] [--json]`: one daemon (#94
+    /// decision 31).
+    Status {
+        to: Target,
+        json: bool,
+    },
+    /// `kill [--name N | --address A | --all] [--force]` (#94 decision 32).
+    Kill {
+        to: KillTarget,
+        force: bool,
+    },
     /// A command whose handler comes later: it exits 1 with
     /// `<name>: <what> isn't built yet`.
     NotBuilt(String),
@@ -73,6 +89,15 @@ pub enum Command {
         address: OsString,
         pane: PaneId,
     },
+}
+
+/// The daemons `kill` ends.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KillTarget {
+    /// One, found as `attach` finds it.
+    One(Target),
+    /// `--all`: every one running.
+    All,
 }
 
 /// A self-attach to a running daemon.
@@ -160,9 +185,9 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
     match word {
         b"attach" | b"list" | b"status" | b"kill" if asks_help(rest) => Ok(Command::Help),
         b"attach" => attach(rest),
-        b"list" | b"status" | b"kill" => {
-            Ok(Command::NotBuilt(first.to_string_lossy().into_owned()))
-        }
+        b"list" => list(rest),
+        b"status" => status(rest),
+        b"kill" => kill(rest),
         b"provider" if asks_help(rest) => Ok(Command::Help),
         b"provider" => match rest.first().map(|w| w.as_encoded_bytes()) {
             Some(b"check") => Ok(Command::NotBuilt("provider check".to_string())),
@@ -431,6 +456,131 @@ fn attach_words(words: &[OsString]) -> Result<(Option<OsString>, Option<u32>), M
         read.take(word)?;
     }
     read.end()
+}
+
+/// `list`'s words: `[--json]`.
+fn list(words: &[OsString]) -> Result<Command, UsageError> {
+    let mut json = false;
+    for word in words {
+        if word != "--json" {
+            return Err(UsageError("list takes only --json".into()));
+        }
+        if std::mem::replace(&mut json, true) {
+            return Err(UsageError("--json is given twice".into()));
+        }
+    }
+    Ok(Command::List { json })
+}
+
+/// A flag `status` or `kill` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flag {
+    Json,
+    All,
+    Force,
+}
+
+impl Flag {
+    fn word(self) -> &'static str {
+        match self {
+            Flag::Json => "--json",
+            Flag::All => "--all",
+            Flag::Force => "--force",
+        }
+    }
+}
+
+/// The options `status` and `kill` read: `--name N`, `--address A`, and
+/// the flags each takes.
+#[derive(Default)]
+struct DaemonOptions {
+    name: Option<OsString>,
+    address: Option<OsString>,
+    /// The flags given, each once.
+    flags: Vec<Flag>,
+}
+
+impl DaemonOptions {
+    /// Reads `words`: `--name N`, `--address A`, and `flags`. Anything else
+    /// is refused with `takes`.
+    fn read(words: &[OsString], flags: &[Flag], takes: &str) -> Result<DaemonOptions, UsageError> {
+        let mut o = DaemonOptions::default();
+        let mut i = 0;
+        while let Some(word) = words.get(i) {
+            if let Some(&flag) = flags.iter().find(|f| *word == *f.word()) {
+                if o.flags.contains(&flag) {
+                    return Err(UsageError(format!("{} is given twice", flag.word())));
+                }
+                o.flags.push(flag);
+            } else if let Some((option, attached)) = long_option(word, &["--name", "--address"]) {
+                let value = option_value(option, attached, words, &mut i)?;
+                let slot = match option {
+                    "--name" => &mut o.name,
+                    _ => &mut o.address,
+                };
+                if slot.replace(value).is_some() {
+                    return Err(UsageError(format!("{option} is given twice")));
+                }
+            } else {
+                return Err(UsageError(takes.to_string()));
+            }
+            i += 1;
+        }
+        Ok(o)
+    }
+
+    fn has(&self, flag: Flag) -> bool {
+        self.flags.contains(&flag)
+    }
+
+    /// The daemon `--name` or `--address` chooses, else the one found.
+    fn target(self) -> Result<Target, UsageError> {
+        match (self.name, self.address) {
+            (Some(_), Some(_)) => Err(both_choose()),
+            (Some(name), None) => Ok(Target::Name(daemon_name(&name)?)),
+            (None, Some(address)) => Ok(Target::Address(Address::from_arg(address))),
+            (None, None) => Ok(Target::Found),
+        }
+    }
+}
+
+/// `status`'s words: `[--name N | --address A] [--json]`.
+fn status(words: &[OsString]) -> Result<Command, UsageError> {
+    let o = DaemonOptions::read(
+        words,
+        &[Flag::Json],
+        "status takes [--name N | --address A] [--json]",
+    )?;
+    let json = o.has(Flag::Json);
+    Ok(Command::Status {
+        to: o.target()?,
+        json,
+    })
+}
+
+/// `kill`'s words: `[--name N | --address A | --all] [--force]`.
+fn kill(words: &[OsString]) -> Result<Command, UsageError> {
+    let o = DaemonOptions::read(
+        words,
+        &[Flag::All, Flag::Force],
+        "kill takes [--name N | --address A | --all] [--force]",
+    )?;
+    let force = o.has(Flag::Force);
+    if !o.has(Flag::All) {
+        return Ok(Command::Kill {
+            to: KillTarget::One(o.target()?),
+            force,
+        });
+    }
+    if o.name.is_some() || o.address.is_some() {
+        return Err(UsageError(
+            "--all ends every daemon, and --name or --address one: give one".into(),
+        ));
+    }
+    Ok(Command::Kill {
+        to: KillTarget::All,
+        force,
+    })
 }
 
 /// `provider show`'s words: `[NAME]`.
