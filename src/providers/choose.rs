@@ -403,12 +403,9 @@ mod tests {
     #[test]
     fn a_config_run_dropped_mid_choice_takes_what_it_started_with_it() {
         // the built binary runs the config child; skipped without it
-        let exe = std::env::current_exe().unwrap();
-        let bin = exe.parent().unwrap().parent().unwrap().join(NAME);
-        if !bin.is_file() {
-            assert!(std::env::var_os("CI").is_none(), "no {}", bin.display());
+        let Some(bin) = crate::util::built_binary() else {
             return;
-        }
+        };
         let dir = std::env::temp_dir().join(format!("{NAME}-cfg-drop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

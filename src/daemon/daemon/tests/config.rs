@@ -9,21 +9,9 @@ use crate::daemon::attach_conn::{self_hello, test_terminal};
 use crate::daemon::pane::Reach;
 use crate::providers::choose::{Chosen, ConfigFile};
 
-/// The built binary, which runs the config child, beside this test's own
-/// `deps/` directory. None, but under `CI`, when it hasn't been built, as
-/// with `cargo test --lib` alone.
+/// The built binary, which runs the config child (`util::built_binary`).
 fn child_exe() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join(NAME);
-    if bin.is_file() {
-        return Some(bin.to_string_lossy().into_owned());
-    }
-    assert!(
-        std::env::var_os("CI").is_none(),
-        "{} isn't built",
-        bin.display()
-    );
-    None
+    crate::util::built_binary().map(|b| b.to_string_lossy().into_owned())
 }
 
 /// A fresh directory for test `tag`, its config `init_lua` there, with
