@@ -7,3 +7,4 @@ pub mod check;
 pub(crate) mod choose;
 pub(crate) mod command;
 pub(crate) mod rex;
+pub(crate) mod tty;
