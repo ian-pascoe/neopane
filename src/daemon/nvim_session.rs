@@ -49,8 +49,8 @@ pub(crate) struct NvimSession {
     /// the next list.
     pub shown: Vec<i64>,
     shown_next: Vec<i64>,
-    /// For each pane holding several tab pages, its window last current in
-    /// each, as Neovim was last told.
+    /// The windows of each pane holding several tab pages, as Neovim was
+    /// last told.
     pub held: Vec<Vec<i64>>,
 }
 
@@ -279,9 +279,9 @@ impl NvimSession {
         self.carried = groups;
     }
 
-    /// Tells Neovim `held`, each pane's window last current in each tab page
-    /// it holds, for the panes holding several, if that changed: `gt` goes
-    /// to the one in the current pane. The caller flushes.
+    /// Tells Neovim `held`, the windows of each pane holding several tab
+    /// pages, if they changed: `gt` goes to a tab page's window last current
+    /// in the current pane. The caller flushes.
     pub(crate) fn tell_panes_hold(&mut self, held: Vec<Vec<i64>>) {
         if !self.ready || held == self.held {
             return;

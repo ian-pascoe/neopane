@@ -168,6 +168,26 @@ fn a_window_opened_unentered_into_the_tab_page_a_pane_isnt_showing_waits_there_h
 }
 
 #[test]
+fn gt_goes_back_to_the_window_current_as_the_tab_page_was_left_though_never_reported() {
+    let Some(mut t) = Lone::new() else {
+        return;
+    };
+    let first = t.d.nvim.current_win;
+    // the split is current only inside the one command, and isn't external
+    // yet as its tab page is left
+    t.keys(b":vsplit | tabnew\r");
+    t.until(|d, p| p.shown_tab != 0 && p.neovim_window_handle == Some(d.nvim.current_win));
+
+    // back to it, not to the window current before it
+    t.keys(b"gt");
+    t.until(|d, p| p.shown_tab == 0 && p.shown_windows().len() == 2 && p.shows(d.nvim.current_win));
+    let split = t.d.nvim.current_win;
+    assert_ne!(first, split);
+    assert_eq!(Some(split), t.pane().neovim_window_handle);
+    t.end();
+}
+
+#[test]
 fn tabclose_returns_the_pane_to_the_tab_page_left() {
     let Some(mut t) = Lone::new() else {
         return;

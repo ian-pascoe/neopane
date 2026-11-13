@@ -608,7 +608,7 @@ impl Daemon {
             .list
             .iter()
             .filter(|p| !p.held.is_empty() && p.closing.is_none())
-            .map(Pane::last_per_tab)
+            .map(Pane::windows)
             .collect();
         self.nvim.tell_panes_hold(held);
         Ok(self.nvim.client.flush()?)

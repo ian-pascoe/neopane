@@ -865,26 +865,56 @@ local function own_window(tab)
   return mine and own_focused(tab, mine.wins, shown)
 end
 
--- For each pane holding several tab pages, as the daemon last said: its
--- window last current in each, the one it shows first
+-- the windows panes show, as the daemon last said; until it says, those
+-- fitted to panes
+local in_panes
+-- The windows of each pane holding several tab pages, as the daemon last
+-- said
 local held_by_pane = {}
 
---- The panes holding several tab pages hold `panes` now.
+--- The panes holding several tab pages hold `panes` now, a list of windows
+--- each.
 function M.panes_hold(panes)
   held_by_pane = panes
 end
 
--- Tab page `tab`'s window last current in the pane showing `win`, if that
--- pane holds one of its windows
-local function in_pane_of(win, tab)
-  if not win then return end
-  for _, wins in ipairs(held_by_pane) do
-    if wins[1] == win then
-      for _, w in ipairs(wins) do
-        if w ~= win and api.nvim_win_is_valid(w) and tab_of(w) == tab then return w end
-      end
+-- window -> when it was last current, counted: reported current, or current
+-- as its tab page was left, as Neovim keeps a tab page's last current window
+local current_at, current_count = {}, 0
+local function was_current(win)
+  current_count = current_count + 1
+  current_at[win] = current_count
+  -- now and then, the closed ones go; a window reopened takes its own on
+  if current_count % 256 == 0 then
+    for w in pairs(current_at) do
+      if not api.nvim_win_is_valid(w) then current_at[w] = nil end
     end
   end
+end
+api.nvim_create_autocmd('TabLeave', {
+  group = group,
+  callback = function()
+    local win = api.nvim_get_current_win()
+    if shown(win) then was_current(win) end
+  end,
+})
+
+-- The windows of the pane holding `win`, if it holds several tab pages
+local function pane_holding(win)
+  for _, wins in ipairs(held_by_pane) do
+    if vim.tbl_contains(wins, win) then return wins end
+  end
+end
+
+-- Tab page `tab`'s window last current among `wins`, a pane's, if any
+local function last_current_of(wins, tab)
+  local to, at = nil, -1
+  for _, w in ipairs(wins) do
+    if shown(w) and tab_of(w) == tab and (current_at[w] or 0) > at then
+      to, at = w, current_at[w] or 0
+    end
+  end
+  return to
 end
 
 -- the window `M.go` made current, its tab page with it, since the last report
@@ -917,10 +947,16 @@ local function report()
   -- :tabnext, gt, a tabline click or a tab page closing went to the tab
   -- page's last current window, which may have closed, be another tab
   -- page's that only sat in it, or be in another pane: its last current in
-  -- the current pane instead, if it has one there, else its own anywhere
+  -- the current pane instead, if it has one there, else its own anywhere.
+  -- One in the current pane, or in none yet, stays.
   if entered and cur ~= chosen then
-    local to = in_pane_of(last, tab)
-    if not to and (is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)) then to = own_window(tab) end
+    local stray = is_anchor(cur) or (shown(cur) and tab_of(cur) ~= tab)
+    local here = last and pane_holding(last)
+    local to
+    if here and (stray or ((in_panes and in_panes[cur] or pane_holding(cur)) and pane_holding(cur) ~= here)) then
+      to = last_current_of(here, tab)
+    end
+    if not to and stray then to = own_window(tab) end
     if to and to ~= cur then
       api.nvim_set_current_win(to)
       return
@@ -955,6 +991,7 @@ local function report()
     return
   end
   last = cur
+  was_current(cur)
   last_buf = api.nvim_win_get_buf(cur)
   saw(cur)
   note('win', cur)
@@ -1134,10 +1171,6 @@ api.nvim_create_autocmd('TabClosed', {
     end
   end,
 })
-
--- the windows panes show, as the daemon last said; until it says, those
--- fitted to panes
-local in_panes
 
 --- Panes show the windows `wins` now.
 function M.panes_show(wins)
@@ -1891,6 +1924,7 @@ local function reopen(win, from, enter)
       if w == win then focused[tab] = new end
     end
     if last == win then last = new end
+    current_at[new], current_at[win] = current_at[win], nil
     for _, f in pairs(floating) do
       if f.back == win then f.back = new end
     end

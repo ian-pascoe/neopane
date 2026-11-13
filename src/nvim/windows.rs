@@ -181,9 +181,9 @@ pub(crate) fn carry(nvim: &mut Nvim, groups: &[Vec<i64>]) {
     }
 }
 
-/// Tells Neovim, for each pane holding several tab pages, its window last
-/// current in each: `gt` and the like go to the tab page's one in the
-/// current pane (ADR 0011).
+/// Tells Neovim the windows of each pane holding several tab pages: `gt` and
+/// the like go to the tab page's window last current in the current pane
+/// (ADR 0011).
 pub(crate) fn panes_hold(nvim: &mut Nvim, panes: &[Vec<i64>]) {
     nvim.exec_lua(&format!("{NAME}.panes_hold(...)"), 1);
     msgpack::write_array_header(nvim.writer(), panes.len() as u32);
@@ -4386,6 +4386,7 @@ mod tests {
         let [a, b, c] = two_tab_pages(&mut h);
         // one pane shows c and holds a, last current there of the first tab
         // page; b, in another, was current after it
+        panes_show(&mut h.nvim, &[b, c]);
         panes_hold(&mut h.nvim, &[vec![c, a]]);
         h.focus_pane(b);
         h.focus_pane(c);

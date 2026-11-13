@@ -338,14 +338,6 @@ impl Pane {
         }
     }
 
-    /// Its window last current in each tab page it holds, the one it shows
-    /// first.
-    pub(crate) fn last_per_tab(&self) -> Vec<NeovimWindowHandle> {
-        let mut out: Vec<_> = self.neovim_window_handle.into_iter().collect();
-        out.extend(self.held.iter().map(|h| h.win));
-        out
-    }
-
     /// Shows the tab page of `win`, a window it holds there, if it shows
     /// another: what it showed is held. Whether it swapped.
     pub(crate) fn show_tab_of(&mut self, win: NeovimWindowHandle) -> bool {
@@ -644,13 +636,12 @@ mod tests {
             (p.shown_tab, p.neovim_window_handle, p.layout.as_ref())
         );
         assert_eq!(vec![3], p.shown_windows());
-        assert_eq!(vec![3, 1], p.last_per_tab());
         assert_eq!(vec![3, 1, 2], p.windows());
 
         assert!(p.show_tab_of(2));
         assert_eq!((0, Some(2)), (p.shown_tab, p.neovim_window_handle));
         assert_eq!(vec![1, 2], p.shown_windows());
-        assert_eq!(vec![2, 3], p.last_per_tab());
+        assert_eq!(vec![1, 2, 3], p.windows());
     }
 
     #[test]
