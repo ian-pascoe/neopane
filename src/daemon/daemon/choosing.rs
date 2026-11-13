@@ -217,29 +217,20 @@ impl Daemon {
         };
         let (id, run) = self.default_run.take().unwrap();
         let _ = self.event_loop.remove(run.fd());
+        let faked = self.faked_default(&outcome.choice());
         let Some(hello) = self.panes.by_id(id).and_then(|p| p.hello.as_deref()) else {
             log_info!("{NAME} daemon: pane {id} went before the default's proofs were done");
             return self.reach_decided();
         };
-        #[cfg(test)]
-        let chosen = match &mut self.test_of_default {
-            Some(of) => of(&outcome.choice()),
-            None => choose::by_proofs(
+        let chosen = faked.unwrap_or_else(|| {
+            choose::by_proofs(
                 &outcome,
                 &hello.env,
                 &hello.cwd,
                 &self.exe,
                 &mut choose::connect(),
-            ),
-        };
-        #[cfg(not(test))]
-        let chosen = choose::by_proofs(
-            &outcome,
-            &hello.env,
-            &hello.cwd,
-            &self.exe,
-            &mut choose::connect(),
-        );
+            )
+        });
         let decided = !matches!(chosen, Chosen::Provider { .. });
         self.take_default(id, chosen)?;
         if decided {
@@ -247,6 +238,18 @@ impl Daemon {
         }
         self.nvim.client.flush()?;
         Ok(())
+    }
+
+    /// What a test has the default's `choice` come to, in place of the pane
+    /// provider it names; None outside tests.
+    #[cfg(test)]
+    fn faked_default(&mut self, choice: &crate::config::Choice) -> Option<Chosen> {
+        self.test_of_default.as_mut().map(|of| of(choice))
+    }
+
+    #[cfg(not(test))]
+    fn faked_default(&mut self, _: &crate::config::Choice) -> Option<Chosen> {
+        None
     }
 
     /// What self-attached pane `id` chose: a pane provider, which its
