@@ -5,8 +5,8 @@
 
 use indexmap::IndexMap;
 
-use super::grid::Grid;
-use super::style::{self, Style};
+use super::grid::{Cell, Grid};
+use super::style::{self, Attr, STATUSLINE_BASE, Style};
 use crate::nvim::msgpack::{Decoder, Token};
 use crate::nvim::rpc;
 
@@ -27,6 +27,12 @@ pub struct Grids {
     /// The highlights of StatusLine and StatusLineNC, likewise.
     pub statusline_hl: u32,
     pub statusline_nc_hl: u32,
+    /// The statuslines neopane draws windows Neovim draws none for
+    /// (`'laststatus'` 0), by grid: their cells as Neovim would draw them,
+    /// as last evaluated, highlighted from `STATUSLINE_BASE`.
+    pub statuslines: IndexMap<u32, Vec<Cell>>,
+    /// The grids whose statusline changed since the renderer last drew it.
+    pub statuslines_dirty: Vec<u32>,
 }
 
 impl Default for Grids {
@@ -41,6 +47,8 @@ impl Default for Grids {
             separator_hl: 0,
             statusline_hl: 0,
             statusline_nc_hl: 0,
+            statuslines: IndexMap::new(),
+            statuslines_dirty: Vec::new(),
         }
     }
 }
@@ -155,6 +163,65 @@ impl Grids {
             }
         }
         None
+    }
+
+    /// Sets the statuslines neopane draws: `attrs` are their highlights, from
+    /// `STATUSLINE_BASE`, and `lines` each window's grid and cells. Replaces
+    /// the last ones whole, marking those that changed. Whether any did.
+    #[doc(hidden)]
+    pub fn set_statuslines(&mut self, attrs: Vec<Attr>, lines: IndexMap<u32, Vec<Cell>>) -> bool {
+        let all = attrs != self.style.statusline_attrs;
+        let mut changed = all || lines.len() != self.statuslines.len();
+        for (grid, cells) in &lines {
+            if all || self.statuslines.get(grid) != Some(cells) {
+                changed = true;
+                if !self.statuslines_dirty.contains(grid) {
+                    self.statuslines_dirty.push(*grid);
+                }
+            }
+        }
+        self.style.statusline_attrs = attrs;
+        self.statuslines = lines;
+        changed
+    }
+
+    /// Reads the answer to `windows::statuslines` and sets the statuslines it
+    /// gives (`set_statuslines`); a window with no grid is skipped. Whether
+    /// any changed.
+    pub(crate) fn apply_statuslines(&mut self, result: &mut Decoder<'_>) -> rpc::Result<bool> {
+        // [attrs, [[win, [[text, attr], ...]], ...]]
+        if rpc::expect_array(result)? < 2 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let n = rpc::expect_array(result)?;
+        let mut attrs = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            attrs.push(style::read_attr(result)?);
+        }
+        let mut lines = IndexMap::new();
+        for _ in 0..rpc::expect_array(result)? {
+            if rpc::expect_array(result)? < 2 {
+                return Err(rpc::Error::BadMessage);
+            }
+            let win = rpc::expect_handle(result)?;
+            let n = rpc::expect_array(result)?;
+            let mut cells = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                if rpc::expect_array(result)? < 2 {
+                    return Err(rpc::Error::BadMessage);
+                }
+                let text = rpc::expect_str(result)?;
+                let a: u32 = expect_int(result)?;
+                if a as usize >= attrs.len() {
+                    return Err(rpc::Error::BadMessage);
+                }
+                cells.push(Cell::init(text, STATUSLINE_BASE + a));
+            }
+            if let Some(grid) = self.grid_of(win) {
+                lines.insert(grid, cells);
+            }
+        }
+        Ok(self.set_statuslines(attrs, lines))
     }
 
     /// Makes grid `grid` window `win`'s, floating on the screen with its
@@ -409,6 +476,7 @@ impl Grids {
                 let id = expect_int::<u32>(d)?;
                 self.grids.swap_remove(&id);
                 self.wins.swap_remove(&id);
+                self.statuslines.swap_remove(&id);
                 Ok(1)
             }
             Event::WinPos | Event::WinExternalPos | Event::WinFloatPos => {

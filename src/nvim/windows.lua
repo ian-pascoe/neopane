@@ -263,6 +263,82 @@ local function text_height(win, h)
   return math.max(h - (has_statusline(win) and 1 or 0), 1)
 end
 
+-- hl_attr_define's names for what nvim_get_hl tells of a highlight
+local attr_names = {
+  fg = 'foreground', bg = 'background', sp = 'special', blend = 'blend',
+  bold = 'bold', italic = 'italic', reverse = 'reverse', strikethrough = 'strikethrough',
+  underline = 'underline', undercurl = 'undercurl', underdouble = 'underdouble',
+  underdotted = 'underdotted', underdashed = 'underdashed', altfont = 'altfont',
+  dim = 'dim', blink = 'blink', conceal = 'conceal', overline = 'overline',
+}
+
+-- The highlight groups `names` make, lowest first, combined as a statusline
+-- combines them, in hl_attr_define's terms
+local function combined_hl(names)
+  local a = vim.empty_dict()
+  for _, name in ipairs(names) do
+    local hl = api.nvim_get_hl(0, { name = name, link = false })
+    if hl.nocombine then a = vim.empty_dict() end
+    for k, v in pairs(hl) do
+      if attr_names[k] then a[attr_names[k]] = v end
+    end
+  end
+  return a
+end
+
+-- What fills the rest of `win`'s statusline: 'fillchars' "stl", or "stlnc"
+-- for a window not current
+local function stl_fill(win, current)
+  local fcs = api.nvim_get_option_value('fillchars', { win = win })
+  return fcs:match('%f[%w]' .. (current and 'stl' or 'stlnc') .. ':([^,]+)') or ' '
+end
+
+-- The statuslines Neovim would draw windows `wins`, which at 'laststatus' 0
+-- it draws none for and the daemon does (ADR 0009). Returns { attrs, lines }:
+-- `attrs` the highlights, in hl_attr_define's terms, and each line { win,
+-- cells }, its cells { text, its highlight's index in `attrs` from 0 } as
+-- many as the window is wide, "" the right half of a wide character.
+function M.statuslines(wins)
+  local attrs, ids = {}, {}
+  local function id_of(names)
+    local key = table.concat(names, ',')
+    if not ids[key] then
+      attrs[#attrs + 1] = combined_hl(names)
+      ids[key] = #attrs - 1
+    end
+    return ids[key]
+  end
+  local cur = api.nvim_get_current_win()
+  local lines = {}
+  for _, win in ipairs(wins) do
+    if api.nvim_win_is_valid(win) then
+      local w = api.nvim_win_get_width(win)
+      local base = id_of({ win == cur and 'StatusLine' or 'StatusLineNC' })
+      local fmt = api.nvim_get_option_value('statusline', { win = win })
+      if fmt == '' then fmt = api.nvim_get_option_info2('statusline', {}).default end
+      local ok, st = pcall(api.nvim_eval_statusline, fmt, { winid = win, maxwidth = w, highlights = true })
+      if not ok then st = { str = '', highlights = {} } end
+      local cells, hls, h, at, hl = {}, st.highlights, 0, 0, base
+      for _, ch in ipairs(vim.fn.split(st.str, '\\zs')) do
+        while hls[h + 1] and hls[h + 1].start <= at do
+          h = h + 1
+          hl = id_of(hls[h].groups or { hls[h].group })
+        end
+        at = at + #ch
+        local cw = api.nvim_strwidth(ch)
+        if cw > 0 and #cells + cw <= w then
+          cells[#cells + 1] = { ch, hl }
+          if cw == 2 then cells[#cells + 1] = { '', hl } end
+        end
+      end
+      local fill = { stl_fill(win, win == cur), base }
+      while #cells < w do cells[#cells + 1] = fill end
+      lines[#lines + 1] = { win, cells }
+    end
+  end
+  return { attrs, lines }
+end
+
 --- Sizes external `win` to fill `w` x `h`, statusline included.
 function M.size(win, w, h)
   if not shown(win) then return end

@@ -172,6 +172,15 @@ pub(crate) fn resized_again(nvim: &mut Nvim, wins: &[i64]) {
     write_wins(nvim, wins);
 }
 
+/// Asks for the statuslines Neovim would draw windows `wins`, which at
+/// `'laststatus'` 0 it draws none for: their text and highlights, as wide as
+/// each window. `Grids::apply_statuslines` reads the response.
+pub(crate) fn statuslines(nvim: &mut Nvim, wins: &[i64]) -> u32 {
+    let id = nvim.exec_lua(&format!("return {NAME}.statuslines(...)"), 1);
+    write_wins(nvim, wins);
+    id
+}
+
 fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
     let wr = nvim.writer();
     msgpack::write_array_header(wr, wins.len() as u32);
@@ -833,6 +842,10 @@ mod tests {
         /// The request id `eval_str` waits an answer to, and the string it got.
         awaiting: Option<u32>,
         reply: Option<String>,
+        /// The `statuslines` ask whose answer goes into `grids`, until it comes.
+        statuslines_ask: Option<u32>,
+        /// Redraws flushed so far.
+        flushes: u32,
         /// A reference: windows.lua never runs in it.
         bare: bool,
     }
@@ -857,6 +870,8 @@ mod tests {
                 tabline_log: None,
                 awaiting: None,
                 reply: None,
+                statuslines_ask: None,
+                flushes: 0,
                 bare: false,
             };
             h.nvim
@@ -927,6 +942,7 @@ mod tests {
                         rpc::Message::Notification { method, mut params } => {
                             if method == b"redraw" {
                                 if self.grids.apply_redraw(&mut params).unwrap() {
+                                    self.flushes += 1;
                                     self.log_tabline();
                                 }
                             } else if let Some(note) = parse_note(method, &mut params).unwrap() {
@@ -948,6 +964,9 @@ mod tests {
                                 self.nvim.flush().unwrap();
                             } else if id == self.setup_id {
                                 self.wins = parse_setup(&mut result).unwrap().wins;
+                            } else if self.statuslines_ask == Some(id) {
+                                self.grids.apply_statuslines(&mut result).unwrap();
+                                self.statuslines_ask = None;
                             } else if self.awaiting == Some(id) {
                                 self.reply = rpc::expect_str(&mut result)
                                     .ok()
@@ -3823,6 +3842,62 @@ mod tests {
 
         h.input(":setlocal statusline=MINE | set laststatus=0<CR>");
         assert!(h.until(|x| x.grid_height(x.wins[0]) == 9 && x.row_starts(x.wins[0], 8, "~")));
+    }
+
+    #[test]
+    fn a_statusline_neovim_draws_none_for_at_laststatus_0_is_evaluated_as_it_would_draw_it() {
+        let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
+            return;
+        };
+        assert!(h.until(|x| x.wins[0] != 0 && x.grid_height(x.wins[0]) == 9));
+        let first = h.wins[0];
+        let split = h.adopt_split();
+        h.input(
+            ":set laststatus=0 fillchars=stlnc:- statusline=ab%1*界%*c | hi User1 guifg=#ff0000<CR>",
+        );
+        h.barrier();
+        let ask = |h: &mut Harness| {
+            h.statuslines_ask = Some(statuslines(&mut h.nvim, &[first, split, 9999]));
+            h.nvim.flush().unwrap();
+            assert!(h.until(|x| x.statuslines_ask.is_none()));
+            h.sync("");
+        };
+        ask(&mut h);
+        // evaluating redraws nothing: the daemon, which asks after each
+        // redraw, would ask again and again
+        let flushes = h.flushes;
+        ask(&mut h);
+        ask(&mut h);
+        assert_eq!(flushes, h.flushes);
+
+        // the first window isn't current: StatusLineNC, User1 over it, and the
+        // rest of its 40 columns filled with 'fillchars' stlnc; a window
+        // that's gone has none
+        let g = h.grids.grid_of(first).unwrap();
+        let cells = &h.grids.statuslines[&g];
+        assert_eq!(40, cells.len());
+        let text: String = cells
+            .iter()
+            .map(|c| String::from_utf8_lossy(c.str()).into_owned())
+            .collect();
+        assert_eq!(format!("ab界c{}", "-".repeat(35)), text);
+        assert_eq!(0, cells[3].len, "the right half of a wide character");
+        let style = &h.grids.style;
+        let nc = style.attr(cells[0].hl);
+        let user1 = style.attr(cells[2].hl);
+        assert!(nc.bg.is_some());
+        assert_eq!(Some(0xff0000), user1.fg);
+        assert_eq!(nc.bg, user1.bg);
+        assert_eq!(cells[0].hl, cells[39].hl);
+        assert_eq!(cells[2].hl, cells[3].hl);
+
+        // the current one: StatusLine, filled with stl, a space
+        let g = h.grids.grid_of(split).unwrap();
+        let cells = &h.grids.statuslines[&g];
+        assert_eq!(20, cells.len());
+        assert_eq!(b" ", cells[19].str());
+        assert_ne!(nc, h.grids.style.attr(cells[0].hl));
+        assert_eq!(2, h.grids.statuslines.len());
     }
 
     /// The windows of `layout`, left to right, if it's one row of them: into `out`.

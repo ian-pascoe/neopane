@@ -104,6 +104,10 @@ pub(crate) struct Daemon {
     pub msg_rows: u32,
     /// The options panes laying out several windows split and close them by.
     pub split_options: windows::SplitOptions,
+    /// The ask for the statuslines neopane draws (`ask_statuslines`) awaiting
+    /// its answer, and whether Neovim redrew since it went: one more is due.
+    pub statuslines_ask: Option<u32>,
+    pub statuslines_again: bool,
     /// Sizes Neovim gave windows not yet in a pane: window, cols, rows, as a
     /// `Resized` note has them. A window that joins a pane layout takes its.
     pub pending_sizes: Vec<(i64, u32, u32)>,
@@ -394,6 +398,8 @@ impl Daemon {
             tabline_rows: 0,
             msg_rows: 1,
             split_options: windows::SplitOptions::default(),
+            statuslines_ask: None,
+            statuslines_again: false,
             pending_sizes: Vec::new(),
             tab_layouts: IndexMap::new(),
             live_layout: None,
@@ -1294,6 +1300,7 @@ impl Daemon {
                         if self.grids.apply_redraw(&mut params)? {
                             self.reconcile()?;
                             self.draw()?;
+                            self.ask_statuslines()?;
                             // once Neovim has drawn its start: before, it
                             // would wait at a hit-enter prompt
                             if self.nvim.ready && !self.held_warnings.is_empty() {
@@ -1375,6 +1382,9 @@ impl Daemon {
         }
         if show_now {
             self.draw()?;
+        }
+        if self.statuslines_ask == Some(id) {
+            return self.on_statuslines(err, result);
         }
         if self.on_window_answer(id, err, result)?
             || self.on_nested_answer(id, err, result)?
@@ -3066,6 +3076,63 @@ impl Daemon {
         (wins, laid.separators)
     }
 
+    /// After Neovim redrew: asks it for the statuslines it would draw the
+    /// windows neopane draws statuslines for, if any, as their text may have
+    /// changed. One ask at a time: a redraw meanwhile asks again once it's
+    /// answered.
+    fn ask_statuslines(&mut self) -> Result<()> {
+        if self.statuslines_ask.is_some() {
+            self.statuslines_again = true;
+            return Ok(());
+        }
+        if self.split_options.statuslines {
+            return Ok(());
+        }
+        let mut wins = Vec::new();
+        for p in &self.panes.list {
+            let Some(layout) = &p.layout else {
+                continue;
+            };
+            let area = self.geometry().window_size(p);
+            let laid = layout.lay_out(area, p.neovim_window_handle.unwrap_or(0));
+            for w in &laid.wins {
+                if self.draws_statusline(w, area) {
+                    wins.push(w.win);
+                }
+            }
+        }
+        if wins.is_empty() {
+            return Ok(());
+        }
+        self.statuslines_ask = Some(windows::statuslines(&mut self.nvim.client, &wins));
+        self.nvim.client.flush()?;
+        Ok(())
+    }
+
+    /// Neovim answered `ask_statuslines`: the panes showing a statusline that
+    /// changed draw it.
+    fn on_statuslines(&mut self, err: Option<&[u8]>, result: Decoder<'_>) -> Result<()> {
+        self.statuslines_ask = None;
+        let mut result = result;
+        let changed = match err {
+            Some(e) => {
+                log_warn!(
+                    "neovim error evaluating statuslines: {}",
+                    String::from_utf8_lossy(e)
+                );
+                false
+            }
+            None => self.grids.apply_statuslines(&mut result)?,
+        };
+        if changed {
+            self.draw()?;
+        }
+        if std::mem::take(&mut self.statuslines_again) {
+            self.ask_statuslines()?;
+        }
+        Ok(())
+    }
+
     /// Whether neopane draws window `w`, laid out in `area`, its statusline: a
     /// window with another below it always has one, and with `'laststatus'`
     /// 0 Neovim draws it none.
@@ -3309,8 +3376,9 @@ mod tests {
     use super::*;
     use crate::nvim::nvim::for_test_on;
     use crate::nvim::windows::{Kind, Node};
-    use crate::screen::grid::Grid;
+    use crate::screen::grid::{Cell, Grid};
     use crate::screen::grids::{Float, Win};
+    use crate::screen::style;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -7215,6 +7283,124 @@ mod tests {
         let sizes = sizes_sent(&sent.nvim_bytes);
         // Neovim's window above is a row short of its place
         assert_eq!(&[[1001, 80, 9], [1000, 80, 10]], &sizes[sizes.len() - 2..]);
+    }
+
+    /// The windows each `<name>.statuslines(...)` in `all` asked for.
+    fn statuslines_asked(all: &[u8]) -> Vec<Vec<i64>> {
+        let call = format!("{NAME}.statuslines(...)");
+        let call = call.as_bytes();
+        let mut asked = Vec::new();
+        let mut at = 0;
+        while let Some(i) = all[at..].windows(call.len()).position(|w| w == call) {
+            at += i + call.len();
+            let mut args = msgpack::Decoder::of(&all[at..]);
+            assert_eq!(Some(msgpack::Token::Array(1)), args.next().unwrap());
+            let Some(msgpack::Token::Array(n)) = args.next().unwrap() else {
+                panic!("no windows");
+            };
+            let wins = (0..n)
+                .map(|_| match args.next().unwrap() {
+                    Some(msgpack::Token::Int(w)) => w,
+                    t => panic!("not a window: {t:?}"),
+                })
+                .collect();
+            asked.push(wins);
+        }
+        asked
+    }
+
+    /// A daemon with Rex closed and `'laststatus'` `laststatus`, whose pane
+    /// shows window 1001 (grid 3) above 1000 (grid 2), the one above current.
+    /// Returns the pane.
+    fn two_stacked(fx: &mut Fixture, laststatus: u32) -> u32 {
+        fx.d.provider = None;
+        fx.d.nvim.ready = true;
+        fx.d.on_note(windows::Note::Options(windows::SplitOptions {
+            statuslines: laststatus != 0,
+            ..windows::SplitOptions::default()
+        }))
+        .unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        let id = fx.d.panes.add(p).id;
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        note_split_from(&mut fx.d, 1001, 1000, false, true);
+        fx.d.on_note(windows::Note::Current(1001)).unwrap();
+        draw_external(&mut fx.d, 3, 1001, 80, 9);
+        fx.d.reconcile().unwrap();
+        id
+    }
+
+    #[test]
+    fn after_a_redraw_neovim_is_asked_for_the_statuslines_neopane_draws_one_ask_at_a_time() {
+        let mut fx = fixture();
+        two_stacked(&mut fx, 0);
+        fx.d.ask_statuslines().unwrap();
+        let id = fx.d.statuslines_ask.unwrap();
+        // redrawn again before the answer: asked again once it comes
+        fx.d.ask_statuslines().unwrap();
+        assert_eq!(Some(id), fx.d.statuslines_ask);
+
+        // [[attr], [[win, [[text, attr], ...]]]]
+        let mut answer = Vec::new();
+        msgpack::write_array_header(&mut answer, 2);
+        msgpack::write_array_header(&mut answer, 1);
+        msgpack::write_map_header(&mut answer, 1);
+        msgpack::write_str(&mut answer, "foreground");
+        msgpack::write_int(&mut answer, 0xff0000);
+        msgpack::write_array_header(&mut answer, 1);
+        msgpack::write_array_header(&mut answer, 2);
+        msgpack::write_int(&mut answer, 1001);
+        msgpack::write_array_header(&mut answer, 1);
+        msgpack::write_array_header(&mut answer, 2);
+        msgpack::write_str(&mut answer, "x");
+        msgpack::write_int(&mut answer, 0);
+        fx.d.on_response(id, None, msgpack::Decoder::of(&answer))
+            .unwrap();
+        assert_eq!(
+            vec![Cell::init("x", style::STATUSLINE_BASE)],
+            fx.d.grids.statuslines[&3]
+        );
+        assert_eq!(
+            Some(0xff0000),
+            fx.d.grids.style.attr(style::STATUSLINE_BASE).fg
+        );
+        assert!(fx.d.statuslines_ask.is_some_and(|a| a != id));
+        let sent = sent_by(fx);
+        assert_eq!(
+            vec![vec![1001], vec![1001]],
+            statuslines_asked(&sent.nvim_bytes)
+        );
+    }
+
+    #[test]
+    fn with_no_statusline_neopane_draws_nothing_is_asked_after_a_redraw() {
+        // Neovim draws the statuslines
+        let mut fx = fixture();
+        two_stacked(&mut fx, 2);
+        fx.d.ask_statuslines().unwrap();
+        assert_eq!(None, fx.d.statuslines_ask);
+        assert!(statuslines_asked(&sent_by(fx).nvim_bytes).is_empty());
+
+        // a window alone in its pane has none
+        let mut fx = fixture();
+        fx.d.provider = None;
+        fx.d.nvim.ready = true;
+        fx.d.on_note(windows::Note::Options(windows::SplitOptions {
+            statuslines: false,
+            ..windows::SplitOptions::default()
+        }))
+        .unwrap();
+        let mut p = Pane::from_neovim_window(1, 1000);
+        p.terminal_surface = Some(Surface::for_test(80, 21));
+        fx.d.panes.add(p);
+        fx.d.nvim.current_win = 1000;
+        draw_external(&mut fx.d, 2, 1000, 80, 20);
+        fx.d.reconcile().unwrap();
+        fx.d.ask_statuslines().unwrap();
+        assert_eq!(None, fx.d.statuslines_ask);
+        assert!(statuslines_asked(&sent_by(fx).nvim_bytes).is_empty());
     }
 
     #[test]
