@@ -27,7 +27,7 @@ shared by every terminal showing it.
 
 With a pane provider, each of Neovim's windows gets a terminal of its own.
 In Rex, `:split` and `:vsplit` open real Rex blocks where Neovim would put the
-window, and closing a block closes its window. Focusable floats, such as
+window, and closing a Rex block closes its window. Focusable floats, such as
 pickers, open in Rex floating panes with any floats attached to them: a float
 group pane. A tab page opened later, as `:tabnew` opens one, gets a tab page
 area of its own, a Rex floating pane over the Rex window. The completion
@@ -344,14 +344,14 @@ own, and Neovim's screen is the current pane's size.
 ### Rex
 
 Rex's pane provider is built in. An attach chooses Rex when `REX_SERVER` and
-`REX_SESSION` are set in its environment, as Rex sets them in every block: the
-daemon connects to that Rex server and session, as the client `neopane`, and
+`REX_SESSION` are set in its environment, as Rex sets them in every Rex block: the
+daemon connects to that Rex server and Rex session, as the client `neopane`, and
 each window gets a Rex block of its own beside the one it was opened from,
 labelled `neopane`. Rex checks the choice: the terminal must be the Rex block
 `REX_BLOCK` names, its terminal compared with the terminal of that block's
 process. The choice fails, with a warning in Neovim, in a terminal started
 from a Rex shell, such as a Ghostty window, which inherited stale `REX_*`, or
-one whose `REX_BLOCK` is unset or names another block. A later attach is in
+one whose `REX_BLOCK` is unset or names another Rex block. A later attach is in
 Rex's reach in a Rex block of the same server and Rex session, found by its
 `REX_BLOCK`. The variables, read from the attach's environment, never the
 daemon's own:
@@ -378,9 +378,8 @@ newer one, and whether Rex proves this terminal is the Rex block `REX_BLOCK`
 names ([docs/config.md](docs/config.md#provider-check)).
 
 To try a build without it taking the focus in your own Rex session, which
-neopane does as it works, run it in a pane of a `rex new` session, or in a
-terminal started with `REX_SESSION` and `REX_BLOCK` naming that session and
-one of its Rex blocks (`REX_SERVER` stays as Rex set it).
+neopane does as it works, run it in a Rex block of a Rex session of your
+own, made with `rex new`.
 
 ### Your own
 
@@ -529,7 +528,7 @@ work
              found unsupported: open_float
   address    /tmp/neopane-501/work/sock
   pid        4242
-  build      neopane 0.1.0 (a1b2c3d, 2026-11-09), attach protocol 1
+  build      neopane 0.0.0 (a1b2c3d, 2026-11-09), attach protocol 1
   log        /tmp/neopane-501/work/log
 ```
 
@@ -610,7 +609,8 @@ What was asked for (help, version, `list`, `status`, `provider check`'s
 report, `provider show`'s Lua, `provider types`' lines, `--detach`'s name)
 goes to stdout; everything else goes to stderr as one `neopane: …` line. A
 usage error is one line ending `(see neopane --help)`. Output is the same to
-a terminal or a pipe, with no colour. A reader that closes the pipe early
+a terminal or a pipe, with no colour, but for the unsaved-file question, the
+key wait after a failed start, and `provider check`'s pane title. A reader that closes the pipe early
 ends `neopane` quietly.
 
 | Status | Meaning |
@@ -638,7 +638,7 @@ saying why, and starts nothing:
 |---|---|
 | `--embed`, `--headless`, `--listen…` | the daemon starts Neovim with them itself |
 | `--server…`, `--remote…` | they talk to another Neovim; open a file in a running daemon with `neopane attach --name N FILE` |
-| `--help`, `--version`, `--api-info`, `-h`, `-?`, `-v` after other arguments | Neovim would print and exit; put `-h` or `-v` first for `neopane`'s own |
+| `-h`, `-v`, `--help`, `--version` after other arguments; `--api-info`, `-?`, and `h` or `v` in a cluster such as `-Rh`, anywhere | Neovim would print and exit; put `-h` or `-v` first for `neopane`'s own |
 | `-l`, `-es`, `-Es` | they run Neovim without a screen |
 | `-V`, or `-V2` and up, without a file | Neovim wouldn't start; give it one, as `-V3log.txt` |
 | `-` | the daemon's Neovim can't read stdin; save it to a file first |
@@ -678,7 +678,9 @@ saying why, and starts nothing:
   `$XDG_CONFIG_HOME/neopane/init.lua`, else `~/.config/neopane/init.lua`, on
   macOS too.
 - `NEOPANE_PROVIDER` is read from the attach's environment, never the
-  daemon's. `--provider P` wins over it. `""` means no hint.
+  daemon's. `--provider P` wins over it. For `provider check`, `""` means
+  no hint; on `neopane` and `neopane attach`, an empty `--provider` falls
+  back to `$NEOPANE_PROVIDER`.
 - `NEOPANE_TMPDIR`: a relative path is taken from the directory `neopane`
   runs in.
 - `NEOPANE_LOG`: `warn`: what went wrong; `info`, the default: that, and
@@ -696,7 +698,8 @@ saying why, and starts nothing:
   this README, not in `--help`.
 
 Pane provider commands get the choosing attach's environment, less
-`NEOPANE`, with the variables of
+`NEOPANE`, every per-act `NEOPANE_*` variable and every `NEOPANE_ENV_*`,
+with their own variables of
 [docs/capabilities.md](docs/capabilities.md#variables) set
 ([Running a command](docs/capabilities.md#running-a-command)). `XDG_CONFIG_HOME`,
 `HOME` and `PATH` are read too.
@@ -744,6 +747,9 @@ Leftover `neorex-<uid>` directories from before the rename are left alone.
   set NEOPANE_TMPDIR to another place` or `neopane: the socket path for work
   would be 109 bytes, over the 103 allowed; use a shorter --name or
   NEOPANE_TMPDIR`.
+- `neopane: the daemon didn't start: <why> (logs: <base>)`: the daemon
+  ended before it said anything; its log, if it made one, is under
+  `<base>`.
 - `neopane: ignoring $NEOPANE: …`: a terminal started from a daemon's
   `:terminal`, such as a tmux server's, inherited `$NEOPANE`. Unset it there.
 - A daemon you can't see: `neopane list` shows every daemon running, with
@@ -875,7 +881,7 @@ a split's count.
   pages from them, such as lualine's `tabs` component, show the wrong labels.
   The built-in tabline, while `'tabline'` is empty, shows the right ones:
   neopane draws it from its own record of each window's home tab page.
-- Plugins that draw cursor effects with editor-relative floats, such as
+- Plugins that draw cursor effects with screen floats, such as
   smear-cursor.nvim, draw them in the wrong place: Neovim can't tell them
   where a pane's window is.
 - No external command line or messages: long messages still show
