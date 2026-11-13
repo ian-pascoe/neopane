@@ -75,7 +75,6 @@ fn fixture_choosing(fakes: Vec<FakeProvider>) -> (Fixture, Choices) {
     fx.d.test_choose = Some(Box::new(move |_| {
         next.borrow_mut().pop_front().unwrap_or(Chosen::None {
             why: "none left".into(),
-            warn: false,
         })
     }));
     (fx, choices)
@@ -84,10 +83,7 @@ fn fixture_choosing(fakes: Vec<FakeProvider>) -> (Fixture, Choices) {
 /// A daemon whose self-attaches choose none, for `why`, with a warning.
 fn fixture_unreachable(why: &'static str) -> Fixture {
     let mut fx = with_provider(None);
-    fx.d.test_choose = Some(Box::new(move |_| Chosen::None {
-        why: why.into(),
-        warn: true,
-    }));
+    fx.d.test_choose = Some(Box::new(move |_| Chosen::CantStart { why: why.into() }));
     fx
 }
 
@@ -238,6 +234,7 @@ fn a_choice_gone_before_its_find_or_none_reached_is_no_pane_provider_with_a_warn
     fx.d.drain_provider().unwrap();
     assert!(fx.d.provider.is_none());
     assert_eq!(None, choosing_id(&fx.d));
+    assert_eq!("none (can't start)", fx.d.provider_shown());
     let warned = sent_to_nvim(&mut fx);
     assert_eq!(
         1,
@@ -252,6 +249,7 @@ fn a_choice_gone_before_its_find_or_none_reached_is_no_pane_provider_with_a_warn
     fx.d.nvim.ready = true;
     let _first = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     assert!(fx.d.provider.is_none());
+    assert_eq!("none (can't start)", fx.d.provider_shown());
     let warned = sent_to_nvim(&mut fx);
     assert!(
         warned.contains("rex: can't reach Rex: connection refused; no pane provider"),
@@ -301,6 +299,17 @@ fn nested_hello() -> Vec<u8> {
 /// default's `inside` proofs each wait for the test's go, then fail; what
 /// the default chooses is then the fake `finding`. The go.
 fn fixture_proving() -> (Fixture, std::sync::mpsc::Sender<()>) {
+    fixture_proving_to(|| Chosen::Provider {
+        held: Box::new(finding()),
+        spent: Duration::ZERO,
+    })
+}
+
+/// `fixture_proving`, the Rex the default names coming to what `chosen`
+/// gives.
+fn fixture_proving_to(
+    chosen: impl Fn() -> Chosen + 'static,
+) -> (Fixture, std::sync::mpsc::Sender<()>) {
     let mut fx = with_provider(None);
     fx.d.nvim.ready = true;
     let (go, wait) = std::sync::mpsc::channel::<()>();
@@ -312,16 +321,13 @@ fn fixture_proving() -> (Fixture, std::sync::mpsc::Sender<()>) {
             why: "this terminal isn't a pane of the tmux server at /tmp/t".into(),
         }
     });
-    fx.d.test_of_default = Some(Box::new(|choice| {
+    fx.d.test_of_default = Some(Box::new(move |choice| {
         // REX_* named too: Rex, unproven
         assert_eq!(
             &crate::config::Choice::Builtin(crate::config::Builtin::Rex),
             choice
         );
-        Chosen::Provider {
-            held: Box::new(finding()),
-            spent: Duration::ZERO,
-        }
+        chosen()
     }));
     (fx, go)
 }
@@ -400,6 +406,68 @@ fn the_defaults_guess_unanswered_is_refused_quietly_too() {
     assert_eq!("none (find refused)", fx.d.provider_shown());
     let sent = sent_to_nvim(&mut fx);
     assert!(!sent.contains("no pane provider"), "{sent:?}");
+}
+
+#[test]
+fn the_defaults_guess_that_cant_be_reached_is_only_logged() {
+    // stale REX_SERVER: Rex has quit, nothing listens
+    let (mut fx, go) = fixture_proving_to(|| Chosen::CantStart {
+        why: "rex: can't reach Rex: connection refused".into(),
+    });
+    let (id, _helper, _pty) = attach_showing_1000(&mut fx, &nested_hello());
+    split_1001_off_1000(&mut fx);
+    let _ = sent_to_nvim(&mut fx);
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    assert!(fx.d.provider.is_none());
+    assert_eq!("none (can't start)", fx.d.provider_shown());
+    let sent = sent_to_nvim(&mut fx);
+    assert!(!sent.contains("can't reach Rex"), "{sent:?}");
+    assert!(!sent.contains("no pane provider"), "{sent:?}");
+    assert!(fx.d.panes.by_id(id).unwrap().holds(1001));
+}
+
+#[test]
+fn the_defaults_guess_gone_before_it_was_confirmed_is_only_logged() {
+    // stale REX_SESSION: Rex runs, but refuses the session, and is gone
+    let (mut fx, go) = fixture_proving();
+    let (id, _helper, _pty) = attach_showing_1000(&mut fx, &nested_hello());
+    split_1001_off_1000(&mut fx);
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    let _ = sent_to_nvim(&mut fx);
+    fake(&mut fx.d).push(ProviderEvent::Gone {
+        reason: "Rex refused session.attach: session_not_found".into(),
+    });
+    fx.d.drain_provider().unwrap();
+    assert!(fx.d.provider.is_none());
+    assert_eq!(None, choosing_id(&fx.d));
+    assert_eq!("none (can't start)", fx.d.provider_shown());
+    let sent = sent_to_nvim(&mut fx);
+    assert!(!sent.contains("session_not_found"), "{sent:?}");
+    assert!(!sent.contains("no pane provider"), "{sent:?}");
+    // the window that waited is drawn in the choosing pane
+    assert!(fx.d.panes.by_id(id).unwrap().holds(1001));
+}
+
+#[test]
+fn the_defaults_guess_gone_once_confirmed_still_warns() {
+    let (mut fx, go) = fixture_proving();
+    let _first = attach_showing_1000(&mut fx, &nested_hello());
+    go.send(()).unwrap();
+    proofs_done(&mut fx.d);
+    found(&mut fx.d, BLOCK);
+    let _ = sent_to_nvim(&mut fx);
+    fake(&mut fx.d).push(ProviderEvent::Gone {
+        reason: "Rex closed the connection".into(),
+    });
+    fx.d.drain_provider().unwrap();
+    assert!(fx.d.provider.is_none());
+    let warned = sent_to_nvim(&mut fx);
+    assert!(
+        warned.contains("fake: Rex closed the connection; no pane provider"),
+        "{warned:?}"
+    );
 }
 
 /// A daemon whose fake pane provider was chosen in Rex session `session:a`
@@ -574,7 +642,6 @@ fn connecting_counts_against_the_choice_and_a_find_queued_behind_a_layout_act_do
     fx.d.nvim.ready = true;
     fx.d.test_choose = Some(Box::new(|_| Chosen::None {
         why: "not yet".into(),
-        warn: false,
     }));
     let (id, _helper, _pty) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
     // a layout act running: the find waits behind it

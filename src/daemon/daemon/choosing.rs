@@ -260,8 +260,9 @@ impl Daemon {
     }
 
     /// What the built-in default chose for self-attached pane `id`, with
-    /// no config: as `take_choice`, but its `find` refusing only logs, the
-    /// default having guessed from variables that may have leaked.
+    /// no config: as `take_choice`, but its pane provider failing to start,
+    /// or `find` refusing it, only logs, the default having guessed from
+    /// variables that may have leaked.
     pub(super) fn take_default(&mut self, id: u32, chosen: Chosen) -> Result<()> {
         self.take_chosen(id, chosen, true)
     }
@@ -277,7 +278,7 @@ impl Daemon {
                 }
                 return Ok(());
             }
-            Chosen::None { why, warn } => {
+            Chosen::None { why } => {
                 let hint = self
                     .panes
                     .by_id(id)
@@ -287,13 +288,15 @@ impl Daemon {
                     Some(choose::HINT_NONE) => NoProvider::HintNone,
                     _ => NoProvider::None,
                 };
-                if warn {
-                    let line = format!("{why}; no pane provider");
-                    log_warn!("{NAME} daemon: {line}");
-                    self.warn_when_ready(format!("{NAME}: {line}"));
-                } else {
-                    log_info!("{NAME} daemon: no pane provider for pane {id}: {why}");
+                log_info!("{NAME} daemon: no pane provider for pane {id}: {why}");
+                if let Some(p) = self.panes.by_id_mut(id) {
+                    p.reach = Reach::Out;
                 }
+                return Ok(());
+            }
+            Chosen::CantStart { why } => {
+                self.no_provider = NoProvider::CantStart;
+                self.tell_no_provider(&format!("{why}; no pane provider"), quiet);
                 if let Some(p) = self.panes.by_id_mut(id) {
                     p.reach = Reach::Out;
                 }
@@ -377,7 +380,7 @@ impl Daemon {
         // stalled anywhere: connecting, `session.attach` or `find`
         let secs = crate::util::seconds(c.time);
         let what = format!("no answer within {secs} s");
-        self.refuse_choice(&what)
+        self.refuse_choice(&what, NoProvider::FindRefused)
     }
 
     /// Self-attached pane `id` came with a pane provider there: out of reach
@@ -612,21 +615,26 @@ impl Daemon {
         self.refit_to_areas()
     }
 
-    /// The choice running is refused, for `why`: the pane provider is
-    /// dropped, with a warning, or for the default's guess, only a line in
-    /// the log.
-    fn refuse_choice(&mut self, why: &str) -> Result<()> {
-        let quiet = self.choosing.take().is_some_and(|c| c.quiet);
-        if quiet {
-            log_info!(
-                "{NAME} daemon: {}: {why}; no pane provider (the default's guess: not warned of)",
-                self.provider_name()
-            );
-            self.drop_provider()?;
-        } else {
-            self.provider_gone(why)?;
+    /// The pane provider went (`Gone`), for `reason`: before its choice
+    /// was confirmed, it couldn't start, which for the default's guess is
+    /// only a line in the log; once confirmed, it's dropped with a warning.
+    pub(super) fn gone_choosing_or_after(&mut self, reason: &str) -> Result<()> {
+        if self.choosing.is_some() {
+            return self.refuse_choice(reason, NoProvider::CantStart);
         }
-        self.no_provider = NoProvider::FindRefused;
+        self.provider_gone(reason)
+    }
+
+    /// The choice running is refused, for `why`, as `shown`: the pane
+    /// provider is dropped, with a warning, or for the default's guess,
+    /// only a line in the log.
+    fn refuse_choice(&mut self, why: &str, shown: NoProvider) -> Result<()> {
+        let quiet = self.choosing.take().is_some_and(|c| c.quiet);
+        let line = format!("{}: {why}; no pane provider", self.provider_name());
+        self.tell_no_provider(&line, quiet);
+        self.nvim.client.flush()?;
+        self.drop_provider()?;
+        self.no_provider = shown;
         self.reach_decided()
     }
 
@@ -683,7 +691,8 @@ impl Daemon {
             }
         }
         if self.is_choosing(pane) {
-            return self.refuse_choice(&format!("find didn't confirm this terminal ({why})"));
+            let why = format!("find didn't confirm this terminal ({why})");
+            return self.refuse_choice(&why, NoProvider::FindRefused);
         }
         self.reach_decided()
     }
@@ -731,6 +740,17 @@ impl Daemon {
             || self
                 .split_from(sp)
                 .is_some_and(|f| f.reach == Reach::Finding)
+    }
+
+    /// Tells that a choice came to no pane provider, as `line` says: a
+    /// warning, or for the default's guess, `quiet`, only a line in the log.
+    pub(super) fn tell_no_provider(&mut self, line: &str, quiet: bool) {
+        if quiet {
+            log_info!("{NAME} daemon: {line} (the default's guess: not warned of)");
+        } else {
+            log_warn!("{NAME} daemon: {line}");
+            self.warn_when_ready(format!("{NAME}: {line}"));
+        }
     }
 
     /// Shows `message` in Neovim as a warning once it is set up and has

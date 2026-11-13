@@ -340,7 +340,7 @@ means tracked files differ from it.
 | | `unsupported` | [str]: found unsupported since the choice | yes | no |
 | | `log` | bin: the log's path | yes | no |
 | | `terminals` | [bin]: ptys of Neovim's running `:terminal` jobs | yes | no |
-| | `provider` (existing) | values: shown name, `(choosing)`, `none`, `none (config error)`, `none (find refused)`, `none (hint none)` | — | no |
+| | `provider` (existing) | values: shown name, `(choosing)`, `none`, `none (can't start)`, `none (config error)`, `none (find refused)`, `none (hint none)` | — | no |
 | `{attach}` | `--transport relay` | appended under the diagnostic | — | — |
 
 None needs a version bump: each is a new optional key or value.

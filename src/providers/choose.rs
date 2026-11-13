@@ -58,8 +58,12 @@ pub(crate) enum Chosen {
         held: Box<dyn PaneProvider>,
         spent: Duration,
     },
-    /// None, and why; shown in Neovim as a warning if `warn`.
-    None { why: String, warn: bool },
+    /// None, by design, and why.
+    None { why: String },
+    /// None: the pane provider chosen can't be started or reached, and why.
+    /// A warning in Neovim, unless the built-in default chose it with no
+    /// config: a guess, only logged.
+    CantStart { why: String },
     /// None: the config failed, or returned something malformed.
     ConfigError,
 }
@@ -98,7 +102,6 @@ pub(crate) fn choose(
     if hint == Some(HINT_NONE) {
         return ByDefault::Now(Chosen::None {
             why: format!("the hint is {HINT_NONE}"),
-            warn: false,
         });
     }
     if config::proves(config::env_of(attach)) {
@@ -106,7 +109,6 @@ pub(crate) fn choose(
             Ok(run) => ByDefault::Proving(run),
             Err(e) => ByDefault::Now(Chosen::None {
                 why: format!("the default can't prove which built-in: {e}"),
-                warn: false,
             }),
         };
     }
@@ -145,11 +147,9 @@ pub(crate) fn by_proofs(
             why: "neither tmux's variables (TERM_PROGRAM=tmux, TMUX) nor Rex's (REX_SERVER, \
                   REX_SESSION) are set"
                 .into(),
-            warn: false,
         },
         Choice::None => Chosen::None {
             why: "no multiplexer the environment names proved this terminal its pane".into(),
-            warn: false,
         },
         choice => of_choice(&choice, env, cwd, exe, connect),
     }
@@ -217,9 +217,8 @@ fn start_rex(env: &Env, connect: &mut Connect, since: Instant) -> Chosen {
         Err(e) => {
             // where, for the log: a warning that long would wait at a prompt
             log_warn!("{NAME} daemon: rex: can't reach Rex at {server}: {e}");
-            Chosen::None {
+            Chosen::CantStart {
                 why: format!("rex: can't reach Rex: {e}"),
-                warn: true,
             }
         }
     }
@@ -423,7 +422,6 @@ fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], exe: &Path, connect: &mut C
     match choice {
         Choice::None => Chosen::None {
             why: "the config chose none".into(),
-            warn: false,
         },
         Choice::Builtin(Builtin::Rex) => start_rex(env, connect, started),
         Choice::Whole(_) | Choice::Pair(_) => {
@@ -434,9 +432,8 @@ fn of_choice(choice: &Choice, env: &Env, cwd: &[u8], exe: &Path, connect: &mut C
                     held: Box::new(p),
                     spent: started.elapsed(),
                 },
-                Err(e) => Chosen::None {
+                Err(e) => Chosen::CantStart {
                     why: format!("{name}: can't start: {e}"),
-                    warn: true,
                 },
             }
         }
@@ -497,9 +494,11 @@ mod tests {
         }
     }
 
+    /// Why none was chosen, and whether it couldn't start.
     fn none(c: Chosen) -> (String, bool) {
         match c {
-            Chosen::None { why, warn } => (why, warn),
+            Chosen::None { why } => (why, false),
+            Chosen::CantStart { why } => (why, true),
             Chosen::Provider { .. } => panic!("chose a pane provider"),
             Chosen::ConfigError => panic!("a config error"),
         }
@@ -605,19 +604,19 @@ mod tests {
     #[test]
     fn the_hint_none_or_no_rex_chooses_none_quietly() {
         let in_rex = env(&[("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")]);
-        let (_, warn) = none(now(in_rex, Some("none"), &mut connects_nowhere()));
-        assert!(!warn);
-        let (_, warn) = none(now(env(&[]), None, &mut connects_nowhere()));
-        assert!(!warn);
+        let (_, cant_start) = none(now(in_rex, Some("none"), &mut connects_nowhere()));
+        assert!(!cant_start);
+        let (_, cant_start) = none(now(env(&[]), None, &mut connects_nowhere()));
+        assert!(!cant_start);
     }
 
     #[test]
-    fn a_rex_that_cant_be_reached_chooses_none_with_a_warning() {
+    fn a_rex_that_cant_be_reached_cant_start() {
         // stale REX_*: a Ghostty window started from a Rex shell, Rex since quit
         let stale = env(&[("REX_SERVER", "unix:///gone"), ("REX_SESSION", "session:s")]);
         let mut refused: Connect = Box::new(|_| Err(std::io::ErrorKind::ConnectionRefused.into()));
-        let (why, warn) = none(now(stale, None, &mut refused));
-        assert!(warn);
+        let (why, cant_start) = none(now(stale, None, &mut refused));
+        assert!(cant_start);
         assert!(why.starts_with("rex: can't reach Rex: "), "{why}");
     }
 
