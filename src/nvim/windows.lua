@@ -18,6 +18,8 @@ end
 local anchors = {}
 -- the window last reported as current
 local last
+-- the window last entered, known at once, while `last` waits for the report
+local entered
 -- the buffer a window a pane could show showed last, for a new window
 -- once none is left
 local last_buf
@@ -908,11 +910,31 @@ api.nvim_create_autocmd('WinNew', {
       end
       return
     end
+    -- split off the window current before, which :split makes the previous
+    -- window. nvim_open_win doesn't, as Neogit opens its commit view, so `#`
+    -- is then whatever was before that, maybe another tab page's external
+    -- window. A split starts on its origin's buffer: if `#` doesn't show it,
+    -- the window entered last does, or the one last current.
+    local buf = api.nvim_win_get_buf(win)
+    local function shows_buf(w)
+      return w and w ~= win and shown(w) and api.nvim_win_get_buf(w) == buf
+    end
     local from = vim.fn.win_getid(vim.fn.winnr('#'))
+    if not shows_buf(from) then
+      if shows_buf(entered) then
+        from = entered
+      elseif shows_buf(last) then
+        from = last
+      elseif from == win then
+        from = 0
+      end
+      -- else `#` stays, though it isn't the origin: a split made from a
+      -- window never entered, as nvim_open_win in nvim_win_call makes one
+    end
     local tab = home[from] or api.nvim_win_get_tabpage(win)
     home[win] = tab
     -- Neovim doesn't keep the scroll when splitting an external window
-    if shown(from) and api.nvim_win_get_buf(from) == api.nvim_win_get_buf(win) then
+    if shows_buf(from) then
       local view = api.nvim_win_call(from, vim.fn.winsaveview)
       vim.fn.winrestview(view)
     end
@@ -1430,6 +1452,7 @@ api.nvim_create_autocmd('WinEnter', {
     -- a float taking focus gets its own Rex pane: say so now, before the
     -- redraw that first shows it
     local win = api.nvim_get_current_win()
+    entered = win
     note_focus(win)
     if api.nvim_win_get_config(win).relative ~= '' then note('entered', win) end
     schedule_report()
