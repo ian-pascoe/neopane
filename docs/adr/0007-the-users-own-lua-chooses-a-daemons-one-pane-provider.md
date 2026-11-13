@@ -18,12 +18,14 @@ isn't needed. With no config, `find` refusing the default's guess goes only
 to the log, and `list` and `status` show `none (find refused)`; a config's
 choice refused still warns, quoting `find`'s first stderr line.
 
-Amended for SPI-1142: with no config, the default's guess failing to start
-is quiet too, as when stale `REX_SERVER` or `REX_SESSION` leak into a
-terminal after Rex quit: Rex can't be reached, or refuses the session and
-is gone before `find` answers. It goes only to the log, and `list` and
-`status` show `none (can't start)`, as they do when a config's choice can't
-start, which still warns.
+Amended by SPI-1142: with no config, every pane provider the default
+guessed that can't start is quiet too, as is one that goes (`Gone`) before
+`find` confirmed it. Examples: Rex unreachable, or refusing the session,
+when stale `REX_*` leak into a terminal after Rex quit; tmux's built-in
+table failing to spawn. Each goes only to the log, and `list` and `status`
+show `none (can't start)`. A config's choice that can't start, or goes
+before `find` confirmed it, shows the same and still warns; a pane provider
+that goes once confirmed warns whoever chose it.
 
 Amended by ADR 0016 (SPI-1131): with no config, the built-in default chooses
 tmux's built-in table in a tmux pane (`TERM_PROGRAM=tmux` and `TMUX` set),
