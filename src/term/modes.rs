@@ -25,6 +25,24 @@ pub(crate) fn undo() -> Vec<u8> {
     [b"\x1b[?2026l", EDITOR_OFF.as_bytes()].concat()
 }
 
+/// Saves the terminal's title on its title stack (xterm's `CSI 22;2 t`),
+/// before the daemon writes a pane title (ADR 0006).
+pub(crate) const TITLE_PUSH: &str = "\x1b[22;2t";
+
+/// Clears the title, then puts back the one saved (`CSI 23;2 t`): a
+/// terminal with no title stack is left with none (#91 decision 6).
+pub(crate) const TITLE_POP: &str = "\x1b]2;\x1b\\\x1b[23;2t";
+
+/// The bytes that save the terminal's title and set it to `title`.
+pub(crate) fn set_title(title: &str) -> Vec<u8> {
+    format!("{TITLE_PUSH}\x1b]2;{title}\x1b\\").into_bytes()
+}
+
+/// `undo`, once a pane title is written: it puts the title back too.
+pub(crate) fn undo_with_title() -> Vec<u8> {
+    [undo(), TITLE_POP.as_bytes().to_vec()].concat()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,9 @@ use super::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
 };
 
+/// What a test runs with each ask.
+pub(crate) type OnAsk = Box<dyn FnMut(&Ask)>;
+
 #[derive(Default)]
 pub(crate) struct FakeProvider {
     pub caps: CapabilitySet,
@@ -21,6 +24,13 @@ pub(crate) struct FakeProvider {
     pub attach_timeout: Option<Duration>,
     /// Its context variables.
     pub context: &'static [&'static str],
+    /// Its `find` variables.
+    pub find_vars: &'static [&'static str],
+    /// Whether it is a pair, and whether its `find` wants the pane title.
+    pub pair: bool,
+    pub wants_title: bool,
+    /// Run with each ask as it is asked.
+    pub on_ask: Option<OnAsk>,
     events: VecDeque<ProviderEvent>,
 }
 
@@ -92,6 +102,9 @@ impl PaneProvider for FakeProvider {
     }
 
     fn ask(&mut self, id: AskId, ask: Ask) {
+        if let Some(f) = &mut self.on_ask {
+            f(&ask);
+        }
         self.asks.push((id, ask));
     }
 
@@ -105,8 +118,20 @@ impl PaneProvider for FakeProvider {
         self.unlaid
     }
 
-    fn context_vars(&self) -> &[&str] {
-        self.context
+    fn context_vars(&self) -> Vec<&str> {
+        self.context.to_vec()
+    }
+
+    fn find_vars(&self) -> Vec<&str> {
+        self.find_vars.to_vec()
+    }
+
+    fn is_pair(&self) -> bool {
+        self.pair
+    }
+
+    fn wants_title(&self) -> bool {
+        self.wants_title
     }
 
     fn attach_timeout(&self) -> Duration {

@@ -19,7 +19,7 @@ which runs for as long as the pane provider is chosen (see [Events](#events)).
 
 - **Working directory:** the choosing attach's, or `/` if it has gone.
 - **stdin** is `/dev/null`. **stdout** is a pipe the daemon reads for the
-  opens (`open`, `open_beside`, `open_float`, `open_tab_page`),
+  opens (`open`, `open_beside`, `open_float`, `open_tab_page`), `find`,
   `report_layout` and `events`, and `/dev/null` for every other
   capability, whose output is ignored.
   **stderr** is always a pipe the daemon reads. No other descriptor is
@@ -47,6 +47,7 @@ which runs for as long as the pane provider is chosen (see [Events](#events)).
 | Capability | Timeout |
 |---|---|
 | `open`, `open_beside`, `open_float`, `open_tab_page` | 5 s |
+| `find` | 3 s, its own retries included |
 | `close`, `place_beside`, `resize`, `focus`, `focus_direction` | 2 s |
 | `report_layout` | 1 s |
 
@@ -62,18 +63,84 @@ chosen (see [Events](#events)).
 | anything else, or killed by a signal | failed: the daemon does without it this time; the first failure of each capability shows in Neovim with its first stderr line |
 
 A command that can't start, such as a program not found, is unsupported.
+`find`'s statuses mean more: see [`find`](#find).
 
 The first 64 KiB of stderr of each run goes to the daemon's log, line by
 line.
 
 ## Output
 
-The opens print the new terminal's id as the first line of stdout. It is
-trimmed of ASCII whitespace, and is at most 4 KiB, with no NUL, in UTF-8:
+The opens and `find` print a terminal's id as the first line of stdout. It
+is trimmed of ASCII whitespace, and is at most 4 KiB, with no NUL, in UTF-8:
 anything else fails the act. An empty first line, or no output, is no id:
 the terminal opened, but the daemon can't close, place or focus it. The
 rest of stdout is ignored, as is all of every other capability's but
 `report_layout`'s and `events`'.
+
+### `find`
+
+`find` tells the daemon whether a terminal that attached is one of the
+pane provider's, and its id. It runs for a terminal that attached of its
+own accord (a self-attach), and for one the pane provider opened when it
+has no id for it: one whose open printed none, or, in a pair, every one
+(see [Pairs](#pairs)). It runs in the choosing attach's environment, so
+`$TMUX_PANE` there is the choosing attach's: the attaching terminal's own
+variables reach it only as `<NAME>_ENV_<VAR>`, one for each of the table's
+`find_vars` the terminal has, its value as raw bytes. It also gets the
+attach's `PANE`, `PID`, `TTY` and `TITLE`.
+
+Before the first `find` for an attach, the daemon writes the **pane
+title**, `<name>-` and the token of the pane id (`TITLE`), into the
+terminal's title, as ordinary output: it saves the terminal's own title
+first (`CSI 22;2 t`), then writes the title with `OSC 2`. When the pane
+hangs up or detaches, the title is cleared (`OSC 2` with nothing), then the
+saved one put back (`CSI 23;2 t`); a terminal that keeps no title stack,
+such as Ghostty or WezTerm, is left with no title. `find` matches a window
+whose title contains `TITLE`, retrying for a while, since a window manager
+may not list a new window at once. An open gets the same title as `TITLE`,
+so a terminal provider can make it the window's first title rather than
+rely on the terminal honouring the escape code. Rex's built-in `find` needs
+no title, so a Rex pane never gets one; nor does a terminal with no pane
+provider.
+
+What each answer means depends on whose terminal it is:
+
+| Answer | (a) the choosing attach | (b) a later self-attach | (c) a terminal the pane provider opened |
+|---|---|---|---|
+| exit 0, a line | accepted; that id | in reach; that id | that id |
+| exit 0, nothing | accepted; no id | in reach; no id | no id |
+| exit 69, or can't start | accepted; no id; `find` isn't run again until the next choice | `find` isn't run until the next choice: reach rests on context variables alone; no id | no id |
+| anything else, a signal, a timeout | refused: no pane provider, with a warning | out of reach | no id, still in reach |
+
+"No id" means every act that needs one does without: new windows split
+off the terminal's pane open unplaced, it is never focused, and its pane is
+a layout area of its own.
+
+### Reach
+
+A terminal is in the pane provider's reach if the pane provider opened it,
+it is the choosing attach's, or it passes the pane provider's checks. A
+window opened from a pane out of reach is drawn in that pane, not in a
+terminal of its own.
+
+- **Context variables** (`context_vars`) come first: each must have the
+  value it had in the choosing attach, compared as bytes, unset matching
+  unset. A terminal that differs is out of reach, and `find` doesn't run.
+- Then **`find`**, as its table above says.
+- With neither, every terminal is in reach.
+
+### Pairs
+
+A pair, `{ terminal = T, layout = L }`, runs only `T`'s `open` and `close`,
+and `L`'s `find`, `place_beside`, `resize`, `focus`, `focus_direction`,
+`report_layout` and `events`, with `L`'s `context_vars` and `find_vars`.
+The one-step capabilities (`open_beside`, `open_float`, `open_tab_page`)
+come only from a table returned whole, so a pair opens, then places, and has
+no tab page areas.
+
+The id `T`'s `open` prints serves only `close`; with none, `close` doesn't
+run. `L`'s `find` runs for every attach, even when `open` printed an id,
+and the id it prints serves everything else.
 
 ### `report_layout`
 
@@ -167,6 +234,7 @@ the lower-cased rest of its name in braces. `{terminal}` is
 | `open_float` | `attach` `attach_json` `title` `pane` `origin` `x` `y` `cols` `rows` `origin_cols` `origin_rows` `area_bounds` | opens it floating over `origin`, at `x`,`y` and `cols` x `rows`, and prints its id |
 | `open_tab_page` | `attach` `attach_json` `title` `pane` `origin` `cols` `rows` | opens it in a new tab page area, and prints its id |
 | `close` | `terminal` | closes the terminal; must succeed on one already gone |
+| `find` | `pane` `pid` `tty` `title`, and `<NAME>_ENV_<VAR>` for each of `find_vars` | prints the attaching terminal's id (see [`find`](#find)) |
 | `place_beside` | `terminal` `origin` `direction` `size` `ratio` | moves the terminal beside `origin`, on side `direction` |
 | `resize` | `terminal` `origin` `direction` `size` `ratio` | sets the terminal's share of the split it makes with `origin`, the terminal across it |
 | `focus` | `terminal` | makes the terminal the one the user types into, wherever it is |
@@ -175,8 +243,7 @@ the lower-cased rest of its name in braces. `{terminal}` is
 | `events` | | prints a line whenever the layout or focus changes (see [Events](#events)) |
 
 Without `open_beside`, the daemon runs `open`, then `place_beside` once the
-terminal has printed its id and attached. `find` is not run
-yet.
+terminal has printed its id and attached.
 
 ## Variables
 
@@ -190,7 +257,7 @@ Each is `<NAME>_` and the name below.
 | `ATTACH_JSON` | compact JSON array | the same words |
 | `TITLE` | e.g. `<name>-k3j9x2qpa8` | the pane title |
 | `PANE` | e.g. `12-k3j9x2qpa8` | the pane id the attach command names |
-| `TERMINAL` | as an open printed it | the terminal acted on |
+| `TERMINAL` | as an open or `find` printed it | the terminal acted on |
 | `ORIGIN` | terminal id | the origin pane's terminal (for `open_float`, the current pane's); for `resize`, the terminal across the split |
 | `DIRECTION` | `left`, `right`, `up`, `down` | a split: which side of `ORIGIN` the terminal goes or is on; `focus_direction`: where focus moves |
 | `SIZE` | integer, cells | the terminal's size along the split |
@@ -200,5 +267,6 @@ Each is `<NAME>_` and the name below.
 | `ORIGIN_COLS`, `ORIGIN_ROWS` | integer, cells | `ORIGIN`'s size |
 | `AREA_BOUNDS` | `x,y,w,h`, each as `RATIO` | the float as fractions of `ORIGIN`'s layout area; unset outside a live layout |
 | `COUNT` | integer, 1–20 | `focus_direction`'s steps |
-
-`PID`, `TTY` and `ENV_*` are `find`'s, and are stripped all the same.
+| `PID` | integer | the attaching helper's process id |
+| `TTY` | path | the attaching terminal's tty; empty where it has none |
+| `ENV_<VAR>` | raw bytes | the attaching terminal's value of `VAR`, one of `find_vars`; unset where it has none. A variable only, never a placeholder |

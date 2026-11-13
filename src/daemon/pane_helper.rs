@@ -1640,6 +1640,34 @@ mod tests {
         against_with(Attach::new(want, Transport::Relay), None, daemon)
     }
 
+    // The daemon's own `Surface` writes a pane title; at hang-up the helper
+    // clears it and puts the saved one back, under either transport.
+    #[test]
+    fn a_titled_pane_hung_up_has_its_old_title_put_back() {
+        use crate::daemon::surface::{Surface, cells};
+        let title: &'static str = format!("{NAME}-abcdefghij").leak();
+        for transport in [Transport::Fd, Transport::Relay] {
+            let how = Attach::new(Want::Requested(pane()), transport);
+            let run = against_with(how, None, move |f| {
+                crate::daemon::attach_conn::send_accept(&f.s, "d", "/tmp/log").unwrap();
+                f.s.set_nonblocking(true).unwrap();
+                let mut surface = Surface::for_attach(f.s, transport, f.tty, cells(80, 24));
+                // what it draws doesn't matter here
+                surface.writer.clear();
+                surface.write_title(title).unwrap();
+                surface.destroy(Ending::Closed, "");
+            });
+            assert_eq!(Exit::ok(), run.exit, "{transport:?}");
+            let shown = String::from_utf8_lossy(&run.shown).into_owned();
+            let set = format!("\x1b[22;2t\x1b]2;{title}\x1b\\");
+            let put_back = "\x1b]2;\x1b\\\x1b[23;2t";
+            // saved and set, then at the end the undo bytes: cleared, popped
+            let at = shown.find(&set).unwrap_or_else(|| panic!("{shown:?}"));
+            assert!(shown[at + set.len()..].ends_with(put_back), "{shown:?}");
+            assert!(run.restored && run.blocking);
+        }
+    }
+
     /// What the helper relays in `i` frames on `theirs`, until `n` bytes.
     fn next_input(theirs: &UnixStream, n: usize) -> Vec<u8> {
         let mut buf = vec![0u8; 1 << 16];

@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 
 use super::backlog::Backlog;
 use super::terminal_io::{FdIo, RelayIo, TerminalIo};
-use crate::attach::{End, Ending, Size, Transport};
+use crate::attach::{End, Ending, Message, Size, Transport};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -114,6 +114,28 @@ impl Surface {
         self.io.wrap(&mut self.writer);
         let fd = self.output_fd();
         self.backlog.send(fd, &mut self.writer)?;
+        Ok(if self.backlog.is_empty() {
+            Sent::All
+        } else {
+            Sent::Waiting
+        })
+    }
+
+    /// Writes pane title `title` into the terminal, its own title saved
+    /// first (ADR 0006), and tells the helper the undo bytes that put it
+    /// back, in a new `u` sent before it (#91 decision 6). Never waits,
+    /// as `send_frame`.
+    pub(crate) fn write_title(&mut self, title: &str) -> std::io::Result<Sent> {
+        let u = Message::Undo(modes::undo_with_title())
+            .encode()
+            .expect("the undo bytes fit a `u`");
+        let mut out = Vec::new();
+        self.io.send_undo(&self.helper_socket, &u, &mut out);
+        self.writer.extend_from_slice(&modes::set_title(title));
+        self.io.wrap(&mut self.writer);
+        out.append(&mut self.writer);
+        let fd = self.output_fd();
+        self.backlog.send(fd, &mut out)?;
         Ok(if self.backlog.is_empty() {
             Sent::All
         } else {
@@ -322,5 +344,27 @@ mod tests {
         let (said, rest) = frames_and_rest(&helper);
         assert!(!said.iter().any(|m| matches!(m, Message::End(_))));
         assert!(!rest.is_empty(), "the `o` in flight is cut off");
+    }
+
+    // Relayed, the new `u` goes between whole frames, before the title.
+    #[test]
+    fn a_relayed_pane_title_follows_its_u_on_the_helper_socket() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        assert_eq!(Sent::All, surface.write_title("np-abcdefghij").unwrap());
+        surface.destroy(Ending::Closed, "");
+        let (said, _) = frames_and_rest(&helper);
+        let [Message::Undo(u), Message::Output(o), Message::End(_)] = &said[..] else {
+            panic!("{said:?}");
+        };
+        assert_eq!(&modes::undo_with_title(), u);
+        assert!(u.ends_with(b"\x1b]2;\x1b\\\x1b[23;2t"));
+        assert_eq!(
+            b"\x1b[22;2t\x1b]2;np-abcdefghij\x1b\\".as_slice(),
+            o.as_slice()
+        );
     }
 }

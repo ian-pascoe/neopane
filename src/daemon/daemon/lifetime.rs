@@ -109,14 +109,16 @@ impl Daemon {
         }
         self.lifetime.kept = kept;
         // float group panes, and requests that failed: their ids expire
-        while let Some(p) = self.panes.list.last_mut() {
+        while let Some(p) = self.panes.list.last() {
+            let close = self.close_id(p);
+            let p = self.panes.list.last_mut().unwrap();
             let failed = p.closing == Some(Close::RequestFailed);
             if p.closing.is_none() {
                 p.closing = Some(Close::Shutdown);
             }
             if !p.is_self_attached()
                 && !failed
-                && let Some(t) = p.terminal.clone()
+                && let Some(t) = close
             {
                 self.act(asks::close(t));
             }

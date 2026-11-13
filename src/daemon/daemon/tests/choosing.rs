@@ -754,3 +754,503 @@ fn a_pane_provider_is_kept_while_a_terminal_in_its_reach_is_on_its_way() {
     assert!(fx.d.panes.by_id(opened).is_some());
     assert!(fx.d.provider.is_some());
 }
+
+#[test]
+fn context_variables_compare_as_bytes_unset_matching_unset() {
+    use crate::daemon::daemon::choosing::in_context;
+    let env = |vars: &[(&str, &[u8])]| -> Vec<(Vec<u8>, Vec<u8>)> {
+        vars.iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.to_vec()))
+            .collect()
+    };
+    let vars = ["REX_SERVER", "REX_SESSION"];
+    let chose = [Some(b"unix:///s".to_vec()), None];
+    assert!(in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///s")])
+    ));
+    // set where the choosing attach had it unset, even empty
+    assert!(!in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///s"), ("REX_SESSION", b"")])
+    ));
+    // a byte apart, and unset where it was set
+    assert!(!in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///S")])
+    ));
+    assert!(!in_context(&vars, &chose, &env(&[])));
+    // raw bytes, not text
+    let raw = [Some(b"\xff".to_vec())];
+    assert!(in_context(&["X"], &raw, &env(&[("X", b"\xff")])));
+    // none: every attach
+    assert!(in_context(&[], &[], &env(&[("REX_SESSION", b"other")])));
+}
+
+// The pane title (#127)
+
+/// What the daemon wrote to the terminal of pty `master`: until it holds
+/// `until`, for at most 5 s; else what came before 50 ms passed quietly.
+fn written_to(master: i32, until: Option<&[u8]>) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if let Some(want) = until
+            && (out.windows(want.len()).any(|w| w == want) || Instant::now() >= deadline)
+        {
+            return out;
+        }
+        let mut fds = [libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        let ready =
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, if until.is_some() { 100 } else { 50 }) };
+        if ready <= 0 {
+            if until.is_none() {
+                return out;
+            }
+            continue;
+        }
+        // SAFETY: reading into a buffer of its size.
+        let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return out;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+}
+
+/// The frames `helper` was sent so far.
+fn frames_sent(helper: &UnixStream) -> Vec<crate::attach::Message> {
+    helper
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = (&*helper).read(&mut buf) {
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let mut out = Vec::new();
+    while let Some(m) = crate::daemon::attach_conn::next_message(&mut bytes).unwrap() {
+        out.push(m);
+    }
+    out
+}
+
+/// A daemon whose fake pane provider can `find`, `wants_title` or not,
+/// chosen already with no context variables. A self-attach to it: its
+/// pane, its helper's end, its pty, and what its terminal had been sent
+/// when `find` was asked.
+fn self_attach_finding(wants_title: bool) -> (Fixture, u32, UnixStream, Pty, Rc<RefCell<Vec<u8>>>) {
+    let mut f = FakeProvider::opening();
+    f.caps.insert(Capability::Find);
+    f.wants_title = wants_title;
+    let pty = Pty::new(80, 24);
+    let at_find = Rc::new(RefCell::new(Vec::new()));
+    let (master, seen) = (pty.master, at_find.clone());
+    f.on_ask = Some(Box::new(move |ask| {
+        if let Ask::Find { title, .. } = ask {
+            // what a title would be, were it written
+            let set = crate::term::modes::set_title(title);
+            let until = wants_title.then_some(set.as_slice());
+            seen.borrow_mut().extend(written_to(master, until));
+        }
+    }));
+    let mut fx = with_provider(Some(Box::new(f)));
+    fx.d.nvim.ready = true;
+    fx.d.panes.add_for_window(900);
+    let at = Address::new(&format!("title-{wants_title}"));
+    let helper = at.send(&rex_hello("session:s", BLOCK), Some(pty.slave));
+    fx.d.accept(&at.server).unwrap();
+    let id = fx.d.panes.list.last().unwrap().id;
+    (fx, id, helper, pty, at_find)
+}
+
+#[test]
+fn the_pane_title_is_written_before_find_runs_and_put_back_by_the_undo_bytes() {
+    let (mut fx, id, helper, pty, at_find) = self_attach_finding(true);
+    let attach = fx.d.panes.by_id(id).unwrap().attach_id.unwrap();
+    let (_, Ask::Find { title, .. }) = last_ask(&mut fx.d) else {
+        panic!("no find asked");
+    };
+    assert_eq!(format!("{NAME}-{}", attach.token()), title);
+    // saved, then set, before `find` was asked
+    let set = format!("\x1b[22;2t\x1b]2;{title}\x1b\\");
+    let seen = String::from_utf8_lossy(&at_find.borrow()).into_owned();
+    assert!(seen.contains(&set), "{seen:?}");
+    // the undo bytes clear it and put the saved one back, in a new `u`
+    use crate::attach::Message;
+    let undos: Vec<Vec<u8>> = frames_sent(&helper)
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Undo(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    let undo = crate::term::modes::undo();
+    let with_title = [undo.clone(), b"\x1b]2;\x1b\\\x1b[23;2t".to_vec()].concat();
+    assert_eq!(vec![undo, with_title], undos);
+
+    // once per attach: a second `find` writes nothing more
+    fx.d.drop_provider().unwrap();
+    let mut f = FakeProvider::opening();
+    f.caps.insert(Capability::Find);
+    f.wants_title = true;
+    fx.d.provider = Some(Box::new(f));
+    // the window's pane, chosen in, keeps it
+    fx.d.panes.by_win_mut(900).unwrap().reach = Reach::In;
+    fx.d.choose_or_reach(id).unwrap();
+    assert!(matches!(
+        fake(&mut fx.d).asked().last(),
+        Some(Ask::Find { .. })
+    ));
+    assert!(!String::from_utf8_lossy(&written_to(pty.master, None)).contains("\x1b]2;"));
+    assert!(frames_sent(&helper).is_empty());
+}
+
+#[test]
+fn a_pane_provider_whose_find_wants_no_title_gets_none_written() {
+    // as Rex's built-in `find`
+    let (mut fx, _id, helper, pty, at_find) = self_attach_finding(false);
+    assert!(matches!(
+        fake(&mut fx.d).asked().last(),
+        Some(Ask::Find { .. })
+    ));
+    let mut seen = at_find.borrow().clone();
+    seen.extend(written_to(pty.master, None));
+    let seen = String::from_utf8_lossy(&seen).into_owned();
+    assert!(
+        !seen.contains("\x1b]2;") && !seen.contains("\x1b[22;2t"),
+        "{seen:?}"
+    );
+    let undos = frames_sent(&helper)
+        .into_iter()
+        .filter(|m| matches!(m, crate::attach::Message::Undo(_)))
+        .count();
+    assert_eq!(1, undos);
+}
+
+// A requested terminal's `find`, and pairs (#127)
+
+/// A fake pair: its terminal half opens and closes, its layout half finds
+/// and places.
+fn pair() -> FakeProvider {
+    let mut f = FakeProvider::with(&[
+        Capability::Open,
+        Capability::Close,
+        Capability::Find,
+        Capability::PlaceBeside,
+        Capability::Focus,
+    ]);
+    f.pair = true;
+    f
+}
+
+/// A daemon that chose `fake` from a pane showing window 1000, found as
+/// `L0`, then split window 1001 off it, opened by `open` to be placed: the
+/// open's id, and what keeps the choosing pane open.
+fn split_opened(fake: FakeProvider) -> (Fixture, AskId, crate::attach::PaneId, (UnixStream, Pty)) {
+    let (mut fx, _) = fixture_choosing(vec![fake]);
+    let (_first, h1, p1) = attach_showing_1000(&mut fx, &rex_hello("session:s", BLOCK));
+    found(&mut fx.d, "L0");
+    split_1001_off_1000(&mut fx);
+    let (ask, Ask::Open { pane, .. }) = last_ask(&mut fx.d) else {
+        panic!("not an open: {:?}", last_ask(&mut fx.d));
+    };
+    (fx, ask, pane, (h1, p1))
+}
+
+/// The pane provider is done with the last act asked.
+fn placed(d: &mut Daemon) {
+    let id = fake(d).last_id();
+    fake(d).answer(id, Outcome::Done(Answer::Nothing));
+    d.drain_provider().unwrap();
+}
+
+#[test]
+fn a_pairs_close_takes_the_terminal_halfs_id_and_placement_the_layout_halfs() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    // `open`'s id places nothing: nothing is asked of it
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::Open { .. }));
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    assert_eq!(None, fx.d.panes.by_id(id).unwrap().terminal);
+
+    // the layout half's `find` runs for it as it attaches, and its id places it
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    found(&mut fx.d, "L1");
+    let Ask::PlaceBeside {
+        terminal, origin, ..
+    } = last_ask(&mut fx.d).1
+    else {
+        panic!("not placed: {:?}", last_ask(&mut fx.d));
+    };
+    assert_eq!(
+        (TerminalId::from("L1"), TerminalId::from("L0")),
+        (terminal, origin)
+    );
+    assert_eq!(Reach::In, fx.d.panes.by_id(id).unwrap().reach);
+    placed(&mut fx.d);
+
+    // its window closes: `close` takes the terminal half's id
+    fx.d.give_up(id).unwrap();
+    assert_eq!(
+        Ask::Close {
+            terminal: TerminalId::from("T1")
+        },
+        last_ask(&mut fx.d).1
+    );
+}
+
+#[test]
+fn a_pairs_find_runs_even_when_its_terminal_attached_before_open_answered() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    let _h2 = attach_requested(&mut fx, pane);
+    // asked once the open is answered, layout acts going one at a time
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    // once: the choosing pane's, and its
+    assert_eq!(2, finds_asked(&mut fx.d));
+}
+
+#[test]
+fn a_pair_whose_open_printed_no_id_closes_nothing() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).answer(open, Outcome::Done(Answer::Nothing));
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    found(&mut fx.d, "L1");
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    let asked = fake(&mut fx.d).asks.len();
+    fx.d.give_up(id).unwrap();
+    assert_eq!(asked, fake(&mut fx.d).asks.len());
+}
+
+#[test]
+fn a_requested_terminal_find_fails_for_is_unplaced_and_still_in_reach() {
+    let (mut fx, open, pane, _keep) = split_opened(pair());
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    not_found(&mut fx.d, "exit 1");
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((Reach::In, None), (p.reach, p.terminal.clone()));
+    assert_eq!(Area::Own, p.area);
+    // never placed, the pane provider kept, with no warning
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::Find { .. }));
+    assert!(fx.d.provider.is_some());
+    assert!(!sent_to_nvim(&mut fx).contains("no pane provider"));
+}
+
+#[test]
+fn a_whole_tables_requested_terminal_is_found_only_when_its_open_printed_no_id() {
+    let mut whole = pair();
+    whole.pair = false;
+    // an id: no `find`
+    let (mut fx, open, pane, _keep) = split_opened(whole);
+    fake(&mut fx.d).opened(open, "T1");
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(1, finds_asked(&mut fx.d));
+
+    let mut whole = pair();
+    whole.pair = false;
+    let (mut fx, open, pane, _keep) = split_opened(whole);
+    fake(&mut fx.d).answer(open, Outcome::Done(Answer::Nothing));
+    fx.d.drain_provider().unwrap();
+    let _h2 = attach_requested(&mut fx, pane);
+    assert_eq!(pane, last_find(&mut fx.d).1);
+    found(&mut fx.d, "T1");
+    // its id places it, and closes it
+    assert!(matches!(last_ask(&mut fx.d).1, Ask::PlaceBeside { .. }));
+    placed(&mut fx.d);
+    let id = fx.d.panes.by_win(1001).unwrap().id;
+    fx.d.give_up(id).unwrap();
+    assert_eq!(
+        Ask::Close {
+            terminal: TerminalId::from("T1")
+        },
+        last_ask(&mut fx.d).1
+    );
+}
+
+// `find` as a command, one test per column of #93 decision 17's table:
+// (a) confirming the choice, (b) a later self-attach, (c) a requested
+// terminal. Each runs every row: a line, nothing, 69, and a failure.
+
+/// The rows of decision 17's table, as `find` scripts.
+const ROWS: [&str; 4] = ["echo L1", "exit 0", "exit 69", "echo no >&2; exit 1"];
+
+/// A command runner whose `find` is `script`, in a pair if `pair`, its
+/// context variable `CTX`; its `open` prints `T1`, and it can place and
+/// close.
+fn runner_finding(script: &Script, pair: bool) -> Box<dyn PaneProvider> {
+    use crate::providers::command::{CapCommand, CommandProvider, Spec};
+    let command = |cap, argv: &[&str]| CapCommand {
+        cap,
+        argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+        timeout: Duration::from_secs(3),
+        protocol: 1,
+    };
+    let spec = Spec {
+        commands: vec![
+            command(Capability::Find, &["sh", script.path()]),
+            command(Capability::Open, &["echo", "T1"]),
+            command(Capability::PlaceBeside, &["true"]),
+            command(Capability::Close, &["true"]),
+        ],
+        context_vars: vec!["CTX".into()],
+        pair,
+        ..Spec::named("cmd")
+    };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let env = [
+        (b"PATH".to_vec(), path.as_encoded_bytes().to_vec()),
+        (b"CTX".to_vec(), b"a".to_vec()),
+    ];
+    Box::new(CommandProvider::new(spec, &env, b"/").unwrap())
+}
+
+/// A self-attach's hello from context `ctx`.
+fn ctx_hello(ctx: &str) -> Vec<u8> {
+    use crate::daemon::attach_conn::{self_hello, test_terminal};
+    let mut t = test_terminal(80, 24);
+    t.env = vec![(b"CTX".to_vec(), ctx.as_bytes().to_vec())];
+    self_hello(t)
+}
+
+/// A daemon holding `p` as chosen in context `a`, watching it on its loop,
+/// with a pane of its own in reach.
+fn holding(p: Box<dyn PaneProvider>) -> Fixture {
+    let mut fx = with_provider(Some(p));
+    let fd = fx.d.provider.as_ref().and_then(|p| p.fd()).unwrap();
+    fx.d.event_loop
+        .add_read(fd, Token::Provider as usize)
+        .unwrap();
+    fx.d.context = vec![Some(b"a".to_vec())];
+    fx.d.nvim.ready = true;
+    fx.d.panes.add_for_window(900);
+    fx
+}
+
+#[test]
+fn find_confirming_the_choice_accepts_on_exit_0_or_69_and_refuses_otherwise() {
+    for (row, script_text) in ROWS.iter().enumerate() {
+        let script = Script::new("find-a");
+        script.set(script_text);
+        let mut fx = with_provider(None);
+        fx.d.nvim.ready = true;
+        let mut held = Some(runner_finding(&script, false));
+        fx.d.test_choose = Some(Box::new(move |_| Chosen::Provider {
+            held: held.take().unwrap(),
+            spent: Duration::ZERO,
+        }));
+        let (id, _h, _p) = attach_showing_1000(&mut fx, &ctx_hello("a"));
+        pump_until(&mut fx, |d| d.choosing.is_none());
+        let kept = fx.d.provider.is_some();
+        let p = fx.d.panes.by_id(id).unwrap();
+        let (reach, terminal) = (p.reach, p.terminal.clone());
+        match row {
+            0 => assert_eq!(
+                (true, Reach::In, Some(TerminalId::from("L1"))),
+                (kept, reach, terminal)
+            ),
+            1 => assert_eq!((true, Reach::In, None), (kept, reach, terminal)),
+            2 => {
+                assert_eq!((true, Reach::In, None), (kept, reach, terminal));
+                assert!(fx.d.asks.unsupported(Capability::Find));
+            }
+            _ => {
+                assert_eq!((false, Reach::Out), (kept, reach));
+                let warned = sent_to_nvim(&mut fx);
+                assert!(
+                    warned.contains("cmd: find didn't confirm this terminal: exit 1: no"),
+                    "{warned:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn find_for_a_later_self_attach_says_its_reach() {
+    for (row, script_text) in ROWS.iter().enumerate() {
+        let script = Script::new("find-b");
+        script.set(script_text);
+        let mut fx = holding(runner_finding(&script, false));
+        let (id, _h, _p) = attach_later(&mut fx, &ctx_hello("a"));
+        pump_until(&mut fx, |d| {
+            d.panes.by_id(id).unwrap().reach != Reach::Finding
+        });
+        let p = fx.d.panes.by_id(id).unwrap();
+        let (reach, terminal) = (p.reach, p.terminal.clone());
+        match row {
+            0 => assert_eq!((Reach::In, Some(TerminalId::from("L1"))), (reach, terminal)),
+            1 => assert_eq!((Reach::In, None), (reach, terminal)),
+            2 => {
+                assert_eq!((Reach::In, None), (reach, terminal));
+                // not run again until the next choice: context alone decides
+                script.set("echo ran > \"$0.ran\"; echo L2");
+                let (next, _h2, _p2) = attach_later(&mut fx, &ctx_hello("a"));
+                assert_eq!(Reach::In, fx.d.panes.by_id(next).unwrap().reach);
+                let (other, _h3, _p3) = attach_later(&mut fx, &ctx_hello("b"));
+                assert_eq!(Reach::Out, fx.d.panes.by_id(other).unwrap().reach);
+                assert!(!std::path::Path::new(&format!("{}.ran", script.path())).exists());
+            }
+            // out of reach: no warning, and the pane provider is kept only
+            // while a terminal in its reach is left
+            _ => {
+                assert_eq!((Reach::Out, None), (reach, terminal));
+                assert!(!sent_to_nvim(&mut fx).contains("find"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_context_variable_mismatch_skips_find() {
+    let script = Script::new("find-ctx");
+    script.set("echo ran > \"$0.ran\"; echo L1");
+    let mut fx = holding(runner_finding(&script, false));
+    let (id, _h, _p) = attach_later(&mut fx, &ctx_hello("b"));
+    assert_eq!(Reach::Out, fx.d.panes.by_id(id).unwrap().reach);
+    assert!(!fx.d.asks.busy());
+    // unset where the choosing attach had it set
+    let (unset, _h2, _p2) = attach_later(&mut fx, &rex_hello("session:s", BLOCK));
+    assert_eq!(Reach::Out, fx.d.panes.by_id(unset).unwrap().reach);
+    assert!(!fx.d.asks.busy());
+    assert!(!std::path::Path::new(&format!("{}.ran", script.path())).exists());
+}
+
+#[test]
+fn find_for_a_requested_terminal_gives_its_id_or_none_and_never_puts_it_out_of_reach() {
+    for (row, script_text) in ROWS.iter().enumerate() {
+        let script = Script::new("find-c");
+        script.set(script_text);
+        // a pair: `find` runs for it as it attaches
+        let mut fx = holding(runner_finding(&script, true));
+        let (id, pane) = requested_pane(&mut fx);
+        let at = Address::new(&format!("find-c-{row}"));
+        let pty = Pty::new(80, 23);
+        let _h = at.send(&hello_for(pane, 80, 23), Some(pty.slave));
+        fx.d.accept(&at.server).unwrap();
+        assert!(fx.d.asks.asked(Capability::Find));
+        pump_until(&mut fx, |d| !d.asks.busy());
+        let p = fx.d.panes.by_id(id).unwrap();
+        let terminal = (row == 0).then(|| TerminalId::from("L1"));
+        assert_eq!((Reach::In, terminal), (p.reach, p.terminal.clone()));
+        assert!(fx.d.provider.is_some());
+        assert!(!sent_to_nvim(&mut fx).contains("no pane provider"));
+    }
+}

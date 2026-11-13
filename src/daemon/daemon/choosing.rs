@@ -11,13 +11,19 @@
 //! meanwhile wait their turn, until one gets a pane provider. A later
 //! self-attach is in reach if its context variables are the choosing
 //! attach's, and its `find` agrees; a window opened from a pane out of reach
-//! is drawn in that pane.
+//! is drawn in that pane. A terminal the pane provider opened is in its
+//! reach whatever `find` says, which runs for it only for its id: in a
+//! pair, or when its open printed none (#93 decision 17).
+//!
+//! Before the first `find` for an attach, a pane provider whose `find`
+//! matches the pane title, unlike Rex's, has the daemon write it into the
+//! terminal, and a new `u` tells the helper how to put the old one back.
 
 use super::*;
 use crate::attach::{PaneId, env_value};
 use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
-use crate::providers::choose::{self, Chosen};
+use crate::providers::choose::{self, Chosen, Env};
 
 /// The choice running: the choosing pane, the pane id its `find` carries,
 /// and when the choice runs out of time.
@@ -193,11 +199,10 @@ impl Daemon {
     fn check_context_reach(&mut self, id: u32) -> bool {
         let vars = self.provider.as_deref().unwrap().context_vars();
         let p = self.panes.by_id(id).unwrap();
-        let same = p.hello.as_deref().is_some_and(|hello| {
-            vars.iter()
-                .zip(&self.context)
-                .all(|(v, chose)| env_value(&hello.env, v) == chose.as_deref())
-        });
+        let same = p
+            .hello
+            .as_deref()
+            .is_some_and(|hello| in_context(&vars, &self.context, &hello.env));
         if !same {
             log_info!(
                 "{NAME} daemon: pane {id} is out of reach: its {} differ",
@@ -229,6 +234,7 @@ impl Daemon {
         let find_vars: Vec<String> = p
             .map(|p| p.find_vars().iter().map(|v| v.to_string()).collect())
             .unwrap_or_default();
+        let wants_title = p.is_some_and(|p| p.wants_title());
         let Some(q) = self.panes.by_id_mut(id) else {
             return false;
         };
@@ -237,7 +243,17 @@ impl Daemon {
             q.reach = Reach::In;
             return true;
         }
-        q.reach = Reach::Finding;
+        // a terminal this pane provider opened stays in its reach whatever
+        // `find` says: only its id is to find (#93 decision 17's (c))
+        if !q.is_provider_made() {
+            q.reach = Reach::Finding;
+        }
+        let title = pane::title(&attach_id);
+        if wants_title && !q.titled {
+            q.titled = true;
+            self.write_title(id, &title);
+        }
+        let q = self.panes.by_id(id).unwrap();
         let hello: &AttachHello = q.hello.as_deref().expect("a pane that finds has a hello");
         let env = hello
             .env
@@ -250,13 +266,37 @@ impl Daemon {
             pid: hello.pid,
             tty: String::from_utf8_lossy(&hello.tty).into_owned(),
             device: hello.device,
-            title: pane::title(&attach_id),
+            title,
             env,
         };
         // L7 is timed from here
         log::trace(Point::Accept, u64::from(id));
         self.act(ask);
         false
+    }
+
+    /// Writes pane title `title` into pane `id`'s terminal, for its
+    /// `find`. A terminal that can't take it is gone, which its hang-up
+    /// tells.
+    fn write_title(&mut self, id: u32, title: &str) {
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return;
+        };
+        let token = p.token(PaneFd::Terminal);
+        let Some(s) = p.terminal_surface.as_deref_mut() else {
+            return;
+        };
+        let watched = match s.write_title(title) {
+            Ok(Sent::Waiting) => self
+                .event_loop
+                .add_write(s.output_fd(), token)
+                .map_err(|e| e.to_string()),
+            Ok(Sent::All) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = watched {
+            log_info!("{NAME} daemon: pane {id}: can't write its title: {e}");
+        }
     }
 
     /// The pane provider's name, for the log and warnings.
@@ -327,6 +367,54 @@ impl Daemon {
         Ok(())
     }
 
+    /// Requested pane `id`'s terminal attached, or its open answered: the
+    /// layout provider's `find` is asked for its id, if it has none from
+    /// its open, as in a pair, and it attached (ADR 0006). It stays in
+    /// reach whatever `find` says.
+    pub(super) fn find_requested(&mut self, id: u32) -> Result<()> {
+        let Some(p) = self.panes.by_id(id) else {
+            return Ok(());
+        };
+        let asks = p.is_provider_made()
+            && p.closing.is_none()
+            && p.terminal.is_none()
+            && p.hello.is_some()
+            && p.terminal_surface.is_some();
+        if asks && self.ask_find(id) {
+            // no `find`: no id
+            self.no_terminal_id(id)?;
+        }
+        Ok(())
+    }
+
+    /// The pane provider's `find` gave requested pane `id` its terminal's
+    /// id `t`, which places it, as an open's id would.
+    fn found_opened(&mut self, id: u32, t: &TerminalId) -> Result<()> {
+        self.place_opened(id);
+        let handle = self.panes.by_id(id).and_then(|p| p.neovim_window_handle);
+        if handle.is_some() && handle == Some(self.nvim.current_win) {
+            self.focus_terminal(Some(t));
+        }
+        self.wait_for_report(id, Instant::now())
+    }
+
+    /// Requested pane `id` has no terminal id, nor will have: nothing
+    /// places it, and it is a layout area of its own.
+    fn no_terminal_id(&mut self, id: u32) -> Result<()> {
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return Ok(());
+        };
+        if p.area != Area::Unreported {
+            return Ok(());
+        }
+        p.area = Area::Own;
+        p.report_due = None;
+        if !self.nvim.ready {
+            return Ok(());
+        }
+        self.refit_to_areas()
+    }
+
     /// The choice running is refused, for `why`: the pane provider is
     /// dropped, with a warning.
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
@@ -342,14 +430,25 @@ impl Daemon {
         let Ask::Find { pane, .. } = ask else {
             return Ok(());
         };
+        let mut made = None;
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
+            // (c): opened by this pane provider, only its id was to find
+            if p.is_provider_made() {
+                made = Some(p.id);
+            }
             p.reach = Reach::In;
-            if let Answer::Terminal(t) = answer {
-                p.terminal = Some(t);
+            if let Answer::Terminal(t) = &answer {
+                p.terminal = Some(t.clone());
             }
             log::trace(Point::Found, u64::from(p.id));
         }
         self.confirm(pane)?;
+        if let Some(id) = made {
+            match answer {
+                Answer::Terminal(t) => self.found_opened(id, &t)?,
+                _ => self.no_terminal_id(id)?,
+            }
+        }
         // a live layout that came first places it now
         if let Some(l) = self.live_layout.clone()
             && self.apply_live_layout(&l)
@@ -367,8 +466,14 @@ impl Daemon {
             return Ok(());
         };
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
-            p.reach = Reach::Out;
-            log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
+            if p.reach == Reach::Finding {
+                p.reach = Reach::Out;
+                log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
+            } else {
+                log_info!("{NAME} daemon: pane {} has no terminal id: {why}", p.id);
+                let id = p.id;
+                self.no_terminal_id(id)?;
+            }
         }
         if self.is_choosing(pane) {
             return self.refuse_choice(&format!("find didn't confirm this terminal: {why}"));
@@ -385,7 +490,12 @@ impl Daemon {
         };
         let kept = self.provider.is_some() && self.asks.unsupported(Capability::Find);
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
+            let made = p.is_provider_made();
             p.reach = if kept { Reach::In } else { Reach::Out };
+            let id = p.id;
+            if kept && made {
+                self.no_terminal_id(id)?;
+            }
         }
         if kept {
             self.confirm(pane)?;
@@ -455,4 +565,14 @@ impl Daemon {
         }
         Ok(())
     }
+}
+
+/// Whether an attach whose environment is `env` is in the context the
+/// choosing attach was, its values of context variables `vars` being
+/// `chose`: each the same bytes, unset matching unset (ADR 0006). With no
+/// context variables, every attach is.
+pub(crate) fn in_context(vars: &[&str], chose: &[Option<Vec<u8>>], env: &Env) -> bool {
+    vars.iter()
+        .zip(chose)
+        .all(|(v, chose)| env_value(env, v) == chose.as_deref())
 }

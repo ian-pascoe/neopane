@@ -30,6 +30,11 @@ pub(crate) trait TerminalIo {
     /// Makes `frame`, drawn by the daemon, what the output fd is sent.
     fn wrap(&self, frame: &mut Vec<u8>);
 
+    /// Sends the helper `u`, a `u` frame with new undo bytes: on `helper`
+    /// at once, or, where output travels on it too, into `out`, the bytes
+    /// the output fd is sent next, so it goes between whole frames.
+    fn send_undo(&self, helper: &UnixStream, u: &[u8], out: &mut Vec<u8>);
+
     /// Ends the attach on `helper`, telling it `end`, once what must go of
     /// `backlog` has. Nothing is written after.
     fn end(&self, helper: &UnixStream, backlog: &Backlog, end: End);
@@ -55,6 +60,12 @@ impl TerminalIo for FdIo {
     }
 
     fn wrap(&self, _frame: &mut Vec<u8>) {}
+
+    /// Only the daemon's frames go on the helper socket, and few: there is
+    /// room for it.
+    fn send_undo(&self, helper: &UnixStream, u: &[u8], _out: &mut Vec<u8>) {
+        write_within(helper, u, Instant::now() + END_FLUSH);
+    }
 
     /// What waits is dropped, and the `z` says whether that cut a frame
     /// short.
@@ -86,6 +97,10 @@ impl TerminalIo for RelayIo {
         }
         let bytes = std::mem::take(frame);
         frame::encode_split(b'o', &bytes, frame).expect("split to fit");
+    }
+
+    fn send_undo(&self, _helper: &UnixStream, u: &[u8], out: &mut Vec<u8>) {
+        out.extend_from_slice(u);
     }
 
     /// The `o` in flight is finished, so the frames stay whole, and the

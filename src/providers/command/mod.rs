@@ -28,8 +28,12 @@
 //!   60 s waits 1 s again. Exit 69, or a first start that fails, ends it for
 //!   good.
 //!
-//! `find` is #127's: a spec's is kept out of its capabilities. Building a
-//! spec from the config's choice is #129's.
+//! - `find` prints the terminal's id like an open (ADR 0006, #93 decision
+//!   17); what each answer means is the daemon's. A pair's halves run as
+//!   one runner: its terminal half's `open` and `close`, its layout half's
+//!   layout capabilities, and no one-step capability (`Spec::of`).
+//!
+//! Choosing a spec through the config is #129's.
 
 mod inputs;
 mod layout;
@@ -67,13 +71,14 @@ const EVENTS_FIRST_WAIT: Duration = Duration::from_secs(1);
 const EVENTS_MOST_WAIT: Duration = Duration::from_secs(60);
 const EVENTS_STEADY: Duration = Duration::from_secs(60);
 
-/// The capabilities this runner runs, so far.
-const RUNS: [Capability; 11] = [
+/// The capabilities this runner runs.
+const RUNS: [Capability; 12] = [
     Capability::Open,
     Capability::OpenBeside,
     Capability::OpenFloat,
     Capability::OpenTabPage,
     Capability::Close,
+    Capability::Find,
     Capability::PlaceBeside,
     Capability::Resize,
     Capability::Focus,
@@ -96,6 +101,102 @@ pub(crate) struct Spec {
     pub commands: Vec<CapCommand>,
     /// Its terminal half's attach timeout (#88 decision 15).
     pub attach_timeout: Duration,
+    /// Its layout half's context variables, and the variables `find` gets.
+    pub context_vars: Vec<String>,
+    pub find_vars: Vec<String>,
+    /// A pair: `open`'s id serves only `close`, and `find` runs for every
+    /// attach (ADR 0006).
+    pub pair: bool,
+}
+
+impl Spec {
+    /// The spec of the pane provider the config chose, if it chose a table
+    /// or a pair. A pair gets only its terminal half's `open` and `close`,
+    /// and its layout half's layout capabilities, context variables and
+    /// `find` variables: one-step capabilities come only from a table
+    /// returned whole (#93 decision 12).
+    pub(crate) fn of(choice: &config::Choice) -> Option<Spec> {
+        let (name, halves, pair) = match choice {
+            config::Choice::Whole(p) => (p.name.clone(), vec![(p, Role::Whole)], false),
+            config::Choice::Pair(pair) => {
+                let t = pair.terminal.iter().map(|t| (t, Role::Terminal));
+                let l = pair.layout.iter().map(|l| (l, Role::Layout));
+                (pair.name.clone(), t.chain(l).collect(), true)
+            }
+            config::Choice::None | config::Choice::Builtin(_) => return None,
+        };
+        let mut spec = Spec {
+            name,
+            commands: Vec::new(),
+            attach_timeout: attach_timeout_of(choice),
+            context_vars: Vec::new(),
+            find_vars: Vec::new(),
+            pair,
+        };
+        for (table, role) in halves {
+            for (cap, command) in &table.capabilities {
+                let used = match role {
+                    Role::Whole => true,
+                    Role::Terminal => cap.is_terminal(),
+                    Role::Layout => cap.is_layout(),
+                };
+                let c = runner_capability(*cap);
+                if used {
+                    spec.commands.push(CapCommand {
+                        cap: c,
+                        argv: command.argv.clone(),
+                        timeout: command.timeout.unwrap_or(c.default_timeout()),
+                        protocol: table.protocol,
+                    });
+                }
+            }
+            if role != Role::Terminal {
+                spec.context_vars = table.context_vars.clone();
+                spec.find_vars = table.find_vars.clone();
+            }
+        }
+        Some(spec)
+    }
+
+    /// A spec named `name` with nothing in it, for tests to fill.
+    #[cfg(test)]
+    pub(crate) fn named(name: &str) -> Spec {
+        Spec {
+            name: name.into(),
+            commands: Vec::new(),
+            attach_timeout: config::check::ATTACH_TIMEOUT,
+            context_vars: Vec::new(),
+            find_vars: Vec::new(),
+            pair: false,
+        }
+    }
+}
+
+/// The capability the runner runs for config capability `cap`.
+fn runner_capability(cap: config::Capability) -> Capability {
+    use config::Capability as C;
+    match cap {
+        C::Open => Capability::Open,
+        C::Close => Capability::Close,
+        C::Find => Capability::Find,
+        C::PlaceBeside => Capability::PlaceBeside,
+        C::Resize => Capability::Resize,
+        C::Focus => Capability::Focus,
+        C::FocusDirection => Capability::FocusDirection,
+        C::ReportLayout => Capability::ReportLayout,
+        C::Events => Capability::Events,
+        C::OpenBeside => Capability::OpenBeside,
+        C::OpenFloat => Capability::OpenFloat,
+        C::OpenTabPage => Capability::OpenTabPage,
+    }
+}
+
+/// What a table is to the pane provider it is part of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Whole,
+    Terminal,
+    Layout,
 }
 
 /// The attach timeout of the pane provider the config chose, for its
@@ -150,6 +251,9 @@ type Clock = Box<dyn Fn() -> Instant>;
 pub(crate) struct CommandProvider {
     name: String,
     attach_timeout: Duration,
+    context_vars: Vec<String>,
+    find_vars: Vec<String>,
+    pair: bool,
     commands: Vec<CapCommand>,
     /// `events`, and how long it waits to start again the next time it
     /// ends; None once it has ended for good, or without one.
@@ -193,7 +297,9 @@ impl CommandProvider {
         let mut p = CommandProvider {
             name: spec.name,
             attach_timeout: spec.attach_timeout,
-            // `find` isn't run yet
+            context_vars: spec.context_vars,
+            find_vars: spec.find_vars,
+            pair: spec.pair,
             commands: spec
                 .commands
                 .into_iter()
@@ -554,9 +660,20 @@ impl PaneProvider for CommandProvider {
         None
     }
 
-    fn context_vars(&self) -> &[&str] {
-        // reach is #127's
-        &[]
+    fn context_vars(&self) -> Vec<&str> {
+        self.context_vars.iter().map(String::as_str).collect()
+    }
+
+    fn find_vars(&self) -> Vec<&str> {
+        self.find_vars.iter().map(String::as_str).collect()
+    }
+
+    fn is_pair(&self) -> bool {
+        self.pair
+    }
+
+    fn wants_title(&self) -> bool {
+        true
     }
 
     fn attach_timeout(&self) -> Duration {
@@ -583,7 +700,7 @@ impl Drop for CommandProvider {
 /// What becomes of a run of `cap`'s stdout.
 fn stdout_of(cap: Capability) -> Stdout {
     match cap {
-        _ if is_open(cap) => Stdout::FirstLine,
+        _ if is_open(cap) || cap == Capability::Find => Stdout::FirstLine,
         Capability::ReportLayout => Stdout::Whole,
         Capability::Events => Stdout::Lines,
         _ => Stdout::Null,

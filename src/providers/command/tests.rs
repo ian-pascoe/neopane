@@ -25,7 +25,7 @@ fn runner(
                 protocol: 1,
             })
             .collect(),
-        attach_timeout: config::check::ATTACH_TIMEOUT,
+        ..Spec::named("test")
     };
     let env: Vec<(Vec<u8>, Vec<u8>)> = env
         .iter()
@@ -606,7 +606,7 @@ fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Ce
             timeout: Duration::from_secs(2),
             protocol: 1,
         }],
-        attach_timeout: config::check::ATTACH_TIMEOUT,
+        ..Spec::named("test")
     };
     let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
     let p = CommandProvider::with_clock(spec, &env, b"/", clock).unwrap();
@@ -829,7 +829,144 @@ fn a_runner_has_its_specs_attach_timeout() {
         name: "test".into(),
         commands: Vec::new(),
         attach_timeout: Duration::from_secs(9),
+        ..Spec::named("test")
     };
     let p = CommandProvider::new(spec, &[], b"/").unwrap();
     assert_eq!(Duration::from_secs(9), p.attach_timeout());
+}
+
+fn find() -> Ask {
+    Ask::Find {
+        pane: PaneId::parse("7-abcdefghij").unwrap(),
+        pid: 4242,
+        tty: "/dev/ttys014".into(),
+        device: None,
+        title: "np-abcdefghij".into(),
+        env: vec![(b"TMUX_PANE".to_vec(), b"%3".to_vec())],
+    }
+}
+
+/// A runner whose `find` runs `script` under `sh -c`.
+fn finding(script: &str) -> CommandProvider {
+    runner(
+        &[(Capability::Find, &["sh", "-c", script])],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+#[test]
+fn find_answers_its_first_line_as_the_terminal_or_none_and_69_is_unsupported() {
+    let up = name::upper();
+    // its inputs, as `find` matches a window by them
+    let script = format!("echo \"${up}_TITLE ${up}_PID ${up}_TTY ${up}_ENV_TMUX_PANE\"; echo more");
+    let mut p = finding(&script);
+    assert!(p.capabilities().has(Capability::Find));
+    assert_eq!(
+        terminal("np-abcdefghij 4242 /dev/ttys014 %3"),
+        outcome(&mut p, find())
+    );
+    assert_eq!(
+        Outcome::Done(Answer::Nothing),
+        outcome(&mut finding("exit 0"), find())
+    );
+    assert_eq!(
+        Outcome::Unsupported,
+        outcome(&mut finding("exit 69"), find())
+    );
+    let Outcome::Failed(why) = outcome(&mut finding("echo nope >&2; exit 1"), find()) else {
+        panic!("not failed");
+    };
+    assert!(why.contains("nope"), "{why}");
+}
+
+/// A checked table named `name` giving `caps`, each running `true`, with
+/// context and `find` variables `vars`.
+fn table_giving(name: &str, caps: &[config::check::Capability], vars: &[&str]) -> config::Provider {
+    let vars: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
+    config::Provider {
+        capabilities: caps
+            .iter()
+            .map(|&c| {
+                let command = config::check::Command {
+                    argv: vec![b"true".to_vec()],
+                    timeout: c.default_timeout(),
+                };
+                (c, command)
+            })
+            .collect(),
+        context_vars: vars.clone(),
+        find_vars: vars,
+        ..table(name, 9)
+    }
+}
+
+#[test]
+fn a_pair_takes_open_and_close_from_its_terminal_half_and_the_rest_from_its_layout_half() {
+    use config::check::Capability as C;
+    // each half as written whole, before the checker drops what isn't its
+    let every = [
+        C::Open,
+        C::Close,
+        C::Find,
+        C::PlaceBeside,
+        C::Focus,
+        C::OpenBeside,
+        C::OpenTabPage,
+    ];
+    let pair = config::Choice::Pair(config::Pair {
+        name: "ghostty+aerospace".into(),
+        terminal: Some(table_giving("ghostty", &every, &["TERM_PROGRAM"])),
+        layout: Some(config::Provider {
+            attach_timeout: Duration::from_secs(2),
+            ..table_giving("aerospace", &every, &["AEROSPACE"])
+        }),
+    });
+    let spec = Spec::of(&pair).unwrap();
+    assert!(spec.pair);
+    assert_eq!("ghostty+aerospace", spec.name);
+    let from = |cap: Capability| spec.commands.iter().filter(|c| c.cap == cap).count();
+    for cap in [
+        Capability::Open,
+        Capability::Close,
+        Capability::Find,
+        Capability::PlaceBeside,
+        Capability::Focus,
+    ] {
+        assert_eq!(1, from(cap), "{cap}");
+    }
+    // one-step capabilities only from a table returned whole
+    assert_eq!(0, from(Capability::OpenBeside));
+    assert_eq!(0, from(Capability::OpenTabPage));
+    // reach is the layout half's, the attach timeout the terminal half's
+    assert_eq!(vec!["AEROSPACE".to_string()], spec.context_vars);
+    assert_eq!(vec!["AEROSPACE".to_string()], spec.find_vars);
+    assert_eq!(Duration::from_secs(9), spec.attach_timeout);
+
+    let whole = Spec::of(&config::Choice::Whole(table_giving(
+        "tmux",
+        &every,
+        &["TMUX"],
+    )))
+    .unwrap();
+    assert!(!whole.pair);
+    assert_eq!(every.len(), whole.commands.len());
+    assert!(Spec::of(&config::Choice::None).is_none());
+}
+
+#[test]
+fn a_runner_names_its_specs_context_and_find_variables() {
+    let spec = Spec {
+        context_vars: vec!["TMUX".into()],
+        find_vars: vec!["TMUX_PANE".into()],
+        pair: true,
+        ..Spec::named("test")
+    };
+    let p = CommandProvider::new(spec, &[], b"/").unwrap();
+    assert_eq!(vec!["TMUX"], p.context_vars());
+    assert_eq!(vec!["TMUX_PANE"], p.find_vars());
+    assert!(p.is_pair());
+    // its find matches the pane title, unlike Rex's
+    assert!(p.wants_title());
 }

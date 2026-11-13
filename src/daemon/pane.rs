@@ -113,6 +113,14 @@ pub(crate) struct Pane {
     /// a pane provider chosen again checks the reach of every pane by it.
     pub hello: Option<Box<AttachHello>>,
     pub reach: Reach,
+    /// Its terminal has the pane title, written before its first `find`
+    /// (ADR 0006).
+    pub titled: bool,
+    /// In a pair, the id the terminal provider's open printed: the one
+    /// `close` takes, `terminal` being the layout provider's (ADR 0006).
+    pub close_terminal: Option<TerminalId>,
+    /// Its open was answered, with an id or none.
+    pub open_answered: bool,
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).
     pub attach_due: Option<std::time::Instant>,
@@ -315,6 +323,9 @@ impl Pane {
             attach_due: None,
             hello: None,
             reach: Reach::In,
+            titled: false,
+            close_terminal: None,
+            open_answered: false,
         }
     }
 
@@ -345,6 +356,13 @@ impl Pane {
             self_attached: true,
             ..Pane::blank(id)
         }
+    }
+
+    /// Whether the pane provider held now opened its terminal: in its
+    /// reach whatever `find` says, which runs for it only for its id (#93
+    /// decision 17's (c)). A pane rejoining after a new choice isn't.
+    pub(crate) fn is_provider_made(&self) -> bool {
+        !self.self_attached && self.reach == Reach::In
     }
 
     /// Whether its terminal attached of its own accord rather than for a
