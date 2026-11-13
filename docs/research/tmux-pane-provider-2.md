@@ -232,13 +232,196 @@ has them); `wait-for -E` needs 3.8 (only Homebrew and sid).
 - 3.8 turns `mouse` on by default (`CHANGES:190`); runtime `show -g mouse`
   printed `on`.
 
+## Follow-ups
+
+Same method: tmux 3.8 (Homebrew) and a 3.7c built from the release tarball
+(tag `3.7c`, commit `e476c123`), private sockets (`nprs3`–`nprs6`, `nprs37`,
+`nprs38`), a user client attached from a second private server where focus or
+borders mattered, and zellij 0.46.0 from a temp dir with its own
+`ZELLIJ_SOCKET_DIR`, `HOME` and XDG dirs. All were killed afterwards.
+
+### `wait-for -E` (3.8)
+
+- **One event name per call.** `wait-for` takes exactly one argument
+  (`cmd-wait-for.c:37`, `{ "EF:LSUlvw:", 1, 1 }`), and a sink matches it with
+  `strcmp` (`events.c:108`). Runtime: `wait-for -E window-layout-changed
+  pane-exited` printed `too many arguments (need at most 1)`;
+  `'window-layout-changed,pane-exited'` printed `invalid event: …`. So you
+  need one waiter per name.
+- **Valid names** are the hook options plus `@user` names
+  (`hooks.c:283-291`; the hook list is `options-table.c:1965-2075`). Runtime
+  `wait-for -E -l NAME` accepted `window-layout-changed`,
+  `window-pane-changed`, `session-window-changed`, `client-session-changed`,
+  `window-linked`, `window-unlinked`, `pane-focus-in`, `pane-focus-out`,
+  `pane-exited`, `pane-died`, `window-zoomed`, `window-unzoomed`,
+  `window-resized`, `pane-resized`, `pane-moved`, `client-focus-out`, `@mine`.
+  It refused `layout-change` and `bogus` (`invalid event`).
+- **Server-wide.** `events_fire` hands every event to every sink of that name,
+  whatever the session (`events.c:94-112`). Runtime: a waiter on
+  `window-layout-changed` woke for a split in session `S2` (`window=@1`) while
+  the user was on `S`.
+- **Narrowing with `-F`.** The filter sees only the payload keys as formats
+  (`events-payload.c:485-515`): `#{window}`, `#{pane}`, `#{session}` (ids), and
+  `#{session_name}`/`#{window_name}` for session/window items. Runtime:
+  `-F '#{==:#{window},@0}'` woke only for `@0`; `-F '#{==:#{session},$0}'`
+  worked for `session-window-changed`. `-F '#{==:#{session_name},S}'` and
+  `#{window_id}`/`#{hook_window}` never matched (the `session_name` case is
+  *unexplained*). Window and pane events carry no session key, so to scope
+  them to a session, filter on the session's window ids. `-v` prints each
+  payload even when the filter is false (`cmd-wait-for.c:234-235`).
+- **Commands that fire `window-layout-changed`.** Runtime, one waiter per
+  command, all woke: `swap-pane`, `select-layout even-vertical`,
+  `resize-pane -Z` (zoom and unzoom; zoom also fires `window-zoomed`),
+  `break-pane -d`, `join-pane -d` (it woke first for the source window `@2`),
+  `kill-pane`, `resize-pane`, `split-window`. Other events, each run once:
+  `select-pane` gave `window-pane-changed new_pane=… old_pane=…`;
+  `new-window` (no `-d`) gave `session-window-changed`; `new-window -d` gave
+  `window-linked session=$0 window=@4 window_index=2`; `kill-window` gave
+  `window-unlinked`; `switch-client` gave `client-session-changed
+  new_session=$1 old_session=$0`.
+- **A waiter is not an attached client.** Runtime: while three waiters ran,
+  `list-clients` showed only the user's client, `session_attached` stayed
+  `1`, and a `client-attached` hook logged nothing. A waiter has no session,
+  so it never counts for focus (`window.c:727`).
+- **FocusLost stays intact.** Runtime (with an app that had `\033[?1004h` set,
+  waiters running): focus-out on the user client delivered `\x1b[O`, focus-in
+  `\x1b[I`. The `pane-focus-out` waiter woke with `pane=%8 window=@0`; the
+  `client-focus-out` waiter woke with `client=/dev/ttys013 session=$0
+  window=@0`.
+- **With `TMUX` set and stdin not a tty.** Runtime: `TMUX=<socket>,<pid>,0
+  TMUX_PANE=%0 tmux wait-for -E -v … </dev/null` (no `-L`) ran and woke.
+  Command clients need no tty. `wait-for -E` refuses only when the command
+  has no client at all (`cmd-wait-for.c:279-280`, `not able to wait`).
+
+### Floating panes in 3.7 and 3.8
+
+- 3.7's `new-pane` takes `-x -y -X -Y`, each in cells or `N%` of the window
+  (`cmd-split-window.c@3.7c:41-47`; `layout.c@3.7c:1367-1395`). Defaults are
+  half the window wide and a quarter high, cascaded from (4,2). 3.7's
+  `new-pane` has no `-B` and no `-T`. Its man page entry still describes
+  splitting.
+- **3.7: the flags give the content.** Runtime (80x24 window, `new-pane -x 20
+  -y 6 -X 10 -Y 4`): `pane_left=10 pane_top=4 pane_width=20 pane_height=6`.
+  The frame was drawn one cell outside the content, at columns 9–30 and rows
+  3–10.
+- **3.8: the flags give the frame.** `-x`/`-y` include the two border cells
+  (`layout.c@3.8:1747-1759`, `sx -= 2` when the pane has lines). Runtime, same
+  command: `pane_left=11 pane_top=5 pane_width=18 pane_height=4`, with the
+  frame at columns 10–29 and rows 4–9. So `-X`/`-Y` name the frame's top-left.
+- **`-B none` exists in 3.8** (`tmux.1:3665`, `:3707-3709`; `none` is "no
+  border for floating panes", `tmux.1:5998`). Runtime: `-B none` gave
+  `pane_left=10 pane_top=4 pane_width=20 pane_height=6`, with no frame drawn.
+- `pane_left/top/width/height` always report the **content**, in both
+  versions, and are window-relative.
+
+### `#{window_layout}`
+
+- **3.8 (v2, JSON):** `{"V":2,"L":CELL}` (`layout-custom.c:30-58`,
+  `:284-300`). A cell has `t` (`h` = side by side, `v` = stacked, `p` = pane),
+  `w`, `h`, `x`, `y`. Node cells also have `c` (children in order). Pane
+  cells also have `I` (`%N`), `i` (index), `a` (active), `l` (last-visited
+  index) and, for a float, `z` (`layout-custom.c:343-400`). Floats are child
+  cells of the root with `z` set. Runtime: a float under a single tiled pane
+  gave a root `{"t":"v",…,"c":[{…"I":"%0"},{"w":18,"h":4,"x":11,"y":5,"z":0,"I":"%1"}]}`.
+- **v1 (3.7 and older, and control clients without `new-layouts`):**
+  `CSUM,WxH,X,Y` and then either `,ID` for a pane, or `{…}` (side by side) or
+  `[…]` (stacked) holding the children, comma-separated
+  (`layout-custom.c:404-440`). `CSUM` is a 16-bit rotate-and-add of the rest,
+  in 4 hex digits (`layout-custom.c:270-279`). In v1, `ID` is the pane number
+  without `%`. Floats are left out of 3.8's v1 (`layout-custom.c:538-552`).
+  3.7 appends them as `<WxH,X,Y,ID>`; runtime 3.7c printed
+  `eb65,80x24,0,0[80x24,0,0,0,20x6,10,4,1]<20x6,10,4,1>`.
+- **Sizes exclude borders.** A pane cell's `w`/`h` is the content. Siblings
+  are 1 cell apart (the border), and a node's size spans its children and the
+  borders between them. Runtime (3.8, 100x40, `((P | A) / Q) | C`):
+  `{"t":"h","w":100,…,"c":[{"t":"v","w":50,…,"c":[{"t":"h","w":50,"h":20,…,"c":[P 25x20 @0,0, A 24x20 @26,0]}, Q 50x19 @0,21]}, C 49x40 @51,0]}`
+  (25+1+24 = 50; 50+1+49 = 100). The same layout in v1 was
+  `92fa,100x40,0,0{50x40,0,0[50x20,0,0{25x20,0,0,0,24x20,26,0,3},50x19,0,21,2],49x40,51,0,1}`.
+- **The split two panes share** is their deepest common ancestor. They share a
+  border only if they are in adjacent children `c[k]`, `c[k+1]` of that node,
+  and its `t` says which axis.
+- `select-layout` accepts either format as a whole layout. Runtime: a
+  hand-made v1 string with a correct checksum applied; with `0000,` it
+  printed `invalid layout checksum`. A v2 string without `i` printed
+  `key "i" not found`. A v2 string whose sizes didn't add up printed `size
+  mismatch after applying layout`. `I` is ignored on parse
+  (`layout-custom.c:53`), so pane assignment follows `i`/order (*not traced*).
+
+### `resize-pane` on a nested split
+
+Runtime (3.8, 100x40), `((P | A) / Q) | C`:
+
+| Command | Border moved |
+|---|---|
+| `P -x 30` | P\|A (P became 30) |
+| `A -x 30` | P\|A (A, last, became 30) |
+| `Q -x 70` | left column\|C (column became 70; P and A both grew) |
+| `C -x 20` | left column\|C (C, last, became 20) |
+| `P -y 25`, `A -y 10` | (P\|A)/Q |
+| `Q -y 10` | (P\|A)/Q (Q, last) |
+
+- So the recipe (resize the pane on the left/top side of the shared border,
+  setting it to the width/height wanted for **that whole side**) holds only
+  when the pane has no split of the same kind between it and the shared
+  split. `-x` stops at the nearest `h` ancestor (`layout.c:874-903`).
+- **Counter-example.** In `((P | A) / (X | Y)) | C`, every left pane has its
+  own `h` split, so `-x` on P, A, X or Y each moved only its inner border.
+  Only `C -x 30` (C is last) moved the column|C border. Runtime confirmed
+  both.
+- A working rule: to move the border between children `c[k]` and `c[k+1]` of
+  a split, pick a pane in `c[k]` reachable without crossing a split of the
+  same kind, and set it to `c[k]`'s new size. If none exists and `c[k+1]` is
+  last, do the same from `c[k+1]`. Otherwise write the whole layout with
+  `select-layout` (above).
+
+### `pane-border-status top`
+
+- Runtime (3.8, 80x24, `(P | C) / B`). With `off`: P `top=0 40x12`, C `top=0
+  39x12`, B `top=13 80x11`. With `top`: P `top=1 40x11`, C `top=1 39x11`, B
+  `top=13 80x11`. The panes on the top row lose their first row to a status
+  line at row 0. Lower panes use the existing separator row (12) as their
+  status line and keep their size.
+- With `bottom`, P and C were unchanged (row 12 became their status line), and
+  B became `80x10`, with a status line on row 23.
+- `#{window_layout}` does not change with this option: P's cell stayed
+  `"h":12,"y":0`. So layout cells and `pane_top/pane_height` disagree by the
+  status row. `pane_at_top` stayed `1` for P and C.
+
+### zellij and tmux nested (zellij 0.46.0, tmux 3.8)
+
+The outer environment was `env -i` plus `TERM=xterm-256color
+TERM_PROGRAM=ghostty TERM_PROGRAM_VERSION=1.2.3`.
+
+- **zellij pane, no tmux:** `TERM=xterm-256color TERM_PROGRAM=ghostty
+  TERM_PROGRAM_VERSION=1.2.3 ZELLIJ=0 ZELLIJ_PANE_ID=0
+  ZELLIJ_SESSION_NAME=nprs5z ZELLIJ_SOCKET_DIR=…`. zellij sets no
+  `TERM_PROGRAM` of its own and passes the outer one through.
+- **tmux inside zellij** (a private server started from the zellij pane): the
+  tmux pane had `TERM=tmux-256color TERM_PROGRAM=tmux TERM_PROGRAM_VERSION=3.8
+  COLORTERM=truecolor TMUX=…/nprs5,60196,0 TMUX_PANE=%0` and still
+  `ZELLIJ=0 ZELLIJ_PANE_ID=0 ZELLIJ_SESSION_NAME=nprs5z ZELLIJ_SOCKET_DIR`.
+  The server's global environment held the zellij values and
+  `TERM_PROGRAM=ghostty`, which tmux overrides per pane. tmux pane tty
+  `ttys017` ≠ zellij pane tty `ttys016`.
+- **zellij inside tmux:** the zellij pane had `TERM=tmux-256color
+  TERM_PROGRAM=tmux TERM_PROGRAM_VERSION=3.8 COLORTERM=truecolor
+  TMUX=…/nprs6,61123,0 TMUX_PANE=%0 ZELLIJ=0 ZELLIJ_PANE_ID=0
+  ZELLIJ_SESSION_NAME=nprs6z`. zellij pane tty `ttys023` ≠ tmux `%0`'s
+  `pane_tty` `ttys021`.
+- So each inner pane carries both multiplexers' variables. The innermost one
+  is shown by `TERM_PROGRAM` only when the inner one is tmux, and by no
+  variable when it is zellij. The tty tells them apart in both directions.
+
 ## Not confirmed
 
 - Why a sole `ignore-size` control client with `-C` resized on 3.2a but not
   on 3.8, and the 80x23 size on 3.2a.
 - Focus-out with a control client on 3.2a (focus code differs before 3.3).
 - Events lost between `wait-for -E` loops.
-- Herdr, Rex and Ghostty nesting in either direction.
+- Why `wait-for -E -F '#{==:#{session_name},S}'` never matched.
+- How `select-layout` assigns panes to a hand-made layout's leaves.
+- Herdr, Rex and Ghostty nesting in either direction (zellij was run; see
+  Follow-ups).
 - Version claims below 3.2a were read from source and CHANGES, not run;
   3.4 (Ubuntu 24.04) and 3.5a (Debian) were not run.
 
@@ -279,3 +462,19 @@ has them); `wait-for -E` needs 3.8 (only Homebrew and sid).
   `session-window-changed` and `pane-exited` gives the same events, with pane
   ids, without attaching; below 3.8, hooks or polling. Either way `events`
   stays optional, as the earlier note concluded.
+- On 3.8, `events` is best built from `wait-for -E`: one waiter per event
+  name, filtered with `-F '#{==:#{window},@N}'` or `#{session}`, since events
+  are server-wide. Waiters are not clients and leave FocusLost and the user's
+  hooks alone, and they work with `TMUX` inherited and stdin `/dev/null`.
+- `open_float` must use different geometry per version. 3.7's `-x -y -X -Y`
+  give the content, and the frame sits one cell outside. 3.8's give the
+  frame, so add 2 to the size and subtract 1 from the position for the same
+  content, or use `-B none`. `report_layout` should take float rects from
+  `pane_*` (content) and report the frame as `inset` [1,1,1,1] unless
+  borderless.
+- `report_layout` can compute fractions from `#{window_layout}` or from
+  `list-panes` `pane_*`. With `pane-border-status` set they differ by a row,
+  so `pane_*` is the one that matches what the terminal shows.
+- `resize` must find the split the two panes share in `#{window_layout}` and
+  pick a pane that `-x`/`-y` will resolve to that split. Where none exists,
+  it must fall back to `select-layout` with a whole recomputed layout.
