@@ -196,23 +196,31 @@ fn left(p: &Pane) -> f64 {
 /// it's in no area, or has no terminal.
 pub(crate) fn area_size(p: &Pane) -> Option<[u32; 2]> {
     let s = p.terminal_surface.as_ref()?;
-    let (mut cols, mut rows) = (s.view.cols, s.view.rows);
-    if let Area::Live {
-        floating: false,
-        inset: [l, t, r, b],
-        ..
-    } = p.area
-    {
-        cols += u32::from(l) + u32::from(r);
-        rows += u32::from(t) + u32::from(b);
-    }
+    let (cols, rows) = (s.view.cols, s.view.rows);
     match &p.area {
         Area::Unreported => None,
         Area::Own => Some([cols, rows]),
-        Area::Live { rect: r, .. } if r[2] <= 0.0 || r[3] <= 0.0 => Some([cols, rows]),
-        Area::Live { rect: r, .. } => Some([
-            cols.max((f64::from(cols) / r[2]).round() as u32),
-            rows.max((f64::from(rows) / r[3]).round() as u32),
-        ]),
+        Area::Live {
+            rect: r,
+            floating,
+            inset: [il, it, ir, ib],
+            ..
+        } => {
+            let (cols, rows) = if *floating {
+                (cols, rows)
+            } else {
+                (
+                    cols + u32::from(*il) + u32::from(*ir),
+                    rows + u32::from(*it) + u32::from(*ib),
+                )
+            };
+            if r[2] <= 0.0 || r[3] <= 0.0 {
+                return Some([cols, rows]);
+            }
+            Some([
+                cols.max((f64::from(cols) / r[2]).round() as u32),
+                rows.max((f64::from(rows) / r[3]).round() as u32),
+            ])
+        }
     }
 }

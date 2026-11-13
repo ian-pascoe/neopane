@@ -34,15 +34,16 @@ pub(crate) struct PlacedTerminal {
     /// pane.
     pub floating: bool,
     /// The cells at each edge of `rect` that aren't the terminal's, such as a
-    /// floating pane's frame: left, top, right, bottom.
+    /// pane's frame: left, top, right, bottom.
     pub inset: [u16; 4],
 }
 
 /// Where a pane is, as the live layout last said (#92 decision 17).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Area {
-    /// In layout area `id`, at `rect`, as fractions of it: x, y, w, h;
-    /// `inset` of `rect`'s cells at each edge not its terminal's.
+    /// In layout area `id`, at `rect`, as fractions of it: x, y, w, h.
+    /// `inset` is the cells at each edge of `rect` that aren't its
+    /// terminal's: left, top, right, bottom.
     Live {
         id: String,
         rect: [f64; 4],

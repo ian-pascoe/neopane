@@ -177,8 +177,9 @@ last layout it read.
 - `floating` (default `false`): it floats over the area's tiled terminals.
 - `inset` (default `[0, 0, 0, 0]`): cells at each edge of `rect` that aren't
   the terminal's, such as a pane's frame: left, top, right, bottom. A
-  tiled terminal's count toward its area's size: the area is its cells and
-  inset over its share of the area, on each axis.
+  tiled terminal's inset counts toward its area's size: the area is the
+  terminal's cells plus its inset, divided by its share of the area, on
+  each axis.
 - `focus` (optional): the terminal the user types into. Without `events`,
   a change here is how the daemon learns the user moved focus.
 - Unknown fields are ignored.

@@ -20,6 +20,10 @@ Amended by #92 before implementation: a requested pane the live layout hasn't
 reported yet is in no layout area for up to 1 s; `report_layout` may give an
 `inset`.
 
+Amended by SPI-1130: a tiled terminal's inset counts toward its area's size,
+which is its cells plus its inset over its share of the area, on each axis. A
+`rect` includes its inset cells, and rects need not tile.
+
 Panes need not share a window any more: a terminal provider alone opens
 separate terminal windows, on different monitors and at different cell sizes,
 and a pane out of the pane provider's reach shares nothing with the rest
