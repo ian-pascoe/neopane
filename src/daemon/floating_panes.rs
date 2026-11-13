@@ -13,6 +13,7 @@ use super::asks;
 use super::dir::Address;
 use super::event_loop::Loop;
 use super::float_homes::FloatHomes;
+use super::geometry;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::provider::{Ask, TerminalId};
@@ -242,7 +243,8 @@ impl FloatingPanes<'_> {
 /// Where a float group is, as `open_float` asks for it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GroupBounds {
-    /// Its top left in cells from its origin pane's: x, y.
+    /// Its top left in cells from the top left of its origin pane's
+    /// content, inside its inset: x, y.
     pub at: [i32; 2],
     /// The origin pane's terminal's size, cols x rows.
     pub origin_size: [u32; 2],
@@ -251,11 +253,11 @@ pub(crate) struct GroupBounds {
     pub area_bounds: Option<[f64; 4]>,
 }
 
-/// Where float group `g` is relative to pane `origin`, the one its pane
-/// opens from: on grid 1, which spans `origin`'s layout area while it's the
-/// current pane. Without the pane, its terminal or a live area, the origin
-/// is the screen: its top left the screen's, and its size grid 1's. None
-/// with no screen.
+/// Where float group `g` is relative to the content of pane `origin`, the
+/// one its pane opens from, inside its inset: on grid 1, which spans
+/// `origin`'s layout area while it's the current pane. Without the pane,
+/// its terminal or a live area, the origin is the screen: its top left the
+/// screen's, and its size grid 1's. None with no screen.
 pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> Option<GroupBounds> {
     let screen = grids.get(1)?;
     let (sw, sh) = (f64::from(screen.width), f64::from(screen.height));
@@ -263,9 +265,10 @@ pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> O
         return None;
     }
     let rect = origin.and_then(|p| p.area.rect());
-    let top_left = rect.map_or([0, 0], |r| {
-        [(r[0] * sw).round() as i32, (r[1] * sh).round() as i32]
-    });
+    // its content's, inside its inset
+    let top_left = origin
+        .and_then(|p| geometry::content_corner(&p.area, [screen.width, screen.height]))
+        .unwrap_or([0, 0]);
     // the terminal's size only with the rect it's at: cells from the
     // screen's top left are counted in the screen
     let origin_size = rect

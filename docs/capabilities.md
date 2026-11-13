@@ -181,7 +181,9 @@ last layout it read.
   the terminal's, such as a pane's frame: left, top, right, bottom. A
   tiled terminal's inset counts toward its area's size: the area is the
   terminal's cells plus its inset, divided by its share of the area, on
-  each axis.
+  each axis. The terminal's content starts inside it, at the rect's top
+  left moved by the inset's left and top: `open_float`'s `X`,`Y` count
+  from there.
 - `focus` (optional): the terminal the user types into. Without `events`,
   a change here is how the daemon learns the user moved focus. A report
   whose command started before a `focus` or `focus_direction` command
@@ -382,7 +384,7 @@ Each is `<NAME>_` and the name below.
 | `SIZE` | integer, cells | the terminal's size along the split |
 | `RATIO` | e.g. `0.5`, `0.3333` | the terminal's share of the room it splits with `ORIGIN`: at most 4 decimals, a `.`, no exponent |
 | `COLS`, `ROWS` | integer, cells | `open`, `open_beside`: a guess at the new terminal's size, its share beside its origin pane; `open_tab_page`: the origin's layout area; `open_float`: the float group's size |
-| `X`, `Y` | integer, may be negative | the float group's top-left, in cells from `ORIGIN`'s top-left |
+| `X`, `Y` | integer, may be negative | the float group's top-left, in cells from the top-left of `ORIGIN`'s content: its `rect`'s top-left, as `report_layout` gives it, moved right and down by its `inset`'s left and top |
 | `ORIGIN_COLS`, `ORIGIN_ROWS` | integer, cells | `ORIGIN`'s size |
 | `AREA_BOUNDS` | `x,y,w,h`, each as `RATIO` | the float as fractions of `ORIGIN`'s layout area; unset outside a live layout |
 | `COUNT` | integer, 1–20 | `focus_direction`'s steps |

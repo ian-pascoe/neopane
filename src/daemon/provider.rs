@@ -221,8 +221,8 @@ pub(crate) enum Ask {
         attach: Vec<String>,
         title: String,
         origin: TerminalId,
-        /// The float group's top-left, in cells from `origin`'s top left,
-        /// and its size; `origin_cols` x `origin_rows` is `origin`'s size.
+        /// The float group's top-left, in cells from the top left of
+        /// `origin`'s content, inside its inset, and its size; `origin_cols` x `origin_rows` is `origin`'s size.
         x: i32,
         y: i32,
         cols: u32,
