@@ -70,11 +70,8 @@ impl Daemon {
         else {
             return Ok(());
         };
-        // in the current tab page, the current pane's
-        let tab = self
-            .current_pane()
-            .filter(|q| q.id != pane)
-            .map_or(0, |q| q.shown_tab);
+        // in the current tab page: the current window's
+        let tab = self.home_tab(self.nvim.current_win);
         match self.panes.by_id_mut(pane) {
             Some(p) => {
                 p.neovim_window_handle = Some(win);
@@ -193,18 +190,14 @@ impl Daemon {
         let first = self
             .lifetime
             .kept
+            .map(|k| k.win)
             .filter(|w| wins.contains(w))
             .unwrap_or(current);
         let picked = pick_unshown_window(first, wins, |w| self.held(w));
         let [cols, rows] = self.window_size_of(id);
         let (req, kind) = match picked {
             Some(win) => {
-                // its tab page, as split notes name it
-                let tab = if self.lifetime.kept == Some(win) {
-                    self.lifetime.kept_tab
-                } else {
-                    self.changes.split_of(win).tab
-                };
+                let tab = self.home_tab(win);
                 let p = self.panes.by_id_mut(id).unwrap();
                 p.neovim_window_handle = Some(win);
                 p.shown_tab = tab;
@@ -222,6 +215,18 @@ impl Daemon {
             req,
             kind,
         });
+    }
+
+    /// Window `win`'s home tab page, as split notes name it: as a pane
+    /// holding it, or the kept window, says, else as its split note does.
+    pub(super) fn home_tab(&self, win: i64) -> i64 {
+        if let Some(tab) = self.panes.by_win(win).and_then(|p| p.tab_of(win)) {
+            return tab;
+        }
+        match self.lifetime.kept {
+            Some(k) if k.win == win => k.tab,
+            _ => self.changes.split_of(win).tab,
+        }
     }
 
     /// Whether window `w` is shown, or on its way to a pane, so no

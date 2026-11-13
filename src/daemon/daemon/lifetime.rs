@@ -42,10 +42,15 @@ pub(crate) struct Lifetime {
     /// without a daemon directory, as in tests.
     pub(crate) unsaved_file: Option<crate::daemon::dir::Unsaved>,
     /// The window an unattached daemon keeps, unshown, for the next attach.
-    pub(super) kept: Option<i64>,
-    /// The tab page the kept window's pane held it in, as split notes name
-    /// it: the next pane to take it shows that tab page.
-    pub(super) kept_tab: i64,
+    pub(super) kept: Option<Kept>,
+}
+
+/// A window kept for the next attach, and the tab page its pane held it in,
+/// as split notes name it: the next pane to take it shows that tab page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Kept {
+    pub(crate) win: i64,
+    pub(crate) tab: i64,
 }
 
 impl Default for Lifetime {
@@ -56,7 +61,6 @@ impl Default for Lifetime {
             ask: 0,
             unsaved_file: None,
             kept: None,
-            kept_tab: 0,
         }
     }
 }
@@ -81,25 +85,27 @@ impl Daemon {
     /// none is. Every pane left goes, opens not yet asked are dropped, and
     /// Neovim is asked about its unsaved changes.
     pub(super) fn go_unattached(&mut self, last: Option<u32>) -> Result<()> {
-        let before = self.lifetime.kept.take().filter(|&w| {
-            self.grids.grid_of(w).is_some()
-                && !self.changes.is_closing(w)
-                && self.panes.by_win(w).is_none()
+        let before = self.lifetime.kept.take().filter(|k| {
+            self.grids.grid_of(k.win).is_some()
+                && !self.changes.is_closing(k.win)
+                && self.panes.by_win(k.win).is_none()
         });
         let mut kept = None;
         if let Some(i) = last.and_then(|id| self.panes.index_of(id)) {
             let p = &self.panes.list[i];
             let wins = p.windows();
             let current = self.nvim.current_win;
-            kept = if wins.contains(&current) {
+            let win = if wins.contains(&current) {
                 Some(current)
             } else {
                 p.neovim_window_handle.filter(|w| wins.contains(w))
             };
-            let kept_tab = kept.and_then(|w| p.tab_of(w));
-            self.lifetime.kept_tab = kept_tab.unwrap_or(0);
+            kept = win.map(|win| Kept {
+                win,
+                tab: p.tab_of(win).unwrap_or(0),
+            });
             self.panes.remove(i, &self.event_loop);
-            for &win in wins.iter().filter(|&&w| Some(w) != kept) {
+            for &win in wins.iter().filter(|&&w| Some(w) != kept.map(|k| k.win)) {
                 self.changes.mark_closing(win);
                 windows::close(&mut self.nvim.client, win);
             }
@@ -107,8 +113,8 @@ impl Daemon {
         // one window kept: an older one goes
         match (kept, before) {
             (Some(_), Some(old)) => {
-                self.changes.mark_closing(old);
-                windows::close(&mut self.nvim.client, old);
+                self.changes.mark_closing(old.win);
+                windows::close(&mut self.nvim.client, old.win);
             }
             (None, old) => kept = old,
             _ => {}
@@ -212,18 +218,16 @@ impl Daemon {
 
     /// Forgets the kept window once it's gone.
     pub(super) fn forget_kept_if_gone(&mut self) {
-        if self
-            .lifetime
-            .kept
-            .is_some_and(|w| self.grids.grid_of(w).is_none() && !self.changes.awaits_drawing(w))
-        {
+        if self.lifetime.kept.is_some_and(|k| {
+            self.grids.grid_of(k.win).is_none() && !self.changes.awaits_drawing(k.win)
+        }) {
             self.lifetime.kept = None;
         }
     }
 
     /// Pane `id` shows window `win`: kept, it's kept no longer.
     pub(super) fn kept_taken(&mut self, win: i64) {
-        if self.lifetime.kept == Some(win) {
+        if self.lifetime.kept.is_some_and(|k| k.win == win) {
             self.lifetime.kept = None;
         }
     }
@@ -231,7 +235,7 @@ impl Daemon {
     /// A pane shows a file it opened: the kept window, unless a pane took
     /// it, closes.
     pub(super) fn close_kept(&mut self) {
-        let Some(win) = self.lifetime.kept.take() else {
+        let Some(Kept { win, .. }) = self.lifetime.kept.take() else {
             return;
         };
         if self.panes.by_win(win).is_some() {

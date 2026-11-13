@@ -1582,7 +1582,7 @@ impl Daemon {
                 WinKind::External => {
                     self.changes.became_external(w.win);
                     if self.panes.by_win(w.win).is_some()
-                        || self.lifetime.kept == Some(w.win)
+                        || self.lifetime.kept.is_some_and(|k| k.win == w.win)
                         || self.changes.is_closing(w.win)
                         || self
                             .unshown_awaiting_origin
@@ -1730,12 +1730,14 @@ impl Daemon {
     }
 
     /// Whether a window pane of tab page `tab`'s tab page area is there or
-    /// on its way: one whose request failed isn't.
+    /// on its way, and not closing. Only one whose request failed stays
+    /// closing: any other is removed in the call that marks it, and float
+    /// group panes don't count.
     fn has_area_pane(&self, tab: i64) -> bool {
         self.panes
             .list
             .iter()
-            .any(|p| p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed))
+            .any(|p| p.tab == tab && p.layer.is_none() && p.closing.is_none())
     }
 
     /// The terminals of the panes a move is between, if both have one.

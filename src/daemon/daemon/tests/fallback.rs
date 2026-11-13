@@ -568,10 +568,8 @@ fn a_pane_taking_the_window_kept_from_a_later_tab_page_lays_its_splits_out_besid
     fx.d.panes.by_id_mut(last).unwrap().shown_tab = 7;
     fx.d.nvim.current_win = 1001;
     fx.d.go_unattached(Some(last)).unwrap();
-    assert_eq!(
-        (Some(1001), 7),
-        (fx.d.lifetime.kept, fx.d.lifetime.kept_tab)
-    );
+    let kept = super::lifetime::Kept { win: 1001, tab: 7 };
+    assert_eq!(Some(kept), fx.d.lifetime.kept);
 
     // the next self-attach takes it, and shows its tab page
     let (id, _b) = windowless_pane(&mut fx, "t0");
@@ -592,4 +590,56 @@ fn a_pane_taking_the_window_kept_from_a_later_tab_page_lays_its_splits_out_besid
     let p = fx.d.panes.by_id(id).unwrap();
     assert!(p.held.is_empty(), "{:?}", p.held);
     assert_eq!(vec![1002, 1001], p.layout.as_ref().unwrap().windows());
+}
+
+/// Window `win`, drawn, split off `from` side by side in tab page `tab`
+/// (as split notes name it), with no pane yet.
+fn split_in_tab(fx: &mut Fixture, win: i64, from: i64, tab: i64) {
+    draw_external(&mut fx.d, win as u32 - 900, win, 80, 23);
+    fx.d.changes.note_split(crate::nvim::windows::Split {
+        win,
+        side_by_side: true,
+        before: false,
+        from,
+        tab,
+    });
+}
+
+#[test]
+fn a_self_attach_opening_a_file_on_a_daemon_kept_on_a_later_tab_page_lays_its_splits_out_beside_it()
+{
+    use super::self_attach::{AskKind, WindowAsk};
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    draw_external(&mut fx.d, 101, 1001, 80, 23);
+    fx.d.lifetime.kept = Some(super::lifetime::Kept { win: 1001, tab: 2 });
+    fx.d.nvim.current_win = 1001;
+    // its file opens in a new window, in the current tab page
+    let (id, _live) = windowless_pane(&mut fx, "t0");
+    fx.d.window_ask = Some(WindowAsk {
+        pane: id,
+        req: 1,
+        kind: AskKind::Open,
+    });
+    fx.d.on_note(crate::nvim::windows::Note::Opened(1002))
+        .unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((2, Some(1002)), (p.shown_tab, p.neovim_window_handle));
+
+    split_in_tab(&mut fx, 1003, 1002, 2);
+    fx.d.new_pane(1003).unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert!(p.held.is_empty(), "{:?}", p.held);
+    assert_eq!(vec![1002, 1003], p.layout.as_ref().unwrap().windows());
+}
+
+#[test]
+fn a_self_attach_taking_an_unshown_window_shows_the_tab_page_its_split_note_names() {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    split_in_tab(&mut fx, 1005, 0, 4);
+    let (id, _live) = windowless_pane(&mut fx, "t0");
+    fx.d.take_unshown(id, 1005, &[1005]);
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((4, Some(1005)), (p.shown_tab, p.neovim_window_handle));
 }
