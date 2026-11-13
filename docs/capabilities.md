@@ -261,8 +261,9 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
   `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
   the new pane's id.
 - `open_float`: `new-pane -d -t ORIGIN` with `-x -y -X -Y`, running the
-  attach command, its content on the float group: `X`,`Y` are made the
-  window's from `ORIGIN`'s `pane_left` and `pane_top`. 3.7's flags give
+  attach command, its content on the float group: `X`,`Y` count from the
+  top left of `ORIGIN`'s content, inside its inset, which is its
+  `pane_left` and `pane_top`, and are made the window's from there. 3.7's flags give
   the content, a size under the window's; 3.8's give the frame, so it
   passes `X-1`, `Y-1`, `COLS+2`, `ROWS+2`. The frame stays: a float without
   one merges into the pane beneath. Prints the new pane's id; below 3.7,

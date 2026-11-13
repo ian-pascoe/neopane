@@ -13,7 +13,6 @@ use super::asks;
 use super::dir::Address;
 use super::event_loop::Loop;
 use super::float_homes::FloatHomes;
-use super::geometry;
 use super::pane::{self, Close, Pane};
 use super::panes::Panes;
 use super::provider::{Ask, TerminalId};
@@ -265,9 +264,9 @@ pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> O
         return None;
     }
     let rect = origin.and_then(|p| p.area.rect());
-    // its content's, inside its inset
+    // its content's, inside its inset: row, col
     let top_left = origin
-        .and_then(|p| geometry::content_corner(&p.area, [screen.width, screen.height]))
+        .and_then(|p| p.area.content_corner([screen.width, screen.height]))
         .unwrap_or([0, 0]);
     // the terminal's size only with the rect it's at: cells from the
     // screen's top left are counted in the screen
@@ -285,7 +284,7 @@ pub(crate) fn group_bounds(grids: &Grids, origin: Option<&Pane>, g: &Group) -> O
         ]
     });
     Some(GroupBounds {
-        at: [g.col - top_left[0], g.row - top_left[1]],
+        at: [g.col - top_left[1], g.row - top_left[0]],
         origin_size,
         area_bounds,
     })

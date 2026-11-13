@@ -25,11 +25,13 @@ pub(crate) fn tab_page_size(cols: u32, rows: u32) -> [u32; 2] {
 }
 
 /// The bounds of the Rex floating pane of a float group `cols` x `rows`
-/// cells, at `x`, `y` cells from its origin's top left, as `open_float` asks
-/// for it: fractions of the Rex window, frame included. `area_bounds`, the
-/// group as fractions of its origin's layout area, the Rex window, give that
-/// window's cells; without them the origin, `origin_cols` x `origin_rows`, is
-/// taken for the window. None with no room to measure by.
+/// cells, at `x`, `y` cells from the top left of its origin's content,
+/// inside its inset, as `open_float` asks for it (Rex reports no inset, so
+/// that is its origin's top left): fractions of the Rex window, frame
+/// included. `area_bounds`, the group as fractions of its origin's layout
+/// area, the Rex window, give that window's cells; without them the
+/// origin, `origin_cols` x `origin_rows`, is taken for the window. None
+/// with no room to measure by.
 pub(crate) fn float_bounds(
     [x, y]: [i32; 2],
     [cols, rows]: [u32; 2],
