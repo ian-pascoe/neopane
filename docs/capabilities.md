@@ -170,11 +170,16 @@ last layout it read.
   area, and each area has its own tabline panes.
 - `terminal`: the id an open printed. Foreign panes, terminals that aren't
   Neovim panes, belong too: they take room in their area.
-- `rect`: `[x, y, w, h]`, as fractions of the area, from its top left.
+- `rect`: `[x, y, w, h]`, as fractions of the area, from its top left:
+  what the terminal takes of its area, including any cells named in
+  `inset`. Rects need not tile: cells between terminals, such as tmux's
+  separators, may belong to none.
 - `floating` (default `false`): it floats over the area's tiled terminals.
 - `inset` (default `[0, 0, 0, 0]`): cells at each edge of `rect` that aren't
-  the terminal's, such as a floating pane's frame: left, top, right,
-  bottom.
+  the terminal's, such as a pane's frame: left, top, right, bottom. A
+  tiled terminal's inset counts toward its area's size: the area is the
+  terminal's cells plus its inset, divided by its share of the area, on
+  each axis.
 - `focus` (optional): the terminal the user types into. Without `events`,
   a change here is how the daemon learns the user moved focus.
 - Unknown fields are ignored.

@@ -4435,6 +4435,7 @@ mod tests {
             id: id.into(),
             rect,
             floating: false,
+            inset: [0; 4],
         }
     }
 
@@ -4444,6 +4445,7 @@ mod tests {
             id: id.into(),
             rect,
             floating: true,
+            inset: [0; 4],
         }
     }
 
@@ -4654,6 +4656,47 @@ mod tests {
         // no terminal was moved for it
         assert!(fake(fx.d()).asks.is_empty());
         assert_eq!(vec![Some(60), None], tabline_widths_sent(fx));
+    }
+
+    #[test]
+    fn framed_tiled_panes_count_their_frames_in_their_areas_size() {
+        let mut fx = TablineFixture::init();
+        fx.d().nvim.ready = true;
+        // side by side in a 200 x 21 area, framed as zellij frames them:
+        // a has its top row and right column framed, b its top row
+        let a = fx.add(0, 99, Area::Unreported);
+        let b = fx.add(1, 100, Area::Unreported);
+        set_block(fx.d(), a, 1);
+        set_block(fx.d(), b, 2);
+        fx.d().nvim.current_win = 1000;
+        let framed = |n: u32, rect: [f64; 4], inset: [u16; 4]| PlacedTerminal {
+            terminal: TerminalId::from(block_id(n).as_str()),
+            rect,
+            floating: false,
+            inset,
+        };
+        let l = LiveLayout {
+            areas: vec![LayoutArea {
+                id: "w".into(),
+                terminals: vec![
+                    framed(1, [0.0, 0.0, 0.5, 1.0], [0, 1, 1, 0]),
+                    framed(2, [0.5, 0.0, 0.5, 1.0], [0, 1, 0, 0]),
+                ],
+            }],
+            current: None,
+        };
+        fake(fx.d()).push(ProviderEvent::Layout(l));
+        fx.d().drain_provider().unwrap();
+        fx.d().after_batch().unwrap();
+        // Neovim's screen is exactly the area, from either pane
+        assert_eq!([200, 21], fx.d().nvim.editor_size);
+        fx.d().on_current(1001).unwrap();
+        fx.d().after_batch().unwrap();
+        assert_eq!([200, 21], fx.d().nvim.editor_size);
+        // framed along the top, both are still tabline panes
+        let d = fx.d();
+        assert!(geometry::is_tabline_pane(d.panes.by_id(a).unwrap()));
+        assert!(geometry::is_tabline_pane(d.panes.by_id(b).unwrap()));
     }
 
     #[test]
@@ -5647,6 +5690,7 @@ mod tests {
             id: "w".into(),
             rect: [0.5, 0.0, 0.5, 1.0],
             floating: false,
+            inset: [0; 4],
         };
         origin.terminal_surface = Some(Surface::for_test(100, 50));
         d.grids.wins.get_mut(&3).unwrap().float.screen = Some([4, 110]);

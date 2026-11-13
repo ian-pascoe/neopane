@@ -190,18 +190,37 @@ fn left(p: &Pane) -> f64 {
 }
 
 /// The size of pane `p`'s layout area, in its cells: its cells over its
-/// share of the area (ADR 0008). Neovim's screen is this, for the current
-/// pane. None while it's in no area, or has no terminal.
+/// share of the area (ADR 0008). A tiled pane's share counts its inset, the
+/// cells of its rect that aren't its terminal's, such as a frame; a floating
+/// one's doesn't. Neovim's screen is this, for the current pane. None while
+/// it's in no area, or has no terminal.
 pub(crate) fn area_size(p: &Pane) -> Option<[u32; 2]> {
     let s = p.terminal_surface.as_ref()?;
     let (cols, rows) = (s.view.cols, s.view.rows);
     match &p.area {
         Area::Unreported => None,
         Area::Own => Some([cols, rows]),
-        Area::Live { rect: r, .. } if r[2] <= 0.0 || r[3] <= 0.0 => Some([cols, rows]),
-        Area::Live { rect: r, .. } => Some([
-            cols.max((f64::from(cols) / r[2]).round() as u32),
-            rows.max((f64::from(rows) / r[3]).round() as u32),
-        ]),
+        Area::Live {
+            rect: r,
+            floating,
+            inset: [il, it, ir, ib],
+            ..
+        } => {
+            let (cols, rows) = if *floating {
+                (cols, rows)
+            } else {
+                (
+                    cols + u32::from(*il) + u32::from(*ir),
+                    rows + u32::from(*it) + u32::from(*ib),
+                )
+            };
+            if r[2] <= 0.0 || r[3] <= 0.0 {
+                return Some([cols, rows]);
+            }
+            Some([
+                cols.max((f64::from(cols) / r[2]).round() as u32),
+                rows.max((f64::from(rows) / r[3]).round() as u32),
+            ])
+        }
     }
 }

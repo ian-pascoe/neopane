@@ -22,6 +22,7 @@ fn two_panes(provider: Option<FakeProvider>) -> Fixture {
             id: "w".into(),
             rect: [x, 0.0, 0.5, 1.0],
             floating: false,
+            inset: [0; 4],
         };
         d.panes.add(p);
     }
@@ -168,6 +169,7 @@ fn a_group_whose_pane_went_stays_in_the_pane_it_was_drawn_in_next() {
         id: "w".into(),
         rect: [0.0, 0.0, 0.5, 1.0],
         floating: false,
+        inset: [0; 4],
     };
     d.panes.add(p);
     d.on_current(1000).unwrap();
