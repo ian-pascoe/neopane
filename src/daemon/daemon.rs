@@ -1490,13 +1490,13 @@ impl Daemon {
                 l.fit = Fit::None;
             }
         }
-        let pair = self.is_pair();
         let mut i = self.panes.list.len();
         while i > 0 {
             i -= 1;
             if self.close_laid_out_windows(i) {
                 continue;
             }
+            let close = self.close_id(&self.panes.list[i]);
             let p = &mut self.panes.list[i];
             let Some(win) = p.neovim_window_handle else {
                 continue;
@@ -1512,7 +1512,7 @@ impl Daemon {
             // a requested terminal is closed, whether or not its helper
             // connected; a self-attached one goes back to its shell (#86 D10)
             if !p.is_self_attached()
-                && let Some(t) = p.close_id(pair)
+                && let Some(t) = close
             {
                 self.act(asks::close(t));
             }
@@ -2022,7 +2022,6 @@ impl Daemon {
         let wait = self.attach_timeout();
         let pair = self.is_pair();
         let p = self.panes.by_id_mut(pane_id).unwrap();
-        p.close_terminal = Some(t.clone());
         p.open_answered = true;
         let handle = p.neovim_window_handle;
         let attaching = p.terminal_surface.is_none();
@@ -2032,6 +2031,7 @@ impl Daemon {
         if pair {
             // its id serves only `close`: the layout provider's `find`, as
             // its terminal attaches, gives the one that places it
+            p.close_terminal = Some(t);
             if attaching {
                 self.arm_attach_timer()?;
             }
@@ -2113,6 +2113,16 @@ impl Daemon {
         self.provider.as_ref().is_some_and(|p| p.is_pair())
     }
 
+    /// The id `close` takes for pane `p`'s terminal: in a pair, the one
+    /// the terminal provider's open printed, if any; else its terminal's.
+    pub(super) fn close_id(&self, p: &Pane) -> Option<TerminalId> {
+        if self.is_pair() {
+            p.close_terminal.clone()
+        } else {
+            p.terminal.clone()
+        }
+    }
+
     /// An act that couldn't be done. A pane whose open failed is given up.
     fn fall_back(&mut self, ask: Ask) -> Result<()> {
         if ask == Ask::ReportLayout {
@@ -2134,11 +2144,11 @@ impl Daemon {
     /// group pane's floats are drawn in the pane, and a tab page's other
     /// windows ask for their own.
     pub(super) fn give_up(&mut self, id: u32) -> Result<()> {
-        let pair = self.is_pair();
+        let terminal = self.close_id(self.panes.by_id(id).unwrap());
         let p = self.panes.by_id_mut(id).unwrap();
         p.closing = Some(Close::RequestFailed);
         p.attach_due = None;
-        let (attach_id, terminal) = (p.attach_id, p.close_id(pair));
+        let attach_id = p.attach_id;
         if let Some(a) = attach_id {
             self.panes.ids.expire(&a);
         }

@@ -17,7 +17,7 @@
 //!
 //! Before the first `find` for an attach, a pane provider whose `find`
 //! matches the pane title, unlike Rex's, has the daemon write it into the
-//! terminal, and a new `u` tell the helper how to put the old one back.
+//! terminal, and a new `u` tells the helper how to put the old one back.
 
 use super::*;
 use crate::attach::{PaneId, env_value};
@@ -245,7 +245,7 @@ impl Daemon {
         }
         // a terminal this pane provider opened stays in its reach whatever
         // `find` says: only its id is to find (#93 decision 17's (c))
-        if q.is_self_attached() || q.reach == Reach::Out {
+        if !q.is_provider_made() {
             q.reach = Reach::Finding;
         }
         let title = pane::title(&attach_id);
@@ -375,8 +375,7 @@ impl Daemon {
         let Some(p) = self.panes.by_id(id) else {
             return Ok(());
         };
-        let asks = !p.is_self_attached()
-            && p.reach == Reach::In
+        let asks = p.is_provider_made()
             && p.closing.is_none()
             && p.terminal.is_none()
             && p.hello.is_some()
@@ -434,7 +433,7 @@ impl Daemon {
         let mut made = None;
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
             // (c): opened by this pane provider, only its id was to find
-            if !p.is_self_attached() && p.reach == Reach::In {
+            if p.is_provider_made() {
                 made = Some(p.id);
             }
             p.reach = Reach::In;
@@ -491,7 +490,7 @@ impl Daemon {
         };
         let kept = self.provider.is_some() && self.asks.unsupported(Capability::Find);
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
-            let made = !p.is_self_attached() && p.reach == Reach::In;
+            let made = p.is_provider_made();
             p.reach = if kept { Reach::In } else { Reach::Out };
             let id = p.id;
             if kept && made {

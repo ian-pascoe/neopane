@@ -140,9 +140,7 @@ impl Spec {
                     Role::Terminal => cap.is_terminal(),
                     Role::Layout => cap.is_layout(),
                 };
-                let Some(c) = RUNS.into_iter().find(|c| c.name() == cap.name()) else {
-                    continue;
-                };
+                let c = runner_capability(*cap);
                 if used {
                     spec.commands.push(CapCommand {
                         cap: c,
@@ -171,6 +169,25 @@ impl Spec {
             find_vars: Vec::new(),
             pair: false,
         }
+    }
+}
+
+/// The capability the runner runs for config capability `cap`.
+fn runner_capability(cap: config::Capability) -> Capability {
+    use config::Capability as C;
+    match cap {
+        C::Open => Capability::Open,
+        C::Close => Capability::Close,
+        C::Find => Capability::Find,
+        C::PlaceBeside => Capability::PlaceBeside,
+        C::Resize => Capability::Resize,
+        C::Focus => Capability::Focus,
+        C::FocusDirection => Capability::FocusDirection,
+        C::ReportLayout => Capability::ReportLayout,
+        C::Events => Capability::Events,
+        C::OpenBeside => Capability::OpenBeside,
+        C::OpenFloat => Capability::OpenFloat,
+        C::OpenTabPage => Capability::OpenTabPage,
     }
 }
 

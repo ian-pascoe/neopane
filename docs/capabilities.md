@@ -257,7 +257,7 @@ Each is `<NAME>_` and the name below.
 | `ATTACH_JSON` | compact JSON array | the same words |
 | `TITLE` | e.g. `<name>-k3j9x2qpa8` | the pane title |
 | `PANE` | e.g. `12-k3j9x2qpa8` | the pane id the attach command names |
-| `TERMINAL` | as an open printed it | the terminal acted on |
+| `TERMINAL` | as an open or `find` printed it | the terminal acted on |
 | `ORIGIN` | terminal id | the origin pane's terminal (for `open_float`, the current pane's); for `resize`, the terminal across the split |
 | `DIRECTION` | `left`, `right`, `up`, `down` | a split: which side of `ORIGIN` the terminal goes or is on; `focus_direction`: where focus moves |
 | `SIZE` | integer, cells | the terminal's size along the split |
@@ -267,7 +267,6 @@ Each is `<NAME>_` and the name below.
 | `ORIGIN_COLS`, `ORIGIN_ROWS` | integer, cells | `ORIGIN`'s size |
 | `AREA_BOUNDS` | `x,y,w,h`, each as `RATIO` | the float as fractions of `ORIGIN`'s layout area; unset outside a live layout |
 | `COUNT` | integer, 1–20 | `focus_direction`'s steps |
-
 | `PID` | integer | the attaching helper's process id |
 | `TTY` | path | the attaching terminal's tty; empty where it has none |
 | `ENV_<VAR>` | raw bytes | the attaching terminal's value of `VAR`, one of `find_vars`; unset where it has none. A variable only, never a placeholder |

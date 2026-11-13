@@ -395,8 +395,8 @@ impl Daemon {
         self.rejoin_requested(id)?;
         // in a pair, or with no id from its open, the layout provider's
         // `find` gives its id
-        let opened = self.panes.by_id(id).is_some_and(|p| p.open_answered);
-        if self.is_pair() || opened {
+        let open_answered = self.panes.by_id(id).is_some_and(|p| p.open_answered);
+        if self.is_pair() || open_answered {
             self.find_requested(id)?;
         }
         self.read_layout_again();

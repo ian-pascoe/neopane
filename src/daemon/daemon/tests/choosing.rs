@@ -792,19 +792,31 @@ fn context_variables_compare_as_bytes_unset_matching_unset() {
 
 // The pane title (#127)
 
-/// What the daemon wrote to the terminal of pty `master` so far.
-fn written_to(master: i32) -> Vec<u8> {
+/// What the daemon wrote to the terminal of pty `master`: until it holds
+/// `until`, for at most 5 s; else what came before 50 ms passed quietly.
+fn written_to(master: i32, until: Option<&[u8]>) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
+        if let Some(want) = until
+            && (out.windows(want.len()).any(|w| w == want) || Instant::now() >= deadline)
+        {
+            return out;
+        }
         let mut fds = [libc::pollfd {
             fd: master,
             events: libc::POLLIN,
             revents: 0,
         }];
         // SAFETY: one valid pollfd.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) } <= 0 {
-            return out;
+        let ready =
+            unsafe { libc::poll(fds.as_mut_ptr(), 1, if until.is_some() { 100 } else { 50 }) };
+        if ready <= 0 {
+            if until.is_none() {
+                return out;
+            }
+            continue;
         }
         // SAFETY: reading into a buffer of its size.
         let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
@@ -844,8 +856,11 @@ fn self_attach_finding(wants_title: bool) -> (Fixture, u32, UnixStream, Pty, Rc<
     let at_find = Rc::new(RefCell::new(Vec::new()));
     let (master, seen) = (pty.master, at_find.clone());
     f.on_ask = Some(Box::new(move |ask| {
-        if matches!(ask, Ask::Find { .. }) {
-            seen.borrow_mut().extend(written_to(master));
+        if let Ask::Find { title, .. } = ask {
+            // what a title would be, were it written
+            let set = crate::term::modes::set_title(title);
+            let until = wants_title.then_some(set.as_slice());
+            seen.borrow_mut().extend(written_to(master, until));
         }
     }));
     let mut fx = with_provider(Some(Box::new(f)));
@@ -896,7 +911,7 @@ fn the_pane_title_is_written_before_find_runs_and_put_back_by_the_undo_bytes() {
         fake(&mut fx.d).asked().last(),
         Some(Ask::Find { .. })
     ));
-    assert!(!String::from_utf8_lossy(&written_to(pty.master)).contains("\x1b]2;"));
+    assert!(!String::from_utf8_lossy(&written_to(pty.master, None)).contains("\x1b]2;"));
     assert!(frames_sent(&helper).is_empty());
 }
 
@@ -909,7 +924,7 @@ fn a_pane_provider_whose_find_wants_no_title_gets_none_written() {
         Some(Ask::Find { .. })
     ));
     let mut seen = at_find.borrow().clone();
-    seen.extend(written_to(pty.master));
+    seen.extend(written_to(pty.master, None));
     let seen = String::from_utf8_lossy(&seen).into_owned();
     assert!(
         !seen.contains("\x1b]2;") && !seen.contains("\x1b[22;2t"),
