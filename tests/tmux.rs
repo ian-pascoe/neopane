@@ -695,6 +695,9 @@ impl Live {
     /// and its statusline and message rows, before the next.
     fn resizes(&self, tab: u32, win: &str, window: &str, axis: Axis, nth: usize, sizes: &[i32]) {
         for &n in sizes {
+            // fitted to its pane as the last step left it: a fit landing
+            // after the resize would undo it
+            self.until_fitted(tab, win, window, axis, nth);
             // Neovim tells a tab page's layout only while it is current
             let resize = format!(
                 "execute('{tab}tabnext') .. win_execute({win}, '{} {n}')",
