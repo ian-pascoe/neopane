@@ -205,3 +205,36 @@ and its Lua, from starting the child to its answer, as the log's
 The first attach starts the config child before Neovim starts, as it starts
 connecting to Rex without one, so the child runs behind Neovim's start;
 Rex's connection starts once it has answered.
+
+## tmux's acts
+
+The built-in tmux pane provider (ADR 0016) runs each act as a process of
+neopane's own binary, which runs `tmux` once or more. Its budget is
+informational, not a gate: median ≤ 15 ms and p95 ≤ 40 ms for the focus
+acts, `focus` and `focus_direction`; `open_beside` is recorded beside them.
+
+```sh
+scripts/latency-tmux.sh [N]
+```
+
+starts a private tmux server of two panes (`tmux -S`, `-f /dev/null`),
+killed at the end, and runs each act N times (50 by default) as the daemon
+would, `{exe} provider builtin tmux CAPABILITY` with that act's variables,
+timing it from its start to its exit: the daemon's ask to the act's end,
+less the daemon's own queue. `focus` alternates between the two panes,
+`focus_direction` between `right` and `left`, and `open_beside` opens a
+pane below `%0` running `sleep 600`, killed untimed after each run. It
+prints N, the median and the p95 (nearest rank) per act, or the exit status
+and first stderr line of an act the build or the tmux doesn't have. It
+times `target/release/neopane` (`BIN` names another) and the `tmux` on
+`PATH` (`TMUX_BIN` names another), and needs bash 5.
+
+Recorded at SPI-1134 (24cb5ff), the release profile, on a MacBook Pro (M1,
+8 cores), macOS 27.2.1, N = 55, the 1-minute load near 9: other builds ran
+alongside, so these are high. The tmux built-in had no `focus` or
+`focus_direction` yet (SPI-1132 adds them), so only `open_beside` was timed.
+
+| Act | tmux | Medians | p95s |
+|---|---|---|---|
+| `open_beside` | 3.8 | 18.825, 17.729, 18.373 | 32.292, 21.356, 21.674 |
+| `open_beside` | 3.2a | 14.257 | 21.164 |
