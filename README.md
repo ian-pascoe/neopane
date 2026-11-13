@@ -165,7 +165,8 @@ own:
 
 - `NEOPANE_PROVIDER`: a hint at the pane provider, sent with the attach;
   `none` chooses none, even in Rex. Other values are for your config, which
-  comes later.
+  comes later. `--provider P`, on `neopane` or `neopane attach`, gives the
+  hint instead.
 - `NEOPANE_LOG`: how much the daemon logs, read as it starts. `warn`: what
   went wrong; `info`, the default: that, and what happened; `debug`: that,
   and the trace timestamps `docs/latency.md` reads. Any other value logs a
@@ -190,20 +191,56 @@ pane id, such as `2-k3j9x2qpa8`, is good for that one pane's terminal only.
 
 ### From another terminal
 
-Any other terminal can show the same Neovim: run `neopane attach --address
-$NEOPANE_TMPDIR/neopane-<uid>/<daemon name>/sock` there (`/tmp` for an unset
-`NEOPANE_TMPDIR`). It shows a window no terminal shows yet, Neovim's current
+Any other terminal can show the same Neovim: run `neopane attach` there. It
+attaches to the one daemon running; with several, name one with `--name`
+(see [Several daemons](#several-daemons)), or give its address,
+`--address $NEOPANE_TMPDIR/neopane-<uid>/<daemon name>/sock` (`/tmp` for an
+unset `NEOPANE_TMPDIR`). It shows a window no terminal shows yet, Neovim's current
 one first, then by tab page and window order, so after `neopane -p a b c` a
 second terminal shows `b`; with none, a new window, as `:split` opens one.
-`neopane attach --address A notes.md` opens `notes.md` there in a new window
-instead, and `+12 notes.md` puts the cursor on line 12. The window it shows
+`neopane attach notes.md` opens `notes.md` there in a new window instead, and
+`neopane attach +12 notes.md` puts the cursor on line 12. A relative path is
+taken from the directory `attach` runs in. The window it shows
 becomes current. Closing that terminal closes its windows, and only those;
 the terminal goes back to its shell. With no pane provider yet, the attach
 chooses one, as the first did. In the pane provider's reach, as in a Rex block
 of the chosen Rex session, `:vsplit` there opens a pane beside it; out of its
 reach, `:vsplit` draws the new window in that terminal. Run in the daemon's own `:terminal`, it exits 1 with `neopane: a
-terminal in <name>'s own Neovim can't attach to it`. Finding a daemon by
-name comes later.
+terminal in <name>'s own Neovim can't attach to it`.
+
+`attach` finds its daemon by `--address`, then `--name`, then `$NEOPANE`, the
+address a daemon sets in its Neovim's `:terminal`s, then the only one
+running. It never starts one. When it finds none, it says why in one line and
+exits 1:
+
+- `neopane: no daemon is running; start one with neopane [FILE]`
+- `neopane: 3 daemons are running (notes, scratch, work); choose one with
+  --name`
+- `neopane: no daemon named work is running (running: notes, scratch)`
+- `neopane: no daemon answers at /tmp/neopane-501/work/sock`
+
+`$NEOPANE` where nothing answers is ignored, with `neopane: ignoring $NEOPANE:
+nothing answers at …`. `attach` takes only `[+LINE] [FILE]`; anything else is
+a usage error, `neopane: attach takes [+LINE] [FILE]`. `--provider P` is the
+hint `NEOPANE_PROVIDER` gives, and wins over it; it counts only when this
+attach chooses the pane provider, and otherwise the daemon logs `hint P
+ignored: work keeps rex`.
+
+### Several daemons
+
+`neopane --name work` attaches to the daemon named `work` if it runs, exactly
+as `neopane attach --name work` would, and otherwise starts a daemon named
+exactly `work`, with no `-2` added. So `neopane --name work` in two terminals
+shows one daemon in both. A name is 1 to 32 letters, digits, `.`, `_` and
+`-`, and not `.` or `..`; anything else exits 2 with `neopane: --name: use
+1-32 letters, digits, '.', '_' or '-'`. A running daemon takes only `[+LINE]
+FILE`: `neopane --name work -O a b` with `work` running exits 2 with
+`neopane: work is running, so it takes only [+LINE] FILE; -O is for starting
+a daemon (open windows from Neovim)`.
+
+`neopane --address A [+LINE] [FILE]` is exactly `neopane attach --address A
+[+LINE] [FILE]`, and never starts a daemon. `--name` and `--address`
+together exit 2.
 
 ### When the last pane goes
 
@@ -298,11 +335,9 @@ Usage:
 ```
 
 Not built yet, each exiting 1 with `neopane: <what> isn't built yet`:
-`attach` without `--address`, and `attach --name` and `attach --provider`;
-`list`, `status`, `kill` and `provider check`; and the bare form's `--name`,
-`--address`, `--detach` and `--no-wait`. The bare form's `--provider` is
-accepted and does nothing. `attach --address A [+LINE] [FILE]` is built, as
-is the hidden `attach --pane` a Rex block runs.
+`list`, `status`, `kill` and `provider check`; and the bare form's
+`--detach` and `--no-wait`. `--provider` with `--detach` exits 2: it is for
+the terminal that chooses the pane provider.
 
 ### Own options first, then Neovim's
 

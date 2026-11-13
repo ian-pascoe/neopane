@@ -7,6 +7,7 @@ pub mod dir;
 pub(crate) mod event_loop;
 pub(crate) mod exe_stamp;
 pub(crate) mod fdpass;
+pub mod find;
 pub(crate) mod floating_panes;
 pub(crate) mod focus_gate;
 pub(crate) mod geometry;

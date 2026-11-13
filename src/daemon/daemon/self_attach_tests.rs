@@ -484,7 +484,7 @@ fn closing_a_self_attached_terminal_closes_only_its_windows() {
 fn hello_with_address(rig: &Rig, tty: &[u8]) -> Vec<u8> {
     let mut terminal = test_terminal(80, 24);
     terminal.env = vec![(
-        crate::name::upper().into_bytes(),
+        crate::daemon::find::inside_var().into_bytes(),
         rig.sock.as_bytes().to_vec(),
     )];
     terminal.tty = tty.to_vec();

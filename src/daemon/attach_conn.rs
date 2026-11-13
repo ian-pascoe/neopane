@@ -257,7 +257,7 @@ pub(crate) enum Nesting {
 
 /// How `nested` goes for self-attaching terminal `t` (see `Nesting`).
 pub(crate) fn nesting(t: &Terminal, address: &std::ffi::OsStr) -> Nesting {
-    if attach::env_value(&t.env, &crate::name::upper()) != Some(address.as_encoded_bytes()) {
+    if attach::env_value(&t.env, &super::find::inside_var()) != Some(address.as_encoded_bytes()) {
         Nesting::No
     } else if t.tty.is_empty() {
         Nesting::Yes
@@ -417,7 +417,10 @@ mod tests {
             let mut t = test_terminal(80, 24);
             t.env = vec![
                 (b"TERM".to_vec(), b"x".to_vec()),
-                (crate::name::upper().into_bytes(), address.to_vec()),
+                (
+                    crate::daemon::find::inside_var().into_bytes(),
+                    address.to_vec(),
+                ),
             ];
             t.tty = tty.to_vec();
             nesting(&t, ours)

@@ -37,7 +37,7 @@ use super::pane::SelfAttach;
 use super::surface::Surface;
 use crate::attach::{End, Purpose, Refusal, Transport};
 use crate::log::{self, Point, log_info, log_warn};
-use crate::name::{self, NAME};
+use crate::name::NAME;
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
 use crate::providers::choose::{self, Chosen};
@@ -515,7 +515,7 @@ fn start_nvim<S: AsRef<OsStr>>(
         .args(["--cmd", &format!("let g:{NAME} = 1")])
         .args(nvim_args)
         // Neovim's alone: nothing else the daemon runs gets it
-        .env(name::upper(), dir.address().as_arg())
+        .env(super::find::inside_var(), dir.address().as_arg())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -766,29 +766,34 @@ fn nvim_exit(child: &mut Child) -> Option<NvimExit> {
 
 /// Waits up to 5 s for the first attach, the launcher's, and accepts it:
 /// a self-attach; later ones come through the loop. Its hello gets
-/// `HELLO_TIMEOUT`, blocking: the loop isn't running yet.
+/// `HELLO_TIMEOUT`, blocking: the loop isn't running yet. A connection that
+/// hangs up before its hello, as one finding the daemons running does, or
+/// another user's, is passed over.
 fn first_attach(server: &UnixListener, name: &str, log: &str) -> Result<SelfAttach> {
-    let mut fds = [libc::pollfd {
-        fd: server.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: one valid pollfd.
-    let ready = loop {
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) };
-        if n >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            break n;
+    let due = Instant::now() + Duration::from_secs(5);
+    let a = loop {
+        let left = due.saturating_duration_since(Instant::now());
+        let mut fds = [libc::pollfd {
+            fd: server.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let ms = left.as_millis().min(i32::MAX as u128) as i32;
+        // SAFETY: one valid pollfd.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
         }
-    };
-    if ready <= 0 {
-        return Err(Error::NoPane.into());
-    }
-    let (stream, _) = server.accept()?;
-    let Some(pending) = Pending::new(stream, attach_conn::HELLO_TIMEOUT, euid())? else {
-        return Err(Error::NoPane.into());
-    };
-    let Step::Arrived(a) = pending.read_blocking() else {
-        return Err(Error::NoPane.into());
+        if ready <= 0 {
+            return Err(Error::NoPane.into());
+        }
+        let (stream, _) = server.accept()?;
+        let Some(pending) = Pending::new(stream, attach_conn::HELLO_TIMEOUT, euid())? else {
+            continue;
+        };
+        if let Step::Arrived(a) = pending.read_blocking() {
+            break a;
+        }
     };
     let hello = match a.hello {
         Ok(h) => h,
@@ -1059,6 +1064,31 @@ mod tests {
         std::os::unix::fs::symlink(&target, &log).unwrap();
         assert!(create_log(&log).is_err());
         assert_eq!("kept", fs::read_to_string(&target).unwrap());
+    }
+
+    #[test]
+    fn the_first_attach_passes_over_a_connection_that_hangs_up_before_its_hello() {
+        let (_base, dir) = test_dir();
+        let server = dir.bind().unwrap();
+        // finding the daemons running: connects, and hangs up
+        assert!(dir.address().answers());
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: valid out-pointers; no name, termios or size.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(0, rc);
+        let _launcher = fake_launcher_ready(&dir.address(), slave).unwrap();
+        let first = first_attach(&server, "d", "/l");
+        // SAFETY: our own master.
+        unsafe { libc::close(master) };
+        assert!(first.is_ok(), "{:?}", first.err());
     }
 
     /// The launcher, for a test: connects to the daemon's socket as soon as it
@@ -1694,7 +1724,10 @@ mod tests {
             return;
         };
         let out = path(&nvim.dir, "out");
-        let cmd = format!("terminal echo \"${}\" > {out}", name::upper());
+        let cmd = format!(
+            "terminal echo \"${}\" > {out}",
+            crate::daemon::find::inside_var()
+        );
         let id = nvim.nvim().request("nvim_command", 1);
         msgpack::write_str(nvim.nvim().writer(), &cmd);
         nvim.nvim().flush().unwrap();
@@ -1713,7 +1746,7 @@ mod tests {
     /// The environment variable that makes `sigkill_helper` run, naming the
     /// file it edits.
     fn sigkill_helper_var() -> String {
-        format!("{}_TEST_SIGKILL", name::upper())
+        format!("{}_TEST_SIGKILL", crate::name::upper())
     }
 
     /// For `a_sigkilled_daemons_neovim_exits_keeping_a_changed_buffers_swap`,

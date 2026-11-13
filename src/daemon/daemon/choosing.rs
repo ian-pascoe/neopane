@@ -57,6 +57,19 @@ impl Daemon {
             self.run_steps()?;
         }
         if self.provider.is_some() {
+            // only a choosing attach's hint matters (#94 decision 37)
+            let hint = self
+                .panes
+                .by_id(id)
+                .and_then(|p| p.hello.as_deref())
+                .and_then(|h| h.hint.as_deref());
+            if let Some(hint) = hint {
+                log_info!(
+                    "{NAME} daemon: hint {hint} ignored: {} keeps {}",
+                    self.name,
+                    self.provider_name()
+                );
+            }
             return self.check_reach(id);
         }
         let hello = self

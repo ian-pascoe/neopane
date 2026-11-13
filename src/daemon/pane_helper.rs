@@ -7,6 +7,7 @@
 //! the daemon wrote and restores its terminal, however the attach ended.
 //! `docs/attach-protocol.md` is the reference.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -92,18 +93,24 @@ pub fn run(address: &Address, want: Want, transport: Transport) -> Exit {
     run_as(address, Attach::new(want, transport))
 }
 
+/// What a self-attach asks of the daemon, beyond a pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Opening {
+    /// The file to open in a new window, absolute, and the cursor's line in
+    /// it.
+    pub file: Option<Vec<u8>>,
+    pub line: Option<u32>,
+    /// `--provider P`, the hint, as given (see `provider_hint`).
+    pub provider: Option<OsString>,
+}
+
 /// Self-attaches stdin's terminal to the daemon at `address`, as `run`
-/// does, asking for `file`, absolute, in a new window with the cursor on
-/// `line`.
-pub fn run_opening(
-    address: &Address,
-    transport: Transport,
-    file: Option<Vec<u8>>,
-    line: Option<u32>,
-) -> Exit {
+/// does, asking for what `opening` says.
+pub fn run_self(address: &Address, transport: Transport, opening: Opening) -> Exit {
     let how = Attach {
-        file,
-        line,
+        file: opening.file,
+        line: opening.line,
+        provider: opening.provider,
         ..Attach::new(Want::SelfAttach, transport)
     };
     run_as(address, how)
@@ -154,6 +161,8 @@ pub(crate) struct Attach {
     /// the cursor's line in it.
     pub(crate) file: Option<Vec<u8>>,
     pub(crate) line: Option<u32>,
+    /// For a self-attach: `--provider P`, as given (see `provider_hint`).
+    pub(crate) provider: Option<OsString>,
     pub(crate) transport: Transport,
     /// How long the daemon has to answer.
     pub(crate) answer_within: Duration,
@@ -170,6 +179,7 @@ impl Attach {
             want,
             file: None,
             line: None,
+            provider: None,
             transport,
             answer_within: ANSWER_TIMEOUT,
             // SAFETY: `geteuid` has no preconditions.
@@ -225,7 +235,7 @@ fn attach_with(
         Want::Requested(pane) => Purpose::Requested { pane, terminal },
         Want::SelfAttach => Purpose::SelfAttach {
             terminal,
-            provider: provider_hint(),
+            provider: provider_hint(how.provider.as_deref()),
             file: how.file.clone(),
             line: how.line,
         },
@@ -826,10 +836,14 @@ fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
     })
 }
 
-/// The pane provider a self-attach hints at: `$<NAME>_PROVIDER`, when set
-/// and not empty.
-fn provider_hint() -> Option<String> {
-    let hint = std::env::var_os(format!("{}_PROVIDER", crate::name::upper()))?;
+/// The pane provider a self-attach hints at: `given`, `--provider P`, else
+/// `$<NAME>_PROVIDER`; empty counts as unset.
+pub fn provider_hint(given: Option<&OsStr>) -> Option<String> {
+    let env = || std::env::var_os(format!("{}_PROVIDER", crate::name::upper()));
+    let hint = match given.filter(|g| !g.is_empty()) {
+        Some(given) => given.to_os_string(),
+        None => env()?,
+    };
     Some(hint.to_string_lossy().into_owned()).filter(|h| !h.is_empty())
 }
 
@@ -1345,6 +1359,26 @@ mod tests {
             libc::close(master);
             libc::close(slave);
         }
+    }
+
+    #[test]
+    fn the_provider_given_goes_into_a_self_attachs_hello() {
+        let how = Attach {
+            provider: Some("tmux".into()),
+            ..Attach::new(Want::SelfAttach, Transport::Fd)
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        against_with(how, None, move |f| {
+            tx.send(f.hello.purpose.clone()).unwrap();
+            send(&f.s, end(Ending::Closed, "closed", false));
+        });
+        let Purpose::SelfAttach { provider, .. } = rx.recv().unwrap() else {
+            panic!("not a self-attach");
+        };
+        assert_eq!(Some("tmux".to_string()), provider);
+        // given, it wins over the variable; empty is unset
+        assert_eq!(Some("x".to_string()), provider_hint(Some(OsStr::new("x"))));
+        assert_eq!(provider_hint(None), provider_hint(Some(OsStr::new(""))));
     }
 
     #[test]

@@ -198,6 +198,38 @@ impl Base {
         self.0.join(name).join(LOG)
     }
 
+    /// Whether a daemon named `name` is live: it holds the lock on its
+    /// directory. Tested with a shared lock, taken and released at once, so
+    /// tests at the same time don't trip each other.
+    pub fn live(&self, name: &str) -> bool {
+        let Ok(dir) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(self.0.join(name))
+        else {
+            return false;
+        };
+        // SAFETY: flock on an fd we own, which closing unlocks.
+        let locked = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0;
+        locked && io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+    }
+
+    /// The names of the live daemons here, sorted. A stale directory, its
+    /// daemon gone, is left out.
+    pub fn running(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.0) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| valid_name(OsStr::new(n)) && self.live(n))
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The base directory at `path`, unchecked.
     #[cfg(test)]
     pub(crate) fn at(path: &Path) -> Base {
@@ -232,6 +264,12 @@ impl Address {
     /// Connects to the daemon at this address.
     pub fn connect(&self) -> io::Result<UnixStream> {
         UnixStream::connect(&self.0)
+    }
+
+    /// Whether a daemon answers here: it accepts a connection, which hangs
+    /// up at once, before any hello.
+    pub fn answers(&self) -> bool {
+        self.connect().is_ok()
     }
 }
 

@@ -109,11 +109,9 @@ fn usage_errors_are_one_line_and_exit_2() {
 fn commands_built_later_exit_1() {
     for (args, what) in [
         (&["list"][..], "list"),
-        (&["attach", "f"], "attach"),
         (&["status"], "status"),
         (&["kill", "--all"], "kill"),
         (&["provider", "check"], "provider check"),
-        (&["--name", "x", "f"], "--name"),
         (&["--detach"], "--detach"),
     ] {
         let out = run(args);
@@ -566,5 +564,278 @@ fn provider_types_writes_both_files_then_keeps_luarc() {
         text(&out.stdout).starts_with(&format!("wrote ~/flag/types/{NAME}.lua\n")),
         "{}",
         text(&out.stdout)
+    );
+}
+
+#[test]
+fn naming_a_daemon_badly_is_a_usage_error() {
+    for (args, why) in [
+        (
+            &["--name", "a/b"][..],
+            "--name: use 1-32 letters, digits, '.', '_' or '-'",
+        ),
+        (
+            &["attach", "--name", ".."],
+            "--name: use 1-32 letters, digits, '.', '_' or '-'",
+        ),
+        (
+            &["--name", "a", "--address", "b"],
+            "--name and --address both choose a daemon: give one",
+        ),
+        (
+            &["attach", "--name", "a", "--address", "b"],
+            "--name and --address both choose a daemon: give one",
+        ),
+        (&["attach", "a", "b"], "attach takes [+LINE] [FILE]"),
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(
+            text(&out.stderr),
+            format!("{NAME}: {why} (see {NAME} --help)\n"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn attach_with_no_daemon_running_says_how_to_start_one() {
+    let tmp = scratch("none");
+    let attach = |args: &[&str]| {
+        Command::new(exe())
+            .args(args)
+            .env(neopane::daemon::dir::tmpdir_var(), &tmp)
+            .env_remove(NAME.to_ascii_uppercase())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let out = attach(&["attach", "f.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon is running; start one with {NAME} [FILE]\n")
+    );
+    let out = attach(&["attach", "--name", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon named work is running\n")
+    );
+    // the bare --address never starts one
+    let out = attach(&["--address", "/nowhere/sock", "f.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon answers at /nowhere/sock\n")
+    );
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+#[test]
+fn attach_among_several_real_daemons_needs_a_running_name() {
+    let tmp = scratch("sev");
+    let attach = |args: &[&str]| {
+        Command::new(exe())
+            .args(args)
+            .env(neopane::daemon::dir::tmpdir_var(), &tmp)
+            .env_remove(NAME.to_ascii_uppercase())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    // live and listening, each waiting for its launcher's attach
+    let mut daemons: Vec<_> = ["notes", "scratch", "work"]
+        .into_iter()
+        .map(|name| {
+            let (child, said) = listening_daemon(&tmp, &[name, "--"]);
+            assert_eq!(said, format!("ok {name}\n"));
+            child
+        })
+        .collect();
+    let out = attach(&["attach", "f.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: 3 daemons are running (notes, scratch, work); choose one with --name\n")
+    );
+    let mut work = daemons.pop().unwrap();
+    work.kill().unwrap();
+    work.wait().unwrap();
+    let out = attach(&["attach", "--name", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: no daemon named work is running (running: notes, scratch)\n")
+    );
+    for mut d in daemons {
+        d.kill().unwrap();
+        d.wait().unwrap();
+    }
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
+/// Whether `nvim` runs; with `CI` set, it must.
+fn have_nvim() -> bool {
+    let ran = Command::new("nvim")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .status()
+        .is_ok();
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "nvim isn't installed"
+    );
+    ran
+}
+
+/// `neopane` with `args` in a pseudo-terminal of its own, in `cwd`, its
+/// daemons under `tmpdir`, with no pane provider or config around it. What
+/// it draws is read and dropped.
+fn in_pty(tmpdir: &Path, cwd: &Path, args: &[&str]) -> std::process::Child {
+    let (mut master, mut slave) = (-1, -1);
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: valid out-pointers; no name or termios.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    assert_eq!(0, rc);
+    // SAFETY: openpty made both, and they are ours alone.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let upper = NAME.to_ascii_uppercase();
+    let child = Command::new(exe())
+        .args(args)
+        .current_dir(cwd)
+        .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
+        .env("XDG_CONFIG_HOME", tmpdir)
+        .env_remove(&upper)
+        .env_remove(format!("{upper}_CONFIG"))
+        .env_remove(format!("{upper}_PROVIDER"))
+        .env_remove("REX_SERVER")
+        .env_remove("REX_SESSION")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut master = File::from(master);
+        let mut buf = [0u8; 4096];
+        while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+    });
+    child
+}
+
+/// What Neovim at `sock` makes of `expr`, if it answers.
+fn remote_expr(sock: &Path, expr: &str) -> Option<String> {
+    let out = Command::new("nvim")
+        .args(["--clean", "--headless", "--server"])
+        .arg(sock)
+        .args(["--remote-expr", expr])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| text(&out.stdout).trim().to_string())
+}
+
+/// Waits up to 20 s for Neovim at `sock` to make `want` of `expr`, as it
+/// last did.
+fn until_expr(sock: &Path, expr: &str, want: impl Fn(&str) -> bool) -> Option<String> {
+    let due = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let got = remote_expr(sock, expr);
+        if got.as_deref().is_some_and(&want) || std::time::Instant::now() > due {
+            return got;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Ends, as it drops, the daemon whose Neovim is at `sock`, by quitting its
+/// Neovim, and the helpers attached to it.
+struct Ending {
+    sock: PathBuf,
+    helpers: Vec<std::process::Child>,
+    tmp: PathBuf,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let _ = Command::new("nvim")
+            .args(["--clean", "--headless", "--server"])
+            .arg(&self.sock)
+            .args(["--remote-send", "<C-\\><C-N>:qa!<CR>"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for h in &mut self.helpers {
+            while h.try_wait().ok().flatten().is_none() && std::time::Instant::now() < due {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = h.kill();
+            let _ = h.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.tmp);
+    }
+}
+
+#[test]
+fn a_name_started_twice_attaches_and_attach_opens_a_file_at_its_line() {
+    if !have_nvim() {
+        return;
+    }
+    let tmp = scratch("at");
+    let lines: String = (1..=20).map(|n| format!("{n}\n")).collect();
+    std::fs::write(tmp.join("f.txt"), lines).unwrap();
+    // SAFETY: getuid can't fail.
+    let base = tmp.join(format!("{NAME}-{}", unsafe { libc::getuid() }));
+    let sock = base.join("work/nvim.sock");
+    let mut ending = Ending {
+        sock: sock.clone(),
+        helpers: Vec::new(),
+        tmp: tmp.clone(),
+    };
+    let start = ["--name", "work", "--provider", "none"];
+
+    // started, named exactly work
+    ending.helpers.push(in_pty(&tmp, &tmp, &start));
+    let wins = until_expr(&sock, "len(nvim_list_wins())", |_| true);
+    let wins: usize = wins.expect("work's Neovim never answered").parse().unwrap();
+
+    // a second time, it attaches: a new window, and no work-2
+    ending.helpers.push(in_pty(&tmp, &tmp, &start));
+    let more = until_expr(&sock, "len(nvim_list_wins())", |n| n != wins.to_string());
+    assert_eq!(more, Some((wins + 1).to_string()));
+    assert!(!base.join("work-2").exists());
+    assert!(ending.helpers[1].try_wait().unwrap().is_none(), "it ended");
+
+    // attach finds the only daemon running, and opens the file at its line
+    ending
+        .helpers
+        .push(in_pty(&tmp, &tmp, &["attach", "+12", "f.txt"]));
+    let at = until_expr(&sock, "expand('%:t') .. ':' .. line('.')", |at| {
+        at == "f.txt:12"
+    });
+    assert_eq!(at.as_deref(), Some("f.txt:12"));
+    let file = remote_expr(&sock, "expand('%:p')").unwrap();
+    assert_eq!(
+        Path::new(&file).canonicalize().unwrap(),
+        tmp.join("f.txt").canonicalize().unwrap()
     );
 }

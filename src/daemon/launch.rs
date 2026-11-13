@@ -69,19 +69,28 @@ fn ready(line: &str) -> Ready {
     }
 }
 
+/// How the launcher starts its daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Launch {
+    /// `--name N`: the daemon is named exactly N. Without it, it is named
+    /// after this directory, de-duplicated.
+    pub name: Option<String>,
+    /// `--provider P`, as given, for the first attach's hello.
+    pub provider: Option<std::ffi::OsString>,
+}
+
 /// Starts a daemon and attaches this terminal to it: how the attach ended,
-/// for the exit status. The daemon is named after this directory,
-/// de-duplicated. A failure before the attach is held as a failed attach
-/// is, with a key wait unless a shell started it as a job.
-pub fn run<S: AsRef<OsStr>>(nvim_args: &[S]) -> pane_helper::Exit {
+/// for the exit status. A failure before the attach is held as a failed
+/// attach is, with a key wait unless a shell started it as a job.
+pub fn run<S: AsRef<OsStr>>(nvim_args: &[S], launch: Launch) -> pane_helper::Exit {
     let started = std::time::Instant::now();
-    match start(nvim_args) {
+    match start(nvim_args, launch) {
         Ok(exit) => exit,
         Err(e) => pane_helper::launcher_failed(e.to_string(), started),
     }
 }
 
-fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
+fn start<S: AsRef<OsStr>>(nvim_args: &[S], launch: Launch) -> Result<pane_helper::Exit> {
     // L6 is timed from here
     let started = log::now_ns();
     // SAFETY: isatty only inspects the fd.
@@ -91,14 +100,22 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
     // warned of before the daemon starts, which warns in its log
     let transport = Transport::from_env(|w| eprintln!("{NAME}: {w}"));
     let base = dir::base()?;
-    let name = default_name(&std::env::current_dir().unwrap_or_default());
+    let (name, dedup) = match launch.name {
+        Some(name) => (name, None),
+        None => (
+            default_name(&std::env::current_dir().unwrap_or_default()),
+            Some("--dedup"),
+        ),
+    };
 
     let exe = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&exe);
     // `ps` shows `<name> daemon NAME`
     command
         .arg0(NAME)
-        .args(["daemon", &name, "--dedup", "--"])
+        .args(["daemon", &name])
+        .args(dedup)
+        .arg("--")
         .args(nvim_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -141,10 +158,14 @@ fn start<S: AsRef<OsStr>>(nvim_args: &[S]) -> Result<pane_helper::Exit> {
         traces.write_into(&mut log)?;
     }
     // the daemon outlives us; it's never waited for here
-    Ok(pane_helper::run(
+    let opening = pane_helper::Opening {
+        provider: launch.provider,
+        ..Default::default()
+    };
+    Ok(pane_helper::run_self(
         &base.address(&name),
-        pane_helper::Want::SelfAttach,
         transport,
+        opening,
     ))
 }
 
