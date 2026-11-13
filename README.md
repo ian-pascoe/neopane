@@ -238,8 +238,8 @@ ignored: work keeps rex`.
 ### Inside a `:terminal`
 
 In a daemon's own `:terminal`, `neopane notes.md` opens `notes.md` in a new
-window of that Neovim, split off the current one, a pane beside the terminal's
-in Rex, and returns once you're done with it: no window shows it any more
+window of that Neovim, split off the window showing that `:terminal` (else
+the current one), so a pane beside the terminal's in Rex, and returns once you're done with it: no window shows it any more
 (`:wq`, `:q`, `ZZ`, `:bd`, or its window showing another buffer), or its
 buffer is unloaded or deleted. `:w` alone isn't done. It prints nothing and
 exits 0, with no time limit. `neopane +12 notes.md` puts the cursor on line
@@ -255,7 +255,8 @@ It exits 1, with one line, when:
   window went because its pane's terminal closed while it had unsaved
   changes;
 - `neopane: work was stopped before notes.md was done`: `neopane kill`;
-- `neopane: work ended before notes.md was done`: the daemon went away;
+- `neopane: work ended before notes.md was done`: the daemon went away, as
+  when its Neovim quits;
 - `neopane: work can't wait for a file (an older build); not waiting`;
 - the file couldn't be opened, as after Quit at Neovim's swap file prompt
   (E325): the daemon's line.

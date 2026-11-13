@@ -1,5 +1,15 @@
 # A file opened from a daemon's own terminal is waited for, so `EDITOR=<name>` works everywhere
 
+Amended by #123 in implementation: `--no-wait` exits 0 once Neovim has the
+file's window, or 1 after 10 s, which a Neovim held at a prompt (E325) would
+otherwise make forever. The window splits off one showing the caller's
+`:terminal`, as the `open` hello's new `tty` names it. Neovim's
+`<name>_done {buf, by_pane}` note says whether the buffer's last window went
+because its pane did: only the daemon knows a pane hung up, only Neovim knows
+which window held the buffer last, and the daemon's own `<name>_unsaved` list
+then says whether that was with unsaved changes. Neovim exiting is never
+done: the daemon goes with it, so the file "ended before it was done".
+
 In a daemon's own `:terminal`, `<name> FILE` opens FILE in a new window of
 that daemon's Neovim and returns only once the file is done: no window shows
 its buffer any more, or the buffer is unloaded or deleted (#94). `--no-wait`

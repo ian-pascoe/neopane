@@ -73,7 +73,7 @@ A connection that asks a daemon something without a terminal: status; stop, whic
 _Avoid_: command (a capability's), RPC (Neovim's)
 
 **Waited file**:
-A file `<name> FILE` opens from a daemon's own `:terminal`: `<name>` returns once no window shows it, or its buffer is unloaded or deleted, so `EDITOR=<name>` works there too; `--no-wait` returns at once.
+A file `<name> FILE` opens from a daemon's own `:terminal`: `<name>` returns once no window shows it, or its buffer is unloaded or deleted, so `EDITOR=<name>` works there too; `--no-wait` returns once Neovim has its window, or fails after 10 s.
 _Avoid_: remote-wait (nvr's)
 
 **Unattached daemon**:
