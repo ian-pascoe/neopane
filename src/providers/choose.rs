@@ -58,7 +58,8 @@ pub(crate) enum Chosen {
         held: Box<dyn PaneProvider>,
         spent: Duration,
     },
-    /// None, and why; shown in Neovim as a warning if `warn`.
+    /// None, and why; shown in Neovim as a warning if `warn`, unless the
+    /// built-in default chose with no config: a guess, only logged.
     None { why: String, warn: bool },
     /// None: the config failed, or returned something malformed.
     ConfigError,

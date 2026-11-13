@@ -2099,7 +2099,7 @@ impl Daemon {
                 // its pane hangs up by itself; ending a requested pane's
                 // wait on it is for later
                 ProviderEvent::Closed(t) => log_info!("{NAME} daemon: {t} closed"),
-                ProviderEvent::Gone { reason } => self.provider_gone(&reason)?,
+                ProviderEvent::Gone { reason } => self.gone(&reason)?,
             }
         }
         self.run_steps()?;
@@ -2110,7 +2110,7 @@ impl Daemon {
     /// The pane provider failed as a whole (`Gone`), for `reason`: it's
     /// dropped at once, with one warning, and every act asked of it or
     /// waiting falls back (#92 decision 27).
-    fn provider_gone(&mut self, reason: &str) -> Result<()> {
+    pub(super) fn provider_gone(&mut self, reason: &str) -> Result<()> {
         let line = format!("{}: {reason}; no pane provider", self.provider_name());
         log_warn!("{NAME} daemon: {line}");
         self.warn_when_ready(format!("{NAME}: {line}"));

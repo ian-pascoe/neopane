@@ -27,6 +27,9 @@ pub(crate) enum NoProvider {
     HintNone,
     /// The choice was refused: `find` didn't confirm it in time.
     FindRefused,
+    /// The pane provider chosen couldn't be started, or went before it
+    /// was confirmed: unreachable, or refusing what the attach named.
+    CantStart,
     /// The config failed, or returned something malformed.
     ConfigError,
 }
@@ -37,6 +40,7 @@ impl std::fmt::Display for NoProvider {
             NoProvider::None => "none",
             NoProvider::HintNone => "none (hint none)",
             NoProvider::FindRefused => "none (find refused)",
+            NoProvider::CantStart => "none (can't start)",
             NoProvider::ConfigError => "none (config error)",
         })
     }
