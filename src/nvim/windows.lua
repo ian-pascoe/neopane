@@ -377,14 +377,21 @@ api.nvim_create_autocmd({ 'WinEnter', 'BufEnter', 'ModeChanged', 'BufModifiedSet
   end,
 })
 
---- Sizes external `win` to fill `w` x `h`, statusline included.
+local refresh_layout
+
+--- Sizes external `win` to fill `w` x `h`, statusline included. A size
+--- Neovim gave it since its tab page's layout was told is told first: the
+--- fit may be for an older size of its pane, landing after Neovim resized
+--- the window again, and would put it back before it was told.
 function M.size(win, w, h)
   if not shown(win) then return end
   local p = pane_of(win)
+  local tab = p.w and tab_of(win)
+  if tab then refresh_layout(tab) end
   -- a pane the user resized is no fight
   if p.w ~= w or p.h ~= h then last_activity = now_ms() end
   -- remembered while we wait, for when the window goes back in its pane
-  p.w, p.h = w, h
+  p.w, p.h, p.neovim_gave = w, h, nil
   reported_sizes[win] = nil
   if waiting(win) then return end
   give_statusline(win)
@@ -471,14 +478,22 @@ local function prune(node, tab, drop)
 end
 
 -- The width and the height Neovim gave external `win`, not us fitting it to
--- its pane: each nil where it's the pane's
+-- its pane: each nil where it's the pane's. Once Neovim gave it one since
+-- its pane's size was last set, noted in `p.neovim_gave`, any other is
+-- Neovim's too, its pane's own included: the pane may not have followed the
+-- first yet.
 local function sized_by_neovim(win)
   local p = panes[win]
   -- one waiting to be put back isn't fitted to its pane, whatever size it has
   if not p or not p.w or waiting(win) then return end
   local w, h = api.nvim_win_get_width(win), api.nvim_win_get_height(win)
+  local gave = p.neovim_gave or {}
+  local by_w = w ~= p.w or (gave.w ~= nil and w ~= gave.w)
   -- the pane's rows are the text and a statusline, which may come or go
-  return w ~= p.w and w or nil, math.abs(h - text_height(win, p.h)) > 1 and h or nil
+  local by_h = math.abs(h - text_height(win, p.h)) > 1 or (gave.h ~= nil and h ~= gave.h)
+  w, h = by_w and w or nil, by_h and h or nil
+  p.neovim_gave = { w = w or gave.w, h = h or gave.h }
+  return w, h
 end
 
 -- Resizing as Neovim resizes a window of a split: frame_setwidth,
@@ -709,7 +724,7 @@ end
 -- external, and from what it was and the sizes Neovim has since given
 -- external ones; tells the daemon if it changed. Not while any of its windows
 -- is being reopened.
-local function refresh_layout(tab)
+function refresh_layout(tab)
   local t = layout_record(tab)
   if not t or (t.reopening or 0) > 0 or not api.nvim_tabpage_is_valid(tab) then return end
   local anchor = anchor_of(tab)
@@ -786,7 +801,7 @@ function M.adopt(win, w, h)
   give_statusline(win)
   api.nvim_win_set_config(win, { external = true, width = w, height = text_height(win, h) })
   local p = pane_of(win)
-  p.w, p.h = w, h
+  p.w, p.h, p.neovim_gave = w, h, nil
   if cols ~= 0 or rows ~= 0 then
     if rows ~= 0 then rows = rows + (has_statusline(win) and 1 or 0) end
     note('resized', win, cols, rows)
