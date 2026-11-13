@@ -358,11 +358,25 @@ pub(crate) trait PaneProvider: std::any::Any {
 
     /// The variables a self-attached terminal must share with the choosing
     /// attach to be in its reach.
-    fn context_vars(&self) -> &[&str];
+    fn context_vars(&self) -> Vec<&str>;
 
     /// The variables `find` is given, as the attach's environment has them.
-    fn find_vars(&self) -> &[&str] {
-        &[]
+    fn find_vars(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// Whether it is a pair (ADR 0006): its terminal provider's id from an
+    /// open serves only `close`, and its layout provider's `find` runs for
+    /// every attach, a requested one's too, its id serving the rest.
+    fn is_pair(&self) -> bool {
+        false
+    }
+
+    /// Whether its `find` matches the pane title, which the daemon writes
+    /// into the terminal before the first `find` for an attach. Rex's
+    /// in-process `find` doesn't: Rex panes never get one.
+    fn wants_title(&self) -> bool {
+        false
     }
 
     /// How long a terminal it opened has to attach, from its open being

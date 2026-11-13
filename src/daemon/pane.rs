@@ -113,6 +113,14 @@ pub(crate) struct Pane {
     /// a pane provider chosen again checks the reach of every pane by it.
     pub hello: Option<Box<AttachHello>>,
     pub reach: Reach,
+    /// Its terminal has the pane title, written before its first `find`
+    /// (ADR 0006).
+    pub titled: bool,
+    /// The id the terminal provider's open printed: in a pair, the one
+    /// `close` takes, `terminal` being the layout provider's (ADR 0006).
+    pub close_terminal: Option<TerminalId>,
+    /// Its open was answered, with an id or none.
+    pub open_answered: bool,
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).
     pub attach_due: Option<std::time::Instant>,
@@ -315,6 +323,9 @@ impl Pane {
             attach_due: None,
             hello: None,
             reach: Reach::In,
+            titled: false,
+            close_terminal: None,
+            open_answered: false,
         }
     }
 

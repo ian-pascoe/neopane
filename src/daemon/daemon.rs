@@ -5728,7 +5728,7 @@ mod tests {
                     protocol: 1,
                 })
                 .collect(),
-            attach_timeout: crate::config::check::ATTACH_TIMEOUT,
+            ..Spec::named("cmd")
         };
         let path = std::env::var_os("PATH").unwrap_or_default();
         let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];

@@ -754,3 +754,170 @@ fn a_pane_provider_is_kept_while_a_terminal_in_its_reach_is_on_its_way() {
     assert!(fx.d.panes.by_id(opened).is_some());
     assert!(fx.d.provider.is_some());
 }
+
+#[test]
+fn context_variables_compare_as_bytes_unset_matching_unset() {
+    use crate::daemon::daemon::choosing::in_context;
+    let env = |vars: &[(&str, &[u8])]| -> Vec<(Vec<u8>, Vec<u8>)> {
+        vars.iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.to_vec()))
+            .collect()
+    };
+    let vars = ["REX_SERVER", "REX_SESSION"];
+    let chose = [Some(b"unix:///s".to_vec()), None];
+    assert!(in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///s")])
+    ));
+    // set where the choosing attach had it unset, even empty
+    assert!(!in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///s"), ("REX_SESSION", b"")])
+    ));
+    // a byte apart, and unset where it was set
+    assert!(!in_context(
+        &vars,
+        &chose,
+        &env(&[("REX_SERVER", b"unix:///S")])
+    ));
+    assert!(!in_context(&vars, &chose, &env(&[])));
+    // raw bytes, not text
+    let raw = [Some(b"\xff".to_vec())];
+    assert!(in_context(&["X"], &raw, &env(&[("X", b"\xff")])));
+    // none: every attach
+    assert!(in_context(&[], &[], &env(&[("REX_SESSION", b"other")])));
+}
+
+// The pane title (#127)
+
+/// What the daemon wrote to the terminal of pty `master` so far.
+fn written_to(master: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let mut fds = [libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) } <= 0 {
+            return out;
+        }
+        // SAFETY: reading into a buffer of its size.
+        let n = unsafe { libc::read(master, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return out;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+}
+
+/// The frames `helper` was sent so far.
+fn frames_sent(helper: &UnixStream) -> Vec<crate::attach::Message> {
+    helper
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = (&*helper).read(&mut buf) {
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let mut out = Vec::new();
+    while let Some(m) = crate::daemon::attach_conn::next_message(&mut bytes).unwrap() {
+        out.push(m);
+    }
+    out
+}
+
+/// A daemon whose fake pane provider can `find`, `wants_title` or not,
+/// chosen already with no context variables. A self-attach to it: its
+/// pane, its helper's end, its pty, and what its terminal had been sent
+/// when `find` was asked.
+fn self_attach_finding(wants_title: bool) -> (Fixture, u32, UnixStream, Pty, Rc<RefCell<Vec<u8>>>) {
+    let mut f = FakeProvider::opening();
+    f.caps.insert(Capability::Find);
+    f.wants_title = wants_title;
+    let pty = Pty::new(80, 24);
+    let at_find = Rc::new(RefCell::new(Vec::new()));
+    let (master, seen) = (pty.master, at_find.clone());
+    f.on_ask = Some(Box::new(move |ask| {
+        if matches!(ask, Ask::Find { .. }) {
+            seen.borrow_mut().extend(written_to(master));
+        }
+    }));
+    let mut fx = with_provider(Some(Box::new(f)));
+    fx.d.nvim.ready = true;
+    fx.d.panes.add_for_window(900);
+    let at = Address::new(&format!("title-{wants_title}"));
+    let helper = at.send(&rex_hello("session:s", BLOCK), Some(pty.slave));
+    fx.d.accept(&at.server).unwrap();
+    let id = fx.d.panes.list.last().unwrap().id;
+    (fx, id, helper, pty, at_find)
+}
+
+#[test]
+fn the_pane_title_is_written_before_find_runs_and_put_back_by_the_undo_bytes() {
+    let (mut fx, id, helper, pty, at_find) = self_attach_finding(true);
+    let attach = fx.d.panes.by_id(id).unwrap().attach_id.unwrap();
+    let (_, Ask::Find { title, .. }) = last_ask(&mut fx.d) else {
+        panic!("no find asked");
+    };
+    assert_eq!(format!("{NAME}-{}", attach.token()), title);
+    // saved, then set, before `find` was asked
+    let set = format!("\x1b[22;2t\x1b]2;{title}\x1b\\");
+    let seen = String::from_utf8_lossy(&at_find.borrow()).into_owned();
+    assert!(seen.contains(&set), "{seen:?}");
+    // the undo bytes clear it and put the saved one back, in a new `u`
+    use crate::attach::Message;
+    let undos: Vec<Vec<u8>> = frames_sent(&helper)
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Undo(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    let undo = crate::term::modes::undo();
+    let with_title = [undo.clone(), b"\x1b]2;\x1b\\\x1b[23;2t".to_vec()].concat();
+    assert_eq!(vec![undo, with_title], undos);
+
+    // once per attach: a second `find` writes nothing more
+    fx.d.drop_provider().unwrap();
+    let mut f = FakeProvider::opening();
+    f.caps.insert(Capability::Find);
+    f.wants_title = true;
+    fx.d.provider = Some(Box::new(f));
+    // the window's pane, chosen in, keeps it
+    fx.d.panes.by_win_mut(900).unwrap().reach = Reach::In;
+    fx.d.choose_or_reach(id).unwrap();
+    assert!(matches!(
+        fake(&mut fx.d).asked().last(),
+        Some(Ask::Find { .. })
+    ));
+    assert!(!String::from_utf8_lossy(&written_to(pty.master)).contains("\x1b]2;"));
+    assert!(frames_sent(&helper).is_empty());
+}
+
+#[test]
+fn a_pane_provider_whose_find_wants_no_title_gets_none_written() {
+    // as Rex's built-in `find`
+    let (mut fx, _id, helper, pty, at_find) = self_attach_finding(false);
+    assert!(matches!(
+        fake(&mut fx.d).asked().last(),
+        Some(Ask::Find { .. })
+    ));
+    let mut seen = at_find.borrow().clone();
+    seen.extend(written_to(pty.master));
+    let seen = String::from_utf8_lossy(&seen).into_owned();
+    assert!(
+        !seen.contains("\x1b]2;") && !seen.contains("\x1b[22;2t"),
+        "{seen:?}"
+    );
+    let undos = frames_sent(&helper)
+        .into_iter()
+        .filter(|m| matches!(m, crate::attach::Message::Undo(_)))
+        .count();
+    assert_eq!(1, undos);
+}

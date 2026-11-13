@@ -101,6 +101,9 @@ pub(crate) struct Inputs {
     /// Each input by its placeholder name; None for one this act doesn't
     /// have, such as `area_bounds` outside a live layout.
     vars: Vec<(Var, Option<String>)>,
+    /// `find`'s `<NAME>_ENV_<VAR>`s: each of its variables the attaching
+    /// terminal has, by name, raw. Variables only, never placeholders.
+    env_vars: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Inputs {
@@ -113,6 +116,7 @@ impl Inputs {
                 (Var::Capability, Some(cap.name().to_string())),
                 (Var::Protocol, Some(protocol.to_string())),
             ],
+            env_vars: Vec::new(),
         }
     }
 
@@ -120,6 +124,7 @@ impl Inputs {
     pub(crate) fn of(ask: &Ask, protocol: i64) -> Inputs {
         let Inputs { mut vars, .. } = Inputs::bare(ask.capability(), protocol);
         let mut attach = None;
+        let mut env_vars = Vec::new();
         let mut opened = |words: &[String], title: &str, pane: String| {
             attach = Some(words.to_vec());
             [
@@ -231,10 +236,33 @@ impl Inputs {
                 (Var::Direction, Some(direction(*dir).into())),
                 (Var::Count, n(*count)),
             ]),
-            // `find`'s are #127's
-            Ask::Find { .. } | Ask::ReportLayout => {}
+            Ask::Find {
+                pane,
+                pid,
+                tty,
+                title,
+                env,
+                ..
+            } => {
+                vars.extend([
+                    (Var::Pane, Some(pane.to_string())),
+                    (Var::Pid, Some(pid.to_string())),
+                    (Var::Tty, Some(tty.clone())),
+                    (Var::Title, Some(title.clone())),
+                ]);
+                let prefix = format!("{}_ENV_", name::upper());
+                env_vars = env
+                    .iter()
+                    .map(|(k, v)| ([prefix.as_bytes(), k].concat(), v.clone()))
+                    .collect();
+            }
+            Ask::ReportLayout => {}
         }
-        Inputs { attach, vars }
+        Inputs {
+            attach,
+            vars,
+            env_vars,
+        }
     }
 
     /// `written`, an argv as the config wrote it, with its whole-word placeholders replaced: `{attach}` by
@@ -277,6 +305,7 @@ impl Inputs {
                 env.push((var.var().into_bytes(), value.as_bytes().to_vec()));
             }
         }
+        env.extend(self.env_vars.iter().cloned());
         env
     }
 }
@@ -505,6 +534,49 @@ mod tests {
         assert_eq!(Some("up".into()), var(&env, "DIRECTION"));
         assert_eq!(Some("3".into()), var(&env, "COUNT"));
         assert_eq!(None, var(&env, "ATTACH"));
+    }
+
+    #[test]
+    fn find_gets_the_attachs_pane_pid_tty_and_title_and_its_find_vars_as_env_variables_only() {
+        let up = name::upper();
+        let find = Ask::Find {
+            pane: PaneId::parse("12-k3j9x2qpa8").unwrap(),
+            pid: 4242,
+            tty: "/dev/ttys014".into(),
+            device: Some(7),
+            title: "np-k3j9x2qpa8".into(),
+            env: vec![
+                (b"TMUX_PANE".to_vec(), b"%3".to_vec()),
+                (b"RAW".to_vec(), b"\xff\x01".to_vec()),
+            ],
+        };
+        let i = Inputs::of(&find, 1);
+        assert_eq!(
+            b(&[
+                "/dev/ttys014",
+                "4242",
+                "12-k3j9x2qpa8",
+                "np-k3j9x2qpa8",
+                "find"
+            ]),
+            i.argv(&b(&["{tty}", "{pid}", "{pane}", "{title}", "{capability}"]))
+        );
+        let env = i.env(&[]);
+        let var = |k: &str| {
+            let k = format!("{up}_{k}");
+            env.iter()
+                .find(|(n, _)| n == k.as_bytes())
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(Some(b"4242".to_vec()), var("PID"));
+        assert_eq!(Some(b"/dev/ttys014".to_vec()), var("TTY"));
+        assert_eq!(Some(b"np-k3j9x2qpa8".to_vec()), var("TITLE"));
+        assert_eq!(Some(b"12-k3j9x2qpa8".to_vec()), var("PANE"));
+        // raw bytes, as the attach's environment has them
+        assert_eq!(Some(b"%3".to_vec()), var("ENV_TMUX_PANE"));
+        assert_eq!(Some(b"\xff\x01".to_vec()), var("ENV_RAW"));
+        // never a placeholder
+        assert_eq!(b(&[""]), i.argv(&b(&["{env_tmux_pane}"])));
     }
 
     #[test]

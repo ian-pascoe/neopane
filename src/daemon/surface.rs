@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 
 use super::backlog::Backlog;
 use super::terminal_io::{FdIo, RelayIo, TerminalIo};
-use crate::attach::{End, Ending, Size, Transport};
+use crate::attach::{End, Ending, Message, Size, Transport};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -114,6 +114,28 @@ impl Surface {
         self.io.wrap(&mut self.writer);
         let fd = self.output_fd();
         self.backlog.send(fd, &mut self.writer)?;
+        Ok(if self.backlog.is_empty() {
+            Sent::All
+        } else {
+            Sent::Waiting
+        })
+    }
+
+    /// Writes pane title `title` into the terminal, its own title saved
+    /// first (ADR 0006), and tells the helper the undo bytes that put it
+    /// back, in a new `u` sent before it (#91 decision 6). Never waits,
+    /// as `send_frame`.
+    pub(crate) fn write_title(&mut self, title: &str) -> std::io::Result<Sent> {
+        let u = Message::Undo(modes::undo_with_title())
+            .encode()
+            .expect("the undo bytes fit a `u`");
+        let mut out = Vec::new();
+        self.io.send_undo(&self.helper_socket, &u, &mut out);
+        self.writer.extend_from_slice(&modes::set_title(title));
+        self.io.wrap(&mut self.writer);
+        out.append(&mut self.writer);
+        let fd = self.output_fd();
+        self.backlog.send(fd, &mut out)?;
         Ok(if self.backlog.is_empty() {
             Sent::All
         } else {

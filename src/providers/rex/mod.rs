@@ -556,12 +556,12 @@ impl PaneProvider for RexProvider {
         Some(bounds::UNLAID_SIZE)
     }
 
-    fn context_vars(&self) -> &[&str] {
-        &["REX_SERVER", "REX_SESSION"]
+    fn context_vars(&self) -> Vec<&str> {
+        vec!["REX_SERVER", "REX_SESSION"]
     }
 
-    fn find_vars(&self) -> &[&str] {
-        &[find::BLOCK_VAR]
+    fn find_vars(&self) -> Vec<&str> {
+        vec![find::BLOCK_VAR]
     }
 
     fn fd(&self) -> Option<RawFd> {

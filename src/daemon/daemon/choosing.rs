@@ -17,7 +17,7 @@ use super::*;
 use crate::attach::{PaneId, env_value};
 use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
-use crate::providers::choose::{self, Chosen};
+use crate::providers::choose::{self, Chosen, Env};
 
 /// The choice running: the choosing pane, the pane id its `find` carries,
 /// and when the choice runs out of time.
@@ -193,11 +193,10 @@ impl Daemon {
     fn check_context_reach(&mut self, id: u32) -> bool {
         let vars = self.provider.as_deref().unwrap().context_vars();
         let p = self.panes.by_id(id).unwrap();
-        let same = p.hello.as_deref().is_some_and(|hello| {
-            vars.iter()
-                .zip(&self.context)
-                .all(|(v, chose)| env_value(&hello.env, v) == chose.as_deref())
-        });
+        let same = p
+            .hello
+            .as_deref()
+            .is_some_and(|hello| in_context(&vars, &self.context, &hello.env));
         if !same {
             log_info!(
                 "{NAME} daemon: pane {id} is out of reach: its {} differ",
@@ -229,6 +228,7 @@ impl Daemon {
         let find_vars: Vec<String> = p
             .map(|p| p.find_vars().iter().map(|v| v.to_string()).collect())
             .unwrap_or_default();
+        let wants_title = p.is_some_and(|p| p.wants_title());
         let Some(q) = self.panes.by_id_mut(id) else {
             return false;
         };
@@ -237,7 +237,17 @@ impl Daemon {
             q.reach = Reach::In;
             return true;
         }
-        q.reach = Reach::Finding;
+        // a terminal this pane provider opened stays in its reach whatever
+        // `find` says: only its id is to find (#93 decision 17's (c))
+        if q.is_self_attached() || q.reach == Reach::Out {
+            q.reach = Reach::Finding;
+        }
+        let title = pane::title(&attach_id);
+        if wants_title && !q.titled {
+            q.titled = true;
+            self.write_title(id, &title);
+        }
+        let q = self.panes.by_id(id).unwrap();
         let hello: &AttachHello = q.hello.as_deref().expect("a pane that finds has a hello");
         let env = hello
             .env
@@ -250,13 +260,37 @@ impl Daemon {
             pid: hello.pid,
             tty: String::from_utf8_lossy(&hello.tty).into_owned(),
             device: hello.device,
-            title: pane::title(&attach_id),
+            title,
             env,
         };
         // L7 is timed from here
         log::trace(Point::Accept, u64::from(id));
         self.act(ask);
         false
+    }
+
+    /// Writes pane title `title` into pane `id`'s terminal, for its
+    /// `find`. A terminal that can't take it is gone, which its hang-up
+    /// tells.
+    fn write_title(&mut self, id: u32, title: &str) {
+        let Some(p) = self.panes.by_id_mut(id) else {
+            return;
+        };
+        let token = p.token(PaneFd::Terminal);
+        let Some(s) = p.terminal_surface.as_deref_mut() else {
+            return;
+        };
+        let watched = match s.write_title(title) {
+            Ok(Sent::Waiting) => self
+                .event_loop
+                .add_write(s.output_fd(), token)
+                .map_err(|e| e.to_string()),
+            Ok(Sent::All) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = watched {
+            log_info!("{NAME} daemon: pane {id}: can't write its title: {e}");
+        }
     }
 
     /// The pane provider's name, for the log and warnings.
@@ -367,8 +401,12 @@ impl Daemon {
             return Ok(());
         };
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
-            p.reach = Reach::Out;
-            log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
+            if p.reach == Reach::Finding {
+                p.reach = Reach::Out;
+                log_info!("{NAME} daemon: pane {} is out of reach: {why}", p.id);
+            } else {
+                log_info!("{NAME} daemon: pane {} has no terminal id: {why}", p.id);
+            }
         }
         if self.is_choosing(pane) {
             return self.refuse_choice(&format!("find didn't confirm this terminal: {why}"));
@@ -455,4 +493,14 @@ impl Daemon {
         }
         Ok(())
     }
+}
+
+/// Whether an attach whose environment is `env` is in the context the
+/// choosing attach was, its values of context variables `vars` being
+/// `chose`: each the same bytes, unset matching unset (ADR 0006). With no
+/// context variables, every attach is.
+pub(crate) fn in_context(vars: &[&str], chose: &[Option<Vec<u8>>], env: &Env) -> bool {
+    vars.iter()
+        .zip(chose)
+        .all(|(v, chose)| env_value(env, v) == chose.as_deref())
 }
