@@ -26,7 +26,6 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::ExitStatusExt;
-
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
