@@ -11,7 +11,12 @@
 //!   block. `close_layer` only cleans up a `new_layer` answered with no block
 //!   id, which then fails.
 //! - `place_beside` is `session.move_block` and `resize`
-//!   `session.resize_pane`, given the anchor's share, `1 − ratio`.
+//!   `session.resize_pane`, given the share of the block before the border.
+//!   A `resize` moves only a border Rex has between the two blocks: one
+//!   `place_beside` made, or one of a split whose two sides they are, either
+//!   way round. Any other is skipped, logged and done: in a tab page without
+//!   a tab page area the panes stay where they opened, and Rex would move
+//!   another border.
 //! - `focus` is `session.focus_block`, which switches Rex windows and tabs
 //!   itself; `focus_direction` is `count` identical `session.focus_direction`
 //!   requests with `wrap: false`, done once the last is answered.
@@ -94,6 +99,11 @@ pub(crate) struct RexProvider {
     directions: Vec<Directing>,
     /// The layout of the last view.
     layout: Option<LiveLayout>,
+    /// The windows of the last view, as Rex has them: its splits.
+    windows: Vec<Value>,
+    /// The terminals moved by `place_beside`, and what each went beside:
+    /// the split between them is the one `move_block` made.
+    placed: Vec<(TerminalId, TerminalId)>,
     events: VecDeque<ProviderEvent>,
     /// Told `Gone`: nothing more comes.
     gone: bool,
@@ -122,6 +132,8 @@ impl RexProvider {
             float_blocks: Vec::new(),
             directions: Vec::new(),
             layout: None,
+            windows: Vec::new(),
+            placed: Vec::new(),
             events: VecDeque::new(),
             gone: false,
             finding: Vec::new(),
@@ -228,29 +240,45 @@ impl RexProvider {
                 dir,
                 ratio,
                 ..
-            } => self.session.move_block(
-                tag,
-                terminal.as_str(),
-                origin.as_str(),
-                dir.across(),
-                1.0 - ratio,
-            )?,
-            // `{origin}` is before the split, `{terminal}` after it
+            } => {
+                self.session.move_block(
+                    tag,
+                    terminal.as_str(),
+                    origin.as_str(),
+                    dir.across(),
+                    1.0 - ratio,
+                )?;
+                self.placed.retain(|(t, _)| *t != terminal);
+                self.placed.push((terminal, origin));
+            }
             Ask::Resize {
                 terminal,
                 origin,
                 dir,
                 ratio,
                 ..
-            } => self.session.resize_pane(
-                tag,
-                origin.as_str(),
-                terminal.as_str(),
-                dir.across(),
-                1.0 - ratio,
-            )?,
+            } => {
+                let Some((before, after, ratio)) =
+                    self.border_of(&terminal, &origin, dir.across(), ratio)
+                else {
+                    log_info!(
+                        "{NAME} daemon: rex: {terminal} and {origin} aren't side by side: not resized"
+                    );
+                    self.answer(tag, Outcome::Done(Answer::Nothing));
+                    return Ok(true);
+                };
+                self.session.resize_pane(
+                    tag,
+                    before.as_str(),
+                    after.as_str(),
+                    dir.across(),
+                    ratio,
+                )?
+            }
             Ask::Close { terminal } => {
                 self.float_blocks.retain(|b| *b != terminal);
+                self.placed
+                    .retain(|(t, o)| *t != terminal && *o != terminal);
                 self.session.close_block(tag, terminal.as_str())?
             }
             Ask::Focus { terminal } => {
@@ -299,6 +327,38 @@ impl RexProvider {
         Ok(true)
     }
 
+    /// The border `session.resize_pane` moves to give `terminal` the share
+    /// `ratio` of the room it splits with `origin`: the blocks before and
+    /// after it, and the share of the one before. Rex's splits are where its
+    /// blocks opened or were placed, not where Neovim has their windows:
+    /// Rex resizes the innermost split with the one block before and the
+    /// other after it, which is the one meant only when `place_beside` made
+    /// it, or the two blocks are its two sides. Otherwise, None.
+    fn border_of(
+        &self,
+        terminal: &TerminalId,
+        origin: &TerminalId,
+        side_by_side: bool,
+        ratio: f64,
+    ) -> Option<(TerminalId, TerminalId, f64)> {
+        if self
+            .placed
+            .iter()
+            .any(|(t, o)| t == terminal && o == origin)
+        {
+            return Some((origin.clone(), terminal.clone(), 1.0 - ratio));
+        }
+        let sides = layout::sides(&self.windows, terminal.as_str(), origin.as_str())?;
+        if sides.side_by_side != side_by_side {
+            return None;
+        }
+        Some(if sides.first_before {
+            (terminal.clone(), origin.clone(), ratio)
+        } else {
+            (origin.clone(), terminal.clone(), 1.0 - ratio)
+        })
+    }
+
     /// The Rex window of terminal `origin`, as the last view had it, where
     /// a new layer opens; None, Rex's active window, if it didn't.
     fn window_of(&self, origin: &TerminalId) -> Option<String> {
@@ -339,6 +399,7 @@ impl RexProvider {
         // a view from before our focus change landed says the old focus
         let current = focused.filter(|_| !self.landing(rev));
         if let Some(Value::Array(windows)) = client::get(view, "windows") {
+            self.windows = windows.clone();
             let l = layout::read(windows, current.as_deref(), &self.float_blocks);
             self.layout = Some(l.clone());
             self.events.push_back(ProviderEvent::Layout(l));

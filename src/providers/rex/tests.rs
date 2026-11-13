@@ -842,3 +842,127 @@ fn a_refused_session_attach_is_gone() {
         "{told:?}"
     );
 }
+
+/// A leaf of a Rex view's layout: block `n`.
+fn leaf(n: u32) -> Value {
+    json!({ "rect": [0, 0, 1, 1], "block_id": block_id(n) })
+}
+
+/// A split of a Rex view's layout, side by side, `before` left of `after`.
+fn split(before: Value, after: Value) -> Value {
+    json!({ "rect": [0, 0, 1, 1], "split": {
+        "split_id": "split:x", "direction": "horizontal", "ratio": 0.5,
+        "before": before, "after": after } })
+}
+
+/// Rex's view changes to one window tiled as `layout`.
+fn tiled(p: &mut RexProvider, theirs: &mut UnixStream, id: u64, layout: Value) {
+    let windows = json!([{ "window_id": window_id(2), "focused_block_id": block_id(1),
+        "layers": [{ "layer_id": "layer:x", "kind": "tiled", "bounds": [0, 0, 1, 1],
+                     "layout": layout, "blocks": [] }] }]);
+    view_changes(p, theirs, id, 1, windows);
+    events(p);
+}
+
+/// A `resize` of block `terminal`'s share, `ratio`, beside block `origin`'s,
+/// side by side.
+fn resize_of(terminal: u32, origin: u32, ratio: f64) -> Ask {
+    Ask::Resize {
+        terminal: TerminalId::from(block_id(terminal).as_str()),
+        origin: TerminalId::from(block_id(origin).as_str()),
+        dir: Direction::Right,
+        size: 20,
+        ratio,
+    }
+}
+
+/// `session.resize_pane` of the border between blocks `before` and `after`,
+/// side by side, `before` getting `ratio`.
+fn resize_pane(before: u32, after: u32, ratio: f64) -> (String, Value) {
+    (
+        "session.resize_pane".to_string(),
+        json!({ "session_id": "session:s", "before_block_id": block_id(before),
+                "after_block_id": block_id(after), "direction": "horizontal", "ratio": ratio }),
+    )
+}
+
+#[test]
+fn a_resize_of_two_blocks_side_by_side_in_rex_resizes_their_split_whichever_is_first() {
+    let (mut p, mut theirs) = rex();
+    // 1 | 2, as a pane left where it opened has it
+    tiled(&mut p, &mut theirs, 1, split(leaf(1), leaf(2)));
+    // in Rex's order: 1 has the rest
+    p.ask(AskId(2), resize_of(2, 1, 0.25));
+    reply(&mut p, &mut theirs, 2, json!({}));
+    // the other way round, as Neovim has them after `<C-w>x`: 1 is the
+    // terminal, so it gets its share
+    p.ask(AskId(3), resize_of(1, 2, 0.25));
+    reply(&mut p, &mut theirs, 3, json!({}));
+    let done = || Outcome::Done(Answer::Nothing);
+    assert_eq!(
+        vec![answered(2, done()), answered(3, done())],
+        events(&mut p)
+    );
+    assert_eq!(
+        vec![resize_pane(1, 2, 0.75), resize_pane(1, 2, 0.25)],
+        requests(p, theirs)[1..]
+    );
+}
+
+#[test]
+fn a_resize_of_blocks_not_side_by_side_in_rex_is_skipped_quietly() {
+    let (mut p, mut theirs) = rex();
+    // 1 | (2 | 3), as splits from 3 make it, where Neovim has 1, 2, 3
+    tiled(
+        &mut p,
+        &mut theirs,
+        1,
+        split(leaf(1), split(leaf(2), leaf(3))),
+    );
+    p.ask(AskId(2), resize_of(3, 1, 0.3));
+    p.ask(AskId(3), resize_of(2, 1, 0.5));
+    // no view to tell
+    p.ask(AskId(4), resize_of(9, 8, 0.5));
+    let done = || Outcome::Done(Answer::Nothing);
+    assert_eq!(
+        vec![
+            answered(2, done()),
+            answered(3, done()),
+            answered(4, done())
+        ],
+        events(&mut p)
+    );
+    // the view's fetch, and nothing else
+    assert_eq!(1, requests(p, theirs).len());
+}
+
+#[test]
+fn a_resize_of_a_block_rex_placed_beside_another_resizes_the_split_it_made() {
+    let (mut p, mut theirs) = rex();
+    // as a tab page area's panes are placed: (3 | 1) | 2
+    for (n, terminal) in [(2, 2), (3, 1)] {
+        p.ask(
+            AskId(n),
+            Ask::PlaceBeside {
+                terminal: TerminalId::from(block_id(terminal).as_str()),
+                origin: TerminalId::from(block_id(3).as_str()),
+                dir: Direction::Right,
+                size: 20,
+                ratio: 0.5,
+            },
+        );
+        reply(&mut p, &mut theirs, n, json!({}));
+    }
+    tiled(
+        &mut p,
+        &mut theirs,
+        4,
+        split(split(leaf(3), leaf(1)), leaf(2)),
+    );
+    // 2 and 3 aren't side by side, but the split between them is the one
+    // `place_beside` made
+    p.ask(AskId(5), resize_of(2, 3, 0.25));
+    reply(&mut p, &mut theirs, 5, json!({}));
+    let asked = requests(p, theirs);
+    assert_eq!(resize_pane(3, 2, 0.75), asked[asked.len() - 1]);
+}

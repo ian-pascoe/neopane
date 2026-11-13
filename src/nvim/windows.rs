@@ -4075,6 +4075,230 @@ mod tests {
         );
     }
 
+    /// The widths of tab page 1's row of windows, as last told, if it's one.
+    fn row_widths(h: &Harness) -> Vec<(i64, u32)> {
+        let Some(l) = h.last_layout(1).filter(|l| l.len > 0) else {
+            return Vec::new();
+        };
+        if l.nodes[0].kind != Kind::Row {
+            return Vec::new();
+        }
+        l.kids(0).map(|k| (l.nodes[k].win, l.nodes[k].w)).collect()
+    }
+
+    #[test]
+    fn a_window_neovim_resizes_takes_its_cells_from_the_window_beside_it_as_a_split_would() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        h.lua("vim.cmd('vsplit')");
+        assert!(h.until(|x| row_widths(x).len() == 2));
+        let [(left, l), (right, r)] = row_widths(&h)[..] else {
+            panic!("not a row of two: {:?}", row_widths(&h))
+        };
+        assert_eq!(119, l + r);
+        // each external, its pane the size Neovim laid it out at: the first
+        // window already is, in the pane that showed it
+        adopt(&mut h.nvim, left, l, 20);
+        for (win, w) in [(left, l), (right, r)] {
+            size(&mut h.nvim, win, w, 20);
+        }
+        h.sync("");
+        assert_eq!(vec![(left, l), (right, r)], row_widths(&h));
+
+        let steps = [
+            // the left window: the right one gives what it takes
+            (left, 30, [30, 89]),
+            // the right, last, window: the one before it gives
+            (right, 40, [79, 40]),
+            // never more than leaves the other a cell
+            (left, 200, [118, 1]),
+        ];
+        for (win, cols, [l, r]) in steps {
+            h.lua(&format!("vim.api.nvim_win_set_width({win}, {cols})"));
+            let want = vec![(left, l), (right, r)];
+            assert!(h.until(|x| row_widths(x) == want), "{:?}", row_widths(&h));
+            // as the pane provider resizes their panes
+            size(&mut h.nvim, left, l, 20);
+            size(&mut h.nvim, right, r, 20);
+        }
+    }
+
+    /// Tab page 1's windows as last told: window, width and height.
+    fn window_sizes(h: &Harness) -> Vec<(i64, u32, u32)> {
+        let Some(l) = h.last_layout(1) else {
+            return Vec::new();
+        };
+        let windows = l.items().iter().filter(|n| n.kind == Kind::Window);
+        windows.map(|n| (n.win, n.w, n.h)).collect()
+    }
+
+    #[test]
+    fn a_window_in_a_column_resized_across_it_takes_its_cells_from_beside_the_column() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        // left | (top over bottom)
+        h.lua("vim.cmd('vsplit')\nvim.cmd('wincmd l')\nvim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 3));
+        let [(left, lw, lh), (top, tw, th), (bottom, bw, bh)] = window_sizes(&h)[..] else {
+            panic!("{:?}", window_sizes(&h))
+        };
+        assert_eq!((119, tw, 28), (lw + tw, bw, th + bh + 1));
+        for win in [left, top, bottom] {
+            adopt(&mut h.nvim, win, 1, 1);
+        }
+        let panes = |h: &mut Harness, sizes: [(i64, u32, u32); 3]| {
+            for (win, w, rows) in sizes {
+                // the text and a statusline
+                size(&mut h.nvim, win, w, rows + 1);
+            }
+        };
+        panes(&mut h, [(left, lw, lh), (top, tw, th), (bottom, bw, bh)]);
+        h.sync("");
+        assert_eq!(
+            vec![(left, lw, lh), (top, tw, th), (bottom, bw, bh)],
+            window_sizes(&h)
+        );
+
+        // across the column: the whole column narrower, the left window wider
+        h.lua(&format!("vim.api.nvim_win_set_width({top}, 50)"));
+        let want = vec![(left, 69, lh), (top, 50, th), (bottom, 50, bh)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+        panes(&mut h, [(left, 69, lh), (top, 50, th), (bottom, 50, bh)]);
+        // along it: the window below gives
+        h.lua(&format!("vim.api.nvim_win_set_height({top}, 5)"));
+        let want = vec![(left, 69, lh), (top, 50, 5), (bottom, 50, th + bh - 5)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+    }
+
+    #[test]
+    fn a_window_resized_across_keeps_the_height_told_though_its_pane_has_another() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        // left | (top over bottom)
+        h.lua("vim.cmd('vsplit')\nvim.cmd('wincmd l')\nvim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 3));
+        let [(left, lw, lh), (top, tw, th), (bottom, bw, bh)] = window_sizes(&h)[..] else {
+            panic!("{:?}", window_sizes(&h))
+        };
+        // panes 11 rows high, none as high as its window was laid out: the
+        // heights told are still the layout's, Neovim having sized none
+        for (win, w) in [(left, lw), (top, tw), (bottom, bw)] {
+            adopt(&mut h.nvim, win, 1, 1);
+            size(&mut h.nvim, win, w, 11);
+        }
+        h.sync("");
+        let told = vec![(left, lw, lh), (top, tw, th), (bottom, bw, bh)];
+        assert_eq!(told, window_sizes(&h));
+
+        // `:vertical resize`: the heights stay as they were told
+        h.lua(&format!("vim.api.nvim_win_set_width({top}, 50)"));
+        let want = vec![(left, 69, lh), (top, 50, th), (bottom, 50, bh)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+    }
+
+    /// A window's index, whether its width is set, the cells, and the sizes
+    /// told after.
+    type ResizeStep<'a> = (usize, bool, u32, &'a [(u32, u32)]);
+
+    /// Lays tab page 1's windows out with Lua `split`, from one window,
+    /// then makes each external, its pane the size Neovim gave it: its
+    /// windows, in layout order. Then for each of `steps`, sets the width
+    /// (`true`) or height of the `n`th to `cells`, as `:vertical resize` and
+    /// `:resize` do, and waits for the layout told to have the sizes given,
+    /// the panes following as the pane provider resizes them.
+    fn resizes_as_neovim_does(split: &str, start: &[(u32, u32)], steps: &[ResizeStep<'_>]) {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        h.lua(split);
+        assert!(h.until(|x| window_sizes(x).len() == start.len()));
+        let wins: Vec<i64> = window_sizes(&h).iter().map(|&(w, ..)| w).collect();
+        let told = |h: &Harness| -> Vec<(u32, u32)> {
+            window_sizes(h).iter().map(|&(_, w, h)| (w, h)).collect()
+        };
+        assert_eq!(start, &told(&h)[..]);
+        let panes = |h: &mut Harness, sizes: &[(u32, u32)]| {
+            for (&win, &(w, rows)) in wins.iter().zip(sizes) {
+                // the text and a statusline
+                size(&mut h.nvim, win, w, rows + 1);
+            }
+        };
+        for &win in &wins {
+            adopt(&mut h.nvim, win, 1, 1);
+        }
+        panes(&mut h, start);
+        h.sync("");
+        assert_eq!(start, &told(&h)[..]);
+        for &(n, across, cells, want) in steps {
+            let set = if across { "width" } else { "height" };
+            h.lua(&format!("vim.api.nvim_win_set_{set}({}, {cells})", wins[n]));
+            assert!(
+                h.until(|x| told(x) == want),
+                "{set} {cells} of {n}: {:?}, not {want:?}",
+                told(&h)
+            );
+            panes(&mut h, want);
+        }
+    }
+
+    // Each size below is what Neovim gives ordinary windows laid out the same.
+
+    #[test]
+    fn a_window_resized_in_a_row_of_three_takes_from_those_after_it_then_those_before() {
+        resizes_as_neovim_does(
+            "vim.cmd('vsplit')\nvim.cmd('vsplit')",
+            &[(40, 28), (39, 28), (39, 28)],
+            &[
+                (0, true, 60, &[(60, 28), (19, 28), (39, 28)]),
+                (1, true, 50, &[(60, 28), (50, 28), (8, 28)]),
+                (2, true, 100, &[(17, 28), (1, 28), (100, 28)]),
+                (0, true, 200, &[(116, 28), (1, 28), (1, 28)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_window_resized_in_a_column_of_three_takes_from_those_below_it_then_those_above() {
+        resizes_as_neovim_does(
+            "vim.cmd('split')\nvim.cmd('split')",
+            &[(120, 9), (120, 9), (120, 8)],
+            &[
+                (0, false, 20, &[(120, 20), (120, 1), (120, 5)]),
+                (2, false, 15, &[(120, 10), (120, 1), (120, 15)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_window_wider_than_its_row_has_room_for_widens_the_column_holding_the_row() {
+        // left | (top over (bottom left | bottom right))
+        resizes_as_neovim_does(
+            "vim.cmd('vsplit')\nvim.cmd('wincmd l')\nvim.cmd('split')\n\
+             vim.cmd('wincmd j')\nvim.cmd('vsplit')",
+            &[(39, 28), (80, 14), (40, 13), (39, 13)],
+            &[
+                (2, true, 80, &[(37, 28), (82, 14), (80, 13), (1, 13)]),
+                // across the row: the column holding it gives
+                (2, false, 20, &[(37, 28), (82, 7), (80, 20), (1, 20)]),
+            ],
+        );
+    }
+
     #[test]
     fn a_window_closing_while_another_tab_page_is_current_reports_its_own_tab_pages_layout() {
         let Some(mut h) = Harness::start_sized(120, 30) else {
