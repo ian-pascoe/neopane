@@ -558,3 +558,38 @@ fn giving_up_the_last_pane_goes_unattached_as_its_last_pane_gone() {
     assert!(fx.d.panes.list.is_empty());
     assert!(deciding(&fx.d));
 }
+
+#[test]
+fn a_pane_taking_the_window_kept_from_a_later_tab_page_lays_its_splits_out_beside_it() {
+    let mut fx = with_provider(None);
+    fx.d.nvim.ready = true;
+    // the last pane, showing tab page 7's window, goes: its window is kept
+    let (last, _a) = live_pane(&mut fx, 50, 1001, None);
+    fx.d.panes.by_id_mut(last).unwrap().shown_tab = 7;
+    fx.d.nvim.current_win = 1001;
+    fx.d.go_unattached(Some(last)).unwrap();
+    assert_eq!(
+        (Some(1001), 7),
+        (fx.d.lifetime.kept, fx.d.lifetime.kept_tab)
+    );
+
+    // the next self-attach takes it, and shows its tab page
+    let (id, _b) = windowless_pane(&mut fx, "t0");
+    fx.d.take_unshown(id, 1001, &[1001]);
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert_eq!((7, Some(1001)), (p.shown_tab, p.neovim_window_handle));
+
+    // `:vsplit` there: side by side, not another tab page's layout
+    draw_external(&mut fx.d, 102, 1002, 80, 23);
+    fx.d.changes.note_split(crate::nvim::windows::Split {
+        win: 1002,
+        side_by_side: true,
+        before: true,
+        from: 1001,
+        tab: 7,
+    });
+    fx.d.new_pane(1002).unwrap();
+    let p = fx.d.panes.by_id(id).unwrap();
+    assert!(p.held.is_empty(), "{:?}", p.held);
+    assert_eq!(vec![1002, 1001], p.layout.as_ref().unwrap().windows());
+}

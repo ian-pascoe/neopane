@@ -1053,7 +1053,8 @@ impl Daemon {
             return true;
         }
         let p = self.provider.as_deref();
-        !self.has_area_pane(sp.tab) && (!self.asks.may_ask(p, Capability::OpenTabPage) || !self.in_reach(sp))
+        !self.has_area_pane(sp.tab)
+            && (!self.asks.may_ask(p, Capability::OpenTabPage) || !self.in_reach(sp))
     }
 
     /// Whether `give_focus_back` can have the pane provider focus the
@@ -1731,9 +1732,10 @@ impl Daemon {
     /// Whether a window pane of tab page `tab`'s tab page area is there or
     /// on its way: one whose request failed isn't.
     fn has_area_pane(&self, tab: i64) -> bool {
-        self.panes.list.iter().any(|p| {
-            p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed)
-        })
+        self.panes
+            .list
+            .iter()
+            .any(|p| p.tab == tab && p.layer.is_none() && p.closing != Some(Close::RequestFailed))
     }
 
     /// The terminals of the panes a move is between, if both have one.
@@ -5105,6 +5107,32 @@ mod tests {
         fx.d.drain_provider().unwrap();
         assert_holds_tab_page_2(&fx.d, origin);
         assert_eq!(vec!["open_tab_page"], asked_capabilities(&mut fx.d));
+    }
+
+    #[test]
+    fn after_a_failed_open_tab_page_the_next_tab_page_asks_for_its_own_again() {
+        let mut fx = two_windows_of_a_tab_page();
+        attach_pane_9(&mut fx.d);
+        fx.d.new_pane(1).unwrap();
+        let f = fake(&mut fx.d);
+        f.answer(f.last_id(), Outcome::Failed("refused: no".into()));
+        fx.d.drain_provider().unwrap();
+
+        // tab page 3's first window, from window 9
+        draw_external(&mut fx.d, 30, 3, 80, 23);
+        fx.d.changes.note_split(windows::Split {
+            win: 3,
+            side_by_side: false,
+            before: false,
+            from: 9,
+            tab: 3,
+        });
+        fx.d.new_pane(3).unwrap();
+        let p = fx.d.panes.by_win(3).unwrap();
+        assert_eq!((3, false), (p.tab, p.holds(9)));
+        let sent = sent_by(fx);
+        assert_eq!(vec!["open_tab_page", "open_tab_page"], sent.capabilities());
+        assert_eq!(block_id(9), sent.origin(1));
     }
 
     #[test]

@@ -421,7 +421,13 @@ impl Pane {
             return false;
         };
         let was_split = self.layout.is_some();
-        let left = close_in(&mut self.layout, &mut win, &mut self.layout_asked, &gone, opts);
+        let left = close_in(
+            &mut self.layout,
+            &mut win,
+            &mut self.layout_asked,
+            &gone,
+            opts,
+        );
         self.neovim_window_handle = Some(win);
         if was_split && self.layout.is_none() {
             // one window again, or none: it fills the pane
@@ -713,6 +719,15 @@ mod tests {
     }
 
     #[test]
+    fn swapping_tab_pages_repaints_the_whole_pane() {
+        let mut p = two_tab_pages();
+        p.terminal_surface = Some(Surface::for_test(80, 24));
+        p.terminal_surface.as_mut().unwrap().view.full = false;
+        p.show_tab_of(3);
+        assert!(p.terminal_surface.as_ref().unwrap().view.full);
+    }
+
+    #[test]
     fn a_pane_whose_tab_page_closed_shows_the_one_it_held() {
         let opts = super::super::pane_layout::Options::default();
         let mut p = two_tab_pages();
@@ -735,7 +750,10 @@ mod tests {
         assert!(p.held.is_empty());
         // and with none held, it ends at its last window
         assert!(!p.close_gone(|w| w == 11 || w == 2, opts));
-        assert_eq!((None, true), (p.layout.as_ref(), p.neovim_window_handle.is_some()));
+        assert_eq!(
+            (None, true),
+            (p.layout.as_ref(), p.neovim_window_handle.is_some())
+        );
     }
 
     /// A self-attach of an 80×24 terminal, with the pane provider's id
