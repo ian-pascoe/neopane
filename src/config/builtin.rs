@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_runs_the_binary_for_find_close_report_layout_and_its_opens() {
+    fn tmux_runs_the_binary_for_every_capability_but_open_and_events() {
         let t = BuiltinTable::Tmux.table();
         let shown: Vec<(&str, String)> = t
             .capabilities

@@ -11,8 +11,15 @@
 //!   origin, running the attach; `kill-pane`, done if already gone.
 //! - `open_float` (`float.rs`): `new-pane -d` over the origin's window,
 //!   its content on the float group; tmux 3.7 at least, else exit 69.
+//! - `open_tab_page` (`tab_page.rs`): `new-window -d` after the origin's
+//!   window: a tmux window is a tab page area.
+//! - `place_beside` and `resize` (`resize.rs`): `join-pane -d`, then one
+//!   `resize-pane` chosen from the window's layout tree
+//!   (`window_layout.rs`); exit 1 where none moves the border.
+//! - `focus` and `focus_direction` (`focus.rs`): `select-window` and
+//!   `select-pane`; steps that stop at the window's edge.
 //! - `report_layout` (`layout.rs`): one area per window of the server,
-//!   from `list-panes -a`.
+//!   from `list-panes -a`; a zoom's hidden panes in `@N~hidden`.
 //! - `events` (`events.rs`): a `wait-for -E` waiter per event, a line
 //!   after each burst, the focus with it when it moved; tmux 3.8 at
 //!   least, else exit 69. It runs until every waiter is gone.

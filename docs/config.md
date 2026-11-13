@@ -391,11 +391,13 @@ commands").
 On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
 config, and each Neovim window gets a tmux pane of its own, split beside the
 pane it came from; on tmux 3.7 or newer, a group of floats you enter gets a
-tmux floating pane. On tmux 3.8 or newer, moving between panes with tmux's
-own keys, or clicking one, moves Neovim's current window there at once;
-older tmux has no way to tell neopane unasked, so the move is learned at the
-next key you type or the next focus report. `neopane provider check` shows
-what your tmux can do. The default knows tmux by its own variables,
+tmux floating pane. `<C-w>h/j/k/l` move tmux's focus, stopping at the
+window's edge, and each tab page gets a tmux window. On tmux 3.8 or newer,
+moving between panes with tmux's own keys, or clicking one, moves Neovim's
+current window there at once; older tmux has no way to tell neopane
+unasked, so the move is learned at the next key you type or the next focus
+report. `neopane provider check` shows what your tmux can do. The default
+knows tmux by its own variables,
 `TERM_PROGRAM=tmux` and `TMUX`, and where Rex's are set too, asks
 `neopane.inside.tmux` (see [The default](#the-default)); its `find` then
 checks the terminal is a pane of that tmux server, by its tty, so a `TMUX`

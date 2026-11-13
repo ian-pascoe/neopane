@@ -169,7 +169,9 @@ last layout it read.
   `terminals`. Neovim's screen is the size of the current pane's layout
   area, and each area has its own tabline panes.
 - `terminal`: the id an open printed. Foreign panes, terminals that aren't
-  Neovim panes, belong too: they take room in their area.
+  Neovim panes, belong too: they take room in their area. A terminal
+  hidden while another is zoomed or full screen goes in an area of its own
+  id, not the zoomed one's.
 - `rect`: `[x, y, w, h]`, as fractions of the area, from its top left:
   what the terminal takes of its area, including any cells named in
   `inset`. Rects need not tile: cells between terminals, such as tmux's
@@ -240,10 +242,9 @@ runs, such as `tmux`'s, and its stderr are not.
 
 ### tmux
 
-`<name>.builtin.tmux()`: `find`, `open_beside`, `open_float`, `close`,
-`report_layout` and `events`, on the tmux server `TMUX` names. Every
-`tmux` call passes that socket with `-S`, and names the pane it acts on
-with `-t`.
+`<name>.builtin.tmux()`: every capability but `open`, on the tmux server
+`TMUX` names. Every `tmux` call passes that socket with `-S`, and names the
+pane or window it acts on with `-t`. A tmux window is a tab page area.
 
 - `find`: the pane of the server whose tty is `TTY`, compared by device,
   as tmux itself tells a client inside it; `%N`, else exit 1. No context
@@ -261,7 +262,30 @@ with `-t`.
   passes `X-1`, `Y-1`, `COLS+2`, `ROWS+2`. The frame stays: a float without
   one merges into the pane beneath. Prints the new pane's id; below 3.7,
   as `tmux -V` says, it exits 69.
+- `open_tab_page`: `new-window -d -a` after `ORIGIN`'s window, running
+  the attach command; prints the new pane's id. The session's current
+  window stays: the daemon focuses the pane when Neovim goes to its tab
+  page.
 - `close`: `kill-pane`; done when the pane is already gone.
+- `place_beside`: `join-pane -d`, `-h` or `-v` and `-b` from `DIRECTION`,
+  `-l SIZE`, the terminal beside `ORIGIN`, without focusing it; then the
+  `resize` below, since within one window the room the terminal leaves
+  goes to its neighbour.
+- `resize`: from `#{window_layout}`, read in tmux 3.8's JSON or the older
+  string, the deepest split holding the terminal and `ORIGIN`; the
+  terminal's part of it gets `SIZE` cells, by the border toward `ORIGIN`.
+  One `resize-pane -x` or `-y` moves that border, on a pane of the part
+  before it with no split of the same kind of its own, else on one of the
+  part after it, when that part is the split's last. Where neither exists,
+  as for `((P | A) / (X | Y)) | C | D`'s border before `C`, it exits 1.
+- `focus`: `select-window` and `select-pane` on the terminal, in one tmux
+  call, so every client on its session moves; never `switch-client`,
+  which moves the most recently active client, whatever its session.
+- `focus_direction`: `COUNT` steps in the window the most recently active
+  client shows, else tmux's own current window, each a `select-pane -L`,
+  `-R`, `-U` or `-D` only if the active pane isn't at that edge
+  (`#{pane_at_left}` and the like), in one tmux call: tmux's own wraps
+  round, this stops at the edge.
 - `report_layout`: an area per window of the server, `@N`, a window
   linked into several sessions counted once, foreign panes included. Rects
   are each pane's content, as fractions of its window, with no inset; with
@@ -269,7 +293,10 @@ with `-t`.
   one row taller, with an inset of 1 at the top. `focus` is the active pane
   of the window the most recently active client shows. A float is its
   frame, its content grown by a cell on each side, `"floating": true` with
-  an inset of 1 all round; either may be partly off its window.
+  an inset of 1 all round; either may be partly off its window. In a
+  zoomed window, `@N` holds only the panes it shows, the zoomed one at
+  `[0, 0, 1, 1]`; the panes the zoom hides are in `@N~hidden`, where the
+  unzoomed `#{window_layout}` has them, as their own `pane_*` are stale.
 - `events`: one `tmux wait-for -E EVENT` waiter per event:
   `window-layout-changed`, `window-pane-changed`, `session-window-changed`,
   `client-session-changed`, `window-linked`, `window-unlinked`,
@@ -288,6 +315,10 @@ with `-t`.
   whose client counts as attached, runs the user's `client-attached` hooks
   and keeps every pane of its session from losing focus; and global
   hooks, which outlive a daemon killed.
+
+`open_beside`, `place_beside`, `resize`, `close`, and `focus` on a hidden
+pane unzoom its window, as tmux's own commands do; `open_tab_page` leaves
+a zoom as it is.
 
 ## Placeholders
 
