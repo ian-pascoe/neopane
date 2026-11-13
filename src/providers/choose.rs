@@ -218,9 +218,9 @@ pub(crate) fn by_config(
         .map_or_else(|| config::FILE_NAME.into(), |n| n.to_string_lossy());
     outcome.log();
     log_info!(
-        "{NAME} daemon: config: ran {} in {} ms",
+        "{NAME} daemon: config: ran {} in {:.1} ms",
         file.display(),
-        outcome.took.as_millis()
+        outcome.took.as_secs_f64() * 1000.0
     );
     match config::choose(outcome, &file_name) {
         Err(problems) => {

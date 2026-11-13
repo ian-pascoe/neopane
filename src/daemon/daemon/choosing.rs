@@ -6,8 +6,8 @@
 //! file the built-in default, from its hello (`providers::choose`). A
 //! config error means none for that choice, with one warning. The chosen
 //! pane provider is held at once, unconfirmed, and its `find` for the
-//! choosing pane confirms it: in reach keeps it; anything else, or the choice's 3 s
-//! running out, drops it with a warning. Nothing waits for that but what
+//! choosing pane confirms it: in reach keeps it; anything else, or the
+//! choice's 3 s running out, drops it with a warning. Nothing waits for that but what
 //! needs the pane provider: the windows Neovim has with no pane of their own
 //! wait unshown, then open as new windows do, and self-attaches that arrive
 //! meanwhile wait their turn, until one gets a pane provider. A later
@@ -156,8 +156,10 @@ impl Daemon {
         if let Some(warning) = warning {
             self.warn_when_ready(warning);
         }
+        // a pane provider's `find` decides, else this does
+        let decided = !matches!(chosen, Chosen::Provider { .. });
         self.take_choice(id, chosen)?;
-        if self.choosing.is_none() {
+        if decided {
             self.reach_decided()?;
         }
         self.nvim.client.flush()?;
