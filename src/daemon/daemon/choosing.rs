@@ -289,14 +289,8 @@ impl Daemon {
                     _ if warn => NoProvider::CantStart,
                     _ => NoProvider::None,
                 };
-                if warn && quiet {
-                    log_info!(
-                        "{NAME} daemon: {why}; no pane provider (the default's guess: not warned of)"
-                    );
-                } else if warn {
-                    let line = format!("{why}; no pane provider");
-                    log_warn!("{NAME} daemon: {line}");
-                    self.warn_when_ready(format!("{NAME}: {line}"));
+                if warn {
+                    self.tell_no_provider(&format!("{why}; no pane provider"), quiet);
                 } else {
                     log_info!("{NAME} daemon: no pane provider for pane {id}: {why}");
                 }
@@ -621,7 +615,7 @@ impl Daemon {
     /// The pane provider went (`Gone`), for `reason`: before its choice
     /// was confirmed, it couldn't start, which for the default's guess is
     /// only a line in the log; once confirmed, it's dropped with a warning.
-    pub(super) fn gone(&mut self, reason: &str) -> Result<()> {
+    pub(super) fn gone_choosing_or_after(&mut self, reason: &str) -> Result<()> {
         if self.choosing.is_some() {
             return self.refuse_choice(reason, NoProvider::CantStart);
         }
@@ -633,15 +627,10 @@ impl Daemon {
     /// only a line in the log.
     fn refuse_choice(&mut self, why: &str, shown: NoProvider) -> Result<()> {
         let quiet = self.choosing.take().is_some_and(|c| c.quiet);
-        if quiet {
-            log_info!(
-                "{NAME} daemon: {}: {why}; no pane provider (the default's guess: not warned of)",
-                self.provider_name()
-            );
-            self.drop_provider()?;
-        } else {
-            self.provider_gone(why)?;
-        }
+        let line = format!("{}: {why}; no pane provider", self.provider_name());
+        self.tell_no_provider(&line, quiet);
+        self.nvim.client.flush()?;
+        self.drop_provider()?;
         self.no_provider = shown;
         self.reach_decided()
     }
@@ -748,6 +737,17 @@ impl Daemon {
             || self
                 .split_from(sp)
                 .is_some_and(|f| f.reach == Reach::Finding)
+    }
+
+    /// Tells that a choice came to no pane provider, as `line` says: a
+    /// warning, or for the default's guess, `quiet`, only a line in the log.
+    pub(super) fn tell_no_provider(&mut self, line: &str, quiet: bool) {
+        if quiet {
+            log_info!("{NAME} daemon: {line} (the default's guess: not warned of)");
+        } else {
+            log_warn!("{NAME} daemon: {line}");
+            self.warn_when_ready(format!("{NAME}: {line}"));
+        }
     }
 
     /// Shows `message` in Neovim as a warning once it is set up and has
