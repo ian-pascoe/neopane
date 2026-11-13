@@ -1,9 +1,12 @@
-//! The core knows nothing of Rex (#92 decision 7): nothing in `src/daemon/`,
-//! `src/screen/`, `src/nvim/` or `src/term/`, tests included, may name
-//! `crate::rex` or `crate::providers::rex`, however it gets there: through
-//! `super`, through an alias of `providers`, or through any module path
-//! with `rex` in it. The core reaches Rex only through `crate::providers`'
-//! own modules, such as `choose`, and the `PaneProvider` trait.
+//! The core knows nothing of Rex (#92 decision 7), nor of any other pane
+//! provider: nothing in `src/daemon/`, `src/screen/`, `src/nvim/` or
+//! `src/term/`, tests included, may name `crate::rex`, a provider's module
+//! under `crate::providers` (Rex's, tmux's, zellij's, herdr's), or any
+//! module of `providers` not known to name none, however it gets there:
+//! through `super`, through an alias of `providers`, or through any module
+//! path with a provider's name in it. The core reaches a pane provider only
+//! through `crate::providers`' neutral modules, such as `choose` and `tty`,
+//! and the `PaneProvider` trait.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -127,29 +130,42 @@ fn paths_from(toks: &[String], prefix: &mut Vec<String>, out: &mut Vec<Vec<Strin
     }
 }
 
-/// How `source` names Rex, or could: each as written.
-/// - any path through or to a `rex` module, as `rex::client`, `p::rex` or
-///   `providers::rex`, whatever comes before it;
-/// - a path from `crate` or `super` with a `rex` segment, as `use crate::rex;`
-///   or `use crate::{rex, log};`;
-/// - the `providers` module itself, which an alias could take to its `rex`:
-///   `use crate::providers;`, `… as p`, `providers::{self, …}`.
-fn names_rex(source: &str) -> Vec<String> {
+/// The pane providers built in, or to come: each a module of its own, under
+/// `providers`, whatever comes between.
+const PROVIDERS: &[&str] = &["rex", "tmux", "zellij", "herdr"];
+
+/// The modules of `providers` that name no pane provider: the core may name
+/// these, and only these.
+const NEUTRAL: &[&str] = &["choose", "command", "tty"];
+
+/// How `source` names a pane provider's module, or could: each as written.
+/// - any path through or to a provider's module, as `rex::client`,
+///   `p::tmux` or `providers::rex`, whatever comes before it;
+/// - a path from `crate` or `super` with a provider's segment, as
+///   `use crate::rex;` or `use crate::{rex, log};`;
+/// - a path from `crate` or `super` to a module of `providers` not in
+///   `NEUTRAL`, as `providers::builtin`;
+/// - the `providers` module itself, which an alias could take to a
+///   provider's: `use crate::providers;`, `… as p`, `providers::{self, …}`.
+fn names_a_provider(source: &str) -> Vec<String> {
     let toks = tokens(&without_comments(source));
     let mut found = Vec::new();
     for w in toks.windows(2) {
-        if w[0] == "rex" && w[1] == "::" {
-            found.push("rex::".to_string());
-        } else if w[0] == "::" && w[1] == "rex" {
-            found.push("::rex".to_string());
+        if PROVIDERS.contains(&w[0].as_str()) && w[1] == "::" {
+            found.push(format!("{}::", w[0]));
+        } else if w[0] == "::" && PROVIDERS.contains(&w[1].as_str()) {
+            found.push(format!("::{}", w[1]));
         }
     }
     for p in rooted_paths(&toks) {
         let last = p.last().map(String::as_str);
-        let via_rex = p[1..].iter().any(|s| s == "rex");
+        let via_provider = p[1..].iter().any(|s| PROVIDERS.contains(&s.as_str()));
         let providers_itself = last == Some("providers")
             || (last == Some("self") && p.len() > 1 && p[p.len() - 2] == "providers");
-        if via_rex || providers_itself {
+        let not_neutral = p
+            .windows(2)
+            .any(|w| w[0] == "providers" && w[1] != "self" && !NEUTRAL.contains(&w[1].as_str()));
+        if via_provider || providers_itself || not_neutral {
             found.push(p.join("::"));
         }
     }
@@ -158,7 +174,7 @@ fn names_rex(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_core_names_neither_rex_nor_rexs_pane_provider() {
+fn the_core_names_no_pane_providers_module() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     for dir in CORE {
@@ -168,19 +184,19 @@ fn the_core_names_neither_rex_nor_rexs_pane_provider() {
     let mut found = Vec::new();
     for f in &files {
         let source = fs::read_to_string(f).unwrap();
-        for p in names_rex(&source) {
+        for p in names_a_provider(&source) {
             found.push(format!("{}: {p}", f.strip_prefix(&src).unwrap().display()));
         }
     }
     assert!(
         found.is_empty(),
-        "the core names Rex:\n{}",
+        "the core names a pane provider:\n{}",
         found.join("\n")
     );
 }
 
 #[test]
-fn a_core_file_using_rex_fails_the_check() {
+fn a_core_file_naming_a_pane_providers_module_fails_the_check() {
     for named in [
         "use crate::rex::client::Client;",
         "use crate::rex;",
@@ -201,20 +217,36 @@ fn a_core_file_using_rex_fails_the_check() {
         // any module path through `rex`
         "let c = r::rex::client::Client::from_stream(s);",
         "use p::rex as r;",
+        // the built-in multiplexers', as Rex's
+        "use crate::providers::tmux::TmuxProvider;",
+        "use crate::providers::builtin::tmux;",
+        "use crate::{log, providers::{choose, zellij}};",
+        "let h = crate::providers::herdr::find(t);",
+        "use super::super::tmux;",
+        "let z = b::zellij::panes();",
+        "use herdr::socket;",
+        // any providers module not known to name none
+        "use crate::providers::builtin::Builtin;",
+        "use crate::providers::check::run;",
+        "use crate::providers::wezterm;",
     ] {
-        assert!(!names_rex(named).is_empty(), "{named}");
+        assert!(!names_a_provider(named).is_empty(), "{named}");
     }
     for clean in [
         "use crate::providers::choose::Chosen;",
         "use crate::providers::choose::{self, Chosen};",
         "use crate::{log, providers::choose};",
+        "use crate::providers::command::{CapCommand, CommandProvider, Spec};",
+        "let d = crate::providers::tty::of_path(p);",
+        "use crate::{log, providers::{choose, tty}};",
         "use super::super::provider::PaneProvider;",
         "// use crate::rex::client;",
         "/* crate::providers::rex */ use crate::name::NAME;",
         "let rex = crate::daemon::rexish::x;",
-        "use crate::providers::rexx;",
+        "let tmux = crate::daemon::tmuxish::x;",
         "let rex = 1; log!(\"rex: {rex}\");",
+        "let tmux = 1; log!(\"tmux: {tmux}\");",
     ] {
-        assert!(names_rex(clean).is_empty(), "{clean}");
+        assert!(names_a_provider(clean).is_empty(), "{clean}");
     }
 }
