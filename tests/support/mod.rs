@@ -243,23 +243,37 @@ pub fn have_tmux() -> bool {
 }
 
 /// A private tmux server, on a socket of its own under `dir` and no
-/// config, started without the user's `TMUX` or `TMUX_PANE`: one detached
+/// config, started without the user's `TMUX` or `TMUX_PANE`, or any
+/// variable of `<name>`'s or Rex's but those in `env`: one detached
 /// session, 80x24, running `command` in its pane, or a shell. Killed as it
 /// drops.
 pub struct TmuxServer {
     pub socket: PathBuf,
+    /// Its pid, killed as it drops, should its socket be gone by then.
+    pid: Option<i32>,
 }
 
 impl TmuxServer {
     pub fn start(dir: &Path, env: &[(&str, &std::ffi::OsStr)], command: &[&str]) -> TmuxServer {
         let socket = dir.join("sock");
-        let server = TmuxServer { socket };
+        let mut server = TmuxServer { socket, pid: None };
+        let upper = NAME.to_ascii_uppercase();
         let mut cmd = server.command();
         cmd.args(["new-session", "-d", "-x", "80", "-y", "24"])
             .args(command)
+            .env_remove(&upper)
+            .env_remove(format!("{upper}_CONFIG"))
+            .env_remove(format!("{upper}_PROVIDER"))
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
             .envs(env.iter().copied());
         let status = cmd.status().unwrap();
         assert!(status.success(), "tmux didn't start");
+        server.pid = server
+            .run(&["display-message", "-p", "-t", "%0", "#{pid}"])
+            .parse()
+            .ok();
         server
     }
 
@@ -285,17 +299,21 @@ impl TmuxServer {
     /// `TMUX` as a pane of this server has it: its socket, its pid and
     /// session 0.
     pub fn tmux_var(&self) -> String {
-        let pid = self.run(&["display-message", "-p", "-t", "%0", "#{pid}"]);
-        format!("{},{pid},0", self.socket.display())
+        format!("{},{},0", self.socket.display(), self.pid.unwrap())
     }
 }
 
 impl Drop for TmuxServer {
     fn drop(&mut self) {
-        let _ = self
+        let killed = self
             .command()
             .arg("kill-server")
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .is_ok_and(|s| s.success());
+        if let Some(pid) = self.pid.filter(|_| !killed) {
+            // SAFETY: a plain syscall, to the server this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
     }
 }
