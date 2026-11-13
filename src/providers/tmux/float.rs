@@ -12,17 +12,17 @@ use super::server::{Server, older_than};
 use crate::providers::builtin::Given;
 
 /// The first tmux with floating panes, `new-pane`.
-pub(super) const FLOATS: (u32, u32) = (3, 7);
+pub(super) const FIRST_WITH_FLOATS: (u32, u32) = (3, 7);
 
 /// The first tmux whose `new-pane -x -y -X -Y` give the frame.
-const FRAMED_FLAGS: (u32, u32) = (3, 8);
+const FIRST_WITH_FRAMED_FLAGS: (u32, u32) = (3, 8);
 
 /// The new pane's id, or why there's none.
 pub(super) fn open_float(given: &Given) -> Result<String, Failure> {
     let server = Server::of(given)?;
     let version = Server::version()?;
     let Some(geometry) = Geometry::of(&version) else {
-        let (major, minor) = FLOATS;
+        let (major, minor) = FIRST_WITH_FLOATS;
         return Err(Failure::Unsupported(format!(
             "tmux {version} has no floating panes: they need {major}.{minor} or newer"
         )));
@@ -103,9 +103,9 @@ impl Geometry {
     /// flags; None below 3.7. A version it can't read, such as `master`,
     /// is taken for the newest.
     fn of(version: &str) -> Option<Geometry> {
-        if older_than(version, FLOATS) {
+        if older_than(version, FIRST_WITH_FLOATS) {
             None
-        } else if older_than(version, FRAMED_FLAGS) {
+        } else if older_than(version, FIRST_WITH_FRAMED_FLAGS) {
             Some(Geometry::Content)
         } else {
             Some(Geometry::Frame)

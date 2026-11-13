@@ -16,8 +16,8 @@
 //!
 //! Each capability gives the line it prints, or why it failed; `run`
 //! prints it, or the failure as one `tmux CAPABILITY: why` line on stderr,
-//! and gives the exit status: 69 where the installed tmux can't. Every pane id read or given is `%` and
-//! digits (`is_pane_id`).
+//! and gives the exit status: 69 where the installed tmux can't. Every
+//! pane id read or given is `%` and digits (`is_pane_id`).
 
 mod find;
 mod float;
@@ -27,10 +27,6 @@ mod server;
 
 use super::builtin::{DONE, FAILED, Given, UNSUPPORTED, print_line};
 use crate::config::Capability;
-
-/// What a capability came to: the line it prints on stdout, if any, or
-/// why it didn't.
-type Done = Result<Option<String>, Failure>;
 
 /// Why a capability didn't do it.
 enum Failure {
@@ -50,21 +46,20 @@ impl From<String> for Failure {
 /// failure as one `tmux CAPABILITY: why` line on stderr, and gives its
 /// exit status.
 pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
-    let done = match cap {
-        Capability::Find => find::find(given).map(Some).map_err(Failure::from),
-        Capability::OpenBeside => panes::open_beside(given).map(Some).map_err(Failure::from),
-        Capability::OpenFloat => float::open_float(given).map(Some),
-        Capability::Close => panes::close(given).map(|()| None).map_err(Failure::from),
-        Capability::ReportLayout => layout::report_layout(given)
-            .map(Some)
-            .map_err(Failure::from),
-        _ => return UNSUPPORTED,
-    };
-    finish(cap, done)
+    match cap {
+        Capability::Find => finish(cap, find::find(given).map(Some)),
+        Capability::OpenBeside => finish(cap, panes::open_beside(given).map(Some)),
+        Capability::OpenFloat => finish(cap, float::open_float(given).map(Some)),
+        Capability::Close => finish(cap, panes::close(given).map(|()| None)),
+        Capability::ReportLayout => finish(cap, layout::report_layout(given).map(Some)),
+        _ => UNSUPPORTED,
+    }
 }
 
-fn finish(cap: Capability, done: Done) -> u8 {
-    match done {
+/// What capability `cap` came to, `done`: the line it prints on stdout,
+/// if any, or why it didn't. Prints it; gives the exit status.
+fn finish(cap: Capability, done: Result<Option<String>, impl Into<Failure>>) -> u8 {
+    match done.map_err(Into::into) {
         Ok(Some(line)) => print_line(line.as_bytes()),
         Ok(None) => DONE,
         Err(Failure::Failed(why)) => {
