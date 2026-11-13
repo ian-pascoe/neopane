@@ -1,4 +1,4 @@
-//! `neorex [nvim args]`: opens Neovim in this pane. Starts the daemon in the
+//! `neopane [nvim args]`: opens Neovim in this pane. Starts the daemon in the
 //! background, then hands it this terminal and waits as its pane helper.
 
 use std::ffi::OsStr;

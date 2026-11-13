@@ -1,5 +1,5 @@
-//! `neorex daemon NAME [--dedup] -- [nvim args]`: the background half of
-//! `neorex`. Claims its directory (`dir`), accepts the launcher's attach,
+//! `neopane daemon NAME [--dedup] -- [nvim args]`: the background half of
+//! `neopane`. Claims its directory (`dir`), accepts the launcher's attach,
 //! an ordinary self-attach, which chooses the pane provider from its hello,
 //! then runs Neovim under `--embed`, sized to it, speaking RPC over its stdin
 //! and stdout, and shows its windows in panes (see `Daemon`). Exits when
@@ -507,7 +507,7 @@ fn start_nvim<S: AsRef<OsStr>>(
     nvim_args: &[S],
     timeout: Duration,
 ) -> std::result::Result<(NvimChild, Nvim), StartFailure> {
-    // before the user's config, so it can tell it runs under neorex
+    // before the user's config, so it can tell it runs under neopane
     let mut child = Command::new(command[0])
         .args(&command[1..])
         .args(["--embed", "--headless", "--listen"])
@@ -1112,7 +1112,7 @@ mod tests {
         let sock = dir.sock_path();
         let nvim_sock = dir.nvim_sock();
 
-        // the pane neorex was run in
+        // the pane neopane was run in
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: valid out-pointers; no name, termios or size.
         let rc = unsafe {
@@ -1399,7 +1399,7 @@ mod tests {
         let swap = Scratch::new().keep();
         let file = temp_file("plugin-detach");
 
-        // the pane neorex was run in, read until it closes
+        // the pane neopane was run in, read until it closes
         let (master, slave) = crate::daemon::surface::open_pty(80, 24);
         let reader = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];

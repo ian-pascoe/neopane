@@ -3,12 +3,12 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use neorex::attach::Transport;
-use neorex::cli::{self, Command, Start, UsageError};
-use neorex::daemon::dir::Address;
-use neorex::daemon::{launch, pane_helper, serve};
-use neorex::debug;
-use neorex::name::NAME;
+use neopane::attach::Transport;
+use neopane::cli::{self, Command, Start, UsageError};
+use neopane::daemon::dir::Address;
+use neopane::daemon::{launch, pane_helper, serve};
+use neopane::debug;
+use neopane::name::NAME;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -48,7 +48,7 @@ fn run(command: Command) -> Result<ExitCode> {
         Command::Version => Ok(print(&cli::version())),
         Command::NotBuilt(what) => Ok(fail(&format!("{what} isn't built yet"))),
         Command::ProviderShow(name) => {
-            match neorex::config::show::show(name.as_deref(), neorex::attach::build()) {
+            match neopane::config::show::show(name.as_deref(), neopane::attach::build()) {
                 Ok(lua) => Ok(print(&lua)),
                 Err(why) => Ok(fail(&why)),
             }
@@ -61,7 +61,7 @@ fn run(command: Command) -> Result<ExitCode> {
             detach,
             nvim_args,
         } => done(serve::run(&name, dedup, detach, &nvim_args)),
-        Command::ConfigChild => match neorex::config::child::main() {
+        Command::ConfigChild => match neopane::config::child::main() {
             Ok(()) => Ok(ExitCode::SUCCESS),
             Err(why) => Ok(fail(&why)),
         },
@@ -93,7 +93,6 @@ fn run(command: Command) -> Result<ExitCode> {
                 &address, transport, file, line,
             )))
         }
-        Command::Replaced => Ok(fail(cli::PANE_REPLACED)),
         Command::DebugKeys => done(debug::keys::run()),
         Command::DebugEvents(nvim_args) => done(debug::events::run(&nvim_args)),
         Command::DebugTui(nvim_args) => done(debug::tui::run(&nvim_args)),
@@ -110,17 +109,17 @@ fn run(command: Command) -> Result<ExitCode> {
 /// `provider types`: the file is `--config`, else where the daemon would
 /// look, made absolute against the working directory.
 fn write_types(config: Option<OsString>) -> ExitCode {
-    use neorex::config::types;
+    use neopane::config::types;
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let file = match config {
         Some(file) => Some(cwd.join(file)),
-        None => neorex::config::default_file(|name| std::env::var_os(name), &cwd),
+        None => neopane::config::default_file(|name| std::env::var_os(name), &cwd),
     };
     let Some(file) = file else {
         return fail("can't find the config directory: HOME isn't set");
     };
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let report = types::write(&file, neorex::attach::build(), home.as_deref());
+    let report = types::write(&file, neopane::attach::build(), home.as_deref());
     let code = print(&report.out);
     match report.error {
         Some(why) => fail(&why),

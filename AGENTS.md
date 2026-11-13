@@ -1,6 +1,6 @@
-# neorex
+# neopane
 
-`neorex` in a terminal starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows; in a Rex pane, Rex is its pane provider and shows each window in its own Rex pane, and elsewhere the windows are drawn in the terminal. The layers:
+`neopane` in a terminal starts a background daemon (`src/daemon/serve.rs`) that runs one Neovim with external windows; in a Rex pane, Rex is its pane provider and shows each window in its own Rex pane, and elsewhere the windows are drawn in the terminal. The layers:
 
 - `src/nvim/windows.lua` runs inside Neovim and keeps every window external, except a hidden anchor per tab page. It tells the daemon about window changes with `<name>_*` notes, `<name>` being `NAME` in `src/name.rs`. `src/nvim/windows.rs` parses those notes, and tests it against a real Neovim.
 - `src/daemon/` holds the daemon. After each Neovim flush, `Daemon::reconcile` gives new windows and float groups panes and hangs up the panes whose windows closed. It also places the panes of a tab page's windows in its tab page area, as the `<name>_layout` notes say, through the pane provider's `place_beside` and `resize` (`TabPlacement`).
@@ -27,15 +27,15 @@ Every user-visible name comes from `NAME` in `src/name.rs` (ADR 0005): Neovim va
 
 The daemon focuses Rex blocks and switches tabs, so a test instance in the user's own Rex session steals their focus. Test live in a session of your own (`rex new`), or in a PTY with `REX_SESSION` pointing at it.
 
-Each daemon keeps its files in `$NEOREX_TMPDIR` (else `/tmp`) `/neorex-<uid>/<daemon name>/` (ADR 0004, `src/daemon/dir.rs`), locked with `flock` while it runs. It logs to `log` there, kept after it ends; the next daemon of that name renames it `log.1`.
+Each daemon keeps its files in `$NEOPANE_TMPDIR` (else `/tmp`) `/neopane-<uid>/<daemon name>/` (ADR 0004, `src/daemon/dir.rs`), locked with `flock` while it runs. It logs to `log` there, kept after it ends; the next daemon of that name renames it `log.1`.
 
-Install with `just install`. On macOS, a binary overwritten in place is killed at launch because the kernel keeps the old file's code signature. A running daemon keeps the binary it started with, so restart neorex to pick up a new build.
+Install with `just install`. On macOS, a binary overwritten in place is killed at launch because the kernel keeps the old file's code signature. A running daemon keeps the binary it started with, so restart neopane to pick up a new build.
 
 ## Neovim behaviour that shapes the design
 
 - External windows always move to the current tab page, so `windows.lua` records each window's home tab itself.
 - `:tabclose` closes the current window's floats first, then the tab's other windows, external ones included. `windows.lua` reopens external windows that belong to other tabs.
-- Plugins that draw with editor-relative floats, such as smear-cursor.nvim, land in the wrong place, because Neovim can't know where a pane's window is. Neovim starts with `g:neorex` set so configs can turn them off.
+- Plugins that draw with editor-relative floats, such as smear-cursor.nvim, land in the wrong place, because Neovim can't know where a pane's window is. Neovim starts with `g:neopane` set so configs can turn them off.
 
 ## Agent skills
 

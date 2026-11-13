@@ -1,5 +1,5 @@
-//! `neorex debug-rex SOCKET`, Rex's own debug tool: talks to Rex directly.
-//! Attaches to this session, opens a split running `neorex attach --address
+//! `neopane debug-rex SOCKET`, Rex's own debug tool: talks to Rex directly.
+//! Attaches to this session, opens a split running `neopane attach --address
 //! SOCKET --pane ID` with an id it minted, takes that pane's terminal over
 //! as debug-panes does, and prints Rex's events. Ctrl+C quits.
 

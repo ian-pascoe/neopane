@@ -1,4 +1,4 @@
-//! `neorex debug-tui`: runs Neovim in this terminal through neorex's own
+//! `neopane debug-tui`: runs Neovim in this terminal through neopane's own
 //! grid and renderer. Ctrl+Q or :q quits.
 
 use std::ffi::{OsStr, OsString};

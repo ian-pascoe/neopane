@@ -1,4 +1,4 @@
-# Where `just install` puts neorex, and which Cargo profile builds it.
+# Where `just install` puts neopane, and which Cargo profile builds it.
 # Override either with an environment variable or on the command line:
 #   just prefix=/usr/local install
 prefix := env("PREFIX", home_directory() / ".local")
@@ -12,7 +12,7 @@ default:
 build *args:
     cargo build {{ args }}
 
-# Run neorex from target/debug, with any Neovim arguments
+# Run neopane from target/debug, with any Neovim arguments
 run *args:
     cargo run -- {{ args }}
 
@@ -40,13 +40,16 @@ lint:
 # The binary is copied next to the old one and renamed over it: a new file,
 # not the old one overwritten. Overwriting a binary in place makes macOS kill
 # it at launch: the kernel keeps the old file's code signature. Running
-# daemons keep the binary they started with. `nrex` is a symlink to it, the
-# shorthand.
-[doc("Build optimized and install as PREFIX/bin/neorex (~/.local by default), with nrex")]
+# daemons keep the binary they started with. `npane` is a symlink to it, the
+# shorthand. neopane was neorex (ADR 0005): our old `nrex` symlink goes, but
+# a `neorex` binary may be the original neorex's, so it only gets a warning.
+[doc("Build optimized and install as PREFIX/bin/neopane (~/.local by default), with npane")]
 install:
     cargo build --profile {{ profile }}
     mkdir -p {{ quote(prefix / "bin") }}
-    cp target/{{ profile }}/neorex {{ quote(prefix / "bin" / ".neorex.new") }}
-    mv -f {{ quote(prefix / "bin" / ".neorex.new") }} {{ quote(prefix / "bin" / "neorex") }}
-    ln -sfn neorex {{ quote(prefix / "bin" / "nrex") }}
-    @echo "installed {{ prefix }}/bin/neorex ({{ profile }}), and nrex"
+    cp target/{{ profile }}/neopane {{ quote(prefix / "bin" / ".neopane.new") }}
+    mv -f {{ quote(prefix / "bin" / ".neopane.new") }} {{ quote(prefix / "bin" / "neopane") }}
+    ln -sfn neopane {{ quote(prefix / "bin" / "npane") }}
+    @if [ "$(readlink {{ quote(prefix / "bin" / "nrex") }})" = neorex ]; then rm {{ quote(prefix / "bin" / "nrex") }}; echo "removed the old nrex symlink"; fi
+    @if [ -e {{ quote(prefix / "bin" / "neorex") }} ]; then echo "warning: {{ prefix }}/bin/neorex is still there: neopane was neorex; remove it unless it's the original neorex" >&2; fi
+    @echo "installed {{ prefix }}/bin/neopane ({{ profile }}), and npane"

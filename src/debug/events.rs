@@ -1,4 +1,4 @@
-//! `neorex debug-events`: attaches to Neovim as a UI and prints every redraw
+//! `neopane debug-events`: attaches to Neovim as a UI and prints every redraw
 //! event it sends. Keys and pastes go to Neovim. Ctrl+Q or :q quits.
 
 use std::ffi::{OsStr, OsString};

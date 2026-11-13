@@ -6,15 +6,15 @@
 
 use std::error::Error;
 
-use neorex::nvim::msgpack;
-use neorex::nvim::nvim::{Nvim, UiOptions};
-use neorex::nvim::rpc;
-use neorex::nvim::windows::{self, Note};
-use neorex::screen::grid::{Cell, Grid};
-use neorex::screen::grids::{Grids, Placed, WinKind};
-use neorex::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown, tabline_slice};
-use neorex::screen::render;
-use neorex::screen::style::{Attr, Shape, Style, Underline};
+use neopane::nvim::msgpack;
+use neopane::nvim::nvim::{Nvim, UiOptions};
+use neopane::nvim::rpc;
+use neopane::nvim::windows::{self, Note};
+use neopane::screen::grid::{Cell, Grid};
+use neopane::screen::grids::{Grids, Placed, WinKind};
+use neopane::screen::pane_view::{LaidOut, Opts, PaneView, Separator, Shown, tabline_slice};
+use neopane::screen::render;
+use neopane::screen::style::{Attr, Shape, Style, Underline};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 

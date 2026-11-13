@@ -1,4 +1,4 @@
-//! neorex: a Rex-native Neovim frontend.
+//! neopane: a Rex-native Neovim frontend.
 
 #![warn(unreachable_pub)]
 

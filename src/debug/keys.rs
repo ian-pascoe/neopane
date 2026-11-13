@@ -1,4 +1,4 @@
-//! `neorex debug-keys`: shows each input event with the raw bytes that
+//! `neopane debug-keys`: shows each input event with the raw bytes that
 //! made it, so you can see what the terminal sends. Ctrl+Q quits.
 
 use std::io::{self, Write};

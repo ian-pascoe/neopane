@@ -8,18 +8,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use neorex::config::check::{Command, Severity};
-use neorex::config::tree::{Marker, Tree};
-use neorex::config::wire::{Called, Ran};
-use neorex::config::{
+use neopane::config::check::{Command, Severity};
+use neopane::config::tree::{Marker, Tree};
+use neopane::config::wire::{Called, Ran};
+use neopane::config::{
     self, Attach, Builtin, Capability, Choice, Chosen, Outcome, Problems, Request, Spawn,
 };
-use neorex::name::NAME;
+use neopane::name::NAME;
 
 /// The binary Cargo built for this test. Cargo names it, as Rust 1.100's
 /// build directory no longer has it beside the test's own binary.
 fn exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_neorex"))
+    PathBuf::from(env!("CARGO_BIN_EXE_neopane"))
 }
 
 /// A fresh directory for one fixture.
@@ -1061,5 +1061,5 @@ fn nothing_the_config_starts_outlives_it() {
 #[test]
 fn the_answer_carries_the_childs_build() {
     let answer = Fixture::new(&returning("nil")).run().answer.unwrap();
-    assert_eq!(answer.build, neorex::attach::build());
+    assert_eq!(answer.build, neopane::attach::build());
 }
