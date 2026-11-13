@@ -224,3 +224,75 @@ pub fn base_of(tmpdir: &Path) -> PathBuf {
 pub fn json(out: &Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)))
 }
+
+/// Whether `tmux` runs; with `CI` set, it must.
+pub fn have_tmux() -> bool {
+    let ran = Command::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .status()
+        .is_ok();
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "tmux isn't installed"
+    );
+    ran
+}
+
+/// A private tmux server, on a socket of its own under `dir` and no
+/// config, started without the user's `TMUX` or `TMUX_PANE`: one detached
+/// session, 80x24, running `command` in its pane, or a shell. Killed as it
+/// drops.
+pub struct TmuxServer {
+    pub socket: PathBuf,
+}
+
+impl TmuxServer {
+    pub fn start(dir: &Path, env: &[(&str, &std::ffi::OsStr)], command: &[&str]) -> TmuxServer {
+        let socket = dir.join("sock");
+        let server = TmuxServer { socket };
+        let mut cmd = server.command();
+        cmd.args(["new-session", "-d", "-x", "80", "-y", "24"])
+            .args(command)
+            .envs(env.iter().copied());
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "tmux didn't start");
+        server
+    }
+
+    /// `tmux` on this server, with `TMUX` and `TMUX_PANE` cleared.
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new("tmux");
+        cmd.arg("-S")
+            .arg(&self.socket)
+            .args(["-f", "/dev/null"])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    /// What `tmux args…` prints, trimmed; panics if it fails.
+    pub fn run(&self, args: &[&str]) -> String {
+        let out = self.command().args(args).output().unwrap();
+        assert!(out.status.success(), "tmux {args:?}: {}", text(&out.stderr));
+        text(&out.stdout).trim().to_string()
+    }
+
+    /// `TMUX` as a pane of this server has it: its socket, its pid and
+    /// session 0.
+    pub fn tmux_var(&self) -> String {
+        let pid = self.run(&["display-message", "-p", "-t", "%0", "#{pid}"]);
+        format!("{},{pid},0", self.socket.display())
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = self
+            .command()
+            .arg("kill-server")
+            .stderr(Stdio::null())
+            .status();
+    }
+}
