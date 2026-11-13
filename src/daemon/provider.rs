@@ -7,8 +7,7 @@
 //! ready (`on_ready`). What the daemon does with acts, their queue, deadlines
 //! and fallbacks, is `asks.rs`'s.
 //!
-//! The opens, `close`, `place_beside`, `resize`, `report_layout`, `focus`
-//! and `focus_direction` are asked through it.
+//! Every capability but `events` is asked through it.
 
 use std::fmt;
 use std::os::fd::RawFd;

@@ -11,7 +11,13 @@
 //! meanwhile wait their turn, until one gets a pane provider. A later
 //! self-attach is in reach if its context variables are the choosing
 //! attach's, and its `find` agrees; a window opened from a pane out of reach
-//! is drawn in that pane.
+//! is drawn in that pane. A terminal the pane provider opened is in its
+//! reach whatever `find` says, which runs for it only for its id: in a
+//! pair, or when its open printed none (#93 decision 17).
+//!
+//! Before the first `find` for an attach, a pane provider whose `find`
+//! matches the pane title, unlike Rex's, has the daemon write it into the
+//! terminal, and a new `u` tell the helper how to put the old one back.
 
 use super::*;
 use crate::attach::{PaneId, env_value};
