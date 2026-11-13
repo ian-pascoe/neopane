@@ -4,11 +4,14 @@
 //! - One layout area per window of the server, its id `@N`. A window
 //!   linked into several sessions is listed once per session, and counted
 //!   once. Foreign panes, not Neovim panes, are in it too.
-//! - Each pane's rect is its content, as fractions of its window: tmux's
-//!   borders belong to no pane, so insets are zero. With
+//! - Each tiled pane's rect is its content, as fractions of its window:
+//!   tmux's borders belong to no pane, so insets are zero. With
 //!   `pane-border-status top`, a pane on the window's top row loses that
 //!   row to its status line: it is reported from the top, one row taller,
 //!   with an inset of 1 at the top.
+//! - A floating pane (3.7 and newer) is its frame, which belongs to it:
+//!   its content grown by a cell on each side, with an inset of 1 all
+//!   round. Either may be partly off its window.
 //! - `focus` is the active pane of the window the most recently active
 //!   client shows; none without a client.
 
@@ -19,10 +22,10 @@ use super::server::Server;
 use crate::providers::builtin::Given;
 
 /// One line per pane of the server, a window linked into several sessions
-/// listing its panes once for each.
-const PANES: &str = "#{window_id} #{window_width} #{window_height} #{pane_id} #{pane_left} \
+/// listing its panes once for each; for `display-message`, the pane's.
+pub(super) const PANES: &str = "#{window_id} #{window_width} #{window_height} #{pane_id} #{pane_left} \
                      #{pane_top} #{pane_width} #{pane_height} #{pane_at_top} \
-                     #{pane-border-status}";
+                     #{pane-border-status} #{?pane_floating_flag,1,0}";
 
 /// One line per client: its last activity, and the active pane of the
 /// window it shows.
@@ -84,24 +87,51 @@ fn focus(clients: &[u8]) -> Option<String> {
     latest.map(|(_, pane)| pane.to_string())
 }
 
+/// The top left of the pane `line`, a line of `PANES`, describes, in
+/// cells of its window, as `report_layout` gives its rect; and its
+/// window's size. None if it can't read it.
+pub(super) fn reported_corner(line: &[u8]) -> Option<([i64; 2], [u32; 2])> {
+    let line = std::str::from_utf8(line).ok()?;
+    let p = Pane::parse(line.lines().next()?)?;
+    let ([x, y, _, _], _) = p.reported();
+    let [ww, wh] = p.window_size;
+    Some(([x as i64, y as i64], [ww as u32, wh as u32]))
+}
+
 /// One line of `list-panes -a -F PANES`.
 struct Pane {
     window: String,
     id: String,
     window_size: [f64; 2],
-    /// Left, top, width, height, in cells.
+    /// Left, top, width, height, in cells: its content's. A float's may
+    /// be off its window.
     cells: [f64; 4],
     at_top: bool,
     status_top: bool,
+    floating: bool,
 }
 
 impl Pane {
     fn parse(line: &str) -> Option<Pane> {
         let w: Vec<&str> = line.split(' ').collect();
-        let [window, ww, wh, id, left, top, width, height, at_top, status] = w.as_slice() else {
+        let [
+            window,
+            ww,
+            wh,
+            id,
+            left,
+            top,
+            width,
+            height,
+            at_top,
+            status,
+            floating,
+        ] = w.as_slice()
+        else {
             return None;
         };
         let n = |s: &str| s.parse::<u32>().ok().map(f64::from);
+        let at = |s: &str| s.parse::<i32>().ok().map(f64::from);
         let window_size = [n(ww)?, n(wh)?];
         if window_size.contains(&0.0) || !window.starts_with('@') || !is_pane_id(id.as_bytes()) {
             return None;
@@ -110,26 +140,38 @@ impl Pane {
             window: window.to_string(),
             id: id.to_string(),
             window_size,
-            cells: [n(left)?, n(top)?, n(width)?, n(height)?],
+            cells: [at(left)?, at(top)?, n(width)?, n(height)?],
             at_top: *at_top == "1",
             status_top: *status == "top",
+            floating: *floating == "1",
         })
+    }
+
+    /// Its rect, in cells of its window, and its inset, as `report_layout`
+    /// gives them. A float is its frame, a cell outside its content on
+    /// each side, whatever the border status. A tiled pane on the top row
+    /// under `pane-border-status top` takes the status line's row.
+    fn reported(&self) -> ([f64; 4], [u16; 4]) {
+        let [x, y, w, h] = self.cells;
+        if self.floating {
+            ([x - 1.0, y - 1.0, w + 2.0, h + 2.0], [1; 4])
+        } else if self.status_top && self.at_top && y >= 1.0 {
+            ([x, y - 1.0, w, h + 1.0], [0, 1, 0, 0])
+        } else {
+            (self.cells, [0; 4])
+        }
     }
 
     /// As `report_layout` gives it.
     fn terminal(&self) -> Value {
-        let [mut x, mut y, mut w, mut h] = self.cells;
-        let status_row = self.status_top && self.at_top && y >= 1.0;
-        if status_row {
-            y -= 1.0;
-            h += 1.0;
-        }
+        let ([x, y, w, h], inset) = self.reported();
         let [ww, wh] = self.window_size;
-        (x, w) = (x / ww, w / ww);
-        (y, h) = (y / wh, h / wh);
-        let mut t = json!({ "terminal": self.id, "rect": [x, y, w, h] });
-        if status_row {
-            t["inset"] = json!([0, 1, 0, 0]);
+        let mut t = json!({ "terminal": self.id, "rect": [x / ww, y / wh, w / ww, h / wh] });
+        if self.floating {
+            t["floating"] = true.into();
+        }
+        if inset != [0; 4] {
+            t["inset"] = json!(inset);
         }
         t
     }
@@ -195,9 +237,54 @@ mod tests {
         assert_eq!(report, want);
     }
 
+    /// A float as the report gives it: its frame, a cell outside its
+    /// content on each side.
+    fn float(id: &str, rect: [f64; 4]) -> Value {
+        json!({ "terminal": id, "rect": rect, "floating": true, "inset": [1, 1, 1, 1] })
+    }
+
+    /// Recorded from tmux 3.8, no client attached, `pane-border-status
+    /// top`: window @0 (80x24) is `%0 | %1`, with floats `%2`, from
+    /// `new-pane -x 20 -y 6 -X 10 -Y 4`, and `%3`, from `-X -1 -Y -1`, its
+    /// frame off the window's top left.
+    #[test]
+    fn tmux_3_8_a_float_is_its_frame_floating_with_an_inset_of_one() {
+        let report = layout(include_bytes!("fixtures/3.8-floats.txt"), b"").unwrap();
+        let want = json!({
+            "areas": [
+                {"id": "@0", "terminals": [
+                    under_status("%0", [0.0, 0.0, 40.0 / 80.0, 1.0]),
+                    under_status("%1", [41.0 / 80.0, 0.0, 39.0 / 80.0, 1.0]),
+                    float("%2", [10.0 / 80.0, 4.0 / 24.0, 20.0 / 80.0, 6.0 / 24.0]),
+                    float("%3", [-1.0 / 80.0, -1.0 / 24.0, 20.0 / 80.0, 6.0 / 24.0]),
+                ]},
+            ],
+        });
+        assert_eq!(report, want);
+    }
+
+    /// Recorded from tmux 3.7c, as the 3.8 one: 3.7's flags gave the
+    /// content, so its frames are a cell bigger each side, and `%3`'s
+    /// content is off the window too.
+    #[test]
+    fn tmux_3_7_a_float_off_the_window_is_reported_where_it_is() {
+        let report = layout(include_bytes!("fixtures/3.7c-floats.txt"), b"").unwrap();
+        let want = json!({
+            "areas": [
+                {"id": "@0", "terminals": [
+                    under_status("%0", [0.0, 0.0, 40.0 / 80.0, 1.0]),
+                    under_status("%1", [41.0 / 80.0, 0.0, 39.0 / 80.0, 1.0]),
+                    float("%2", [9.0 / 80.0, 3.0 / 24.0, 22.0 / 80.0, 8.0 / 24.0]),
+                    float("%3", [-2.0 / 80.0, -2.0 / 24.0, 22.0 / 80.0, 8.0 / 24.0]),
+                ]},
+            ],
+        });
+        assert_eq!(report, want);
+    }
+
     #[test]
     fn focus_is_only_ever_a_pane_id() {
-        let panes = b"@0 80 24 %0 0 0 80 24 1 off\n";
+        let panes = b"@0 80 24 %0 0 0 80 24 1 off 0\n";
         let report = layout(panes, b"9 %\n8 %1x\n7 @1\n3 %0\n").unwrap();
         assert_eq!(report["focus"], "%0");
         let report = layout(panes, b"9 %x\n").unwrap();
@@ -207,7 +294,8 @@ mod tests {
     #[test]
     fn a_line_it_cant_read_fails_the_report() {
         assert!(layout(b"@0 80 24 %0 0 0 80\n", b"").is_err());
-        assert!(layout(b"@0 0 24 %0 0 0 80 24 1 off\n", b"").is_err());
+        assert!(layout(b"@0 0 24 %0 0 0 80 24 1 off 0\n", b"").is_err());
+        assert!(layout(b"@0 80 24 %0 0 0 80 24 1 off\n", b"").is_err());
         // no pane at all is no area
         assert_eq!(layout(b"", b"").unwrap(), json!({ "areas": [] }));
     }

@@ -388,9 +388,11 @@ neopane itself
 ([ADR 0016](docs/adr/0016-built-in-pane-providers-other-than-rex-are-tables-that-run-neopane-itself.md)).
 An attach chooses it when `TERM_PROGRAM` is `tmux` and `TMUX` is set, as in
 every tmux pane: each window gets a tmux pane of its own, split beside the
-one it was opened from. tmux checks the choice: the terminal's tty must be
-one of that tmux server's panes', so a `TMUX` inherited by another terminal
-chooses none. It needs tmux 3.2 or newer. `neopane provider show tmux` prints
+one it was opened from. A group of floats you enter, such as a picker, gets
+a tmux floating pane, framed, on tmux 3.7 or newer; older ones draw it in
+its pane. tmux checks the choice: the terminal's tty must be one of that
+tmux server's panes', so a `TMUX` inherited by another terminal chooses
+none. It needs tmux 3.2 or newer. `neopane provider show tmux` prints
 its table, which `neopane.builtin.tmux()` returns for your config to change
 ([docs/config.md](docs/config.md#tmux)); `--provider none` opts out.
 

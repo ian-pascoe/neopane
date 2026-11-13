@@ -14,11 +14,7 @@ use crate::providers::builtin::Given;
 pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     let server = Server::of(given)?;
     let origin = pane_id(given, "origin")?;
-    let attach = given.var("attach").unwrap_or_default();
-    let words = unquoted(&attach).ok_or("ATTACH isn't as the daemon writes it")?;
-    if words.len() < 2 {
-        return Err("the attach command is under two words".into());
-    }
+    let words = attach_words(given)?;
     let mut args: Vec<OsString> = vec!["split-window".into(), "-d".into()];
     let direction = given.var("direction").unwrap_or_default();
     let (axis, before) = match direction.as_slice() {
@@ -49,12 +45,28 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     }
     args.extend(["-t".into(), origin.into()]);
     args.extend(["-P".into(), "-F".into(), "#{pane_id}".into()]);
-    args.extend(words.into_iter().map(OsString::from_vec));
-    let out = server.run(&args)?;
-    let id = String::from_utf8_lossy(&out);
+    args.extend(words);
+    printed_pane(&server.run(&args)?, "split-window")
+}
+
+/// The attach command's words, from `ATTACH`, for tmux to `execvp`: two
+/// or more, or tmux would run it with a shell.
+pub(super) fn attach_words(given: &Given) -> Result<Vec<OsString>, String> {
+    let attach = given.var("attach").unwrap_or_default();
+    let words = unquoted(&attach).ok_or("ATTACH isn't as the daemon writes it")?;
+    if words.len() < 2 {
+        return Err("the attach command is under two words".into());
+    }
+    Ok(words.into_iter().map(OsString::from_vec).collect())
+}
+
+/// The pane id `-P -F '#{pane_id}'` had `command` print, `out`, or why
+/// it isn't one.
+pub(super) fn printed_pane(out: &[u8], command: &str) -> Result<String, String> {
+    let id = String::from_utf8_lossy(out);
     let id = id.lines().next().unwrap_or_default().trim();
     if !is_pane_id(id.as_bytes()) {
-        return Err(format!("split-window printed {id:?}, not a pane id"));
+        return Err(format!("{command} printed {id:?}, not a pane id"));
     }
     Ok(id.to_string())
 }
@@ -75,7 +87,7 @@ pub(super) fn close(given: &Given) -> Result<(), String> {
 
 /// Input `name`, a pane id `%N`, or why not: anything else could name a
 /// session or window to tmux.
-fn pane_id(given: &Given, name: &str) -> Result<String, String> {
+pub(super) fn pane_id(given: &Given, name: &str) -> Result<String, String> {
     let id = given.var(name).unwrap_or_default();
     if !is_pane_id(&id) {
         return Err(format!(

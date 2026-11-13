@@ -208,7 +208,9 @@ mod tests {
                    report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"report_layout\" }},\n  \
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
-                 \"open_beside\" }},\n\
+                 \"open_beside\" }},\n  \
+                   open_float = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
+                 \"open_float\" }},\n\
                  }}\n"
             )
         );

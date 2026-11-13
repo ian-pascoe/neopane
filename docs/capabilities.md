@@ -240,7 +240,7 @@ runs, such as `tmux`'s, and its stderr are not.
 
 ### tmux
 
-`<name>.builtin.tmux()`: `find`, `open_beside`, `close` and
+`<name>.builtin.tmux()`: `find`, `open_beside`, `open_float`, `close` and
 `report_layout`, on the tmux server `TMUX` names. Every `tmux` call passes
 that socket with `-S`, and names the pane it acts on with `-t`.
 
@@ -251,13 +251,22 @@ that socket with `-S`, and names the pane it acts on with `-t`.
 - `open_beside`: `split-window -d`, `-h` or `-v` and `-b` from
   `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
   the new pane's id.
+- `open_float`: `new-pane -d -t ORIGIN` with `-x -y -X -Y`, running the
+  attach command, its content on the float group: `X`,`Y` are made the
+  window's from `ORIGIN`'s `pane_left` and `pane_top`. 3.7's flags give
+  the content, a size under the window's; 3.8's give the frame, so it
+  passes `X-1`, `Y-1`, `COLS+2`, `ROWS+2`. The frame stays: a float without
+  one merges into the pane beneath. Prints the new pane's id; below 3.7,
+  as `tmux -V` says, it exits 69.
 - `close`: `kill-pane`; done when the pane is already gone.
 - `report_layout`: an area per window of the server, `@N`, a window
   linked into several sessions counted once, foreign panes included. Rects
   are each pane's content, as fractions of its window, with no inset; with
   `pane-border-status top`, a pane on the top row is reported from the top,
   one row taller, with an inset of 1 at the top. `focus` is the active pane
-  of the window the most recently active client shows.
+  of the window the most recently active client shows. A float is its
+  frame, its content grown by a cell on each side, `"floating": true` with
+  an inset of 1 all round; either may be partly off its window.
 
 ## Placeholders
 
