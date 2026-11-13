@@ -308,15 +308,11 @@ fn provider_types_takes_a_config_file() {
 #[test]
 fn command_words_are_only_the_first_argument() {
     assert_eq!(parsed("attach f"), found(Some("f"), None));
-    for (line, what) in [
-        ("list", "list"),
-        ("list --json", "list"),
-        ("status", "status"),
-        ("kill --all", "kill"),
-        ("provider check", "provider check"),
-    ] {
-        assert_eq!(parsed(line), Ok(Command::NotBuilt(what.into())), "{line}");
-    }
+    assert_eq!(parsed("list"), Ok(Command::List { json: false }));
+    assert_eq!(
+        parsed("provider check"),
+        Ok(Command::NotBuilt("provider check".into()))
+    );
     assert_eq!(refused("provider"), "provider takes check, show or types");
     assert_eq!(refused("provider x"), "provider takes check, show or types");
     // anywhere else, a file
@@ -407,10 +403,72 @@ fn flags_take_no_value() {
 #[test]
 fn help_after_dashdash_is_a_file() {
     assert_eq!(parsed("attach -- -h"), found(Some("-h"), None));
+    assert_eq!(refused("list -- --help"), "list takes only --json");
+}
+
+#[test]
+fn list_takes_only_json() {
+    assert_eq!(parsed("list --json"), Ok(Command::List { json: true }));
+    assert_eq!(refused("list x"), "list takes only --json");
+    assert_eq!(refused("list --json=1"), "list takes only --json");
+    assert_eq!(refused("list --json --json"), "--json is given twice");
+}
+
+#[test]
+fn status_finds_its_daemon_as_attach_does() {
+    let status = |to, json| Ok(Command::Status { to, json });
+    assert_eq!(parsed("status"), status(Target::Found, false));
     assert_eq!(
-        parsed("list -- --help"),
-        Ok(Command::NotBuilt("list".into()))
+        parsed("status --name work --json"),
+        status(Target::Name("work".into()), true)
     );
+    assert_eq!(
+        parsed("status --json --address=/a/sock"),
+        status(Target::Address(Address::from_arg("/a/sock".into())), true)
+    );
+    assert_eq!(
+        refused("status --name a --address b"),
+        "--name and --address both choose a daemon: give one"
+    );
+    assert_eq!(
+        refused("status --name a/b"),
+        "--name: use 1-32 letters, digits, '.', '_' or '-'"
+    );
+    assert_eq!(
+        refused("status work"),
+        "status takes [--name N | --address A] [--json]"
+    );
+    assert_eq!(refused("status --name"), "--name needs a value");
+}
+
+#[test]
+fn kill_takes_a_daemon_or_all_and_force() {
+    let kill = |to, force| Ok(Command::Kill { to, force });
+    assert_eq!(parsed("kill"), kill(KillTarget::One(Target::Found), false));
+    assert_eq!(
+        parsed("kill --force --name work"),
+        kill(KillTarget::One(Target::Name("work".into())), true)
+    );
+    assert_eq!(
+        parsed("kill --address /a/sock"),
+        kill(
+            KillTarget::One(Target::Address(Address::from_arg("/a/sock".into()))),
+            false
+        )
+    );
+    assert_eq!(parsed("kill --all --force"), kill(KillTarget::All, true));
+    let one = "--all ends every daemon, and --name or --address one: give one";
+    assert_eq!(refused("kill --all --name a"), one);
+    assert_eq!(refused("kill --address a --all"), one);
+    assert_eq!(
+        refused("kill --name a --address b"),
+        "--name and --address both choose a daemon: give one"
+    );
+    assert_eq!(
+        refused("kill work"),
+        "kill takes [--name N | --address A | --all] [--force]"
+    );
+    assert_eq!(refused("kill --force --force"), "--force is given twice");
 }
 
 #[test]

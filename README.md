@@ -260,7 +260,8 @@ a second at most. Then:
   closes the rest. `neopane attach --address …` brings that window back, with
   your changes, and removes `unsaved`; `neopane attach --address … FILE` opens
   FILE and closes the kept window. Saving or throwing away the last change
-  ends it, and so does a signal, keeping the changes in swap files.
+  ends it, and so do `neopane kill --force` and a signal, keeping the changes
+  in swap files.
 
 A terminal that attaches while the daemon waits keeps it. One that attaches
 once Neovim is ending is refused with `stopping`. `:q` in the last window
@@ -335,8 +336,7 @@ Usage:
 ```
 
 Not built yet, each exiting 1 with `neopane: <what> isn't built yet`:
-`list`, `status`, `kill` and `provider check`; and the bare form's
-`--detach` and `--no-wait`. `--provider` with `--detach` exits 2: it is for
+`provider check`, and the bare form's `--detach` and `--no-wait`. `--provider` with `--detach` exits 2: it is for
 the terminal that chooses the pane provider.
 
 ### Own options first, then Neovim's
@@ -353,6 +353,97 @@ Only the first argument can be a command word (`attach`, `list`, `status`,
 `kill`, `provider`, `help`, `version`), and it runs the command even when a
 file of that name exists, with a note on stderr; `neopane ./list` opens the
 file. `detach` is held for a later command.
+
+### list, status and kill
+
+`neopane list` asks every running daemon at once, giving each 2 s, and
+prints a row per daemon, sorted by name, under a header that is always
+printed. Directories whose daemon is gone are skipped. With none running,
+stderr also gets `neopane: no daemon is running`, and it exits 0.
+
+```text
+NAME     PANES   UNSAVED  PROVIDER  DIRECTORY
+notes    0       2        none      ~/notes
+work     3       0        rex       ~/src/neorex
+old      -       -        -         (neopane 0.0.9, attach protocol 0)
+stuck    -       -        -         (didn't answer in 2 s)
+```
+
+- PANES: the terminals attached, window and float group panes alike, with
+  `kept` after it for a daemon started with `--detach`.
+- UNSAVED: how many buffers have unsaved changes.
+- PROVIDER: the pane provider, `(choosing)` while it is being confirmed, or
+  `none`, `none (find refused)` or `none (hint none)`.
+- DIRECTORY: Neovim's global working directory, `~` standing for `$HOME`.
+- A daemon of another attach protocol version shows its build and version
+  instead; one that didn't answer, why.
+
+`neopane status [--name N | --address A]` finds its daemon as `attach` does,
+with the same messages, and prints it:
+
+```text
+work
+  directory  ~/src/neorex
+  panes      3
+  unsaved    README.md, src/main.rs
+  stays      while something is unsaved
+  provider   rex
+             has: open_beside, open_float, open_tab_page, close, find,
+                  place_beside, resize, focus, focus_direction, report_layout,
+                  events
+             found unsupported: open_float
+  address    /tmp/neopane-501/work/sock
+  pid        4242
+  build      neopane 0.1.0 (a1b2c3d, 2026-11-09), attach protocol 1
+  log        /tmp/neopane-501/work/log
+```
+
+Unsaved files are shown relative to the directory. `found unsupported` lists
+the capabilities found unsupported since the pane provider was chosen. A
+daemon of another version shows only its name, `pid` and `build`, then
+`(another version: only its name, pid and build are known)`. A daemon that
+doesn't answer in 2 s is a failure: `neopane: work didn't answer in 2 s (log:
+…)`, exit 1.
+
+`--json` prints, for `list`, `{"daemons":[…]}` with one object per row, and
+for `status` the one object:
+
+```json
+{"name":"work","address":"/tmp/neopane-501/work/sock","pid":4242,
+ "build":"neopane 0.1.0 (a1b2c3d, 2026-11-09)","v":1,"same_version":true,
+ "dir":"/Users/ian/src/neorex","panes":3,"unsaved":["/Users/ian/src/neorex/README.md"],
+ "provider":"rex","capabilities":["open_beside","close","find"],"unsupported":[],
+ "kept":false,"log":"/tmp/neopane-501/work/log","terminals":["/dev/ttys004"]}
+{"name":"old","address":"…","pid":77,"build":"neopane 0.0.9","v":0,"same_version":false}
+{"name":"stuck","address":"…","error":"didn't answer in 2 s"}
+```
+
+`unsaved` holds absolute paths, `""` for an unnamed buffer; `terminals` the
+ptys of Neovim's running `:terminal` jobs. Paths that aren't UTF-8 have
+U+FFFD in place of what isn't. The JSON is stable: fields are only ever
+added, never removed, renamed, or changed in type or meaning. Read it
+ignoring fields you don't know, and take a missing field as unknown, as for
+a daemon of another version.
+
+`neopane kill [--name N | --address A | --all] [--force]` ends a daemon,
+found as `attach` finds one, or with `--all` every one running. It never
+sends a signal: it asks the daemon to stop, and the daemon ends its attaches
+(`stopped`, exit 0), closes the terminals it asked the pane provider for, and
+ends Neovim by closing its channel, so swap files are kept. While Neovim has
+unsaved changes, the daemon refuses unless `--force`, and nothing ends:
+
+```text
+neopane: work has unsaved changes: README.md, src/main.rs (save them, or kill --force to keep them only in swap files)
+```
+
+`kill` returns once the daemon is gone, printing nothing, and waits 10 s at
+most: `neopane: work is still ending after 10 s (pid 4242)` or `neopane: work
+didn't answer in 10 s (log: …)`, exit 1. With several running and no
+`--name`: `neopane: 3 daemons are running (notes, scratch, work); choose one
+with --name, or use --all`. With none running, `neopane: no daemon is
+running` and exit 1; `--all` then exits 0. `--all` prints a line per refusal
+or failure, and exits 1 if there was any. `--force` loses unsaved changes
+under `-n`, which keeps no swap files.
 
 ### Version
 
@@ -384,7 +475,7 @@ Anything else Neovim itself rejects fails the start.
 
 ### Output and exit statuses
 
-What was asked for (help, version) goes to stdout; everything else goes to
+What was asked for (help, version, `list`, `status`) goes to stdout; everything else goes to
 stderr as one `neopane: …` line. A usage error is one line ending
 `(see neopane --help)`. A reader that closes the pipe early ends `neopane`
 quietly.

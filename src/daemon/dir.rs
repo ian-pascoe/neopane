@@ -272,20 +272,34 @@ impl Address {
         self.connect().is_ok()
     }
 
+    /// The daemon directory this address is in, as base and name: None
+    /// for an address in no daemon's directory.
+    fn in_dir(&self) -> Option<(Base, String)> {
+        let path = Path::new(&self.0);
+        if path.file_name()? != SOCK {
+            return None;
+        }
+        let dir = path.parent()?;
+        let name = dir.file_name()?.to_str()?;
+        let base = Base(dir.parent()?.to_path_buf());
+        valid_name(OsStr::new(name)).then(|| (base, name.into()))
+    }
+
+    /// The name of the daemon whose directory this address is in.
+    pub fn daemon_name(&self) -> Option<String> {
+        self.in_dir().map(|(_, name)| name)
+    }
+
+    /// The log of the daemon whose directory this address is in.
+    pub fn log(&self) -> Option<PathBuf> {
+        self.in_dir().map(|(base, name)| base.log(&name))
+    }
+
     /// Whether a live daemon holds the directory this address is in: its
     /// lock goes last as it ends. False for an address in no daemon's
     /// directory.
     pub fn dir_locked(&self) -> bool {
-        let path = Path::new(&self.0);
-        match (path.parent(), path.file_name()) {
-            (Some(dir), Some(sock)) if sock == SOCK => {
-                let (Some(base), Some(name)) = (dir.parent(), dir.file_name()) else {
-                    return false;
-                };
-                name.to_str().is_some_and(|n| Base(base.to_path_buf()).live(n))
-            }
-            _ => false,
-        }
+        self.in_dir().is_some_and(|(base, name)| base.live(&name))
     }
 }
 
