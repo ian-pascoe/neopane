@@ -78,6 +78,32 @@ fn its_panes_are_never_moved_even_when_neovim_moves_its_windows() {
 }
 
 #[test]
+fn a_resize_before_the_live_layout_reports_the_new_pane_is_asked_once_it_does() {
+    let mut fx = first_tab_page(&[Capability::Resize]);
+    let d = &mut fx.d;
+    // window 2's pane just opened: the live layout hasn't reported it
+    d.panes.by_win_mut(2).unwrap().area = Area::Unreported;
+    d.on_tab_layout(first_row(&[40, 39])).unwrap();
+    // `:vertical resize 30` on window 1: not yet known to share its area
+    d.on_tab_layout(first_row(&[30, 49])).unwrap();
+    assert!(fake(d).asks.is_empty());
+    // reported beside the self-attached pane
+    let l = layout_of(&[(
+        "@0",
+        &[
+            (block_id(1).as_str(), [0.0, 0.0, 0.5, 1.0], false),
+            (block_id(2).as_str(), [0.5, 0.0, 0.5, 1.0], false),
+        ],
+    )]);
+    fake(d).push(ProviderEvent::Layout(l));
+    d.drain_provider().unwrap();
+    assert_eq!(
+        ratios_rounded(&[resize(2, 1, 49, 49.0 / 79.0)]),
+        ratios_rounded(&fake(d).asked())
+    );
+}
+
+#[test]
 fn panes_the_live_layout_has_in_two_layout_areas_are_not_resized() {
     let mut fx = first_tab_page(&[Capability::Resize]);
     let d = &mut fx.d;

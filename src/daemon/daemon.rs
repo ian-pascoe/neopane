@@ -1962,6 +1962,9 @@ impl Daemon {
                         no_area,
                     });
                 }
+                // whether a pane the live layout hasn't reported shares its
+                // area isn't known: placed once it's reported
+                Action::Resize(plan) if no_area && awaits_report(&self.panes, &plan) => {}
                 Action::Resize(plan) => {
                     tab.placed = Some(plan);
                     if resizes {
@@ -2730,7 +2733,9 @@ impl Daemon {
 
     /// A live layout came: the panes it names join their areas (ADR 0008).
     /// One that says what the last did, to panes that are as it left them,
-    /// changes nothing to size or draw. No terminal is moved.
+    /// changes nothing to size or draw. No terminal is moved, but a tab
+    /// page's panes are placed again once areas changed: a resize may have
+    /// waited for a pane's report.
     fn on_live_layout(&mut self, l: LiveLayout) -> Result<()> {
         let changed = self.apply_live_layout(&l);
         if !changed && self.live_layout.as_ref() == Some(&l) {
@@ -2738,7 +2743,11 @@ impl Daemon {
         }
         self.live_layout = Some(l);
         self.arm_area_timer()?;
-        self.refit_to_areas()
+        self.refit_to_areas()?;
+        if changed {
+            self.place_tab_pages()?;
+        }
+        Ok(())
     }
 
     /// Gives the panes `l` names their areas, and has the floats of a float
@@ -3336,6 +3345,20 @@ impl Daemon {
 /// (see `terminals_to_place`).
 fn takes_part(p: &Pane, no_area: bool) -> bool {
     p.closing.is_none() && (!p.is_self_attached() || (no_area && p.terminal.is_some()))
+}
+
+/// Whether a move of `plan`, of a tab page without a tab page area, has a
+/// pane the live layout hasn't reported yet: whether the two share a layout
+/// area, so that it can be asked, isn't known (see `terminals_to_place`).
+fn awaits_report(panes: &Panes, plan: &TabPlacement) -> bool {
+    let unreported = |win| {
+        panes
+            .by_win(win)
+            .is_some_and(|p| p.area == Area::Unreported)
+    };
+    plan.items()
+        .iter()
+        .any(|m| unreported(m.win) || unreported(m.beside))
 }
 
 /// The terminals of panes `moved` and `beside`, if they take part together
