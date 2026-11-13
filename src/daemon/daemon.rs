@@ -30,7 +30,9 @@ use super::nvim_session::NvimSession;
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing, SelfAttach};
 use super::pane_layout::{self, Axis, PaneLayout};
 use super::panes::Panes;
-use super::provider::{Answer, Ask, Capability, Direction, ProviderEvent, TerminalId};
+use super::provider::{
+    Answer, Ask, Capability, Direction, PaneProvider, ProviderEvent, TerminalId,
+};
 use super::provider_focus::ProviderFocus;
 use super::surface::{self, Sent, Surface};
 use super::tab_placement::{self, Action, PaneMove, Tab, WindowState};
@@ -42,9 +44,6 @@ use crate::nvim::forwarder::{self, FocusReport, Forwarder, Taking};
 use crate::nvim::msgpack::{self, Decoder};
 use crate::nvim::rpc;
 use crate::nvim::windows::{self, Layout};
-use crate::providers::Held;
-#[cfg(test)]
-use crate::providers::rex::RexProvider;
 use crate::screen::float_groups;
 use crate::screen::grid::Cell;
 use crate::screen::grids::{Grids, WinKind};
@@ -149,9 +148,10 @@ pub(crate) struct Daemon {
     context: Vec<Option<Vec<u8>>>,
     /// Whether the loop watches the pane provider's fd for room to write.
     provider_writes: bool,
-    /// How tests connect a chosen pane provider to a fake.
+    /// What tests have a self-attach choose, given its hello, in place of
+    /// the built-in default.
     #[cfg(test)]
-    pub test_connect: Option<crate::providers::choose::Connect>,
+    pub test_choose: Option<TestChoose>,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
     /// Warnings for Neovim held until it is set up (`warn_when_ready`).
@@ -159,10 +159,15 @@ pub(crate) struct Daemon {
     // Dropped last, in this order: the loop, then the pane provider, then
     // Neovim.
     pub event_loop: Loop,
-    /// None without one, or once it failed as a whole.
-    pub provider: Option<Held>,
+    /// The pane provider, one at a time: None before a self-attach chooses
+    /// one, or once it is dropped, gone or with no terminal in its reach.
+    pub provider: Option<Box<dyn PaneProvider>>,
     pub nvim: NvimSession,
 }
+
+/// What a test has a self-attach choose, given its hello.
+#[cfg(test)]
+pub(crate) type TestChoose = Box<dyn FnMut(&pane::AttachHello) -> crate::providers::choose::Chosen>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -327,7 +332,7 @@ impl Daemon {
     pub(crate) fn new(
         event_loop: Loop,
         nvim: NvimSession,
-        provider: Option<Held>,
+        provider: Option<Box<dyn PaneProvider>>,
         exe: String,
         sock: super::dir::Address,
     ) -> Daemon {
@@ -370,7 +375,7 @@ impl Daemon {
             context: Vec::new(),
             provider_writes: false,
             #[cfg(test)]
-            test_connect: None,
+            test_choose: None,
             first_choice: None,
             held_warnings: Vec::new(),
             event_loop,
@@ -509,6 +514,7 @@ impl Daemon {
         self.tell_panes_show()?;
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
+        self.drop_provider_out_of_reach()?;
         if self.nvim.watch_switch() {
             self.add_timer(Token::SwitchTimer, SWITCH_RECHECK_MS)?;
         }
@@ -951,7 +957,7 @@ impl Daemon {
             Some(o) if o[axis] > 0 => (f64::from(along) / f64::from(o[axis])).clamp(0.0, 1.0),
             _ => 0.5,
         };
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         if !self.asks.may_ask(p, Capability::OpenBeside) && self.asks.may_ask(p, Capability::Open) {
             // opened, then placed once it attaches (ADR 0006)
             if self.asks.may_ask(p, Capability::PlaceBeside) {
@@ -995,7 +1001,7 @@ impl Daemon {
     ///   current pane's terminal (#86 D5);
     /// - no version refusal holds (#91 decision 24).
     fn opens_terminal(&mut self, sp: windows::Split) -> bool {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         let opens =
             self.asks.may_ask(p, Capability::OpenBeside) || self.asks.may_ask(p, Capability::Open);
         if !opens || !self.in_reach(sp) {
@@ -1024,7 +1030,7 @@ impl Daemon {
     /// or a session load make them, may have no pane yet, or one whose open
     /// is still on its way: its id comes with the open.
     fn can_give_focus_back(&self) -> bool {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         if !self.asks.may_ask(p, Capability::Focus) {
             return false;
         }
@@ -1399,7 +1405,7 @@ impl Daemon {
             windows::Direction::Right => Direction::Right,
         };
         let count = self.step_in_layout(dir, m.count.max(1))?;
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         if count == 0 || !self.asks.may_ask(p, Capability::FocusDirection) {
             return Ok(());
         }
@@ -1625,7 +1631,7 @@ impl Daemon {
     /// layout queue. Without `place_beside` nothing is placed; without
     /// `resize`, a change of sizes alone is left.
     fn place_tab_pages(&mut self) -> Result<()> {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         if !self.asks.may_ask(p, Capability::PlaceBeside) {
             return Ok(());
         }
@@ -1767,21 +1773,13 @@ impl Daemon {
 
     // The pane provider
 
-    #[cfg(test)]
-    fn rex_ref(&self) -> Option<&RexProvider> {
-        match &self.provider {
-            Some(Held::Rex(r)) => Some(r),
-            _ => None,
-        }
-    }
-
     /// Asks the pane provider to focus terminal `t`, unless it has or will
     /// once a focus asked lands, or can't.
     fn focus_terminal(&mut self, t: Option<&TerminalId>) {
         let Some(t) = t else {
             return;
         };
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         if self.focus.has_focused(t) || !self.asks.may_ask(p, Capability::Focus) {
             return;
         }
@@ -1794,13 +1792,16 @@ impl Daemon {
     /// Asks the pane provider for `ask`, or falls back without it. What
     /// became of it, `run_steps` acts on.
     pub(crate) fn act(&mut self, ask: Ask) {
-        let p = self.provider.as_mut().map(Held::seam);
+        let p = self
+            .provider
+            .as_mut()
+            .map(|p| &mut **p as &mut dyn PaneProvider);
         self.asks.act(p, ask, Instant::now());
     }
 
     /// Matches float group panes to groups of floats (see `floating_panes`).
     fn reconcile_layers(&mut self) {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         let open_float = self.asks.may_ask(p, Capability::OpenFloat);
         let origin = self
             .current_pane()
@@ -1826,7 +1827,7 @@ impl Daemon {
 
     fn on_provider(&mut self, token: usize) -> Result<()> {
         if let Some(p) = &mut self.provider {
-            p.seam().on_ready(token);
+            p.on_ready(token);
         }
         self.drain_provider()
     }
@@ -1834,11 +1835,11 @@ impl Daemon {
     /// Handles what the pane provider has to tell, then what became of the
     /// acts.
     pub(crate) fn drain_provider(&mut self) -> Result<()> {
-        while let Some(e) = self.provider.as_mut().and_then(|p| p.seam().next()) {
+        while let Some(e) = self.provider.as_mut().and_then(|p| p.next()) {
             match e {
                 ProviderEvent::Answered { id, outcome } => {
                     if let Some(p) = &mut self.provider {
-                        self.asks.answered(p.seam(), id, outcome, Instant::now());
+                        self.asks.answered(p.as_mut(), id, outcome, Instant::now());
                     }
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
@@ -1855,25 +1856,60 @@ impl Daemon {
         self.arm_ask_timer()
     }
 
-    /// The pane provider failed as a whole: it's dropped, and every act
-    /// asked of it or waiting falls back. Its live layout goes: a pane it
-    /// hadn't reported is its own area, and the rest stay as they are.
+    /// The pane provider failed as a whole (`Gone`), for `reason`: it's
+    /// dropped at once, with one warning, and every act asked of it or
+    /// waiting falls back (#92 decision 27).
     fn provider_gone(&mut self, reason: &str) -> Result<()> {
-        log_warn!("{NAME} daemon: dropping the pane provider: {reason}");
-        if let Some(fd) = self.provider.as_ref().and_then(Held::fd) {
+        let line = format!("{}: {reason}; no pane provider", self.provider_name());
+        log_warn!("{NAME} daemon: {line}");
+        self.warn_when_ready(format!("{NAME}: {line}"));
+        self.nvim.client.flush()?;
+        self.drop_provider()
+    }
+
+    /// Drops the pane provider once no terminal in its reach is attached or
+    /// on its way, and nothing asked of it is unanswered, as when the
+    /// daemon goes unattached: the next self-attach chooses again.
+    fn drop_provider_out_of_reach(&mut self) -> Result<()> {
+        let ending = self.stopped.is_some();
+        if self.provider.is_none() || self.choosing.is_some() || self.asks.busy() || ending {
+            return Ok(());
+        }
+        if self.reaches(None) {
+            return Ok(());
+        }
+        log_info!(
+            "{NAME} daemon: dropping {}: no terminal in its reach",
+            self.provider_name()
+        );
+        self.drop_provider()?;
+        self.run_steps()
+    }
+
+    /// Drops the pane provider, ending what it runs, such as its connection
+    /// or its `events`. Every act asked of it or
+    /// waiting falls back, and what it was found not to support is
+    /// forgotten. Its terminal ids and live layout go: a pane it hadn't
+    /// reported is its own area, and the rest stay as they are. Every pane
+    /// is out of reach until the next choice checks it again.
+    fn drop_provider(&mut self) -> Result<()> {
+        if let Some(fd) = self.provider.as_ref().and_then(|p| p.fd()) {
             let _ = self.event_loop.remove(fd);
         }
         self.provider = None;
         self.provider_writes = false;
-        // gone before it was confirmed: none was chosen after all
+        self.context.clear();
+        // dropped before it was confirmed: none was chosen after all
         if let Some(c) = self.choosing.take() {
             log_info!(
                 "{NAME} daemon: pane {} chose no pane provider after all",
                 c.id
             );
-            self.warn_when_ready(format!("{NAME}: {reason}; no pane provider"));
-            self.nvim.client.flush()?;
         }
+        for p in &mut self.panes.list {
+            p.terminal = None;
+        }
+        self.out_of_reach_but(None);
         self.focus = ProviderFocus::default();
         self.just_opened.clear();
         self.asks.gone();
@@ -1887,7 +1923,7 @@ impl Daemon {
     fn time_out_asks(&mut self) -> Result<()> {
         self.ask_timer_due = None;
         if let Some(p) = &mut self.provider {
-            self.asks.time_out(p.seam(), Instant::now());
+            self.asks.time_out(p.as_mut(), Instant::now());
         }
         self.run_steps()?;
         self.arm_ask_timer()
@@ -2136,7 +2172,7 @@ impl Daemon {
             .provider
             .as_ref()
             .map_or(super::provider::default_attach_timeout(), |p| {
-                p.seam_ref().attach_timeout()
+                p.attach_timeout()
             });
         wait.min(crate::config::check::MAX_TIMEOUT)
     }
@@ -2333,7 +2369,7 @@ impl Daemon {
 
     /// Whether the pane provider can give a live layout.
     fn reports_layouts(&self) -> bool {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        let p = self.provider.as_deref();
         self.asks.may_ask(p, Capability::ReportLayout)
     }
 
@@ -2342,7 +2378,7 @@ impl Daemon {
     fn has_events(&self) -> bool {
         self.provider
             .as_ref()
-            .is_some_and(|p| p.seam_ref().capabilities().has(Capability::Events))
+            .is_some_and(|p| p.capabilities().has(Capability::Events))
     }
 
     /// Something may have moved the terminals or focus: a pane provider
@@ -2957,13 +2993,8 @@ mod tests {
     use super::*;
     use crate::nvim::nvim::for_test_on;
     use crate::nvim::windows::{Kind, Node};
-    use crate::rex::client::Client;
-    use crate::rex::session::tests::server_frame;
-    use crate::rex::session::{Conn, Session as RexSession};
     use crate::screen::grid::Grid;
     use crate::screen::grids::{Float, Win};
-    use serde_json::Value;
-    use serde_json::json;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -2981,10 +3012,10 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        with_provider(Some(Held::Fake(FakeProvider::opening())))
+        with_provider(Some(Box::new(FakeProvider::opening())))
     }
 
-    fn with_provider(provider: Option<Held>) -> Fixture {
+    fn with_provider(provider: Option<Box<dyn PaneProvider>>) -> Fixture {
         let (nvim_ours, nvim_end) = UnixStream::pair().unwrap();
         let d = Daemon::new(
             Loop::init().unwrap(),
@@ -2994,17 +3025,6 @@ mod tests {
             crate::daemon::dir::Address::from_arg(Default::default()),
         );
         Fixture { d, nvim_end }
-    }
-
-    /// A fixture whose pane provider is Rex's, over a socket nothing answers,
-    /// for what isn't asked through the seam yet: focus and layout. Rex's end
-    /// reads what it is sent.
-    fn rex_fixture() -> (Fixture, UnixStream) {
-        let (rex_ours, rex_end) = UnixStream::pair().unwrap();
-        let mut rex = RexSession::new(Client::from_stream(rex_ours), "session:s".to_string());
-        rex.conn = Conn::Attached;
-        let rex = Held::Rex(Box::new(RexProvider::new(rex)));
-        (with_provider(Some(rex)), rex_end)
     }
 
     /// The fake pane provider of `d`.
@@ -3770,7 +3790,7 @@ mod tests {
 
     /// A daemon set up, its first self-attached pane showing window 1000,
     /// and a second self-attached pane waiting for a window: its id.
-    fn second_self_attach(provider: Option<Held>) -> (Fixture, u32) {
+    fn second_self_attach(provider: Option<Box<dyn PaneProvider>>) -> (Fixture, u32) {
         let mut fx = with_provider(provider);
         draw_external(&mut fx.d, 2, 1000, 80, 23);
         let first = fx.d.panes.add_self_attached(SelfAttach {
@@ -3844,7 +3864,7 @@ mod tests {
 
     /// The ask serving the second pane of `second_self_attach` for a new
     /// window, the Lua having noted window 1002 as it made it.
-    fn opening_1002(provider: Option<Held>) -> (Fixture, u32, u32) {
+    fn opening_1002(provider: Option<Box<dyn PaneProvider>>) -> (Fixture, u32, u32) {
         let (mut fx, id) = second_self_attach(provider);
         fx.d.give_windows().unwrap();
         list_answer(&mut fx, 1000, &[1000]);
@@ -3901,7 +3921,7 @@ mod tests {
 
     #[test]
     fn a_window_waiting_for_a_pane_without_one_isnt_taken() {
-        let (mut fx, id) = second_self_attach(Some(Held::Fake(FakeProvider::opening())));
+        let (mut fx, id) = second_self_attach(Some(Box::new(FakeProvider::opening())));
         // 1001 waits for its tab page's floating pane, or an origin; 1002
         // for a pane that can draw it
         fx.d.changes.note_split(windows::Split {
@@ -3973,7 +3993,7 @@ mod tests {
 
     impl TablineFixture {
         fn init() -> TablineFixture {
-            TablineFixture::on(with_provider(Some(Held::Fake(FakeProvider::telling()))))
+            TablineFixture::on(with_provider(Some(Box::new(FakeProvider::telling()))))
         }
 
         fn on(mut fx: Fixture) -> TablineFixture {
@@ -4392,7 +4412,7 @@ mod tests {
 
     #[test]
     fn the_area_timer_fires_once_the_report_wait_is_over_and_not_before() {
-        let mut fx = with_provider(Some(Held::Fake(FakeProvider::telling())));
+        let mut fx = with_provider(Some(Box::new(FakeProvider::telling())));
         let (id, pane) = requested_pane(&mut fx);
         fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
         let _attached = attach_terminal(&mut fx, pane, 70, 20);
@@ -4461,7 +4481,7 @@ mod tests {
 
     #[test]
     fn an_unreported_pane_becomes_its_own_area_a_second_after_its_terminal_attached_with_its_id() {
-        let mut fx = with_provider(Some(Held::Fake(FakeProvider::telling())));
+        let mut fx = with_provider(Some(Box::new(FakeProvider::telling())));
         let (id, pane) = requested_pane(&mut fx);
         // its open is done: it has its terminal id
         fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
@@ -4491,7 +4511,7 @@ mod tests {
     fn a_pane_provider_that_doesnt_tell_layouts_is_asked_and_only_unsupported_drops_its_layout() {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::ReportLayout);
-        let mut fx = with_provider(Some(Held::Fake(f)));
+        let mut fx = with_provider(Some(Box::new(f)));
         let (id, pane) = requested_pane(&mut fx);
         fx.d.panes.by_id_mut(id).unwrap().terminal = Some(TerminalId::from("t1"));
         let _attached = attach_terminal(&mut fx, pane, 70, 20);
@@ -4533,84 +4553,47 @@ mod tests {
         assert_eq!(Area::Own, area(&mut fx, waiting));
     }
 
-    /// The JSON of each text frame in `bytes`, as a Client wrote them: masked
-    /// frames with 7-bit or 16-bit lengths. (Dropping a `Client` also
-    /// sends a close frame, which isn't text.)
-    fn client_frames(bytes: &[u8]) -> Vec<String> {
-        let mut frames = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let opcode = bytes[i] & 0x0f;
-            let mut len = (bytes[i + 1] & 0x7f) as usize;
-            i += 2;
-            if len == 126 {
-                len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
-                i += 2;
-            }
-            let mask = &bytes[i..i + 4];
-            let text: Vec<u8> = bytes[i + 4..i + 4 + len]
-                .iter()
-                .enumerate()
-                .map(|(k, b)| b ^ mask[k % 4])
-                .collect();
-            if opcode == 1 {
-                frames.push(String::from_utf8(text).unwrap());
-            }
-            i += 4 + len;
-        }
-        frames
-    }
-
-    /// The requests a daemon with a Rex connection to nothing but a socket sends
-    /// while `body` does something with it, as Rex reads them.
-    fn fake_rex_requests(body: impl FnOnce(&mut Daemon)) -> Vec<String> {
-        let (Fixture { mut d, .. }, mut rex_end) = rex_fixture();
-        body(&mut d);
-        drop(d); // the end of what it sent
-
-        let mut all = Vec::new();
-        rex_end.read_to_end(&mut all).unwrap();
-        client_frames(&all)
-    }
-
-    /// What `on_direction` asks Rex for with `m`: the requests Rex reads.
-    fn direction_requests(m: windows::Move) -> Vec<String> {
-        fake_rex_requests(|d| d.on_direction(m).unwrap())
+    /// What `on_direction` asks the pane provider for with `m`.
+    fn direction_asks(m: windows::Move) -> Vec<Ask> {
+        let mut fx = with_provider(Some(Box::new(FakeProvider::with(&[
+            Capability::FocusDirection,
+        ]))));
+        fx.d.on_direction(m).unwrap();
+        fake(&mut fx.d).asked()
     }
 
     #[test]
-    fn a_directional_move_asks_rex_to_focus_that_way_without_wrapping_once_per_count() {
-        let down = direction_requests(windows::Move {
-            dir: windows::Direction::Down,
-            count: 3,
-        });
-        assert_eq!(3, down.len());
+    fn a_directional_move_asks_to_focus_that_way_once_with_its_count() {
+        let asked = |dir, count| direction_asks(windows::Move { dir, count });
         assert_eq!(
-            r#"{"type":"request","id":"1","method":"session.focus_direction","payload":{"session_id":"session:s","direction":"down","wrap":false}}"#,
-            down[0]
+            vec![Ask::FocusDirection {
+                dir: Direction::Down,
+                count: 3
+            }],
+            asked(windows::Direction::Down, 3)
         );
-        assert_eq!(
-            r#"{"type":"request","id":"3","method":"session.focus_direction","payload":{"session_id":"session:s","direction":"down","wrap":false}}"#,
-            down[2]
-        );
-
-        // Neovim's hjkl are Rex's left, down, up and right
-        for (dir, name) in [
-            (windows::Direction::Left, "left"),
-            (windows::Direction::Up, "up"),
-            (windows::Direction::Right, "right"),
+        // Neovim's hjkl are left, down, up and right
+        for (dir, want) in [
+            (windows::Direction::Left, Direction::Left),
+            (windows::Direction::Up, Direction::Up),
+            (windows::Direction::Right, Direction::Right),
         ] {
-            let one = direction_requests(windows::Move { dir, count: 1 });
-            assert_eq!(1, one.len());
-            assert!(one[0].contains(&format!("\"direction\":\"{name}\"")));
+            assert_eq!(
+                vec![Ask::FocusDirection {
+                    dir: want,
+                    count: 1
+                }],
+                asked(dir, 1)
+            );
         }
-
-        // a stray huge count doesn't flood Rex
-        let many = direction_requests(windows::Move {
-            dir: windows::Direction::Left,
-            count: 9999,
-        });
-        assert_eq!(20, many.len());
+        // a stray huge count doesn't flood the pane provider
+        assert_eq!(
+            vec![Ask::FocusDirection {
+                dir: Direction::Left,
+                count: 20
+            }],
+            asked(windows::Direction::Left, 9999)
+        );
     }
 
     /// A layout of one row of windows 1 to `n`, `widths` wide, in tab page 2.
@@ -4702,7 +4685,7 @@ mod tests {
         for &c in caps {
             f.caps.insert(c);
         }
-        let mut fx = with_provider(Some(Held::Fake(f)));
+        let mut fx = with_provider(Some(Box::new(f)));
         for n in [1u32, 2, 3] {
             fx.d.grids.wins.insert(
                 n + 10,
@@ -5098,12 +5081,6 @@ mod tests {
         }
     }
 
-    fn window_id(n: u32) -> String {
-        let id = format!("window:00000000-0000-0000-0000-{n:0>12}");
-        assert_eq!(43, id.len());
-        id
-    }
-
     /// Grid 1 of 200 x 50, and an entered picker float, as one group, on top.
     fn show_picker(d: &mut Daemon) {
         d.grids.grids.insert(1, Grid::default());
@@ -5493,7 +5470,12 @@ mod tests {
 
     /// A pane of window 1001 waiting on the open asked for it. Its id.
     fn opening(d: &mut Daemon) -> u32 {
-        let p = d.panes.add_for_window(1001);
+        opening_for(d, 1001)
+    }
+
+    /// Pane `win` asked for, its `open_beside` asked: its id.
+    fn opening_for(d: &mut Daemon, win: i64) -> u32 {
+        let p = d.panes.add_for_window(win);
         let (id, pane) = (p.id, p.attach_id.unwrap());
         p.awaiting_size = true;
         d.act(Ask::OpenBeside {
@@ -5530,39 +5512,25 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_rex_sends_before_an_open_is_done_still_places_its_pane() {
-        let (mut fx, mut rex_end) = rex_fixture();
+    fn a_layout_told_before_an_open_is_done_still_places_its_pane() {
+        let mut fx = with_provider(Some(Box::new(FakeProvider::telling())));
         let id = opening(&mut fx.d);
-        let mut rex_says = |d: &mut Daemon, v: Value| {
-            rex_end.write_all(&server_frame(&v.to_string())).unwrap();
-            d.on_provider(Token::Provider as usize).unwrap();
-        };
-        let response = |id: u64, payload: Value| json!({ "type": "response", "id": id.to_string(), "seq": 0, "payload": payload });
-        // 1: new_split, answered; 2: disown_block, not yet
-        rex_says(
-            &mut fx.d,
-            response(1, json!({ "block_ids": [block_id(5)] })),
-        );
-        // the view changes, and 3, its fetch, is answered with the new block in it
-        rex_says(
-            &mut fx.d,
-            json!({ "type": "event", "seq": 0, "payload": {
-                "type": "session_view_changed", "payload": { "revision": 1 } } }),
-        );
-        let view = json!({ "revision": 1, "active_window_id": window_id(1),
-            "windows": [ { "window_id": window_id(1), "focused_block_id": block_id(5),
-                "layers": [ { "kind": "tiled", "layout": {
-                    "block_id": block_id(5), "rect": [0.5, 0.0, 0.5, 1.0] } } ] } ] });
-        rex_says(&mut fx.d, response(3, view));
+        let ask = fake(&mut fx.d).last_id();
+        // the live layout has the new terminal before its open is done
+        let rect = [0.5, 0.0, 0.5, 1.0];
+        let l = layout_of(&[("w1", &[(block_id(5).as_str(), rect, false)])]);
+        fake(&mut fx.d).push(ProviderEvent::Layout(l));
+        fx.d.drain_provider().unwrap();
         assert_eq!(Area::Unreported, fx.d.panes.by_id(id).unwrap().area);
-        // the disown answered: the open is done, and the pane where the view has it
-        rex_says(&mut fx.d, response(2, json!({})));
+        // the open done: the pane where the live layout has it
+        fake(&mut fx.d).opened(ask, &block_id(5));
+        fx.d.drain_provider().unwrap();
         let p = fx.d.panes.by_id(id).unwrap();
         assert_eq!(
             Some(block_id(5).as_str()),
             p.terminal.as_ref().map(TerminalId::as_str)
         );
-        assert_eq!(live(&window_id(1), [0.5, 0.0, 0.5, 1.0]), p.area);
+        assert_eq!(live("w1", rect), p.area);
     }
 
     #[test]
@@ -5606,37 +5574,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_to_rex_on_the_direct_focus_path_drops_rex_and_gives_up_its_opens() {
-        let (mut fx, rex_end) = rex_fixture();
-        let id = opening(&mut fx.d);
-        drop(rex_end); // writes to a socket nobody holds fail
-        fx.d.on_direction(windows::Move {
-            dir: windows::Direction::Left,
-            count: 1,
-        })
-        .unwrap();
-        fx.d.after_batch().unwrap();
-        assert!(fx.d.provider.is_none());
-        assert_given_up(&fx.d, id);
-        assert_eq!(None, fx.d.stopped);
-    }
-
-    #[test]
-    fn rex_hanging_up_drops_it_and_gives_its_pending_open_up() {
-        let (mut fx, rex_end) = rex_fixture();
-        let fd = fx.d.rex_ref().unwrap().session.client.fd();
-        fx.d.event_loop
-            .add_read(fd, Token::Provider as usize)
-            .unwrap();
-        let id = opening(&mut fx.d);
-        rex_end.shutdown(std::net::Shutdown::Both).unwrap();
-        fx.d.on_provider(Token::Provider as usize).unwrap();
-        assert!(fx.d.provider.is_none());
-        assert_given_up(&fx.d, id);
-        assert_eq!(None, fx.d.stopped);
-    }
-
-    #[test]
     fn a_terminal_opened_for_a_pane_since_gone_is_closed() {
         let mut fx = fixture();
         let id = opening(&mut fx.d);
@@ -5656,7 +5593,7 @@ mod tests {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::Focus);
         f.caps.insert(Capability::FocusDirection);
-        let mut fx = with_provider(Some(Held::Fake(f)));
+        let mut fx = with_provider(Some(Box::new(f)));
         fx.d.nvim.ready = true;
         fx
     }
@@ -5793,8 +5730,8 @@ mod tests {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let env = [(b"PATH".to_vec(), path.as_encoded_bytes().to_vec())];
         let p = CommandProvider::new(spec, &env, b"/").unwrap();
-        let mut fx = with_provider(Some(Held::Command(Box::new(p))));
-        let fd = fx.d.provider.as_ref().and_then(Held::fd).unwrap();
+        let mut fx = with_provider(Some(Box::new(p)));
+        let fd = fx.d.provider.as_ref().and_then(|p| p.fd()).unwrap();
         fx.d.event_loop
             .add_read(fd, Token::Provider as usize)
             .unwrap();
@@ -5937,6 +5874,38 @@ mod tests {
         pump_until(&mut fx, |d| d.nvim.current_win == 1001);
     }
 
+    #[test]
+    fn dropping_a_command_runner_kills_its_events() {
+        let script = Script::new("events-dropped");
+        let pid_file = script.0.with_file_name("pid");
+        script.set(&format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        let mut fx = commanded_by(&[(Capability::Events, &["sh", script.path()])]);
+        let started = Instant::now();
+        let pid: libc::pid_t = loop {
+            if let Ok(s) = std::fs::read_to_string(&pid_file)
+                && s.ends_with('\n')
+            {
+                break s.trim().parse().unwrap();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "events never ran"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // SAFETY: signal 0 only checks the process is there.
+        let alive = |pid| unsafe { libc::kill(pid, 0) } == 0;
+        assert!(alive(pid));
+        // no terminal in its reach
+        fx.d.after_batch().unwrap();
+        assert!(fx.d.provider.is_none());
+        let gone = Instant::now();
+        while alive(pid) {
+            assert!(gone.elapsed() < Duration::from_secs(3), "events lives");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// A daemon whose fake pane provider can focus and report layouts, but
     /// doesn't tell them: two panes, of windows 1000 and 1001, show `t1`
     /// and `t2`, the first current. The second's id.
@@ -5944,7 +5913,7 @@ mod tests {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::ReportLayout);
         f.caps.insert(Capability::Focus);
-        let mut fx = TablineFixture::on(with_provider(Some(Held::Fake(f))));
+        let mut fx = TablineFixture::on(with_provider(Some(Box::new(f))));
         fx.d().nvim.ready = true;
         let mut b = 0;
         for slot in 0..2 {
@@ -6079,7 +6048,7 @@ mod tests {
         });
         let late = Instant::now() + Duration::from_secs(60);
         let d = fx.d();
-        d.asks.time_out(d.provider.as_mut().unwrap().seam(), late);
+        d.asks.time_out(d.provider.as_mut().unwrap().as_mut(), late);
         d.run_steps().unwrap();
         assert_eq!(1, reports_asked(&mut fx));
         // the command runner says so once it has been killed
@@ -6154,6 +6123,7 @@ mod tests {
     #[test]
     fn a_focus_commands_answer_comes_through_the_daemons_loop() {
         let mut fx = focusing_by(&["true"]);
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
         fx.d.focus_terminal(Some(&TerminalId::from("t2")));
         fx.d.after_batch().unwrap();
         assert_eq!(1, fx.d.asks.waiting());
@@ -6441,7 +6411,7 @@ mod tests {
         for id_first in [true, false] {
             let f =
                 FakeProvider::with(&[Capability::Open, Capability::PlaceBeside, Capability::Close]);
-            let mut fx = with_provider(Some(Held::Fake(f)));
+            let mut fx = with_provider(Some(Box::new(f)));
             fake(&mut fx.d).unlaid = Some([80, 24]);
             pane_in_block(&mut fx.d, 2, 0, 2);
             note_split_from(&mut fx.d, 3, 2, true, false);
@@ -6499,7 +6469,7 @@ mod tests {
     #[test]
     fn without_place_beside_a_new_window_opened_by_open_is_an_unplaced_pane() {
         let f = FakeProvider::with(&[Capability::Open, Capability::Close]);
-        let mut fx = with_provider(Some(Held::Fake(f)));
+        let mut fx = with_provider(Some(Box::new(f)));
         pane_in_block(&mut fx.d, 2, 0, 2);
         note_split_from(&mut fx.d, 3, 2, true, false);
         fx.d.nvim.current_win = 3;

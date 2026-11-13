@@ -84,7 +84,7 @@ impl Rig {
     /// `terminal` its id for the first pane.
     fn start_with(
         args: &[&str],
-        provider: Option<Held>,
+        provider: Option<Box<dyn PaneProvider>>,
         terminal: Option<TerminalId>,
     ) -> Option<Rig> {
         static RIGS: AtomicU32 = AtomicU32::new(0);
@@ -434,7 +434,7 @@ fn a_file_attach_after_an_unshown_one_before_neovim_is_ready_waits_its_turn() {
 #[test]
 fn a_window_whose_requested_pane_is_on_its_way_isnt_taken() {
     // a pane provider that never answers its opens
-    let fake = Held::Fake(FakeProvider::opening());
+    let fake = Box::new(FakeProvider::opening());
     let Some(mut rig) = Rig::start_with(&[], Some(fake), Some(TerminalId::from("t0"))) else {
         return;
     };

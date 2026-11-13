@@ -26,13 +26,13 @@ pub(crate) type NeovimWindowHandle = i64;
 pub(crate) struct SelfAttach {
     pub surface: Box<Surface>,
     pub terminal: Option<TerminalId>,
-    pub hello: Option<Box<SelfHello>>,
+    pub hello: Option<Box<AttachHello>>,
 }
 
-/// What a self-attach's hello says of its terminal, as choosing a pane
+/// What an attach's hello says of its terminal, as choosing a pane
 /// provider, its context variables and its `find` read it (ADRs 0006, 0007).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SelfHello {
+pub(crate) struct AttachHello {
     /// The helper's.
     pub pid: u32,
     pub tty: Vec<u8>,
@@ -109,8 +109,9 @@ pub(crate) struct Pane {
     /// Where Neovim split a requested pane's window off: where it is drawn
     /// if its terminal never comes (#112).
     pub split: Option<Split>,
-    /// A self-attached pane's hello, as choosing and reach read it.
-    pub hello: Option<Box<SelfHello>>,
+    /// Its terminal's hello, once attached, as choosing and reach read it:
+    /// a pane provider chosen again checks the reach of every pane by it.
+    pub hello: Option<Box<AttachHello>>,
     pub reach: Reach,
     /// When a requested pane whose terminal is open stops waiting for it to
     /// attach (#88 decision 15).

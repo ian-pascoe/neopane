@@ -300,3 +300,37 @@ fn opens_not_yet_asked_are_dropped_as_the_daemon_goes_unattached() {
     let asked = fake(&mut rig.fx.d).asked();
     assert_eq!(vec![open_tab_page(ids[0])], asked);
 }
+
+#[test]
+fn an_unattached_daemon_drops_its_pane_provider_once_its_closes_are_answered() {
+    let mut rig = Rig::new();
+    // a float group pane's terminal: going unattached closes it
+    let group = rig.fx.d.panes.add_for_group(Group::default());
+    group.terminal = Some(TerminalId::from("block:f"));
+    rig.last_pane_goes();
+    rig.told(&["/a"], FIRST_ASK);
+    assert_eq!(Stage::StayingForUnsaved, rig.fx.d.lifetime.stage);
+    let (close, ask) = fake(&mut rig.fx.d).asks.last().cloned().expect("a close");
+    assert_eq!(asks::close(TerminalId::from("block:f")), ask);
+    // no terminal in its reach, but its close unanswered: kept
+    rig.fx.d.after_batch().unwrap();
+    assert!(rig.fx.d.provider.is_some());
+    fake(&mut rig.fx.d).answer(close, Outcome::Done(Answer::Nothing));
+    rig.fx.d.drain_provider().unwrap();
+    rig.fx.d.after_batch().unwrap();
+    assert!(rig.fx.d.provider.is_none());
+    assert_eq!(None, rig.fx.d.stopped);
+
+    // the next attach chooses a pane provider of its own, and takes the
+    // kept window
+    rig.fx.d.test_choose = Some(Box::new(|_| crate::providers::choose::Chosen::Provider {
+        held: Box::new(FakeProvider::opening()),
+        spent: Duration::ZERO,
+    }));
+    let (_helper, _pty) = rig.self_attach(None);
+    assert!(fake(&mut rig.fx.d).asks.is_empty(), "the old one");
+    list_answer(&mut rig.fx, 2000, &[999, 1000]);
+    let id = rig.fx.d.panes.list.last().unwrap().id;
+    assert_eq!(Some(id), rig.fx.d.panes.by_win(1000).map(|p| p.id));
+    assert_eq!(pane::Reach::In, rig.fx.d.panes.by_id(id).unwrap().reach);
+}

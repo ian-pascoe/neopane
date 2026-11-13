@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::attach::{PaneId, env_value};
-use crate::daemon::pane::{Reach, SelfHello};
+use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
 use crate::providers::choose::{self, Chosen};
 
@@ -32,27 +32,44 @@ impl Daemon {
     /// there is none, else its reach is checked. While a choice runs, it
     /// waits its turn.
     pub(super) fn choose_or_reach(&mut self, id: u32) -> Result<()> {
-        let Some(hello) = self.panes.by_id(id).and_then(|p| p.hello.as_deref()) else {
+        if self
+            .panes
+            .by_id(id)
+            .and_then(|p| p.hello.as_deref())
+            .is_none()
+        {
             return Ok(());
-        };
+        }
         if self.choosing.is_some() {
             log_info!("{NAME} daemon: pane {id} waits for the choice running");
             self.panes.by_id_mut(id).unwrap().reach = Reach::Finding;
             self.waiting_choice.push(id);
             return Ok(());
         }
+        // a pane provider with no terminal left in its reach, only asks
+        // pending, is on its way out: this attach chooses anew
+        if self.provider.is_some() && !self.reaches(Some(id)) {
+            log_info!(
+                "{NAME} daemon: dropping {} for pane {id}'s choice: no terminal in its reach",
+                self.provider_name()
+            );
+            self.drop_provider()?;
+            self.run_steps()?;
+        }
         if self.provider.is_some() {
             return self.check_reach(id);
         }
-        #[cfg(not(test))]
-        let mut connect = choose::connect();
+        let hello = self
+            .panes
+            .by_id(id)
+            .and_then(|p| p.hello.as_deref())
+            .unwrap();
         #[cfg(test)]
-        let mut connect = self.test_connect.take().unwrap_or_else(choose::connect);
-        let chosen = choose::choose(&hello.env, hello.hint.as_deref(), &mut connect);
-        #[cfg(test)]
-        {
-            self.test_connect = Some(connect);
+        if let Some(choose) = &mut self.test_choose {
+            let chosen = choose(hello);
+            return self.take_choice(id, chosen);
         }
+        let chosen = choose::choose(&hello.env, hello.hint.as_deref(), &mut choose::connect());
         self.take_choice(id, chosen)
     }
 
@@ -81,9 +98,8 @@ impl Daemon {
         };
         let hello = p.hello.as_deref().expect("a choosing pane has a hello");
         let attach = p.attach_id.expect("a self-attached pane has an id");
-        let seam = held.seam_ref();
-        log_info!("{NAME} daemon: pane {id} chose {}", seam.name());
-        self.context = seam
+        log_info!("{NAME} daemon: pane {id} chose {}", held.name());
+        self.context = held
             .context_vars()
             .iter()
             .map(|v| env_value(&hello.env, v).map(<[u8]>::to_vec))
@@ -92,20 +108,33 @@ impl Daemon {
             self.event_loop.add_read(fd, Token::Provider as usize)?;
         }
         self.provider = Some(held);
-        // #115: a newly chosen pane provider checks reach for every attached
-        // pane, so these rejoin (ADR 0007); until then they are out of
-        // reach, and their windows stay theirs
-        for q in self.panes.list.iter_mut() {
-            // those waiting their turn are checked as it comes
-            if q.is_self_attached() && q.id != id && !self.waiting_choice.contains(&q.id) {
-                q.reach = Reach::Out;
-            }
-        }
+        // the panes attached before are out of reach, their windows theirs,
+        // until the choice is confirmed: then they rejoin as `find` says
+        self.out_of_reach_but(Some(id));
         // the whole choice has the time: connecting, before, counts
         let due = Instant::now() + crate::config::TIME.saturating_sub(spent);
         self.choosing = Some(Choosing { id, attach, due });
         self.arm_choice_timer(due)?;
         self.find(id)
+    }
+
+    /// Whether a pane but `but`, not closing, may be in the pane provider's
+    /// reach: in it, or finding out.
+    pub(super) fn reaches(&self, but: Option<u32>) -> bool {
+        self.panes
+            .list
+            .iter()
+            .any(|p| Some(p.id) != but && p.reach != Reach::Out && p.closing.is_none())
+    }
+
+    /// Puts every pane but `but` out of reach, except those waiting their
+    /// turn to choose, which are checked as it comes.
+    pub(super) fn out_of_reach_but(&mut self, but: Option<u32>) {
+        for q in self.panes.list.iter_mut() {
+            if Some(q.id) != but && !self.waiting_choice.contains(&q.id) {
+                q.reach = Reach::Out;
+            }
+        }
     }
 
     /// Starts the choice timer for `due`.
@@ -139,43 +168,64 @@ impl Daemon {
     /// if its context variables aren't the choosing attach's, else as its
     /// `find` says.
     fn check_reach(&mut self, id: u32) -> Result<()> {
-        let p = self.provider.as_ref().map(Held::seam_ref).unwrap();
-        let vars = p.context_vars();
-        let hello = self.panes.by_id(id).unwrap().hello.as_deref().unwrap();
-        let same = vars
-            .iter()
-            .zip(&self.context)
-            .all(|(v, chose)| env_value(&hello.env, v) == chose.as_deref());
+        if !self.check_context_reach(id) {
+            return self.reach_decided();
+        }
+        self.find(id)
+    }
+
+    /// Checks pane `id`'s hello has the choosing attach's values of the
+    /// pane provider's context variables, whether it does; if not, the
+    /// pane is out of reach.
+    fn check_context_reach(&mut self, id: u32) -> bool {
+        let vars = self.provider.as_deref().unwrap().context_vars();
+        let p = self.panes.by_id(id).unwrap();
+        let same = p.hello.as_deref().is_some_and(|hello| {
+            vars.iter()
+                .zip(&self.context)
+                .all(|(v, chose)| env_value(&hello.env, v) == chose.as_deref())
+        });
         if !same {
             log_info!(
                 "{NAME} daemon: pane {id} is out of reach: its {} differ",
                 vars.join(", ")
             );
             self.panes.by_id_mut(id).unwrap().reach = Reach::Out;
-            return self.reach_decided();
         }
-        self.find(id)
+        same
     }
 
     /// Asks the pane provider to `find` pane `id`'s terminal; without
-    /// `find`, it is in reach.
+    /// `find`, it is in reach, which is decided now.
     fn find(&mut self, id: u32) -> Result<()> {
-        let p = self.provider.as_ref().map(Held::seam_ref);
+        if !self.ask_find(id) {
+            return Ok(());
+        }
+        let attach_id = self.panes.by_id(id).and_then(|p| p.attach_id);
+        if let Some(a) = attach_id {
+            self.confirm(&a)?;
+        }
+        self.reach_decided()
+    }
+
+    /// Asks the pane provider to `find` pane `id`'s terminal. Without `find`
+    /// it is in reach at once: true, and the caller decides what follows.
+    fn ask_find(&mut self, id: u32) -> bool {
+        let p = self.provider.as_deref();
         let finds = self.asks.may_ask(p, Capability::Find);
         let find_vars: Vec<String> = p
             .map(|p| p.find_vars().iter().map(|v| v.to_string()).collect())
             .unwrap_or_default();
         let Some(q) = self.panes.by_id_mut(id) else {
-            return Ok(());
+            return false;
         };
-        let attach_id = q.attach_id.expect("a self-attached pane has an id");
+        let attach_id = q.attach_id.expect("an attached pane has an id");
         if !finds {
             q.reach = Reach::In;
-            self.confirm(&attach_id);
-            return self.reach_decided();
+            return true;
         }
         q.reach = Reach::Finding;
-        let hello: &SelfHello = q.hello.as_deref().expect("a pane that finds has a hello");
+        let hello: &AttachHello = q.hello.as_deref().expect("a pane that finds has a hello");
         let env = hello
             .env
             .iter()
@@ -193,14 +243,14 @@ impl Daemon {
         // L7 is timed from here
         log::trace(Point::Accept, u64::from(id));
         self.act(ask);
-        Ok(())
+        false
     }
 
     /// The pane provider's name, for the log and warnings.
-    fn provider_name(&self) -> String {
+    pub(super) fn provider_name(&self) -> String {
         self.provider
             .as_ref()
-            .map(|p| p.seam_ref().name().to_string())
+            .map(|p| p.name().to_string())
             .unwrap_or_default()
     }
 
@@ -210,25 +260,65 @@ impl Daemon {
     }
 
     /// The pane with pane id `attach` is in reach: if it chose, the choice
-    /// is confirmed.
-    fn confirm(&mut self, attach: &PaneId) {
-        if self.is_choosing(attach) {
-            let c = self.choosing.take().unwrap();
-            log_info!(
-                "{NAME} daemon: pane {} confirmed {}",
-                c.id,
-                self.provider_name()
-            );
+    /// is confirmed, and the panes attached before it rejoin.
+    fn confirm(&mut self, attach: &PaneId) -> Result<()> {
+        if !self.is_choosing(attach) {
+            return Ok(());
         }
+        let c = self.choosing.take().unwrap();
+        log_info!(
+            "{NAME} daemon: pane {} confirmed {}",
+            c.id,
+            self.provider_name()
+        );
+        self.rejoin(c.id)
+    }
+
+    /// A newly chosen pane provider, confirmed by pane `chose`, checks the
+    /// reach of every pane attached before it (ADR 0007): a pane in reach
+    /// rejoins. Those waiting their turn are checked as it comes.
+    fn rejoin(&mut self, chose: u32) -> Result<()> {
+        let before: Vec<u32> = self
+            .panes
+            .list
+            .iter()
+            .filter(|p| {
+                p.id != chose
+                    && p.reach == Reach::Out
+                    && p.closing.is_none()
+                    && p.hello.is_some()
+                    && !self.waiting_choice.contains(&p.id)
+            })
+            .map(|p| p.id)
+            .collect();
+        // the caller decides what follows, once, for those in reach at once
+        for id in before {
+            if self.provider.is_some() && self.check_context_reach(id) {
+                self.ask_find(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Requested pane `id`'s terminal attached, its hello with it: if it
+    /// was out of reach, opened by a pane provider since dropped, the one
+    /// chosen since checks its reach, as `rejoin` does.
+    pub(super) fn rejoin_requested(&mut self, id: u32) -> Result<()> {
+        let out = self.panes.by_id(id).is_some_and(|p| p.reach == Reach::Out);
+        if !out || self.provider.is_none() || self.choosing.is_some() {
+            return Ok(());
+        }
+        if self.check_context_reach(id) && self.ask_find(id) {
+            return self.reach_decided();
+        }
+        Ok(())
     }
 
     /// The choice running is refused, for `why`: the pane provider is
     /// dropped, with a warning.
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
         self.choosing = None;
-        let line = format!("{}: {why}; no pane provider", self.provider_name());
-        self.warn_when_ready(format!("{NAME}: {line}"));
-        self.provider_gone(&line)?;
+        self.provider_gone(why)?;
         self.reach_decided()
     }
 
@@ -246,7 +336,7 @@ impl Daemon {
             }
             log::trace(Point::Found, u64::from(p.id));
         }
-        self.confirm(pane);
+        self.confirm(pane)?;
         // a live layout that came first places it now
         if let Some(l) = self.live_layout.clone()
             && self.apply_live_layout(&l)
@@ -285,7 +375,7 @@ impl Daemon {
             p.reach = if kept { Reach::In } else { Reach::Out };
         }
         if kept {
-            self.confirm(pane);
+            self.confirm(pane)?;
         }
         self.reach_decided()
     }

@@ -9,10 +9,10 @@
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use super::Held;
 use super::rex::RexProvider;
 use crate::attach::env_value;
 use crate::config::{self, Builtin, Choice};
+use crate::daemon::provider::PaneProvider;
 use crate::log::log_warn;
 use crate::name::NAME;
 
@@ -39,7 +39,10 @@ pub(crate) fn connect() -> Connect {
 pub(crate) enum Chosen {
     /// A pane provider, which its `find` still has to confirm, and the time
     /// choosing it took, connecting: the choice's 3 s count it.
-    Provider { held: Held, spent: Duration },
+    Provider {
+        held: Box<dyn PaneProvider>,
+        spent: Duration,
+    },
     /// None, and why; shown in Neovim as a warning if `warn`.
     None { why: String, warn: bool },
 }
@@ -84,7 +87,7 @@ fn start_rex(env: &Env, connect: &mut Connect, since: Instant) -> Chosen {
     });
     match started {
         Ok(rex) => Chosen::Provider {
-            held: Held::Rex(Box::new(rex)),
+            held: Box::new(rex),
             spent: since.elapsed(),
         },
         Err(e) => {
@@ -168,7 +171,7 @@ mod tests {
         let Chosen::Provider { held, spent } = choose(&in_rex, Some("tmux"), &mut connect) else {
             panic!("chose none");
         };
-        assert_eq!("rex", held.seam_ref().name());
+        assert_eq!("rex", held.name());
         assert!(spent < Duration::from_secs(3));
     }
 }

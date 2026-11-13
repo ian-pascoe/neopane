@@ -1,13 +1,14 @@
-//! Our side of the Rex session: requests in flight, the session view, and
-//! the revision our last focus change landed at.
+//! Our side of a Rex session, on the wire: request builders, the requests
+//! in flight matched to their answers by id, and the session view, fetched
+//! one at a time with any change meanwhile fetched again once. What the
+//! answers and views mean is for whoever drives it: Rex's pane provider.
+//! It knows nothing of who connects: the client name is given.
 
 use serde_json::{Value, json};
 
 use super::client::{self, Client, ClientError};
-use super::ids;
 use super::web_socket::Close;
-use crate::log::{self, Point, log_info, log_warn};
-use crate::name::NAME;
+use crate::log::{log_info, log_warn};
 
 /// What a request asked for; tags match Rex's methods. A request made for
 /// someone else's purpose carries their number for it, and its answer comes
@@ -56,7 +57,7 @@ pub(crate) struct Pending {
     pub req: Request,
 }
 
-/// Nothing is sent once closed; windows keep working without Rex.
+/// Nothing is sent once closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Conn {
     Attaching,
@@ -88,10 +89,12 @@ impl Default for View {
 }
 
 pub(crate) struct Session {
-    /// (Owned: the daemon reaches it as `session.client`, e.g. for
+    /// (Owned: its driver reaches it as `session.client`, e.g. for
     /// `client.fd()`.)
     pub client: Client,
     pub session_id: String,
+    /// Who we are to Rex, as our log lines say.
+    pub client_name: String,
 
     pub pending_requests: Vec<Pending>,
 
@@ -99,22 +102,12 @@ pub(crate) struct Session {
 
     pub view: View,
 
-    /// The revision our last focus change landed at: a view older than it
-    /// says the focus from before.
-    pub applied_rev: i64,
-
-    /// The Rex window a new layer opens in, as its pane provider last chose.
-    pub window: Option<[u8; 43]>,
-
-    /// A focus change from the same view as a `layout` update, sent after it.
-    pub queued_focus: Option<String>,
-
     /// Why Rex closed, once it has; told once as `Update::Closed`.
     pub closed: Option<String>,
     closed_told: bool,
 }
 
-/// What the daemon has to act on. (Owned, so it outlives the next call to
+/// What the driver has to act on. (Owned, so it outlives the next call to
 /// `next`.)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Update {
@@ -123,16 +116,8 @@ pub(crate) enum Update {
         req: Request,
         result: client::ResponseResult,
     },
-    /// A newer view's windows, to read where our panes sit, and its active
-    /// window's focused block, unless our own focus change is still landing.
-    /// `FocusMoved` follows it.
-    Layout {
-        windows: Vec<Value>,
-        current: Option<String>,
-    },
-    /// A newer view's focused block, unless our own focus change is still
-    /// landing: maybe the user's move, maybe what was focused already.
-    FocusMoved(String),
+    /// A view newer than any read before.
+    View(Value),
     /// Rex closed or failed, for the reason in `closed`: nothing more will be
     /// answered.
     Closed,
@@ -176,17 +161,16 @@ fn json_f64(v: f64) -> Value {
 }
 
 impl Session {
-    /// A session that is attaching; `attach` joins it.
-    pub(crate) fn new(client: Client, session_id: String) -> Session {
+    /// A session that is attaching, as the client `client_name`; `attach`
+    /// joins it.
+    pub(crate) fn new(client: Client, session_id: String, client_name: &str) -> Session {
         Session {
             client,
             session_id,
+            client_name: client_name.to_string(),
             pending_requests: Vec::new(),
             conn: Conn::Attaching,
             view: View::default(),
-            applied_rev: 0,
-            window: None,
-            queued_focus: None,
             closed: None,
             closed_told: false,
         }
@@ -219,19 +203,16 @@ impl Session {
         }
     }
 
-    /// Any Rex error closes Rex: the windows keep working without it.
+    /// Any Rex error closes Rex.
     fn close_rex(&mut self, reason: &str) {
-        log_warn!("{NAME} daemon: Rex {reason}, treating it as closed");
+        log_warn!("{}: Rex {reason}, treating it as closed", self.client_name);
         self.conn = Conn::Closed;
         self.closed.get_or_insert_with(|| format!("Rex {reason}"));
     }
 
-    /// The next update for the daemon, or None when there are none.
+    /// The next update for the driver, or None when there are none.
     #[allow(clippy::should_implement_trait)]
     pub(crate) fn next(&mut self) -> Result<Option<Update>, ClientError> {
-        if let Some(block) = self.queued_focus.take() {
-            return Ok(Some(Update::FocusMoved(block)));
-        }
         loop {
             let message = match self.client.next() {
                 Ok(Some(m)) => m,
@@ -265,9 +246,7 @@ impl Session {
             Request::FocusBlock(tag),
             "session.focus_block",
             json!({ "session_id": self.session_id, "block_id": block }),
-        )?;
-        log::trace(Point::Focus, 0);
-        Ok(())
+        )
     }
 
     /// Asks Rex to focus the nearest block `dir` of the focused one. At an edge
@@ -282,9 +261,7 @@ impl Session {
                 "direction": dir.tag_name(),
                 "wrap": false,
             }),
-        )?;
-        log::trace(Point::Focus, 0);
-        Ok(())
+        )
     }
 
     /// Asks for a split beside `anchor`, holding `layout`: to its left or
@@ -395,21 +372,19 @@ impl Session {
         )
     }
 
-    /// Asks for a floating layer at `bounds` in our window, holding `layout`.
-    /// (`layout` is a JSON value.)
+    /// Asks for a floating layer at `bounds` in Rex window `window`, Rex's
+    /// active one if None, holding `layout`.
     pub(crate) fn new_layer(
         &mut self,
         tag: u64,
+        window: Option<&str>,
         bounds: [f64; 4],
         layout: Value,
     ) -> Result<(), ClientError> {
         let mut payload = serde_json::Map::new();
         payload.insert("session_id".into(), Value::String(self.session_id.clone()));
-        if let Some(w) = &self.window {
-            payload.insert(
-                "window_id".into(),
-                Value::String(String::from_utf8_lossy(w).into_owned()),
-            );
+        if let Some(w) = window {
+            payload.insert("window_id".into(), Value::String(w.to_string()));
         }
         payload.insert(
             "bounds".into(),
@@ -423,7 +398,7 @@ impl Session {
         )
     }
 
-    /// Send a request to the Rex client, add it to list of pending requests
+    /// Sends a request, and adds it to the requests in flight.
     pub(crate) fn request(
         &mut self,
         req: Request,
@@ -456,30 +431,15 @@ impl Session {
         if let client::ResponseResult::Err(e) = &res.result
             && !matches!(req, Request::Process(_))
         {
-            log_request_error(req, e);
+            self.log_request_error(req, e);
         }
         match req {
-            Request::FocusBlock(_) => {
-                self.on_focus_block_result(&res.result)?;
-                Ok(Some(Update::Answered {
-                    req,
-                    result: res.result,
-                }))
-            }
-            Request::NewSplit(_)
-            | Request::NewLayer(_)
-            | Request::DisownBlock(_)
-            | Request::CloseBlock(_)
-            | Request::CloseLayer(_)
-            | Request::MoveBlock(_)
-            | Request::ResizePane(_)
-            | Request::FocusDirection(_)
-            | Request::Process(_) => Ok(Some(Update::Answered {
+            Request::View => self.on_view_result(&res.result),
+            Request::Attach => self.on_attach_result(&res.result),
+            _ => Ok(Some(Update::Answered {
                 req,
                 result: res.result,
             })),
-            Request::View => self.on_view_result(&res.result),
-            Request::Attach => self.on_attach_result(&res.result),
         }
     }
 
@@ -502,7 +462,7 @@ impl Session {
             Some(code) => format!("Rex closed {code} {}", String::from_utf8_lossy(&c.reason)),
             None => format!("Rex closed null {}", String::from_utf8_lossy(&c.reason)),
         };
-        log_info!("{NAME} daemon: {reason}");
+        log_info!("{}: {reason}", self.client_name);
         self.closed.get_or_insert(reason);
         self.conn = Conn::Closed;
     }
@@ -513,8 +473,13 @@ impl Session {
         Some(self.pending_requests.swap_remove(i).req)
     }
 
-    /// Attached: the answer's view gives the starting layout and focus, or
-    /// one is fetched. Refused, Rex is closed.
+    /// Whether a request for `req` is in flight.
+    pub(crate) fn asking(&self, req: impl Fn(Request) -> bool) -> bool {
+        self.pending_requests.iter().any(|p| req(p.req))
+    }
+
+    /// Attached: the answer's view is the first, or one is fetched. Refused,
+    /// Rex is closed.
     fn on_attach_result(
         &mut self,
         result: &client::ResponseResult,
@@ -523,7 +488,7 @@ impl Session {
             client::ResponseResult::Ok(ok) => {
                 self.conn = Conn::Attached;
                 if let Some(view) = client::get(ok, "view") {
-                    return Ok(self.apply_view(view));
+                    return Ok(self.newer_view(view));
                 }
                 self.fetch_view()?;
             }
@@ -536,40 +501,7 @@ impl Session {
         Ok(None)
     }
 
-    /// Records the revision our focus change landed at. One refused, with no
-    /// other on its way, fetches the view: where focus really is.
-    fn on_focus_block_result(
-        &mut self,
-        result: &client::ResponseResult,
-    ) -> Result<(), ClientError> {
-        match result {
-            client::ResponseResult::Ok(val) => {
-                let rev = client::get_int(val, "revision").unwrap_or(0);
-                self.applied_rev = self.applied_rev.max(rev);
-            }
-            client::ResponseResult::Err(_) => {
-                if !self.focusing() {
-                    self.fetch_view()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether a focus change of ours is unanswered.
-    fn focusing(&self) -> bool {
-        self.pending_requests
-            .iter()
-            .any(|p| matches!(p.req, Request::FocusBlock(_)))
-    }
-
-    /// Whether a view at `rev` may say the focus from before our own change:
-    /// it is unanswered, or landed after `rev`.
-    fn landing(&self, rev: i64) -> bool {
-        self.focusing() || rev < self.applied_rev
-    }
-
-    /// Applies the view, then fetches again if it was already out of date.
+    /// Tells the view, then fetches again if it was already out of date.
     fn on_view_result(
         &mut self,
         result: &client::ResponseResult,
@@ -577,7 +509,7 @@ impl Session {
         let stale = self.view.fetch == Fetch::Stale;
         self.view.fetch = Fetch::Idle;
         let update = match result {
-            client::ResponseResult::Ok(val) => self.apply_view(val),
+            client::ResponseResult::Ok(val) => self.newer_view(val),
             client::ResponseResult::Err(_) => None,
         };
         if stale {
@@ -587,7 +519,7 @@ impl Session {
     }
 
     /// Fetches the session view, or another after the one on its way.
-    fn fetch_view(&mut self) -> Result<(), ClientError> {
+    pub(crate) fn fetch_view(&mut self) -> Result<(), ClientError> {
         match self.view.fetch {
             Fetch::Idle => {
                 if self.conn == Conn::Closed {
@@ -607,43 +539,34 @@ impl Session {
         Ok(())
     }
 
-    /// Skips views no newer than the last one read. Layout comes first, then
-    /// any focus change.
-    fn apply_view(&mut self, snapshot: &Value) -> Option<Update> {
+    /// `snapshot`, if it's newer than every view read before.
+    fn newer_view(&mut self, snapshot: &Value) -> Option<Update> {
         let rev = client::get_int(snapshot, "revision")?;
         if rev <= self.view.rev {
             return None;
         }
         self.view.rev = rev;
-        let focused = find_focused_block(snapshot);
-        let landing = self.landing(rev);
-        let focus_update = match focused {
-            Some(block) if !landing => Some(Update::FocusMoved(
-                String::from_utf8_lossy(&block).into_owned(),
-            )),
-            Some(_) => None,
-            None => {
-                log_unexpected_response(Request::View, "focused block");
-                None
-            }
-        };
-        let Some(windows) = client::get(snapshot, "windows") else {
-            return focus_update;
-        };
-        let Value::Array(items) = windows else {
-            return focus_update;
-        };
-        if let Some(Update::FocusMoved(block)) = focus_update {
-            self.queued_focus = Some(block);
-        }
-        // a view from before our focus change landed says the old focus
-        let current = focused
-            .filter(|_| !landing)
-            .map(|b| String::from_utf8_lossy(&b).into_owned());
-        Some(Update::Layout {
-            windows: items.clone(),
-            current,
-        })
+        Some(Update::View(snapshot.clone()))
+    }
+
+    /// Rex refused a request.
+    fn log_request_error(&self, req: Request, e: &client::Error) {
+        log_warn!(
+            "{}: Rex {} failed: {}: {}",
+            self.client_name,
+            req.tag_name(),
+            e.code,
+            e.message
+        );
+    }
+
+    /// Rex said yes, in a shape we can't read.
+    pub(crate) fn log_unexpected_response(&self, req: Request, what: &str) {
+        log_warn!(
+            "{}: Rex {} answer has no {what}",
+            self.client_name,
+            req.tag_name()
+        );
     }
 }
 
@@ -655,43 +578,8 @@ pub(crate) fn new_block_id(ok: &Value) -> Option<&str> {
     client::str(block_ids.first())
 }
 
-/// The focused block of the active window.
-fn find_focused_block(snapshot: &Value) -> Option<ids::Block> {
-    let active_id = client::get_str(snapshot, "active_window_id")?;
-    let Value::Array(windows) = client::get(snapshot, "windows")? else {
-        return None;
-    };
-    for win in windows {
-        let Some(win_id) = client::get_str(win, "window_id") else {
-            continue;
-        };
-        if win_id == active_id {
-            let block = client::get_str(win, "focused_block_id")?;
-            return ids::block(block.as_bytes()).ok();
-        }
-    }
-    None
-}
-
-// Loggers
-
-/// Rex refused a request.
-pub(crate) fn log_request_error(req: Request, e: &client::Error) {
-    log_warn!(
-        "{NAME} daemon: Rex {} failed: {}: {}",
-        req.tag_name(),
-        e.code,
-        e.message
-    );
-}
-
-/// Rex said yes, in a shape we can't read.
-pub(crate) fn log_unexpected_response(req: Request, what: &str) {
-    log_warn!("{NAME} daemon: Rex {} answer has no {what}", req.tag_name());
-}
-
-// These check the JSON written to Rex and the view/focus flow. Rex's pane
-// provider's tests reuse the helpers.
+// These check the JSON written to Rex, matching answers and fetching views.
+// Rex's pane provider's tests reuse the helpers.
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -737,15 +625,9 @@ pub(crate) mod tests {
 
     pub(crate) fn session() -> (Session, UnixStream) {
         let (ours, theirs) = UnixStream::pair().unwrap();
-        let mut s = Session::new(Client::from_stream(ours), "session:s".to_string());
+        let mut s = Session::new(Client::from_stream(ours), "session:s".to_string(), "test");
         s.conn = Conn::Attached;
         (s, theirs)
-    }
-
-    fn block(c: char) -> ids::Block {
-        let mut b = [c as u8; 42];
-        b[..6].copy_from_slice(b"block:");
-        b
     }
 
     #[test]
@@ -756,12 +638,10 @@ pub(crate) mod tests {
         s.move_block(0, "block:a", "block:b", true, 0.5).unwrap();
         s.resize_pane(0, "block:a", "block:b", false, 1.0).unwrap();
         s.disown(0, "block:a").unwrap();
-        s.new_layer(3, [1.0, 2.5, 80.0, 24.0], json!({ "kind": "leaf" }))
+        s.new_layer(3, None, [1.0, 2.5, 80.0, 24.0], json!({ "kind": "leaf" }))
             .unwrap();
-        let mut window = [b'0'; 43];
-        window[..7].copy_from_slice(b"window:");
-        s.window = Some(window);
-        s.new_layer(4, [0.0, 0.0, 1.0, 1.0], json!(null)).unwrap();
+        s.new_layer(4, Some("window:w"), [0.0, 0.0, 1.0, 1.0], json!(null))
+            .unwrap();
         s.focus_block(5, "block:a").unwrap();
         assert_eq!(8, s.pending_requests.len());
         drop(s);
@@ -791,7 +671,7 @@ pub(crate) mod tests {
             r#"{"session_id":"session:s","bounds":[1,2.5,80,24],"layout":{"kind":"leaf"}}"#,
             payload(5)
         );
-        assert!(payload(6).contains(r#""window_id":"window:"#));
+        assert!(payload(6).contains(r#""window_id":"window:w""#));
         assert_eq!(
             r#"{"session_id":"session:s","block_id":"block:a"}"#,
             payload(7)
@@ -800,55 +680,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn view_results() {
+    fn only_a_view_newer_than_the_last_is_told() {
         let (mut s, _theirs) = session();
-        let (a, b) = (block('a'), block('b'));
-        let view = |rev: i64, focused: &ids::Block| {
-            json!({
-                "revision": rev,
-                "active_window_id": "window:w",
-                "windows": [{ "window_id": "window:w",
-                              "focused_block_id": String::from_utf8_lossy(focused) }],
-            })
-        };
-        // each newer view tells its layout, then its focus
-        let Some(Update::Layout { windows, current }) = s.apply_view(&view(1, &a)) else {
-            panic!("expected a layout");
-        };
-        assert_eq!(1, windows.len());
-        assert_eq!(Some(String::from_utf8_lossy(&a).into_owned()), current);
-        assert_eq!(
-            Some(Update::FocusMoved(String::from_utf8_lossy(&a).into_owned())),
-            s.next().unwrap()
-        );
-        // an older view is skipped
-        assert_eq!(None, s.apply_view(&view(1, &b)));
-        // the user moved focus: layout, then the focus
-        let Some(Update::Layout { .. }) = s.apply_view(&view(2, &b)) else {
-            panic!("expected a layout");
-        };
-        assert_eq!(
-            Some(Update::FocusMoved(String::from_utf8_lossy(&b).into_owned())),
-            s.next().unwrap()
-        );
-        // while our own focus change lands, a view says no current block
-        s.focus_block(1, &String::from_utf8_lossy(&a)).unwrap();
-        let Some(Update::Layout { current, .. }) = s.apply_view(&view(3, &b)) else {
-            panic!("expected a layout");
-        };
-        assert_eq!(None, current);
+        let view = |rev: i64| json!({ "revision": rev, "windows": [] });
+        assert_eq!(Some(Update::View(view(1))), s.newer_view(&view(1)));
+        assert_eq!(None, s.newer_view(&view(1)));
+        assert_eq!(None, s.newer_view(&view(0)));
+        assert_eq!(Some(Update::View(view(2))), s.newer_view(&view(2)));
     }
 
     pub(crate) fn ok(v: Value) -> client::ResponseResult {
         client::ResponseResult::Ok(v)
-    }
-
-    pub(crate) fn refused() -> client::ResponseResult {
-        client::ResponseResult::Err(client::Error {
-            code: "refused".into(),
-            message: "no".into(),
-            status: 400,
-        })
     }
 
     /// The ids of the requests still waiting for `kind`, oldest first.
@@ -876,25 +718,6 @@ pub(crate) mod tests {
             name: "session_view_changed".into(),
             payload: json!({ "revision": rev }),
         }
-    }
-
-    #[test]
-    fn refused_focus_fetches_view_only_when_nothing_is_in_flight() {
-        let (mut s, _theirs) = session();
-        s.focus_block(1, "block:a").unwrap();
-        s.focus_block(2, "block:b").unwrap();
-        let ids = [
-            pending(&s, Request::FocusBlock(1))[0],
-            pending(&s, Request::FocusBlock(2))[0],
-        ];
-
-        answer(&mut s, ids[0], refused());
-        assert!(pending(&s, Request::View).is_empty());
-        assert_eq!(Fetch::Idle, s.view.fetch);
-
-        answer(&mut s, ids[1], refused());
-        assert_eq!(1, pending(&s, Request::View).len());
-        assert_eq!(Fetch::Running, s.view.fetch);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Rex's pane provider, built in (#92): what's asked through the seam, as
-//! Rex requests on today's `rex::session::Session`.
+//! Rex requests on a `rex::session::Session`, the wire.
 //!
 //! - `open_beside` is `session.new_split` beside the origin's block,
 //!   `open_tab_page` a `session.new_layer` at the tab page bounds, and
@@ -23,7 +23,7 @@
 //!   group's block is placed at its floating layer's bounds, its frame the
 //!   inset. A new layer opens in its origin's Rex window.
 //! - Each view's focused block is told as `Focused`, unless our own focus
-//!   change is still landing (`Session::landing`): the daemon tells the
+//!   change is still landing (`RexProvider::landing`): the daemon tells the
 //!   user's moves from what it knew (`ProviderFocus`).
 //! - `find` asks for the processes of the block `REX_BLOCK` names, and
 //!   compares its terminal with the attach's (`find.rs`).
@@ -34,6 +34,7 @@ pub(crate) mod find;
 pub(crate) mod layout;
 
 use std::collections::VecDeque;
+use std::os::fd::RawFd;
 
 use serde_json::{Value, json};
 
@@ -42,7 +43,7 @@ use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Direction, Outcome, PaneProvider, ProviderEvent,
     TerminalId,
 };
-use crate::log::log_info;
+use crate::log::{self, Point, log_info};
 use crate::name::NAME;
 use crate::rex::client::{self, ResponseResult};
 use crate::rex::ids;
@@ -105,6 +106,9 @@ pub(crate) struct RexProvider {
     /// What was asked before Rex attached us to its session, asked once it
     /// has: Rex runs some requests out of order.
     deferred: Vec<(AskId, Ask)>,
+    /// The revision our last focus change landed at: a view older than it
+    /// says the focus from before.
+    applied_rev: i64,
 }
 
 impl RexProvider {
@@ -122,6 +126,7 @@ impl RexProvider {
             tty_of_pid: find::tty_of_pid,
             trusted: false,
             deferred: Vec::new(),
+            applied_rev: 0,
         }
     }
 
@@ -133,14 +138,9 @@ impl RexProvider {
         session_id: &str,
     ) -> Result<RexProvider, client::ClientError> {
         let client = client::Client::start(stream, NAME)?;
-        let mut session = Session::new(client, session_id.to_string());
+        let mut session = Session::new(client, session_id.to_string(), NAME);
         session.attach()?;
         Ok(RexProvider::new(session))
-    }
-
-    /// Whether bytes wait for room on Rex's socket.
-    pub(crate) fn wants_write(&self) -> bool {
-        self.session.client.wants_write()
     }
 
     /// Whether asks wait for Rex to attach us, and it has.
@@ -173,9 +173,9 @@ impl RexProvider {
             } => {
                 let size = bounds::tab_page_size(cols, rows);
                 let layout = json!({ "block": block(&attach, Some(size)) });
-                self.in_window_of(&origin);
+                let window = self.window_of(&origin);
                 self.session
-                    .new_layer(tag, bounds::TAB_PAGE_BOUNDS, layout)?;
+                    .new_layer(tag, window.as_deref(), bounds::TAB_PAGE_BOUNDS, layout)?;
             }
             Ask::OpenFloat {
                 attach,
@@ -199,9 +199,10 @@ impl RexProvider {
                     return Ok(true);
                 };
                 let layout = json!({ "block": block(&attach, None) });
-                self.in_window_of(&origin);
+                let window = self.window_of(&origin);
                 self.float_asks.push(tag);
-                self.session.new_layer(tag, bounds, layout)?;
+                self.session
+                    .new_layer(tag, window.as_deref(), bounds, layout)?;
             }
             // `session.move_block` puts it only right of or below `{origin}`
             Ask::PlaceBeside { dir, .. } if dir.before() => {
@@ -247,6 +248,7 @@ impl RexProvider {
                     return Ok(true);
                 }
                 self.session.focus_block(tag, terminal.as_str())?;
+                log::trace(Point::Focus, 0);
             }
             Ask::FocusDirection { dir, count } => {
                 // the daemon asks one at least
@@ -258,6 +260,7 @@ impl RexProvider {
                 });
                 for _ in 0..count {
                     self.session.focus_direction(tag, rex_direction(dir))?;
+                    log::trace(Point::Focus, 0);
                 }
             }
             Ask::Find { env, device, .. } => match find::block_in(&env) {
@@ -279,15 +282,15 @@ impl RexProvider {
         Ok(true)
     }
 
-    /// New layers open in the Rex window of terminal `origin`, as the last
-    /// view had it; in Rex's active window if it didn't.
-    fn in_window_of(&mut self, origin: &TerminalId) {
-        self.session.window = self.layout.as_ref().and_then(|l| {
-            l.areas
-                .iter()
-                .find(|a| a.terminals.iter().any(|t| t.terminal == *origin))
-                .and_then(|a| a.id.as_bytes().try_into().ok())
-        });
+    /// The Rex window of terminal `origin`, as the last view had it, where
+    /// a new layer opens; None, Rex's active window, if it didn't.
+    fn window_of(&self, origin: &TerminalId) -> Option<String> {
+        let l = self.layout.as_ref()?;
+        let area = l
+            .areas
+            .iter()
+            .find(|a| a.terminals.iter().any(|t| t.terminal == *origin))?;
+        Some(area.id.clone())
     }
 
     fn answer(&mut self, tag: u64, outcome: Outcome) {
@@ -301,15 +304,59 @@ impl RexProvider {
     fn on_update(&mut self, u: Update) -> Result<(), client::ClientError> {
         match u {
             Update::Answered { req, result } => self.on_answer(req, result)?,
-            Update::Layout { windows, current } => {
-                let l = layout::read(&windows, current.as_deref(), &self.float_blocks);
-                self.layout = Some(l.clone());
-                self.events.push_back(ProviderEvent::Layout(l));
-            }
-            Update::FocusMoved(block) => self
-                .events
-                .push_back(ProviderEvent::Focused(TerminalId::from(block.as_str()))),
+            Update::View(view) => self.on_view(&view),
             Update::Closed => self.go(),
+        }
+        Ok(())
+    }
+
+    /// A newer view: told as a live layout, then its focused block as
+    /// `Focused`, unless our own focus change is still landing.
+    fn on_view(&mut self, view: &Value) {
+        let rev = client::get_int(view, "revision").unwrap_or(0);
+        let focused = layout::focused_block(view);
+        if focused.is_none() {
+            self.session
+                .log_unexpected_response(Request::View, "focused block");
+        }
+        // a view from before our focus change landed says the old focus
+        let current = focused.filter(|_| !self.landing(rev));
+        if let Some(Value::Array(windows)) = client::get(view, "windows") {
+            let l = layout::read(windows, current.as_deref(), &self.float_blocks);
+            self.layout = Some(l.clone());
+            self.events.push_back(ProviderEvent::Layout(l));
+        }
+        if let Some(block) = current {
+            let t = TerminalId::from(block.as_str());
+            self.events.push_back(ProviderEvent::Focused(t));
+        }
+    }
+
+    /// Whether a focus change of ours is unanswered.
+    fn focusing(&self) -> bool {
+        self.session.asking(|r| matches!(r, Request::FocusBlock(_)))
+    }
+
+    /// Whether a view at `rev` may say the focus from before our own change:
+    /// it is unanswered, or landed after `rev`.
+    fn landing(&self, rev: i64) -> bool {
+        self.focusing() || rev < self.applied_rev
+    }
+
+    /// Rex answered a `focus_block`: the revision it landed at is recorded.
+    /// One refused, with no other on its way, fetches the view: where focus
+    /// really is.
+    fn on_focus_block_result(
+        &mut self,
+        result: &ResponseResult,
+    ) -> Result<(), client::ClientError> {
+        match result {
+            ResponseResult::Ok(val) => {
+                let rev = client::get_int(val, "revision").unwrap_or(0);
+                self.applied_rev = self.applied_rev.max(rev);
+            }
+            ResponseResult::Err(_) if !self.focusing() => self.session.fetch_view()?,
+            ResponseResult::Err(_) => {}
         }
         Ok(())
     }
@@ -320,6 +367,9 @@ impl RexProvider {
         req: Request,
         result: ResponseResult,
     ) -> Result<(), client::ClientError> {
+        if matches!(req, Request::FocusBlock(_)) {
+            self.on_focus_block_result(&result)?;
+        }
         match (req, result) {
             (Request::NewSplit(tag) | Request::NewLayer(tag), ResponseResult::Ok(ok)) => {
                 let float = self.took_float_ask(tag);
@@ -333,7 +383,7 @@ impl RexProvider {
                     self.opened.push((tag, TerminalId::from(block)));
                     return Ok(());
                 }
-                session::log_unexpected_response(req, "block_ids");
+                self.session.log_unexpected_response(req, "block_ids");
                 match client::get_str(&ok, "layer_id") {
                     // the layer would stay, empty, for good
                     Some(layer) if matches!(req, Request::NewLayer(_)) => {
@@ -512,6 +562,14 @@ impl PaneProvider for RexProvider {
 
     fn find_vars(&self) -> &[&str] {
         &[find::BLOCK_VAR]
+    }
+
+    fn fd(&self) -> Option<RawFd> {
+        Some(self.session.client.fd())
+    }
+
+    fn wants_write(&self) -> bool {
+        self.session.client.wants_write()
     }
 }
 

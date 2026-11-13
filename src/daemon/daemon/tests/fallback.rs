@@ -398,7 +398,7 @@ pub(super) fn pump(d: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
 /// the terminal's other ends, and its reader. None without Neovim.
 pub(super) fn started_with(
     flag: &str,
-    provider: Option<Held>,
+    provider: Option<Box<dyn PaneProvider>>,
 ) -> Option<(Daemon, Live, std::thread::JoinHandle<()>)> {
     use crate::nvim::nvim::spawn_for_test_with;
     let nvim = spawn_for_test_with(&["nvim", "--clean", "--embed", "-n", flag])?;
@@ -474,13 +474,14 @@ fn with_a_pane_provider_windows_opened_with_o_or_capital_o_open_where_neovims_la
     for (flag, want) in [("-o3", Direction::Down), ("-O3", Direction::Right)] {
         let mut f = FakeProvider::opening();
         f.caps.insert(Capability::Focus);
-        let Some((mut d, live, reader)) = started_with(flag, Some(Held::Fake(f))) else {
+        let Some((mut d, live, reader)) = started_with(flag, Some(Box::new(f))) else {
             return;
         };
         let open = |a: &Ask| matches!(a, Ask::OpenBeside { .. });
-        pump(&mut d, |d| match &d.provider {
-            Some(Held::Fake(f)) => f.asked().iter().any(open),
-            _ => false,
+        pump(&mut d, |d| {
+            d.provider
+                .as_ref()
+                .is_some_and(|p| p.fake_ref().asked().iter().any(open))
         });
         // the first asked, the next waiting their turn, beside the first
         // pane the way Neovim split them (ADR 0009)
