@@ -47,9 +47,14 @@ impl Work {
     /// daemon, the rest attach to it. Wide enough for a warning to show
     /// without a hit-enter prompt, which would hold Neovim's answers.
     fn attach(&mut self) {
+        let (var, config) = self.config_var();
+        self.attach_with(&[(&var, &config)]);
+    }
+
+    /// `<NAME>_CONFIG`, naming its config.
+    fn config_var(&self) -> (String, std::ffi::OsString) {
         let var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
-        let config = self.config.clone();
-        self.attach_with(&[(&var, config.as_os_str())]);
+        (var, self.config.clone().into_os_string())
     }
 
     /// `attach`, with only `env` set: with no config, unless it names one.
@@ -235,16 +240,11 @@ fn a_find_that_refuses_the_terminal_means_no_pane_provider() {
 }
 
 /// What a terminal Rex's variables leaked into has, after Rex quit.
-const STALE_REX: [(&str, &str); 2] = [
-    ("REX_SERVER", "unix:///nowhere/rex.sock"),
-    ("REX_SESSION", "session:gone"),
-];
-
 fn stale_rex() -> Vec<(&'static str, &'static std::ffi::OsStr)> {
-    STALE_REX
-        .iter()
-        .map(|(k, v)| (*k, std::ffi::OsStr::new(v)))
-        .collect()
+    vec![
+        ("REX_SERVER", "unix:///nowhere/rex.sock".as_ref()),
+        ("REX_SESSION", "session:gone".as_ref()),
+    ]
 }
 
 #[test]
@@ -278,9 +278,9 @@ fn a_config_choosing_a_stale_rex_warns() {
         "rex-cfg",
         "return { provider = function(attach) return \"rex\" end }\n",
     );
-    let var = format!("{}_CONFIG", NAME.to_ascii_uppercase());
-    let config = work.config.clone();
-    let env = [stale_rex(), vec![(var.as_str(), config.as_os_str())]].concat();
+    let mut env = stale_rex();
+    let (var, config) = work.config_var();
+    env.push((&var, &config));
     work.attach_with(&env);
     work.until_up();
     let s = work.until_status(|s| s["provider"] != "(choosing)");
