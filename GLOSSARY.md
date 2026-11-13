@@ -191,8 +191,12 @@ A terminal provider and a layout provider used together as one pane provider, ea
 _Avoid_: combination, combo
 
 **Built-in provider**:
-A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex`. Rex's runs inside neopane and is never paired; later ones are written as a user would write theirs, to use as they are or copy and change.
+A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex` or `tmux`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
 _Avoid_: default provider, bundled provider
+
+**Built-in command**:
+What a built-in provider's table runs for a capability: neopane itself, asked for one capability of one built-in, as `{exe} provider builtin tmux find`.
+_Avoid_: helper (an attach's), shim
 
 **Config**:
 The user's own Lua file that sets up terminal and layout providers and says, for a self-attach, which pane provider to use. Neovim never reads it.

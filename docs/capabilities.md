@@ -215,6 +215,50 @@ start waits the same way. Exit 69, or a command that can't start the first
 time, ends it for good: the daemon then runs `report_layout` as it would
 without `events`.
 
+## Built-in commands
+
+A built-in pane provider other than Rex, such as tmux's, is a table whose
+every capability runs `<name>` itself (ADR 0016):
+
+```lua
+find = { "{exe}", "provider", "builtin", "tmux", "find" },
+```
+
+- **Words:** `provider builtin NAME CAPABILITY`, hidden from help. The
+  capability word wins over `<NAME>_CAPABILITY`.
+- **Inputs:** only the variables this page documents for the capability,
+  and the choosing attach's environment, such as `TMUX`.
+- **Outputs:** the capability's stdout and exit status, as this page says.
+  An unknown name, capability or extra word exits 69, unsupported, as does
+  a capability the installed multiplexer is too old for.
+- **Run by hand**, without `<NAME>_PROTOCOL`, it exits 2, saying a pane
+  provider table runs it.
+
+The words, inputs and outputs are frozen, and only ever gain forms: a
+daemon upgraded in place runs a newer binary at `{exe}`. The commands it
+runs, such as `tmux`'s, and its stderr are not.
+
+### tmux
+
+`<name>.builtin.tmux()`: `find`, `open_beside`, `close` and
+`report_layout`, on the tmux server `TMUX` names. Every `tmux` call passes
+that socket with `-S`, and names the pane it acts on with `-t`.
+
+- `find`: the pane of the server whose tty is `TTY`, compared by device,
+  as tmux itself tells a client inside it; `%N`, else exit 1. No context
+  or find variables: `TMUX` leaks into terminals tmux doesn't run. It
+  refuses tmux older than 3.2, naming the version.
+- `open_beside`: `split-window -d`, `-h` or `-v` and `-b` from
+  `DIRECTION`, `-l SIZE`, `-t ORIGIN`, running the attach command; prints
+  the new pane's id.
+- `close`: `kill-pane`; done when the pane is already gone.
+- `report_layout`: an area per window of the server, `@N`, a window
+  linked into several sessions counted once, foreign panes included. Rects
+  are each pane's content, as fractions of its window, with no inset; with
+  `pane-border-status top`, a pane on the top row is reported from the top,
+  one row taller, with an inset of 1 at the top. `focus` is the active pane
+  of the window the most recently active client shows.
+
 ## Placeholders
 
 Every variable but `<NAME>_ENV_*` is also a placeholder: a whole argv word,

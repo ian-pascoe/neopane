@@ -1,5 +1,9 @@
 # The user's own Lua chooses a daemon's one pane provider, which may pair a terminal provider with a layout provider
 
+Amended by ADR 0016 (SPI-1131): with no config, the built-in default chooses
+tmux's built-in table in a tmux pane (`TERM_PROGRAM=tmux` and `TMUX` set),
+before Rex; `<name>.default` returns that table there.
+
 Amended by ADR 0012 before implementation: one-step capabilities come only
 from a pane provider returned whole.
 

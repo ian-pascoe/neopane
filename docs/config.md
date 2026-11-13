@@ -2,7 +2,8 @@
 
 Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
-chooses: Rex inside Rex, else none. `docs/capabilities.md` is the contract
+chooses: tmux in a tmux pane, Rex inside Rex, else none (see
+[Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md` is the contract
 of a pane provider's commands.
 
 ## The file
@@ -72,6 +73,7 @@ neopane, and the file doesn't run for it.
 - `nil` or `false`: no pane provider. Windows are drawn in the terminal
   they were opened from, as plain Neovim draws splits.
 - `"rex"`: Rex's pane provider, built in. It works only in a Rex pane.
+  The other built-ins are tables, such as `neopane.builtin.tmux()`.
 - A pane provider table, used whole.
 - A pair, `{ terminal = T, layout = L }`, or one side alone, `{ terminal = T }`
   or `{ layout = L }`: `T` is a terminal provider, which opens and closes
@@ -127,10 +129,10 @@ Also `require("neopane")`.
 
 | | |
 |---|---|
-| `neopane.default(attach)` | What the daemon chooses with no file: `"rex"` when `REX_SERVER` and `REX_SESSION` are both set, else nil. Reads only the environment, ignores the hint, never raises |
+| `neopane.default(attach)` | What the daemon chooses with no file: tmux's table, as `neopane.builtin.tmux()` returns it, when `TERM_PROGRAM` is `tmux` and `TMUX` is set and not empty; else `"rex"` when `REX_SERVER` and `REX_SESSION` are both set; else nil. Reads only the environment, ignores the hint, never raises |
 | `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
 | `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
-| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change. Empty for now |
+| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`. They take no options, and raise on any |
 | `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is a multiplexer's own pane. Empty for now |
 | `neopane.os` | `"macos"` or `"linux"` |
 | `neopane.version` | The daemon's version |
@@ -310,10 +312,36 @@ or changed in type or meaning; a missing one means unknown.
 
 ## Built-in pane providers
 
-`neopane provider show` lists the built-ins. Today that is only `rex`, which
-has no Lua table: return `"rex"` from `provider()` to use it.
+`neopane provider show` lists the built-ins: `rex`, which has no Lua table
+(return `"rex"` from `provider()` to use it), and `tmux`.
 `neopane provider show NAME` prints a built-in that has a Lua table as a Lua
-file, to copy into your `init.lua` and change.
+file, to copy into your `init.lua` and change. Its every capability runs
+`{exe} provider builtin NAME CAPABILITY`: neopane itself, speaking the
+capability contract for that multiplexer (`docs/capabilities.md`, "Built-in
+commands").
+
+### tmux
+
+On by default: run `neopane` in a tmux pane (tmux 3.2 or newer), with no
+config, and each Neovim window gets a tmux pane of its own, split beside the
+pane it came from. The default knows tmux by its own variables,
+`TERM_PROGRAM=tmux` and `TMUX`; its `find` then checks the terminal is a
+pane of that tmux server, by its tty, so a `TMUX` leaked into another
+terminal chooses nothing. A config gets the same table from
+`neopane.builtin.tmux()`, and may change any capability of it:
+
+```lua
+return {
+  provider = function(attach)
+    local tmux = neopane.builtin.tmux()
+    tmux.timeouts = { open_beside = 10 } -- a slow machine
+    return tmux
+  end,
+}
+```
+
+To opt out, run `neopane --provider none` or set `NEOPANE_PROVIDER=none`,
+or have your config return something else in tmux, such as `nil`.
 
 ## Editor setup
 
