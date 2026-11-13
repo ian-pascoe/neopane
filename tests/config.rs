@@ -756,14 +756,14 @@ fn the_global_and_require_give_the_same_table() {
     let f = Fixture::new(
         "local n = require('{name}') \
          print(n == {name}, n.os, n.version, n.config_dir, type(n.builtin), type(n.inside), \
-               next(n.builtin), next(n.inside)) \
+               next(n.builtin), next(n.inside), next(n.inside, 'tmux')) \
          return { provider = function() end }",
     );
     let dir = f.dir.display().to_string();
     assert_eq!(
         f.run().printed,
         [format!(
-            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux\tnil",
+            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux\ttmux\tnil",
             std::env::consts::OS
         )]
     );
@@ -1035,7 +1035,7 @@ fn provider_show_prints_what_builtin_returns() {
     assert_eq!(f.run().printed, ["true"]);
 }
 
-// <name>.default (#93 decision 27): the same as the daemon's
+// <name>.default (#93 decision 27, SPI-1135): the same as the daemon's
 
 #[test]
 fn default_agrees_with_the_daemons() {
@@ -1061,16 +1061,17 @@ fn default_agrees_with_the_daemons() {
             ("REX_SESSION", "s"),
         ],
     ];
-    let want = [false, true, false, false, true, true, true, false, false];
+    // the last names both: with no tty, tmux's `inside` can't prove it
+    let want = [false, true, false, false, true, true, true, false, true];
     let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
-    let wants_tmux = [false, false, false, false, false, false, false, true, true];
+    let wants_tmux = [false, false, false, false, false, false, false, true, false];
     for ((env, want), wants_tmux) in envs.into_iter().zip(want).zip(wants_tmux) {
         let mut f = Fixture::new(source);
         f.attach.env = env
             .iter()
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
-        let daemons = config::default(&f.attach);
+        let daemons = config::default(&f.attach).choice();
         assert_eq!(f.choose().unwrap().choice, daemons, "{env:?}");
         let rex = Choice::Builtin(Builtin::Rex);
         assert_eq!(daemons == rex, want, "{env:?}");
@@ -1086,6 +1087,17 @@ fn default_never_raises() {
              {name}.default({ env = 2 })) return {}"
         ),
         ["nil\tnil\tnil\tnil"]
+    );
+}
+
+#[test]
+fn inside_never_raises() {
+    assert_eq!(
+        printed(
+            "print({name}.inside.tmux()) print({name}.inside.tmux(1)) \
+             print({name}.inside.tmux({ env = 2, tty = {} })) return {}"
+        ),
+        ["false\tTMUX isn't set"; 3]
     );
 }
 

@@ -12,7 +12,7 @@ use super::find::{Answered, Find, exit_of};
 use super::rex::RexReport;
 use super::{Check, ConfigState, How, Verdict};
 use crate::config::check::{Problem, Severity};
-use crate::config::{Builtin, Capability, Choice, Provider};
+use crate::config::{Builtin, Capability, Choice, Defaulted, Provider};
 use crate::name::NAME;
 use crate::providers::rex::find::{BLOCK_VAR, Verdict as RexVerdict};
 use crate::util::seconds;
@@ -213,6 +213,11 @@ pub(super) fn text(c: &Check, full: bool) -> String {
     }
     if let Some((choice, how)) = &c.chose {
         put(chose_line(choice, *how));
+        if let Some(d) = &c.default {
+            for line in default_lines(d) {
+                put(line);
+            }
+        }
         for (p, role) in tables(choice) {
             for line in table_lines(p, role, c, full) {
                 put(line);
@@ -527,7 +532,38 @@ fn result_text(v: &Verdict) -> String {
         } => format!("ok (find not run){}", with(warning)),
         Verdict::None { warning } => format!("none{}", with(warning)),
         Verdict::Error(message) => format!("error: {message}"),
+        Verdict::Refused(message) => format!(
+            "none (find refused): {message}; with no config, the daemon logs this and \
+             warns of nothing, {NAME}.default having guessed"
+        ),
     }
+}
+
+/// What `<name>.default` named and proved: `default  names tmux and rex`,
+/// then each `inside` proof it ran, as `  inside.tmux  no: why`.
+fn default_lines(d: &Defaulted) -> Vec<String> {
+    let names: Vec<&str> = d.named.iter().map(|n| n.name()).collect();
+    let named = match names.as_slice() {
+        [] => "nothing".to_string(),
+        [one] => format!("{one}; nothing to prove"),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let mut lines = vec![format!("default  names {named}")];
+    for (table, proof) in &d.proofs {
+        let said = if proof.ok { "yes" } else { "no" };
+        lines.push(format!("  inside.{}  {said}: {}", table.name(), proof.why));
+    }
+    lines
+}
+
+fn default_json(d: &Defaulted) -> Value {
+    let inside: Vec<Value> = d
+        .proofs
+        .iter()
+        .map(|(table, proof)| json!({ "name": table.name(), "ok": proof.ok, "why": proof.why }))
+        .collect();
+    let named: Vec<&str> = d.named.iter().map(|n| n.name()).collect();
+    json!({ "named": named, "inside": inside })
 }
 
 /// The JSON report: one object, and a newline.
@@ -582,6 +618,7 @@ pub(super) fn json(c: &Check) -> String {
         Verdict::Ok { warning, .. } => json!({ "state": "ok", "message": warning }),
         Verdict::None { warning } => json!({ "state": "none", "message": warning }),
         Verdict::Error(m) => json!({ "state": "error", "message": m }),
+        Verdict::Refused(m) => json!({ "state": "none", "message": null, "refused": m }),
     };
     let v = json!({
         "config": config,
@@ -592,6 +629,7 @@ pub(super) fn json(c: &Check) -> String {
         "one_step": one_step_json,
         "find": find_json(&c.find),
         "rex": rex,
+        "default": c.default.as_ref().map_or(Value::Null, default_json),
         "problems": problems,
         "result": result,
     });

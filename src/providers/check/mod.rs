@@ -85,6 +85,9 @@ pub(crate) struct Check {
     pub find: Find,
     /// For `"rex"`.
     pub rex: Option<rex::RexReport>,
+    /// What `<name>.default` came to, when it chose: what it named and the
+    /// `inside` proofs it ran.
+    pub default: Option<config::Defaulted>,
     pub result: Verdict,
 }
 
@@ -133,6 +136,10 @@ pub(crate) enum Verdict {
     /// No pane provider for an error, or `find` refusing: the Neovim
     /// message.
     Error(String),
+    /// No pane provider: `find` refused `<name>.default`'s guess, with no
+    /// config, which the daemon only logs, warning of nothing. The message
+    /// a config's choice would have warned with.
+    Refused(String),
 }
 
 impl Verdict {
@@ -185,6 +192,7 @@ fn gather(o: &Options) -> Check {
         problems: Problems::default(),
         find: Find::NotRun("the config failed".into()),
         rex: None,
+        default: None,
         result: Verdict::None { warning: None },
     };
     match choose::choose_by(file.as_ref(), hint.as_deref()) {
@@ -193,8 +201,9 @@ fn gather(o: &Options) -> Check {
             check.chose = Some((Choice::None, How::Hint));
         }
         ChooseBy::Default => {
-            let choice = choose::default_choice(&check.attach.env);
-            check.chose = Some((choice, How::Default));
+            let defaulted = config::default(&check.attach);
+            check.chose = Some((defaulted.choice(), How::Default));
+            check.default = Some(defaulted);
         }
         ChooseBy::Missing(path) => {
             check.config = ConfigState::File(path.to_path_buf());
@@ -211,9 +220,9 @@ fn gather(o: &Options) -> Check {
             run_config(&mut check, path);
         }
     }
-    if let Some((choice, _)) = &check.chose {
-        let choice = choice.clone();
-        decide(&mut check, &choice, o.no_find, tty.as_ref());
+    if let Some((choice, how)) = &check.chose {
+        let (choice, how) = (choice.clone(), *how);
+        decide(&mut check, &choice, how, o.no_find, tty.as_ref());
     }
     check
 }
@@ -276,13 +285,22 @@ fn run_error(outcome: &Outcome, file: &str) -> Option<String> {
     }
 }
 
+/// What `find` refusing a choice made by `how`, for `message`, comes to:
+/// the default's guess is only logged.
+fn refused(how: How, message: String) -> Verdict {
+    match how {
+        How::Default => Verdict::Refused(message),
+        How::Provider | How::Hint => Verdict::Error(message),
+    }
+}
+
 /// Why `find` isn't run without a terminal.
 const NO_TERMINAL: &str =
     "stdin isn't a terminal, so there's no title to write and nothing to find";
 
 /// What the choice came to: `find` run, unless `no_find` or stdin isn't a
 /// terminal, and Rex asked what it is.
-fn decide(check: &mut Check, choice: &Choice, no_find: bool, tty: Option<&find::Tty>) {
+fn decide(check: &mut Check, choice: &Choice, how: How, no_find: bool, tty: Option<&find::Tty>) {
     let warning = check
         .problems
         .0
@@ -310,7 +328,7 @@ fn decide(check: &mut Check, choice: &Choice, no_find: bool, tty: Option<&find::
             let (report, found) = rex::probe(&check.attach, finding);
             check.result = match (&report.error, &found) {
                 (Some(why), _) => Verdict::Error(format!("{NAME}: rex: {why}; no pane provider")),
-                (None, Some(f)) if f.refused() => Verdict::Error(f.refusal("rex")),
+                (None, Some(f)) if f.refused() => refused(how, f.refusal("rex")),
                 (None, f) => Verdict::Ok {
                     find_ran: f.is_some(),
                     warning,
@@ -327,7 +345,7 @@ fn decide(check: &mut Check, choice: &Choice, no_find: bool, tty: Option<&find::
                 (why, _) => Find::NotRun(why.unwrap_or_else(|| NO_TERMINAL.into())),
             };
             check.result = if found.refused() {
-                Verdict::Error(found.refusal(name))
+                refused(how, found.refusal(name))
             } else {
                 Verdict::Ok {
                     find_ran: !matches!(found, Find::NotRun(_)),

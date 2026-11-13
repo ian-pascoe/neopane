@@ -42,7 +42,7 @@ use crate::log::{self, Point, log_info, log_warn};
 use crate::name::NAME;
 use crate::nvim::nvim::{Frame, Nvim};
 use crate::nvim::{msgpack, rpc};
-use crate::providers::choose::{self, ChooseBy, Chosen, ConfigRun};
+use crate::providers::choose::{self, ByDefault, ChooseBy, Chosen, ConfigRun, DefaultRun};
 
 /// `serve` is a top layer: any error will do.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -623,9 +623,10 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     // the config file, from the start environment only (ADR 0007)
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let config_file = choose::config_path(&std::env::vars_os().collect::<Vec<_>>(), &cwd);
-    // it chooses now: the config, or connecting to Rex, goes on as Neovim
-    // starts
+    // it chooses now: the config, the default's proofs, or connecting to
+    // Rex, goes on as Neovim starts
     let mut config_run = None;
+    let mut default_run = None;
     let chosen = match first.as_ref().and_then(|f| f.hello.as_deref()) {
         Some(h) => match choose::choose_by(config_file.as_ref(), h.hint.as_deref()) {
             ChooseBy::Config(file) => {
@@ -638,13 +639,19 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
             }
             // warned of at `start`
             ChooseBy::Missing(_) => None,
-            ChooseBy::Default => Some(choose::choose(
-                &h.env,
-                &h.cwd,
+            ChooseBy::Default => match choose::choose(
+                &h.for_config(&name),
                 h.hint.as_deref(),
                 &exe,
                 &mut choose::connect(),
-            )),
+                &choose::prove(),
+            ) {
+                ByDefault::Now(chosen) => Some(chosen),
+                ByDefault::Proving(run) => {
+                    default_run = Some(run);
+                    None
+                }
+            },
         },
         // kept: the first attach chooses, as any after the last pane
         None => None,
@@ -656,6 +663,7 @@ pub(crate) fn serve<S: AsRef<OsStr>>(
     let choice = FirstChoice {
         chosen,
         config_run,
+        default_run,
         config_file,
     };
     match start_daemon(dir, nvim_args, config, &server, exe, &mut first, choice) {
@@ -710,12 +718,13 @@ fn starting_status(address: &super::dir::Address, log: &str) -> crate::attach::S
     }
 }
 
-/// What the first attach chose before Neovim started, or the config it
-/// started running to choose, and the config file the daemon found at
+/// What the first attach chose before Neovim started, or the config or
+/// the default's proofs it started running to choose, and the config file the daemon found at
 /// start.
 struct FirstChoice {
     chosen: Option<Chosen>,
     config_run: Option<ConfigRun>,
+    default_run: Option<DefaultRun>,
     config_file: Option<choose::ConfigFile>,
 }
 
@@ -749,6 +758,7 @@ fn start_daemon<S: AsRef<OsStr>>(
     d.lifetime.unsaved_file = Some(dir.unsaved());
     d.first_choice = choice.chosen;
     d.first_config = choice.config_run;
+    d.first_default = choice.default_run;
     d.config_file = choice.config_file;
     if first.is_some() {
         d.start(first)?;

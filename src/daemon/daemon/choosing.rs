@@ -29,7 +29,7 @@ use super::*;
 use crate::attach::{PaneId, env_value};
 use crate::daemon::pane::{AttachHello, Reach};
 use crate::daemon::provider::Ask;
-use crate::providers::choose::{self, ChooseBy, Chosen, ConfigRun, Env};
+use crate::providers::choose::{self, ByDefault, ChooseBy, Chosen, ConfigRun, DefaultRun, Env};
 
 /// The choice running: the choosing attach's pane, the pane id its `find`
 /// carries, when the choice runs out of time, and the time it had.
@@ -38,6 +38,8 @@ pub(crate) struct Choosing {
     attach: PaneId,
     due: Instant,
     time: Duration,
+    /// The built-in default's guess, with no config: refusing it only logs.
+    quiet: bool,
 }
 
 impl Daemon {
@@ -105,14 +107,18 @@ impl Daemon {
                 self.config_failed(id, line)
             }
             ChooseBy::Default => {
-                let chosen = choose::choose(
-                    &hello.env,
-                    &hello.cwd,
+                let attach = hello.for_config(&self.name);
+                let by = choose::choose(
+                    &attach,
                     hello.hint.as_deref(),
                     &self.exe,
                     &mut choose::connect(),
+                    &self.prove,
                 );
-                self.take_choice(id, chosen)
+                match by {
+                    ByDefault::Now(chosen) => self.take_default(id, chosen),
+                    ByDefault::Proving(run) => self.wait_for_default(id, run),
+                }
             }
         }
     }
@@ -128,7 +134,7 @@ impl Daemon {
     /// Whether a choice runs: the config, or a chosen pane provider's
     /// `find` that hasn't confirmed it yet.
     pub(super) fn a_choice_runs(&self) -> bool {
-        self.choosing.is_some() || self.config_run.is_some()
+        self.choosing.is_some() || self.config_run.is_some() || self.default_run.is_some()
     }
 
     /// Self-attached pane `id` chooses with config `file`, which runs in
@@ -190,10 +196,74 @@ impl Daemon {
         Ok(())
     }
 
+    /// Self-attached pane `id` chooses with the built-in default, whose
+    /// proofs `run` runs off the loop: what needs the pane provider waits
+    /// for them, as for a config.
+    pub(super) fn wait_for_default(&mut self, id: u32, run: DefaultRun) -> Result<()> {
+        log_info!("{NAME} daemon: pane {id} proves which multiplexer it is in");
+        self.event_loop
+            .add_read(run.fd(), Token::Default as usize)?;
+        if let Some(p) = self.panes.by_id_mut(id) {
+            p.reach = Reach::Finding;
+        }
+        self.default_run = Some((id, run));
+        Ok(())
+    }
+
+    /// The default's proofs for a choice are done: what it chose is taken.
+    pub(super) fn on_default(&mut self) -> Result<()> {
+        let Some(outcome) = self.default_run.as_ref().and_then(|(_, run)| run.outcome()) else {
+            return Ok(());
+        };
+        let (id, run) = self.default_run.take().unwrap();
+        let _ = self.event_loop.remove(run.fd());
+        let Some(hello) = self.panes.by_id(id).and_then(|p| p.hello.as_deref()) else {
+            log_info!("{NAME} daemon: pane {id} went before the default's proofs were done");
+            return self.reach_decided();
+        };
+        #[cfg(test)]
+        let chosen = match &mut self.test_of_default {
+            Some(of) => of(&outcome.choice()),
+            None => choose::by_proofs(
+                &outcome,
+                &hello.env,
+                &hello.cwd,
+                &self.exe,
+                &mut choose::connect(),
+            ),
+        };
+        #[cfg(not(test))]
+        let chosen = choose::by_proofs(
+            &outcome,
+            &hello.env,
+            &hello.cwd,
+            &self.exe,
+            &mut choose::connect(),
+        );
+        let decided = !matches!(chosen, Chosen::Provider { .. });
+        self.take_default(id, chosen)?;
+        if decided {
+            self.reach_decided()?;
+        }
+        self.nvim.client.flush()?;
+        Ok(())
+    }
+
     /// What self-attached pane `id` chose: a pane provider, which its
     /// `find` confirms within the choice's time, or none. Its windows wait
-    /// for that.
+    /// for that. A refusal warns.
     pub(super) fn take_choice(&mut self, id: u32, chosen: Chosen) -> Result<()> {
+        self.take_chosen(id, chosen, false)
+    }
+
+    /// What the built-in default chose for self-attached pane `id`, with
+    /// no config: as `take_choice`, but its `find` refusing only logs, the
+    /// default having guessed from variables that may have leaked.
+    pub(super) fn take_default(&mut self, id: u32, chosen: Chosen) -> Result<()> {
+        self.take_chosen(id, chosen, true)
+    }
+
+    fn take_chosen(&mut self, id: u32, chosen: Chosen, quiet: bool) -> Result<()> {
         let (held, spent) = match chosen {
             Chosen::Provider { held, spent } => (held, spent),
             Chosen::ConfigError => {
@@ -255,6 +325,7 @@ impl Daemon {
             attach,
             due,
             time,
+            quiet,
         });
         self.arm_choice_timer(due)?;
         self.find(id)
@@ -539,10 +610,19 @@ impl Daemon {
     }
 
     /// The choice running is refused, for `why`: the pane provider is
-    /// dropped, with a warning.
+    /// dropped, with a warning, or for the default's guess, only a line in
+    /// the log.
     fn refuse_choice(&mut self, why: &str) -> Result<()> {
-        self.choosing = None;
-        self.provider_gone(why)?;
+        let quiet = self.choosing.take().is_some_and(|c| c.quiet);
+        if quiet {
+            log_info!(
+                "{NAME} daemon: {}: {why}; no pane provider (the default's guess: not warned of)",
+                self.provider_name()
+            );
+            self.drop_provider()?;
+        } else {
+            self.provider_gone(why)?;
+        }
         self.no_provider = NoProvider::FindRefused;
         self.reach_decided()
     }

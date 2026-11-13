@@ -168,6 +168,11 @@ pub(crate) struct Daemon {
     /// The config running for a choice, and the pane of the choosing
     /// attach, until it answers.
     config_run: Option<(u32, crate::providers::choose::ConfigRun)>,
+    /// The built-in default proving which built-in a choice is in, and
+    /// the pane of the choosing attach, until it is done.
+    default_run: Option<(u32, crate::providers::choose::DefaultRun)>,
+    /// The built-in default's `inside` proofs: the real ones, but in tests.
+    pub prove: crate::providers::choose::Prove,
     /// Self-attaches that came while a choice ran, waiting their turn.
     waiting_choice: Vec<u32>,
     /// The choosing attach's values of the pane provider's context
@@ -179,11 +184,18 @@ pub(crate) struct Daemon {
     /// the built-in default.
     #[cfg(test)]
     pub test_choose: Option<TestChoose>,
+    /// What tests have the built-in default's choice come to, in place of
+    /// the pane provider it names.
+    #[cfg(test)]
+    pub test_of_default: Option<TestOfDefault>,
     /// What the first self-attach chose, before Neovim started, for `start`.
     pub first_choice: Option<crate::providers::choose::Chosen>,
     /// The config the first self-attach started running, before Neovim
     /// started, for `start` to wait for.
     pub first_config: Option<crate::providers::choose::ConfigRun>,
+    /// The built-in default the first self-attach started proving, before
+    /// Neovim started, for `start` to wait for.
+    pub first_default: Option<crate::providers::choose::DefaultRun>,
     /// Warnings for Neovim held until it is set up (`warn_when_ready`).
     held_warnings: Vec<String>,
     // Dropped last, in this order: the loop, then the pane provider, then
@@ -198,6 +210,11 @@ pub(crate) struct Daemon {
 /// What a test has a self-attach choose, given its hello.
 #[cfg(test)]
 pub(crate) type TestChoose = Box<dyn FnMut(&pane::AttachHello) -> crate::providers::choose::Chosen>;
+
+/// What a test has the built-in default's choice come to.
+#[cfg(test)]
+pub(crate) type TestOfDefault =
+    Box<dyn FnMut(&crate::config::Choice) -> crate::providers::choose::Chosen>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -243,6 +260,8 @@ pub(crate) enum Token {
     StopTimer,
     /// The config's run for a choice is done.
     Config,
+    /// The built-in default's proofs for a choice are done.
+    Default,
 }
 
 impl Token {
@@ -266,13 +285,14 @@ impl Token {
             14 => Token::UnattachTimer,
             15 => Token::StopTimer,
             16 => Token::Config,
+            17 => Token::Default,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::Config as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::Default as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -422,13 +442,18 @@ impl Daemon {
             choosing: None,
             config_file: None,
             config_run: None,
+            default_run: None,
+            prove: crate::providers::choose::prove(),
             waiting_choice: Vec::new(),
             context: Vec::new(),
             provider_writes: false,
             #[cfg(test)]
             test_choose: None,
+            #[cfg(test)]
+            test_of_default: None,
             first_choice: None,
             first_config: None,
+            first_default: None,
             held_warnings: Vec::new(),
             event_loop,
             provider,
@@ -481,10 +506,17 @@ impl Daemon {
         self.nvim
             .attach_ui(cols, rows)
             .map_err(|e| format!("couldn't talk to Neovim: {e}"))?;
-        match (self.first_choice.take(), self.first_config.take()) {
-            (Some(chosen), _) => self.take_choice(id, chosen)?,
-            (None, Some(run)) => self.wait_for_config(id, run)?,
-            (None, None) => self.choose_or_reach(id)?,
+        let first = (
+            self.first_choice.take(),
+            self.first_config.take(),
+            self.first_default.take(),
+        );
+        match first {
+            // only the default chooses before Neovim starts
+            (Some(chosen), _, _) => self.take_default(id, chosen)?,
+            (None, Some(run), _) => self.wait_for_config(id, run)?,
+            (None, None, Some(run)) => self.wait_for_default(id, run)?,
+            (None, None, None) => self.choose_or_reach(id)?,
         }
         self.nvim.client.flush()?;
         Ok(())
@@ -568,6 +600,7 @@ impl Daemon {
             Some(Token::UnattachTimer) => self.unattach_wait_over()?,
             Some(Token::StopTimer) => self.stop_wait_over(),
             Some(Token::Config) => self.on_config()?,
+            Some(Token::Default) => self.on_default()?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }

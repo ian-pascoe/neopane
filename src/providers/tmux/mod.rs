@@ -13,6 +13,8 @@
 //!   its content on the float group; tmux 3.7 at least, else exit 69.
 //! - `report_layout` (`layout.rs`): one area per window of the server,
 //!   from `list-panes -a`.
+//! - `inside.tmux` (`inside.rs`), no capability: `find`'s search, run by
+//!   the built-in default and the config's `<name>.inside.tmux`.
 //!
 //! Each capability gives the line it prints, or why it failed; `run`
 //! prints it, or the failure as one `tmux CAPABILITY: why` line on stderr,
@@ -21,9 +23,12 @@
 
 mod find;
 mod float;
+mod inside;
 mod layout;
 mod panes;
 mod server;
+
+pub(crate) use inside::inside;
 
 use super::builtin::{DONE, FAILED, Given, UNSUPPORTED, print_line};
 use crate::config::Capability;
