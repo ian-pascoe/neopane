@@ -92,6 +92,10 @@ pub struct Opts<'a> {
     pub origin: [i32; 2],
     /// Editor floats shown elsewhere, with every float hanging from them.
     pub skip: &'a [u32],
+    /// Editor floats drawn here, with every float hanging from them, even
+    /// when the pane isn't focused: float groups with no float group pane
+    /// last current in it (ADR 0010).
+    pub own: &'a [u32],
     /// The screen's tabline over this pane, for a pane along the top of the
     /// Rex window: its row of grid 1 from `tabline_col`, which the panes
     /// along the top lay out from column 0, left to right. The window shows
@@ -227,7 +231,7 @@ impl PaneView {
         let grid_rows = size[1].min(msg_top.saturating_sub(top));
 
         let mut rects = if gid.is_some() {
-            let placed = grids.floats_over(id, focused, opts.skip);
+            let placed = grids.floats_over_with(id, focused, opts.skip, opts.own);
             let mut rects = float_rects(grids, &placed);
             self.fit_screen(&mut rects, opts.origin, screen_rows(grids));
             rects
@@ -453,7 +457,8 @@ impl PaneView {
         // the floats over each window, then the screen's, in the window area
         let mut rects: Vec<Rect> = Vec::new();
         for (i, s) in wins.iter().enumerate() {
-            let placed = grids.floats_over(s.grid, focused && i == 0, opts.skip);
+            let own = if i == 0 { opts.own } else { &[] };
+            let placed = grids.floats_over_with(s.grid, focused && i == 0, opts.skip, own);
             for mut r in float_rects(grids, &placed) {
                 if !r.on_screen {
                     r.row += s.row as i32;
@@ -462,8 +467,8 @@ impl PaneView {
                 rects.push(r);
             }
         }
-        if wins.is_empty() && focused {
-            let placed = grids.floats_over(0, true, opts.skip);
+        if wins.is_empty() && (focused || !opts.own.is_empty()) {
+            let placed = grids.floats_over_with(0, focused, opts.skip, opts.own);
             rects = float_rects(grids, &placed);
         }
         if rects.len() > MAX_FLOATS {

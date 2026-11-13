@@ -31,6 +31,8 @@ pub(crate) struct FloatingPanes<'a> {
     pub panes: &'a mut Panes,
     pub event_loop: &'a Loop,
     pub nvim: &'a mut NvimSession,
+    /// The groups drawn in a pane for life without having asked.
+    pub in_pane: &'a mut Vec<i64>,
 }
 
 impl FloatingPanes<'_> {
@@ -61,18 +63,18 @@ impl FloatingPanes<'_> {
     /// those whose group closed hang up. A float group pane's size is the pane provider's:
     /// it's never moved to follow its floats, they follow it. Float group
     /// panes are only made if the pane provider can `open_float`, from
-    /// `origin`, the current pane's terminal. What to ask for, it returns.
+    /// `origin`, the current pane's terminal, at most `MAX_GROUPS` at once,
+    /// the top-most groups first; a new group that gets none is drawn in a
+    /// pane for life. While the screen is `shrunk` to the current pane, its
+    /// bounds are the screen's. What to ask for, it returns.
     pub(crate) fn reconcile_layers(
         &mut self,
         open_float: bool,
         origin: Option<TerminalId>,
+        shrunk: bool,
     ) -> Vec<Ask> {
         let mut out = Vec::new();
-        let groups = if open_float {
-            float_groups::find(self.grids, self.nvim.entered_floats())
-        } else {
-            Vec::new()
-        };
+        let groups = float_groups::find(self.grids, self.nvim.entered_floats());
         let mut i = self.panes.list.len();
         while i > 0 {
             i -= 1;
@@ -98,11 +100,20 @@ impl FloatingPanes<'_> {
             }
             self.panes.remove(i, self.event_loop);
         }
-        for g in groups {
-            if self.panes.by_layer_key(g.key).is_none()
-                && let Some(ask) = self.new_layer(g, origin.as_ref())
-            {
+        let grids = self.grids;
+        self.in_pane.retain(|&k| grids.grid_of(k).is_some());
+        let mut open = self.panes.list.iter().filter(|p| p.layer_hides()).count();
+        for g in groups.into_iter().rev() {
+            if self.panes.by_layer_key(g.key).is_some() || self.in_pane.contains(&g.key) {
+                continue;
+            }
+            if !open_float || open >= float_groups::MAX_GROUPS {
+                self.in_pane.push(g.key);
+                continue;
+            }
+            if let Some(ask) = self.new_layer(g, origin.as_ref(), shrunk) {
                 out.push(ask);
+                open += 1;
             }
         }
         out
@@ -110,9 +121,11 @@ impl FloatingPanes<'_> {
 
     /// A float group pane for `g`, and its `open_float`; None while there's no
     /// screen or no `origin` to open it from.
-    fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>) -> Option<Ask> {
+    fn new_layer(&mut self, g: Group, origin: Option<&TerminalId>, shrunk: bool) -> Option<Ask> {
         let origin = origin?.clone();
-        let b = group_bounds(self.grids, self.panes.by_terminal(origin.as_str()), &g)?;
+        // shrunk, the screen is the origin pane
+        let from = self.panes.by_terminal(origin.as_str()).filter(|_| !shrunk);
+        let b = group_bounds(self.grids, from, &g)?;
         let pane = self.panes.add_for_group(g);
         let id = pane.attach_id.expect("a requested pane");
         let attach = pane::attach_words(self.exe, self.sock, self.transport, pane);

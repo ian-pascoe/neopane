@@ -673,6 +673,8 @@ impl Multi {
                                 | Note::Options(_)
                                 | Note::Resized { .. }
                                 | Note::Unsaved { .. }
+                                | Note::Cwd(_)
+                                | Note::Terminals(_)
                                 | Note::Opened(_) => {}
                             }
                         }
@@ -1150,6 +1152,63 @@ fn two_windows_side_by_side_with_a_separator_between() -> Result<()> {
     // nothing changed: nothing drawn
     out.clear();
     assert!(!view.frame_laid_out(&mut gs, laid, Opts::default(), &mut out));
+    Ok(())
+}
+
+#[test]
+fn a_screen_float_too_wide_for_its_pane_is_moved_in_and_cut() -> Result<()> {
+    let mut gs = Grids::default();
+    gs.style = split_style();
+    add_window(&mut gs, 2, 12, 3, 'a');
+    // a picker's line, 16 wide, at column 20 of a screen the pane starts
+    // 10 columns into
+    let mut f = Grid::default();
+    f.resize(16, 1);
+    for (c, ch) in "PICKER-012345678".chars().enumerate() {
+        f.cells[c] = Cell::init(ch.to_string(), TEXT);
+    }
+    gs.grids.insert(5, f);
+    gs.float_on_screen(5, 1005, 1, 20);
+    let want = [
+        ("a0          ", "............"),
+        ("PICKER-01234", "............"),
+        ("a2          ", "............"),
+        ("[a]         ", "SSSSSSSSSSSS"),
+    ];
+    // in the current pane, and in another it is drawn in as its own
+    for opts in [
+        Opts {
+            focused: true,
+            origin: [0, 10],
+            ..Opts::default()
+        },
+        Opts {
+            origin: [0, 10],
+            own: &[5],
+            ..Opts::default()
+        },
+    ] {
+        let mut view = PaneView::init(12, 5);
+        let mut t = test_terminal(12, 5)?;
+        let mut out = Vec::new();
+        assert!(view.frame(&mut gs, Some(2), opts, &mut out));
+        t.feed(&out);
+        expect_written(&t, &gs.style, &want)?;
+    }
+    // and in no other
+    let mut view = PaneView::init(12, 5);
+    let mut t = test_terminal(12, 5)?;
+    let mut out = Vec::new();
+    assert!(view.frame(&mut gs, Some(2), Opts::default(), &mut out));
+    t.feed(&out);
+    expect_written(
+        &t,
+        &gs.style,
+        &[
+            ("a0          ", "............"),
+            ("a1          ", "............"),
+        ],
+    )?;
     Ok(())
 }
 

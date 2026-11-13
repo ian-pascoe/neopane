@@ -22,11 +22,12 @@ use super::asks::{self, Asks, Step};
 use super::attach_conn::Pending;
 use super::event_loop::{Event, Kind, Loop};
 use super::exe_stamp::VersionRefused;
+use super::float_homes::{self, FloatHomes};
 use super::floating_panes::{self, FloatingPanes};
 use super::focus_gate::AimForwarder;
 use super::geometry::{self, Geometry};
 use super::live_layout::{Area, LiveLayout};
-use super::nvim_session::NvimSession;
+use super::nvim_session::{NvimSession, Shrink};
 use super::pane::{self, Close, Fit, LastAskedWinSize, Pane, PaneFd, Placing, SelfAttach};
 use super::pane_layout::{self, Axis};
 use super::panes::Panes;
@@ -140,6 +141,8 @@ pub(crate) struct Daemon {
     /// Unshown windows of the first tab page whose terminal won't come,
     /// each waiting for a pane that can draw it, and how it was split off.
     unshown_awaiting_origin: Vec<(i64, windows::Split)>,
+    /// Where float groups with no float group pane are drawn (ADR 0010).
+    float_homes: FloatHomes,
     /// The tab pages made after setup with no tab page area, each drawn
     /// whole in the pane it opened in, for its life (ADR 0012).
     tabs_in_panes: Vec<i64>,
@@ -389,6 +392,7 @@ impl Daemon {
             unshown_awaiting_origin: Vec::new(),
             tabs_in_panes: Vec::new(),
             focus: ProviderFocus::default(),
+            float_homes: FloatHomes::default(),
             focus_in: None,
             just_opened: Vec::new(),
             choosing: None,
@@ -818,6 +822,16 @@ impl Daemon {
         if taking != Taking::Nothing && !rerouted {
             self.make_current(id)?;
             self.focus_terminal(terminal.as_ref());
+        }
+        // a key or click in a float group pane goes into its floats
+        let pane = self.panes.by_id(id).unwrap();
+        if pane.layer.is_some()
+            && pane
+                .terminal_surface
+                .as_ref()
+                .is_some_and(|s| s.forwarder.taking(bytes) != Taking::Nothing)
+        {
+            self.enter_layer(id)?;
         }
         // behind the switch above, if any: sent straight, the keys would reach the old window
         let mut fwds = PaneForwarders {
@@ -1360,6 +1374,7 @@ impl Daemon {
         let from_tab = self.current_pane().map(|p| p.tab);
         self.nvim.current_float = 0;
         self.nvim.current_win = win;
+        self.end_shrink()?;
         let Some(p) = self.panes.by_win_mut(win) else {
             return Ok(());
         };
@@ -1507,14 +1522,93 @@ impl Daemon {
     }
 
     /// A float became current: if it's in a floating pane, focus that.
+    /// Its group, if drawn in a pane, is drawn in the current pane from now
+    /// on; from a window, whether it shrinks the screen is decided.
     fn on_current_float(&mut self, win: i64) -> Result<()> {
         self.nvim.current_float = win;
-        let Some(p) = floating_panes::layer_of_win(&self.grids, &self.panes, win) else {
+        if let Some(id) = self.current_pane_id() {
+            self.float_homes.became_current(win, id);
+        }
+        if !matches!(self.nvim.shrink, Shrink::Shrunk(_)) {
+            self.nvim.shrink = Shrink::Deciding(win);
+        }
+        self.decide_shrink()?;
+        if let Some(p) = floating_panes::layer_of_win(&self.grids, &self.panes, win) {
+            let terminal = p.terminal.clone();
+            self.focus_terminal(terminal.as_ref());
+        }
+        self.nvim.client.flush()?;
+        self.draw()
+    }
+
+    /// Decides, once its group is drawn, whether the float that became
+    /// current shrinks the screen (ADR 0010): its group has no float group
+    /// pane, ready or on its way, and is bigger than the current pane's
+    /// room, its width and its rows below its tabline row and above
+    /// `'cmdheight'`. Then Neovim's screen takes the current pane's size
+    /// until a window is current again (`end_shrink`).
+    fn decide_shrink(&mut self) -> Result<()> {
+        let Shrink::Deciding(win) = self.nvim.shrink else {
             return Ok(());
         };
-        let terminal = p.terminal.clone();
-        self.focus_terminal(terminal.as_ref());
+        if self.nvim.current_float != win {
+            self.nvim.shrink = Shrink::No;
+            return Ok(());
+        }
+        let groups = float_groups::find(&self.grids, self.nvim.entered_floats());
+        let Some(g) = groups
+            .iter()
+            .find(|g| float_groups::has_win(&self.grids, g, win))
+        else {
+            // not drawn yet
+            return Ok(());
+        };
+        self.nvim.shrink = Shrink::No;
+        if self
+            .panes
+            .by_layer_key(g.key)
+            .is_some_and(|p| p.layer_hides())
+        {
+            return Ok(());
+        }
+        let Some(p) = self.current_pane() else {
+            return Ok(());
+        };
+        let Some(s) = &p.terminal_surface else {
+            return Ok(());
+        };
+        let kept = self.geometry().tabline_rows_of(p) + self.msg_rows;
+        let room = [s.view.cols, s.view.rows.saturating_sub(kept)];
+        if g.width <= room[0] && g.height <= room[1] {
+            return Ok(());
+        }
+        let id = p.id;
+        self.nvim.shrink = Shrink::Shrunk(win);
+        self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         Ok(())
+    }
+
+    /// A window is current again: a decision on a shrink is dropped, and a
+    /// shrunk screen grows back to the current pane's layout area. The
+    /// floats of the group it shrank for, if still open, then run their
+    /// buffer-local `VimResized` autocommands again, as pickers listen only
+    /// there.
+    fn end_shrink(&mut self) -> Result<()> {
+        let Shrink::Shrunk(win) = std::mem::take(&mut self.nvim.shrink) else {
+            return Ok(());
+        };
+        if let Some(id) = self.current_pane_id() {
+            self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
+        }
+        let groups = float_groups::find(&self.grids, self.nvim.entered_floats());
+        if let Some(g) = groups
+            .iter()
+            .find(|g| float_groups::has_win(&self.grids, g, win))
+        {
+            let wins = float_groups::wins(&self.grids, g);
+            windows::resized_again(&mut self.nvim.client, &wins);
+        }
+        Ok(self.nvim.client.flush()?)
     }
 
     /// A float took focus. Usually before it's drawn, so the next flush gives
@@ -1528,6 +1622,7 @@ impl Daemon {
             return Ok(());
         }
         self.reconcile_layers();
+        self.decide_shrink()?;
         self.nvim.client.flush()?;
         self.draw()
     }
@@ -1622,6 +1717,7 @@ impl Daemon {
         }
         self.size_windows();
         self.reconcile_layers();
+        self.decide_shrink()?;
         self.place_tab_pages()?;
         self.nvim.client.flush()?;
         Ok(())
@@ -1848,7 +1944,8 @@ impl Daemon {
             .current_pane()
             .and_then(|f| f.terminal.clone())
             .or_else(|| self.any_terminal(|_| true));
-        for ask in self.floating().reconcile_layers(open_float, origin) {
+        let shrunk = matches!(self.nvim.shrink, Shrink::Shrunk(_));
+        for ask in self.floating().reconcile_layers(open_float, origin, shrunk) {
             self.act(ask);
         }
         // their floats move into whichever tab page is current
@@ -2354,39 +2451,48 @@ impl Daemon {
         self.focus_terminal(current.as_ref());
     }
 
+    /// The user went into float group pane `id`, focusing it or typing or
+    /// clicking there: into one of its floats, if not there already, the
+    /// one that takes focus (#89 decision 15).
+    fn enter_layer(&mut self, id: u32) -> Result<()> {
+        let Some(l) = self.panes.by_id(id).and_then(|p| p.layer) else {
+            return Ok(());
+        };
+        if self.nvim.current_float != 0
+            && floating_panes::layer_of_win(&self.grids, &self.panes, self.nvim.current_float)
+                .map(|q| q.id)
+                == Some(id)
+        {
+            return Ok(());
+        }
+        // hidden in another tab page: Neovim goes there, to the float
+        // in it that takes focus
+        let hidden = float_groups::hidden(&self.grids, &l.group);
+        let top = l
+            .group
+            .top_grids()
+            .first()
+            .and_then(|&t| self.grids.win_on(t));
+        let found = match top {
+            Some(w) if hidden => Some(w.win),
+            _ => floating_panes::focusable_in(&self.grids, &l.group),
+        };
+        let Some(win) = found else {
+            return Ok(());
+        };
+        self.nvim.current_float = win;
+        self.nvim.switch_to_float(id, win)?;
+        Ok(())
+    }
+
     /// The user focused one of our panes's terminals: make its window current.
     fn on_provider_focus(&mut self, t: &TerminalId) -> Result<()> {
         let Some(p) = self.panes.by_terminal(t.as_str()) else {
             return Ok(());
         };
         let id = p.id;
-        if let Some(l) = &p.layer {
-            // clicked into a floating pane: into one of its floats, if not there
-            if self.nvim.current_float != 0
-                && floating_panes::layer_of_win(&self.grids, &self.panes, self.nvim.current_float)
-                    .map(|q| q.id)
-                    == Some(id)
-            {
-                return Ok(());
-            }
-            // hidden in another tab page: Neovim goes there, to the float
-            // in it that takes focus
-            let hidden = float_groups::hidden(&self.grids, &l.group);
-            let top = l
-                .group
-                .top_grids()
-                .first()
-                .and_then(|&t| self.grids.win_on(t));
-            let found = match top {
-                Some(w) if hidden => Some(w.win),
-                _ => floating_panes::focusable_in(&self.grids, &l.group),
-            };
-            let Some(win) = found else {
-                return Ok(());
-            };
-            self.nvim.current_float = win;
-            self.nvim.switch_to_float(id, win)?;
-            return Ok(());
+        if p.layer.is_some() {
+            return self.enter_layer(id);
         }
         let Some(win) = p.neovim_window_handle else {
             return Ok(());
@@ -2613,6 +2719,7 @@ impl Daemon {
             panes: &mut self.panes,
             event_loop: &self.event_loop,
             nvim: &mut self.nvim,
+            in_pane: &mut self.float_homes.in_pane,
         }
     }
 
@@ -2634,6 +2741,24 @@ impl Daemon {
                 skip.push(t);
             }
         }
+        // float groups with no float group pane: each in its own pane, and
+        // while the screen shrinks for one, in none until Neovim has redrawn
+        // at that size
+        let homed = float_homes::in_panes(
+            &self.grids,
+            &self.panes,
+            &self.float_homes,
+            self.nvim.entered_floats(),
+            focused,
+        );
+        let shrunk = matches!(self.nvim.shrink, Shrink::Shrunk(_));
+        let redrawing = shrunk
+            && self
+                .grids
+                .get(1)
+                .is_some_and(|g| [g.width, g.height] != self.nvim.editor_size);
+        let mut pane_skip: Vec<u32> = Vec::with_capacity(SKIP_MAX);
+        let mut own: Vec<u32> = Vec::new();
         // the screen's tabline: grid 1's top row
         let tabline_dirty = self
             .grids
@@ -2648,6 +2773,18 @@ impl Daemon {
                 continue;
             }
             let id = p.id;
+            pane_skip.clear();
+            pane_skip.extend_from_slice(&skip);
+            own.clear();
+            for (home, g) in &homed {
+                if *home == id && !redrawing {
+                    own.extend_from_slice(g.top_grids());
+                } else {
+                    pane_skip.extend_from_slice(g.top_grids());
+                }
+            }
+            // shrunk, the screen is the current pane
+            let at_screen = shrunk && focused == Some(id);
             // a pane that closes in this loop leaves the panes drawn before it, to its right, on their old columns for this frame: the next draw finds their start moved and redraws the row
             let tabline = self.prepare_tabline(id);
             let p = &self.panes.list[i];
@@ -2676,7 +2813,11 @@ impl Daemon {
                     )
             } else if caught_up && p.layout.is_some() {
                 let (wins, separators) = self.laid_out_view(p);
-                let origin = self.geometry().pane_origin(p);
+                let origin = if at_screen {
+                    [0, 0]
+                } else {
+                    self.geometry().pane_origin(p)
+                };
                 let mut buf = [0u8; 4];
                 let separator = Cell::init(
                     self.split_options.separator.encode_utf8(&mut buf),
@@ -2693,7 +2834,8 @@ impl Daemon {
                     Opts {
                         focused: focused == Some(id),
                         origin,
-                        skip: &skip,
+                        skip: &pane_skip,
+                        own: &own,
                         tabline: tabline.cells.as_deref(),
                         tabline_col: tabline.col,
                         tabline_dirty,
@@ -2702,7 +2844,11 @@ impl Daemon {
                 )
             } else if caught_up {
                 let grid = geometry::grid_of_pane(&self.grids, p);
-                let origin = self.geometry().pane_origin(p);
+                let origin = if at_screen {
+                    [0, 0]
+                } else {
+                    self.geometry().pane_origin(p)
+                };
                 let s: &mut Surface = self.panes.list[i].terminal_surface.as_deref_mut().unwrap();
                 s.view.frame(
                     &mut self.grids,
@@ -2710,7 +2856,8 @@ impl Daemon {
                     Opts {
                         focused: focused == Some(id),
                         origin,
-                        skip: &skip,
+                        skip: &pane_skip,
+                        own: &own,
                         tabline: tabline.cells.as_deref(),
                         tabline_col: tabline.col,
                         tabline_dirty,
@@ -2877,6 +3024,7 @@ impl Daemon {
     fn make_current(&mut self, id: u32) -> Result<()> {
         let win = self.panes.by_id(id).unwrap().neovim_window_handle.unwrap();
         self.nvim.make_current(id, win)?;
+        self.end_shrink()?;
         self.nvim.fit_ui_to(self.panes.by_id(id).unwrap())?;
         Ok(())
     }
@@ -3106,6 +3254,7 @@ mod tests {
     mod choosing;
     mod control;
     mod fallback;
+    mod floats_in_panes;
     mod in_layout;
     mod tab_layouts;
     mod tabs;

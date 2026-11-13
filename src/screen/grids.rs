@@ -157,6 +157,24 @@ impl Grids {
         None
     }
 
+    /// Makes grid `grid` window `win`'s, floating on the screen with its
+    /// top left at `row`, `col`, as `win_float_pos` would: for tests outside
+    /// the crate, such as the golden ones.
+    #[doc(hidden)]
+    pub fn float_on_screen(&mut self, grid: u32, win: i64, row: i32, col: i32) {
+        self.wins.insert(
+            grid,
+            Win {
+                win,
+                kind: WinKind::Float,
+                float: Float {
+                    screen: Some([row, col]),
+                    ..Float::default()
+                },
+            },
+        );
+    }
+
     /// The window on `grid`.
     pub(crate) fn win_on(&self, grid: u32) -> Option<Win> {
         self.wins.get(&grid).copied()
@@ -167,6 +185,19 @@ impl Grids {
     /// from an editor float in `skip` are left out. At most `MAX_FLOATS`: the
     /// top-most ones.
     pub fn floats_over(&self, base: u32, screen: bool, skip: &[u32]) -> Vec<Placed> {
+        self.floats_over_with(base, screen, skip, &[])
+    }
+
+    /// `floats_over`, and the floats of the editor floats in `own` even
+    /// without `screen`: float groups drawn in this pane though it isn't the
+    /// current one (ADR 0010).
+    pub(crate) fn floats_over_with(
+        &self,
+        base: u32,
+        screen: bool,
+        skip: &[u32],
+        own: &[u32],
+    ) -> Vec<Placed> {
         let mut out: Vec<Placed> = Vec::new();
         for (&id, w) in &self.wins {
             if w.kind != WinKind::Float {
@@ -177,7 +208,8 @@ impl Grids {
                 continue;
             }
             let on_screen = p.root == 1 || Some(p.root) == self.msg_grid;
-            if p.root != base && !(screen && on_screen) {
+            let owned = p.root == 1 && p.top != 0 && own.contains(&p.top);
+            if p.root != base && !(screen && on_screen) && !owned {
                 continue;
             }
             out.push(Placed {

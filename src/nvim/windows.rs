@@ -161,6 +161,16 @@ pub(crate) fn panes_show(nvim: &mut Nvim, wins: &[i64]) {
     write_wins(nvim, wins);
 }
 
+/// Runs the buffer-local `VimResized` autocommands of each of floats `wins`
+/// again, with its window current: Neovim's screen grew back to its layout
+/// area's size while another window was current, and pickers such as
+/// Telescope's listen only on their own buffers (ADR 0010). Global ones,
+/// which Neovim ran, aren't. A window that closed is skipped.
+pub(crate) fn resized_again(nvim: &mut Nvim, wins: &[i64]) {
+    nvim.exec_lua(&format!("{NAME}.resized_again(...)"), 1);
+    write_wins(nvim, wins);
+}
+
 fn write_wins(nvim: &mut Nvim, wins: &[i64]) {
     let wr = nvim.writer();
     msgpack::write_array_header(wr, wins.len() as u32);
@@ -4559,5 +4569,46 @@ mod tests {
         h.barrier();
         assert_eq!("1", h.tabpagenr());
         assert_eq!("TabLeave TabEnter", h.fired());
+    }
+
+    #[test]
+    fn a_floats_buffer_local_vimresized_runs_again_with_its_window_current_and_no_global_one() {
+        let Some(mut h) = Harness::start_sized(60, 10) else {
+            return;
+        };
+        let main = h.wins[0];
+        // a picker's input, listening on its own buffer only, as
+        // Telescope's does; and a global listener
+        let float: i64 = h
+            .eval_str(
+                "_G.seen, _G.globals = '', 0\n\
+                 local buf = vim.api.nvim_create_buf(false, true)\n\
+                 vim.api.nvim_create_autocmd('VimResized', { buffer = buf, callback = function()\n\
+                 \x20 _G.seen = _G.seen .. vim.o.columns .. (vim.api.nvim_get_current_buf() == buf and '+' or '-') .. ' '\n\
+                 end })\n\
+                 vim.api.nvim_create_autocmd('VimResized', { callback = function() _G.globals = _G.globals + 1 end })\n\
+                 local win = vim.api.nvim_open_win(buf, true, { relative = 'editor', row = 1, col = 1, width = 50, height = 5 })\n\
+                 return tostring(win)",
+            )
+            .parse()
+            .unwrap();
+        let seen = |h: &mut Harness| h.eval_str("return _G.seen .. '/' .. _G.globals");
+
+        // shrunk while it's current: Neovim runs it
+        h.nvim.ui_try_resize(30, 10).unwrap();
+        assert!(h.until(|x| x.grids.get(1).is_some_and(|g| g.width == 30)));
+        assert_eq!("30+ /1", seen(&mut h));
+
+        // grown back with another window current: Neovim doesn't
+        h.sync(&format!("vim.api.nvim_set_current_win({main})"));
+        h.nvim.ui_try_resize(60, 10).unwrap();
+        resized_again(&mut h.nvim, &[float, main, 99999]);
+        h.nvim.flush().unwrap();
+        // run again, in the float, at the size just asked; the global one isn't
+        assert_eq!("30+ 60+ /2", seen(&mut h));
+        assert_eq!(
+            main.to_string(),
+            h.eval_str("return tostring(vim.api.nvim_get_current_win())")
+        );
     }
 }
