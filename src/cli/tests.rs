@@ -305,13 +305,60 @@ fn provider_types_takes_a_config_file() {
     );
 }
 
+/// `provider check`'s options, failing on anything else.
+fn checked(line: &str) -> ProviderCheck {
+    match parsed(line) {
+        Ok(Command::ProviderCheck(check)) => check,
+        other => panic!("{line}: {other:?}"),
+    }
+}
+
+#[test]
+fn provider_check_takes_its_options_in_any_order() {
+    assert_eq!(checked("provider check"), ProviderCheck::default());
+    let all = checked(
+        "provider check --json --full --no-find --daemon-name work --provider=tmux --config c.lua",
+    );
+    assert_eq!(
+        all,
+        ProviderCheck {
+            config: Some("c.lua".into()),
+            provider: Some("tmux".into()),
+            daemon_name: Some("work".into()),
+            no_find: true,
+            full: true,
+            json: true,
+        }
+    );
+    // "" means no hint, unlike leaving it out
+    assert_eq!(
+        checked("provider check --provider=").provider,
+        Some(OsString::new())
+    );
+    assert_eq!(
+        refused("provider check --json --json"),
+        "--json is given twice"
+    );
+    assert_eq!(refused("provider check --config"), "--config needs a value");
+    assert_eq!(
+        refused("provider check --daemon-name a/b"),
+        "--daemon-name: use 1-32 letters, digits, '.', '_' or '-'"
+    );
+    assert_eq!(
+        refused("provider check x"),
+        "provider check takes [--config FILE] [--provider P] [--daemon-name N] [--no-find] \
+         [--full] [--json]"
+    );
+    assert_eq!(parsed("provider check -h"), Ok(Command::Help));
+}
+
 #[test]
 fn command_words_are_only_the_first_argument() {
     assert_eq!(parsed("attach f"), found(Some("f"), None));
     assert_eq!(parsed("list"), Ok(Command::List { json: false }));
     assert_eq!(
         parsed("provider check"),
-        Ok(Command::NotBuilt("provider check".into()))
+        Ok(Command::ProviderCheck(ProviderCheck::default()))
     );
     assert_eq!(refused("provider"), "provider takes check, show or types");
     assert_eq!(refused("provider x"), "provider takes check, show or types");

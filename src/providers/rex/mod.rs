@@ -50,7 +50,7 @@ use crate::rex::ids;
 use crate::rex::session::{self, Conn, Request, Session, Update};
 
 /// What Rex is asked through the seam.
-const CAPABILITIES: &[Capability] = &[
+pub(crate) const CAPABILITIES: &[Capability] = &[
     Capability::OpenBeside,
     Capability::OpenFloat,
     Capability::OpenTabPage,
@@ -64,6 +64,12 @@ const CAPABILITIES: &[Capability] = &[
     // views come unasked
     Capability::Events,
 ];
+
+/// The Rex API revision capability `cap` needs from the server: the one
+/// this client speaks, for every capability, until one needs a later one.
+pub(crate) fn revision_needed(_cap: Capability) -> i64 {
+    client::API_REVISION
+}
 
 /// A `find` asked of Rex: its block, and the attaching terminal's device.
 struct Finding {

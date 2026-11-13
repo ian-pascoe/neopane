@@ -100,18 +100,12 @@ fn usage_errors_are_one_line_and_exit_2() {
 
 #[test]
 fn commands_built_later_exit_1() {
-    for (args, what) in [
-        (&["provider", "check"][..], "provider check"),
-        (&["--detach"], "--detach"),
-    ] {
-        let out = run(args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert_eq!(
-            text(&out.stderr),
-            format!("{NAME}: {what} isn't built yet\n"),
-            "{args:?}"
-        );
-    }
+    let out = run(&["--detach"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!("{NAME}: --detach isn't built yet\n")
+    );
 }
 
 #[test]

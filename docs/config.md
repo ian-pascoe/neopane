@@ -175,6 +175,133 @@ A `find` that refuses the choosing attach warns too:
 neopane: aerospace: find didn't confirm this terminal (exit 1); no pane provider
 ```
 
+## `provider check`
+
+```text
+neopane provider check [--config FILE] [--provider P] [--daemon-name N] [--no-find] [--full] [--json]
+```
+
+Runs your config as a terminal attaching here would, and reports what it
+chose. It finds the file as the daemon would, and runs it in the same child
+process, with the same checks and the same 3 s, for an attach made from this
+shell: its environment and working directory, stdin's tty (`""` if stdin
+isn't a terminal), its own pid, the daemon name and the hint. Then it runs
+the chosen pane provider's `find` as a self-attach here would: it writes the
+pane title `neopane-<token>` into this terminal, runs `find` with the pane
+id `0-<token>`, and puts the old title back (clearing it in a terminal that
+keeps no title stack). Rex's `find` needs no title. It runs no other
+capability. With stdin not a terminal, it writes no title and runs no
+`find`, and the result is `ok (find not run)`.
+
+- `--config FILE`: the file; by default `$NEOPANE_CONFIG`, then the default
+  places, as [The file](#the-file) says. A file it names that isn't there is
+  an error.
+- `--provider P`: the hint; by default `$NEOPANE_PROVIDER`. `none` skips the
+  file; `""` means no hint.
+- `--daemon-name N`: `attach.daemon`; by default the name a daemon started
+  in this directory gets, with no `-2` suffix.
+- `--no-find`: `find` isn't run.
+- `--full`: shows everything. Without it, a capability's line is cut at 100
+  columns with `…`, and at most 20 of the lines the config printed are
+  shown, then `(N more: --full)`.
+- `--json`: one JSON object, below.
+
+The report's sections:
+
+| Section | Shows |
+|---|---|
+| `config` | the file; `no file: neopane.default chooses`; or `skipped: hint none` |
+| `attach` | its tty (or `no terminal`), pid, working directory, daemon name and hint |
+| `ran` | how long the file took and the lines it printed; or its Lua error, with Lua's traceback where it gives one, the timeout, or why it ended without answering |
+| `chose` | none, `"rex"`, a table, a pair or one side alone, its name and Lua path, and whether `provider()` or `neopane.default` chose |
+| `table`, `terminal`, `layout` | each table in use: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`); `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`) and `reach` (its context variables, with this attach's values) and `find vars`, for a table that gives the layout; `attach timeout`, such as `5 s (default)`, for one that opens terminals |
+| `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
+| `rex` | for `"rex"`: the server's URL, version and API revision, and `missing  <capability> (needs Rex API revision N)` for each capability the server is too old for |
+| `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)`, or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
+| `errors`, `warnings` | every problem, with its path |
+| `result` | `ok`, `none` or `error`, quoting the exact message Neovim would show |
+
+For example, in Ghostty, for the config in
+[Ghostty with AeroSpace](#ghostty-with-aerospace):
+
+```text
+config  /Users/me/.config/neopane/init.lua
+attach  tty /dev/ttys014, pid 4242, cwd /Users/me/src/work, daemon work, no hint
+ran  3.1 ms, 0 lines printed
+chose  a pair, ghostty+aerospace, at provider(), by provider()
+terminal  ghostty at provider().terminal, protocol 1
+  open  sh -c 'exec open -na Ghostty.app --args --title="$NEOPANE_TITLE" --abnormal-command-exit-ru…
+  close  absent: a terminal it opened closes only as its attach ends
+  attach timeout  5 s (default)
+layout  aerospace at provider().layout, protocol 1
+  find  /Users/me/.config/neopane/bin/aerospace-find  (3 s)
+  place_beside  absent: a terminal it opened stays where it opened
+  resize  absent: a terminal keeps the size it opened at
+  focus  aerospace focus --window-id {terminal}  (2 s)
+  focus_direction  aerospace focus --boundaries-action stop {direction}  (2 s)
+  report_layout  absent: each pane is its own layout area
+  events  absent: no live layout
+  live layout  no: each pane is its own layout area
+  reach  every terminal (no context variables)
+  find vars  none
+one-step  none: a pair opens, then places
+find  accepted: id 31337 (exit 0, 412.0 ms, title neopane-k3j9x2qpa8 written, then restored)
+result  ok
+```
+
+It exits 0 for a pane provider, or for none by design (`provider()` returned
+`nil` or `false`, or the hint is `none`), also when `find` wasn't run; 1 for
+an error, or a `find` refusing this terminal; 2 for a usage error. Warnings
+don't change it.
+
+### `--json`
+
+```json
+{"config":{"path":"/Users/me/.config/neopane/init.lua","state":"file"},
+ "attach":{"tty":"/dev/ttys014","pid":4242,"cwd":"/Users/me/src/work","daemon":"work","provider":null},
+ "ran":{"seconds":0.0031,"printed":[],"error":null},
+ "chose":{"kind":"pair","name":"ghostty+aerospace","path":"provider()","how":"provider"},
+ "tables":[{"role":"terminal","name":"ghostty","path":"provider().terminal","protocol":1,
+            "capabilities":{"open":{"state":"present","argv":["sh","-c","…","sh","{attach}"],"timeout":5.0},
+                            "close":{"state":"absent","fallback":"a terminal it opened closes only as its attach ends"}},
+            "settings":{"name":"ghostty","attach_timeout":5.0},"live_layout":null,
+            "context_vars":{},"find_vars":[]},
+           {"role":"layout","name":"aerospace","path":"provider().layout","protocol":1,
+            "capabilities":{"find":{"state":"present","argv":["/Users/me/.config/neopane/bin/aerospace-find"],"timeout":3.0},…},
+            "settings":{"name":"aerospace"},"live_layout":"no","context_vars":{},"find_vars":[]}],
+ "one_step":[],
+ "find":{"ran":true,"title":"neopane-k3j9x2qpa8","exit":0,"seconds":0.412,"id":"31337","verdict":"accepted","why":null},
+ "rex":null,
+ "problems":[],
+ "result":{"state":"ok","message":null}}
+```
+
+- `config.state`: `file`, `none` (no file: `neopane.default` chooses) or
+  `skipped` (the hint is `none`).
+- `attach.provider`: the hint, or null.
+- `ran`: null when the file didn't run; `error` is null when it answered.
+- `chose`: null when the config failed. `kind` is `none`, `builtin`,
+  `table`, `pair`, `terminal` or `layout` (one side alone); `how` is
+  `provider`, `default`, or null for the hint `none`.
+- `tables[]`: `role` is `whole`, `terminal` or `layout`. Each capability its
+  role gives is `present` (with `argv`, and `timeout` in seconds, null for
+  `events`), `ignored` (with `why`) or `absent` (with `fallback`).
+  `live_layout` is `events`, `report_layout`, `no`, or null for a terminal
+  side; `context_vars` maps each variable to this attach's value, or null.
+- `find.verdict`: `accepted`, `refused` or `not run`; `exit` is null for a
+  signal, a timeout, Rex's, or exit 69 (`why`: `unsupported`), which can't
+  be told from a command that can't start.
+- `rex`: null unless `"rex"` was chosen; `missing[]` holds `capability` and
+  `needs`, and `find` is `proven`, `disproved`, `unprovable`, or null when
+  it didn't run.
+- `problems[]`: `level` is `error` or `warning`; `path` is the Lua path, the
+  file's name for its own table, or null.
+- `result.state`: `ok`, `none` or `error`; `message` is what Neovim would
+  show, or null.
+
+As with `list --json`, fields are only ever added, never removed, renamed,
+or changed in type or meaning; a missing one means unknown.
+
 ## Built-in pane providers
 
 `neopane provider show` lists the built-ins. Today that is only `rex`, which
