@@ -4211,6 +4211,81 @@ mod tests {
         );
     }
 
+    /// Neovim resizes a window again before the pane provider's resize of
+    /// its pane for the last size has come back: that pane's fit, landing
+    /// after it, would put the window back at the last size. The newer size
+    /// is told all the same, as the fit lands, for its pane to be resized
+    /// to it in turn.
+    #[test]
+    fn a_size_neovim_gives_before_the_last_sizes_pane_fit_lands_is_told() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        h.lua("vim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 2));
+        let [(top, w, th), (bottom, _, bh)] = window_sizes(&h)[..] else {
+            panic!("{:?}", window_sizes(&h))
+        };
+        for (win, rows) in [(top, th), (bottom, bh)] {
+            adopt(&mut h.nvim, win, 1, 1);
+            // the text and a statusline
+            size(&mut h.nvim, win, w, rows + 1);
+        }
+        h.sync("");
+        let rows = th + bh;
+        // `:resize 5`, told; its pane isn't resized yet
+        h.lua(&format!("vim.api.nvim_win_set_height({top}, 5)"));
+        let want = vec![(top, w, 5), (bottom, w, rows - 5)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+
+        // `:resize 9`, and before Neovim waits for input again, the fit of
+        // the pane resized to the 5 rows
+        h.lua(&format!(
+            "vim.api.nvim_win_set_height({top}, 9)\n{NAME}.size({top}, {w}, 6)"
+        ));
+        let want = vec![(top, w, 9), (bottom, w, rows - 9)];
+        assert!(
+            h.until(|x| window_sizes(x) == want),
+            "{:?}",
+            window_sizes(&h)
+        );
+    }
+
+    /// Neovim resizes a window, then back to the size of its pane, before the
+    /// pane provider resized the pane for the first size: the window being
+    /// as high as its pane doesn't make the second size the pane's.
+    #[test]
+    fn a_window_neovim_resizes_back_to_its_panes_size_before_the_pane_followed_is_told() {
+        let Some(mut h) = Harness::start_sized(120, 30) else {
+            return;
+        };
+        h.lua("vim.cmd('split')");
+        assert!(h.until(|x| window_sizes(x).len() == 2));
+        let [(top, w, th), (bottom, _, bh)] = window_sizes(&h)[..] else {
+            panic!("{:?}", window_sizes(&h))
+        };
+        for (win, rows) in [(top, th), (bottom, bh)] {
+            adopt(&mut h.nvim, win, 1, 1);
+            // the text and a statusline
+            size(&mut h.nvim, win, w, rows + 1);
+        }
+        h.sync("");
+        let rows = th + bh;
+        for cells in [5, th] {
+            h.lua(&format!("vim.api.nvim_win_set_height({top}, {cells})"));
+            let want = vec![(top, w, cells), (bottom, w, rows - cells)];
+            assert!(
+                h.until(|x| window_sizes(x) == want),
+                "{:?}",
+                window_sizes(&h)
+            );
+        }
+    }
+
     /// A window's index, whether its width is set, the cells, and the sizes
     /// told after.
     type ResizeStep<'a> = (usize, bool, u32, &'a [(u32, u32)]);
