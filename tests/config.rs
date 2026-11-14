@@ -404,8 +404,15 @@ fn provider_raises_or_returns_the_wrong_thing() {
         "provider() returned true; expected nil, false, \"rex\" or a table"
     );
     assert_eq!(
+        error_of(&returning("'screen'")),
+        "provider() returned \"screen\"; the only built-in name is \"rex\""
+    );
+    assert_eq!(
         error_of(&returning("'zellij'")),
-        "provider() returned \"zellij\"; the only built-in name is \"rex\""
+        format!(
+            "provider() returned \"zellij\"; the only built-in name is \"rex\" (for zellij's \
+             table, return {NAME}.builtin.zellij())"
+        )
     );
     assert_eq!(
         error_of(&returning("'tmux'")),
@@ -755,15 +762,19 @@ fn strings_are_bytes() {
 fn the_global_and_require_give_the_same_table() {
     let f = Fixture::new(
         "local n = require('{name}') \
+         local function keys(t) \
+           local k = {} for name in pairs(t) do k[#k + 1] = name end \
+           table.sort(k) return table.concat(k, ',') \
+         end \
          print(n == {name}, n.os, n.version, n.config_dir, type(n.builtin), type(n.inside), \
-               next(n.builtin), next(n.inside), next(n.inside, 'tmux')) \
+               keys(n.builtin), keys(n.inside)) \
          return { provider = function() end }",
     );
     let dir = f.dir.display().to_string();
     assert_eq!(
         f.run().printed,
         [format!(
-            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux\ttmux\tnil",
+            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux,zellij\ttmux,zellij",
             std::env::consts::OS
         )]
     );
@@ -1015,24 +1026,40 @@ fn builtin_tmux_takes_no_options() {
 }
 
 #[test]
-fn provider_show_prints_what_builtin_returns() {
-    let shown = std::process::Command::new(exe())
-        .args(["provider", "show", "tmux"])
-        .output()
-        .unwrap();
-    assert!(shown.status.success());
-    let f = Fixture::new(
-        "local function same(a, b) \
-           if type(a) ~= 'table' or type(b) ~= 'table' then return a == b end \
-           for k, v in pairs(a) do if not same(v, b[k]) then return false end end \
-           for k in pairs(b) do if a[k] == nil then return false end end \
-           return true \
-         end \
-         print(same(dofile({name}.config_dir .. '/shown.lua'), {name}.builtin.tmux())) \
-         return {}",
+fn builtin_zellij_is_the_zellij_table_and_passes_the_checker() {
+    let (choice, warnings) = chosen(&returning("{name}.builtin.zellij()"));
+    assert_eq!(warnings, Vec::<String>::new());
+    let provider = whole(choice);
+    assert_eq!(provider, config::BuiltinTable::Zellij.provider());
+    assert_eq!(
+        provider.context_vars,
+        ["ZELLIJ_SESSION_NAME", "ZELLIJ_SOCKET_DIR"]
     );
-    std::fs::write(f.dir.join("shown.lua"), &shown.stdout).unwrap();
-    assert_eq!(f.run().printed, ["true"]);
+    assert_eq!(provider.find_vars, ["ZELLIJ_PANE_ID"]);
+}
+
+#[test]
+fn provider_show_prints_what_builtin_returns() {
+    for table in config::BuiltinTable::ALL {
+        let name = table.name();
+        let shown = std::process::Command::new(exe())
+            .args(["provider", "show", name])
+            .output()
+            .unwrap();
+        assert!(shown.status.success());
+        let source = "local function same(a, b) \
+               if type(a) ~= 'table' or type(b) ~= 'table' then return a == b end \
+               for k, v in pairs(a) do if not same(v, b[k]) then return false end end \
+               for k in pairs(b) do if a[k] == nil then return false end end \
+               return true \
+             end \
+             print(same(dofile({name}.config_dir .. '/shown.lua'), {name}.builtin.TABLE())) \
+             return {}"
+            .replace("TABLE", name);
+        let f = Fixture::new(&source);
+        std::fs::write(f.dir.join("shown.lua"), &shown.stdout).unwrap();
+        assert_eq!(f.run().printed, ["true"], "{name}");
+    }
 }
 
 // <name>.default (#93 decision 27, SPI-1135): the same as the daemon's
@@ -1041,7 +1068,7 @@ fn provider_show_prints_what_builtin_returns() {
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
     // set means present, even empty, as the daemon reads its own
-    let envs: [&[(&str, &str)]; 9] = [
+    let envs: [&[(&str, &str)]; 11] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
@@ -1060,12 +1087,29 @@ fn default_agrees_with_the_daemons() {
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
+        &[("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "3")],
+        &[
+            ("ZELLIJ", "0"),
+            ("ZELLIJ_PANE_ID", "3"),
+            ("REX_SERVER", "ws://x"),
+            ("REX_SESSION", "s"),
+        ],
     ];
-    // the last names both: with no tty, tmux's `inside` can't prove it
-    let want = [false, true, false, false, true, true, true, false, true];
+    // the last of each names both: with no tty, `inside` can't prove it
+    let want = [
+        false, true, false, false, true, true, true, false, true, false, true,
+    ];
     let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
-    let wants_tmux = [false, false, false, false, false, false, false, true, false];
-    for ((env, want), wants_tmux) in envs.into_iter().zip(want).zip(wants_tmux) {
+    let wants_tmux = [
+        false, false, false, false, false, false, false, true, false, false, false,
+    ];
+    let zellij = Choice::Whole(config::BuiltinTable::Zellij.provider());
+    let wants_zellij = [
+        false, false, false, false, false, false, false, false, false, true, false,
+    ];
+    for (((env, want), wants_tmux), wants_zellij) in
+        envs.into_iter().zip(want).zip(wants_tmux).zip(wants_zellij)
+    {
         let mut f = Fixture::new(source);
         f.attach.env = env
             .iter()
@@ -1076,6 +1120,7 @@ fn default_agrees_with_the_daemons() {
         let rex = Choice::Builtin(Builtin::Rex);
         assert_eq!(daemons == rex, want, "{env:?}");
         assert_eq!(daemons == tmux, wants_tmux, "{env:?}");
+        assert_eq!(daemons == zellij, wants_zellij, "{env:?}");
     }
 }
 
@@ -1098,6 +1143,13 @@ fn inside_never_raises() {
              print({name}.inside.tmux({ env = 2, tty = {} })) return {}"
         ),
         ["false\tTMUX isn't set"; 3]
+    );
+    assert_eq!(
+        printed(
+            "print({name}.inside.zellij()) print({name}.inside.zellij(1)) \
+             print({name}.inside.zellij({ env = 2, tty = {}, pid = 'x' })) return {}"
+        ),
+        ["false\tZELLIJ_PANE_ID isn't set"; 3]
     );
 }
 

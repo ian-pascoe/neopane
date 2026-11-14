@@ -17,6 +17,7 @@ use crate::daemon::provider::{Answer, Outcome};
 use crate::name::NAME;
 use crate::providers::rex::RexProvider;
 use crate::providers::rex::find::BLOCK_VAR;
+use crate::providers::tty;
 use crate::rex::client::{self, API_REVISION, Client, Message, ResponseResult};
 use crate::util::wait_readable;
 
@@ -96,7 +97,7 @@ pub(super) fn probe(attach: &Attach, finding: Option<&Tty>) -> (RexReport, Optio
                 took,
                 block,
                 verdict: found.verdict,
-                theirs: found.theirs.and_then(device_path),
+                theirs: found.theirs.and_then(tty::path_of_device),
             };
             (report, Some(found))
         }
@@ -161,37 +162,6 @@ fn ask_version(client: &mut Client, report: &mut RexReport, due: Instant) -> Res
             return Err(format!("no answer within {} s", TIME.as_secs()));
         }
     }
-}
-
-/// The path of terminal device `dev`, as `/dev/ttys009`: on macOS, the
-/// name the system gives it.
-#[cfg(target_os = "macos")]
-fn device_path(dev: u64) -> Option<String> {
-    // SAFETY: devname returns a static buffer or null.
-    let name = unsafe { libc::devname(dev as libc::dev_t, libc::S_IFCHR) };
-    if name.is_null() {
-        return None;
-    }
-    // SAFETY: non-null, NUL-terminated.
-    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
-    (!name.is_empty() && !name.contains('?')).then(|| format!("/dev/{name}"))
-}
-
-/// The path of terminal device `dev`, as `/dev/pts/3`: on Linux, only a
-/// pseudo-terminal's (majors 136 to 143) is named.
-#[cfg(target_os = "linux")]
-fn device_path(dev: u64) -> Option<String> {
-    let dev = dev as libc::dev_t;
-    let (major, minor) = (libc::major(dev), libc::minor(dev));
-    (136..=143)
-        .contains(&major)
-        .then(|| format!("/dev/pts/{}", (major - 136) * 256 + minor))
-}
-
-/// Elsewhere none is named.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn device_path(_dev: u64) -> Option<String> {
-    None
 }
 
 #[cfg(test)]

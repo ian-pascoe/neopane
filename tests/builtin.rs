@@ -37,7 +37,8 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
     for words in [
         &[][..],
         &["tmux"],
-        &["zellij", "find"],
+        &["nope", "find"],
+        &["zellij", "place_beside"],
         &["tmux", "open"],
         &["tmux", "nope"],
         &["tmux", "find", "extra"],
@@ -159,6 +160,32 @@ fn find_refuses_a_tmux_older_than_3_2_naming_its_version() {
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
     assert!(err.contains("tmux 3.1c is too old"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zellijs_find_refuses_a_zellij_older_than_0_46_0_naming_its_version() {
+    let dir = scratch("zellij-old");
+    let fake = dir.join("zellij");
+    std::fs::write(&fake, "#!/bin/sh\necho 'zellij 0.45.1'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(exe())
+        .args(["provider", "builtin", "zellij", "find"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "find")
+        .env(var("ENV_ZELLIJ_PANE_ID"), "3")
+        .env(var("PID"), "1")
+        .env(var("TTY"), "/dev/null")
+        .env("ZELLIJ_SESSION_NAME", "work")
+        .env("PATH", &dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = text(&out.stderr);
+    assert_eq!(err, "zellij find: zellij 0.45.1 is older than 0.46.0\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

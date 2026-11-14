@@ -117,6 +117,9 @@ pub fn in_pty_typed(
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("TERM_PROGRAM")
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_PANE_ID")
+        .env_remove("ZELLIJ_SESSION_NAME")
         .envs(env.iter().copied())
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
@@ -290,6 +293,9 @@ impl TmuxServer {
             .env_remove("REX_SERVER")
             .env_remove("REX_SESSION")
             .env_remove("REX_BLOCK")
+            .env_remove("ZELLIJ")
+            .env_remove("ZELLIJ_PANE_ID")
+            .env_remove("ZELLIJ_SESSION_NAME")
             .envs(env.iter().copied());
         let status = cmd.status().unwrap();
         assert!(status.success(), "tmux didn't start");
@@ -415,6 +421,223 @@ impl Drop for TmuxServer {
         if let Some(pid) = self.pid.filter(|_| !killed) {
             // SAFETY: a plain syscall, to the server this test started.
             unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// The oldest zellij the built-in works with.
+const ZELLIJ_OLDEST: (u32, u32, u32) = (0, 46, 0);
+
+/// Whether a zellij 0.46.0 or newer runs; with `CI` set, it must.
+pub fn have_zellij() -> bool {
+    let version = Command::new("zellij")
+        .arg("--version")
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| {
+            let shown = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let mut parts = shown.strip_prefix("zellij ")?.split(['.', '-']);
+            let mut next = || parts.next()?.parse::<u32>().ok();
+            Some((next()?, next()?, next()?))
+        });
+    let ran = version.is_some_and(|v| v >= ZELLIJ_OLDEST);
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "zellij 0.46.0 or newer isn't installed: {version:?}"
+    );
+    ran
+}
+
+/// A private zellij session, started in the background with no client:
+/// its own socket directory, `HOME` and config directory, so neither the
+/// user's sessions nor their config or cache are touched, nor a first-run
+/// float shown. Killed, its files removed, as it drops.
+pub struct ZellijSession {
+    pub name: String,
+    /// `HOME`, `ZELLIJ_SOCKET_DIR` and `ZELLIJ_CONFIG_DIR`, and the rest
+    /// every zellij call gets.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// Under `/tmp`: a socket's path must stay short.
+    dir: PathBuf,
+}
+
+impl ZellijSession {
+    /// The private directories for session `name`, with nothing started.
+    pub fn new(name: &str) -> ZellijSession {
+        // a socket's path is at most 104 bytes on macOS: $TMPDIR is long
+        let dir = PathBuf::from(format!("/tmp/{NAME}-zj-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, sockets, config) = (dir.join("home"), dir.join("s"), dir.join("config"));
+        for d in [&home, &sockets, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            config.join("config.kdl"),
+            "show_startup_tips false\nshow_release_notes false\n",
+        )
+        .unwrap();
+        // the setup screen, a float, dismissed for good, as its "Don't Show
+        // Again" leaves it, where macOS and Linux keep zellij's data
+        let dismissed = r#"{"flags":["WizardDismissed","SetupNeverShow"]}"#;
+        for data in [
+            home.join("Library/Application Support/org.Zellij-Contributors.Zellij"),
+            home.join(".local/share/zellij"),
+        ] {
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("desktop_integration.json"), dismissed).unwrap();
+        }
+        let env = vec![
+            ("HOME".into(), home.clone().into()),
+            ("ZELLIJ_SOCKET_DIR".into(), sockets.into()),
+            ("ZELLIJ_CONFIG_DIR".into(), config.into()),
+            ("XDG_DATA_HOME".into(), home.join(".local/share").into()),
+            ("XDG_CACHE_HOME".into(), home.join(".cache").into()),
+            ("XDG_CONFIG_HOME".into(), home.join(".config").into()),
+            ("SHELL".into(), "/bin/sh".into()),
+            ("TERM".into(), "xterm-256color".into()),
+        ];
+        ZellijSession {
+            name: name.into(),
+            env,
+            dir,
+        }
+    }
+
+    /// `zellij` with this session's private environment, and without the
+    /// user's `ZELLIJ*`, `TMUX*` or `<NAME>*` variables, or Rex's.
+    pub fn command(&self) -> Command {
+        let upper = NAME.to_ascii_uppercase();
+        let mut cmd = Command::new("zellij");
+        cmd.env_remove("ZELLIJ")
+            .env_remove("ZELLIJ_PANE_ID")
+            .env_remove("ZELLIJ_SESSION_NAME")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("TERM_PROGRAM")
+            .env_remove(&upper)
+            .env_remove(format!("{upper}_CONFIG"))
+            .env_remove(format!("{upper}_PROVIDER"))
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    /// Starts it in the background, its first pane running a shell.
+    pub fn start(&self) {
+        let out = self
+            .command()
+            .args(["attach", "--create-background", &self.name])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "zellij didn't start: {}",
+            text(&out.stderr)
+        );
+    }
+
+    /// Waits until it lists a terminal pane with room: a background
+    /// session's first pane has none at first.
+    pub fn ready(&self) {
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let out = self
+                .command()
+                .args(["--session", &self.name, "action", "list-panes", "--json"])
+                .output()
+                .unwrap();
+            let panes: Vec<serde_json::Value> =
+                serde_json::from_slice(&out.stdout).unwrap_or_default();
+            let roomy = |p: &serde_json::Value| {
+                p["is_plugin"] == false && p["pane_columns"].as_u64().is_some_and(|c| c > 0)
+            };
+            if panes.iter().any(roomy) {
+                return;
+            }
+            assert!(std::time::Instant::now() < due, "zellij never got ready");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Opens a pane running `command` with `env` set, once it is ready,
+    /// where zellij finds room: its id, `terminal_N`. A pane's environment
+    /// is the server's, not the caller's: `env` sets the rest. On Linux, a
+    /// pane's command may start before its terminal has a size: it waits
+    /// for one, up to 5 s.
+    pub fn open(&self, env: &[(&str, &std::ffi::OsStr)], command: &[&str]) -> String {
+        self.ready();
+        let set: Vec<String> = env
+            .iter()
+            .map(|(k, v)| format!("{k}={}", v.to_str().unwrap()))
+            .collect();
+        let sized = "i=0; while [ \"$(stty size 2>/dev/null)\" = '0 0' ] && [ $i -lt 100 ]; do \
+                     sleep 0.05; i=$((i + 1)); done; exec \"$@\"";
+        let mut args = vec!["new-pane", "--", "sh", "-c", sized, "sh", "env"];
+        args.extend(set.iter().map(String::as_str));
+        args.extend(command);
+        let id = self.run(&args);
+        assert!(id.starts_with("terminal_"), "new-pane printed {id:?}");
+        id
+    }
+
+    /// What `zellij --session NAME action args…` prints; panics if it
+    /// fails.
+    pub fn run(&self, args: &[&str]) -> String {
+        let out = self
+            .command()
+            .args(["--session", &self.name, "action"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "zellij action {args:?}: {}",
+            text(&out.stderr)
+        );
+        text(&out.stdout).trim().to_string()
+    }
+
+    /// Its panes, as `list-panes --json` lists them.
+    pub fn panes(&self) -> Vec<serde_json::Value> {
+        serde_json::from_str(&self.run(&["list-panes", "--json"])).unwrap()
+    }
+
+    /// Its terminal panes, as `terminal_N`.
+    pub fn terminals(&self) -> Vec<String> {
+        self.panes()
+            .iter()
+            .filter(|p| p["is_plugin"] == false)
+            .map(|p| format!("terminal_{}", p["id"]))
+            .collect()
+    }
+}
+
+impl Drop for ZellijSession {
+    fn drop(&mut self) {
+        let _ = self
+            .command()
+            .args(["kill-session", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // the server ends after it answers, its socket last, and may still
+        // write its session index: gone once its directory stays gone
+        let sockets = self.dir.join("s/contract_version_1");
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let live = || std::fs::read_dir(&sockets).is_ok_and(|mut d| d.next().is_some());
+        while live() && std::time::Instant::now() < due {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        while std::time::Instant::now() < due {
+            let _ = std::fs::remove_dir_all(&self.dir);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if !self.dir.exists() {
+                break;
+            }
         }
     }
 }

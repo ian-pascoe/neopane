@@ -16,9 +16,9 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-use super::tmux;
+use super::{tmux, zellij};
 use crate::config::{Attach, BuiltinTable, Capability, Proof};
 use crate::name::{NAME, upper};
 
@@ -67,6 +67,7 @@ fn run(words: &[OsString], given: &Given) -> u8 {
     }
     match table {
         BuiltinTable::Tmux => tmux::run(cap, given),
+        BuiltinTable::Zellij => zellij::run(cap, given),
     }
 }
 
@@ -77,6 +78,7 @@ fn run(words: &[OsString], given: &Given) -> u8 {
 pub(crate) fn inside(table: BuiltinTable, attach: &Attach) -> Proof {
     match table {
         BuiltinTable::Tmux => tmux::inside(attach),
+        BuiltinTable::Zellij => zellij::inside(attach),
     }
 }
 
@@ -110,6 +112,56 @@ impl Given {
     pub(crate) fn env(&self, name: &str) -> Option<Vec<u8>> {
         (self.env)(name)
     }
+
+    /// The attach command's words, from `ATTACH`, or why there are none.
+    pub(crate) fn attach_words(&self) -> Result<Vec<OsString>, String> {
+        let attach = self.var("attach").unwrap_or_default();
+        let words = unquoted(&attach).ok_or("ATTACH isn't as the daemon writes it")?;
+        if words.is_empty() {
+            return Err("ATTACH is empty".into());
+        }
+        Ok(words.into_iter().map(OsString::from_vec).collect())
+    }
+}
+
+/// The words of `line`, as `<NAME>_ATTACH` has them: each bare, or in
+/// single quotes with `'\''` for a `'`, separated by one space. None if it
+/// isn't that.
+fn unquoted(line: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut words = Vec::new();
+    let mut word = Vec::new();
+    let mut started = false;
+    let mut rest = line;
+    while let Some((&b, after)) = rest.split_first() {
+        rest = after;
+        match b {
+            b' ' => {
+                if !started {
+                    return None;
+                }
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+            b'\'' => {
+                started = true;
+                let end = rest.iter().position(|&c| c == b'\'')?;
+                word.extend_from_slice(&rest[..end]);
+                rest = &rest[end + 1..];
+                if let Some(after) = rest.strip_prefix(b"\\'") {
+                    word.push(b'\'');
+                    rest = after;
+                }
+            }
+            b => {
+                started = true;
+                word.push(b);
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
 }
 
 /// Prints `line` and a newline on stdout: a terminal id. A reader gone
@@ -123,5 +175,24 @@ pub(crate) fn print_line(line: &[u8]) -> u8 {
     match wrote {
         Ok(()) => DONE,
         Err(_) => FAILED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attach::attach_line;
+
+    #[test]
+    fn the_attach_line_reads_back_as_its_words() {
+        let words: Vec<OsString> = [&b"/a b/x"[..], b"attach", b"it's", b"", b"\xff", b"x'"]
+            .iter()
+            .map(|w| OsString::from_vec(w.to_vec()))
+            .collect();
+        let line = attach_line(&words).into_vec();
+        let back: Vec<Vec<u8>> = words.into_iter().map(OsString::into_vec).collect();
+        assert_eq!(unquoted(&line), Some(back));
+        assert_eq!(unquoted(b"a  b"), None);
+        assert_eq!(unquoted(b"'open"), None);
     }
 }

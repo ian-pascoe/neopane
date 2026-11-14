@@ -144,8 +144,8 @@ pub(crate) fn by_proofs(
     }
     match defaulted.choice() {
         Choice::None if defaulted.named.is_empty() => Chosen::None {
-            why: "neither tmux's variables (TERM_PROGRAM=tmux, TMUX) nor Rex's (REX_SERVER, \
-                  REX_SESSION) are set"
+            why: "none of tmux's variables (TERM_PROGRAM=tmux, TMUX), zellij's (ZELLIJ, \
+                  ZELLIJ_PANE_ID) or Rex's (REX_SERVER, REX_SESSION) are set"
                 .into(),
         },
         Choice::None => Chosen::None {

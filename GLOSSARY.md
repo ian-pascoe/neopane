@@ -199,7 +199,7 @@ What chooses the pane provider with no config, and what `<name>.default` returns
 _Avoid_: default provider, fallback
 
 **Inside proof**:
-A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, asking the multiplexer within 0.5 s, and why. It accepts exactly what that built-in's `find` accepts, and the built-in default asks it where variables name several built-ins.
+A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's does, or the process table alone, as zellij's does. That built-in's `find` runs it first, and the built-in default asks it where variables name several built-ins.
 _Avoid_: detection, nesting check
 
 **Built-in command**:
@@ -281,3 +281,15 @@ _Avoid_: floating pane (on its own), layer (Rex's API word)
 **Rex session**:
 What `REX_SESSION` names: the Rex tabs one Rex server keeps for a session, and the attach context of Rex's pane provider. A terminal in another Rex session is out of its reach.
 _Avoid_: session (on its own)
+
+### zellij's pane provider
+
+Terms used only by the built-in `zellij` pane provider (`src/providers/zellij/`); the core never uses them.
+
+**Zellij session**:
+What `ZELLIJ_SESSION_NAME` names: the zellij tabs one zellij server keeps, and the attach context of zellij's pane provider, which reaches it through the choosing attach's `ZELLIJ_SOCKET_DIR` and `HOME`. A terminal in another zellij session is out of its reach. Within zellij's own code and docs, "session" alone means this one.
+_Avoid_: session (on its own, outside zellij's own code and docs), server (a zellij server keeps one session, and it is the session that is named)
+
+**Zellij tab**:
+A tab of a zellij session: the space its tiled panes share, bars excluded, is a layout area, with zellij's floating panes over it. Within zellij's own code and docs, "tab" alone means this.
+_Avoid_: tab (on its own, outside zellij's own code and docs), tab page (that is Neovim's)

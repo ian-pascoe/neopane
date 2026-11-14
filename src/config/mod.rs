@@ -92,7 +92,8 @@ impl Defaulted {
 
 /// The built-ins an environment names, from its variables only, the
 /// multiplexers in proving order, then Rex: tmux when `TERM_PROGRAM` is
-/// `tmux` and `TMUX` is set and not empty, Rex when `REX_SERVER` and
+/// `tmux` and `TMUX` is set and not empty, zellij when `ZELLIJ` is set and
+/// `ZELLIJ_PANE_ID` set and not empty, Rex when `REX_SERVER` and
 /// `REX_SESSION` are both set, even if empty. A multiplexer's panes
 /// inherit whatever started its server, so several may be named.
 pub fn named(var: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<DefaultName> {
@@ -100,6 +101,9 @@ pub fn named(var: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<DefaultName> {
     if var("TERM_PROGRAM").as_deref() == Some(b"tmux") && var("TMUX").is_some_and(|t| !t.is_empty())
     {
         named.push(DefaultName::Table(BuiltinTable::Tmux));
+    }
+    if var("ZELLIJ").is_some() && var("ZELLIJ_PANE_ID").is_some_and(|p| !p.is_empty()) {
+        named.push(DefaultName::Table(BuiltinTable::Zellij));
     }
     if var("REX_SERVER").is_some() && var("REX_SESSION").is_some() {
         named.push(DefaultName::Rex);
@@ -209,6 +213,7 @@ mod default_tests {
     use super::*;
 
     const TMUX: DefaultName = DefaultName::Table(BuiltinTable::Tmux);
+    const ZELLIJ: DefaultName = DefaultName::Table(BuiltinTable::Zellij);
 
     fn var<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<Vec<u8>> + 'a {
         move |name| {
@@ -220,6 +225,7 @@ mod default_tests {
 
     const IN_TMUX: [(&str, &str); 2] = [("TERM_PROGRAM", "tmux"), ("TMUX", "/tmp/t,1,0")];
     const IN_REX: [(&str, &str); 2] = [("REX_SERVER", "unix:///s"), ("REX_SESSION", "session:s")];
+    const IN_ZELLIJ: [(&str, &str); 2] = [("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "3")];
 
     fn proof(ok: bool, why: &str) -> Proof {
         Proof {
@@ -255,6 +261,39 @@ mod default_tests {
             []
         );
         assert_eq!(named(var(&[("TERM_PROGRAM", "tmux"), ("TMUX", "")])), []);
+    }
+
+    #[test]
+    fn the_environment_names_zellij_after_tmux_and_before_rex() {
+        assert_eq!(named(var(&IN_ZELLIJ)), [ZELLIJ]);
+        assert_eq!(
+            named(var(&[IN_REX, IN_ZELLIJ, IN_TMUX].concat())),
+            [TMUX, ZELLIJ, DefaultName::Rex]
+        );
+        // ZELLIJ alone, or an empty pane id, names no zellij
+        assert_eq!(named(var(&IN_ZELLIJ[..1])), []);
+        assert_eq!(named(var(&IN_ZELLIJ[1..])), []);
+        assert_eq!(named(var(&[("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "")])), []);
+    }
+
+    #[test]
+    fn zellij_named_alone_is_chosen_and_after_tmux_is_proved_last() {
+        let d = default_of(var(&IN_ZELLIJ), never);
+        assert_eq!(d.chose, Some(ZELLIJ));
+        // zellij started from a tmux shell: tmux's variables leak into it
+        let both = [IN_TMUX, IN_ZELLIJ].concat();
+        let mut asked = Vec::new();
+        let d = default_of(var(&both), |t| {
+            asked.push(t);
+            proof(t == BuiltinTable::Zellij, "")
+        });
+        assert_eq!(asked, [BuiltinTable::Tmux, BuiltinTable::Zellij]);
+        assert_eq!(d.chose, Some(ZELLIJ));
+        // neither proving, Rex if named, else none
+        let d = default_of(var(&[IN_ZELLIJ, IN_REX].concat()), |_| proof(false, ""));
+        assert_eq!(d.chose, Some(DefaultName::Rex));
+        let d = default_of(var(&both), |_| proof(false, ""));
+        assert_eq!(d.chose, None);
     }
 
     #[test]
