@@ -37,6 +37,10 @@ jobs:
         run: |
           scripts/install-zellij.sh "$HOME/zellij"
           echo "$HOME/zellij" >> "$GITHUB_PATH"
+      - name: Install herdr
+        run: |
+          scripts/install-herdr.sh "$HOME/herdr"
+          echo "$HOME/herdr" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -75,6 +79,10 @@ jobs:
         run: |
           scripts/install-zellij.sh "$HOME/zellij"
           echo "$HOME/zellij" >> "$GITHUB_PATH"
+      - name: Install herdr
+        run: |
+          scripts/install-herdr.sh "$HOME/herdr"
+          echo "$HOME/herdr" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -93,5 +101,9 @@ jobs:
         run: |
           scripts/install-zellij.sh "$HOME/zellij"
           echo "$HOME/zellij" >> "$GITHUB_PATH"
+      - name: Install herdr
+        run: |
+          scripts/install-herdr.sh "$HOME/herdr"
+          echo "$HOME/herdr" >> "$GITHUB_PATH"
       - run: cargo check --all-targets
       - run: cargo test

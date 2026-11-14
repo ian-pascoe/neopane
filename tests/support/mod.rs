@@ -117,6 +117,9 @@ pub fn in_pty_typed(
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("TERM_PROGRAM")
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
         .env_remove("ZELLIJ")
         .env_remove("ZELLIJ_PANE_ID")
         .env_remove("ZELLIJ_SESSION_NAME")
@@ -639,5 +642,235 @@ impl Drop for ZellijSession {
                 break;
             }
         }
+    }
+}
+
+/// Whether `herdr` runs; with `CI` set, it must.
+pub fn have_herdr() -> bool {
+    let ran = Command::new("herdr")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "herdr isn't installed"
+    );
+    ran
+}
+
+/// A private `herdr server`, its home, config and state under `dir` and
+/// its API socket `dir/h.sock`, started without the user's herdr, tmux or
+/// Rex variables, or any of `<name>`'s but those in `env`, which its panes
+/// get. Its config turns off the first-run screen. Stopped as it drops.
+pub struct HerdrServer {
+    pub socket: PathBuf,
+    dir: PathBuf,
+    child: std::process::Child,
+}
+
+impl HerdrServer {
+    pub fn start(dir: &Path, env: &[(&str, &std::ffi::OsStr)]) -> HerdrServer {
+        let config = dir.join("home/.config/herdr");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.toml"), "onboarding = false\n").unwrap();
+        let socket = dir.join("h.sock");
+        let mut cmd = Command::new("herdr");
+        cmd.arg("server");
+        HerdrServer::isolate(&mut cmd, dir);
+        let upper = NAME.to_ascii_uppercase();
+        let log = File::create(dir.join("herdr.log")).unwrap();
+        let child = cmd
+            .env_remove(&upper)
+            .env_remove(format!("{upper}_CONFIG"))
+            .env_remove(format!("{upper}_PROVIDER"))
+            .env_remove("REX_SERVER")
+            .env_remove("REX_SESSION")
+            .env_remove("REX_BLOCK")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("SHELL", "/bin/sh")
+            .envs(env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let server = HerdrServer {
+            socket,
+            dir: dir.to_path_buf(),
+            child,
+        };
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while server.try_call("ping", serde_json::json!({})).is_err() {
+            assert!(
+                std::time::Instant::now() < due,
+                "herdr server never answered: {}",
+                std::fs::read_to_string(dir.join("herdr.log")).unwrap_or_default()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        server
+    }
+
+    /// Points `cmd` at a server under `dir`, and at no other herdr.
+    fn isolate(cmd: &mut Command, dir: &Path) {
+        cmd.env("HOME", dir.join("home"))
+            .env("XDG_CONFIG_HOME", dir.join("home/.config"))
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("HERDR_SOCKET_PATH", dir.join("h.sock"))
+            .env_remove("HERDR_ENV")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_TAB_ID")
+            .env_remove("HERDR_WORKSPACE_ID");
+    }
+
+    /// The `result` of request `method` with `params`, or the reply that
+    /// has none.
+    pub fn try_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+        let mut conn =
+            std::os::unix::net::UnixStream::connect(&self.socket).map_err(|e| e.to_string())?;
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let request = serde_json::json!({ "id": "t", "method": method, "params": params });
+        conn.write_all(format!("{request}\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).map_err(|e| e.to_string())?;
+        let v: serde_json::Value =
+            serde_json::from_str(&reply).map_err(|e| format!("{e}: {reply}"))?;
+        v.get("result").cloned().ok_or(reply)
+    }
+
+    /// [`try_call`](Self::try_call)'s result; panics without one.
+    pub fn call(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.try_call(method, params)
+            .unwrap_or_else(|e| panic!("herdr {method}: {e}"))
+    }
+
+    /// A user's client, `herdr`, in a pty of its own, `cols` x `rows`:
+    /// what it draws is read and dropped. Killed as it drops.
+    pub fn attach(&self, cols: u16, rows: u16) -> HerdrClient {
+        let (mut master, mut slave) = (-1, -1);
+        let mut size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: valid out-pointers; no name or termios.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut size,
+            )
+        };
+        assert_eq!(0, rc);
+        // SAFETY: openpty made both, and they are ours alone.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let mut cmd = Command::new("herdr");
+        HerdrServer::isolate(&mut cmd, &self.dir);
+        cmd.env("TERM", "xterm-256color")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut master = File::from(master);
+            let mut buf = [0u8; 4096];
+            while let Ok(1..) = master.read(&mut buf) {}
+        });
+        HerdrClient { child }
+    }
+
+    /// The rows and columns of pane `pane`'s pty, as its process's
+    /// terminal has them; None if it can't be read.
+    pub fn pty_size(&self, pane: &str) -> Option<(u16, u16)> {
+        let info = self
+            .try_call("pane.process_info", serde_json::json!({ "pane_id": pane }))
+            .ok()?;
+        let pid = info["process_info"]["shell_pid"].as_u64()?;
+        let ps = Command::new("ps")
+            .args(["-o", "tty=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let tty = text(&ps.stdout).trim().to_string();
+        if tty.is_empty() || tty.starts_with('?') {
+            return None;
+        }
+        let path = std::ffi::CString::new(format!("/dev/{tty}")).ok()?;
+        // SAFETY: a NUL-terminated path; the fd is ours, closed below.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_NOCTTY | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: fd is ours from here.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: TIOCGWINSZ fills a winsize.
+        let r = unsafe {
+            libc::ioctl(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                libc::TIOCGWINSZ,
+                &mut size,
+            )
+        };
+        (r == 0).then_some((size.ws_row, size.ws_col))
+    }
+}
+
+/// A user's `herdr` client in a pty, from [`HerdrServer::attach`].
+pub struct HerdrClient {
+    child: std::process::Child,
+}
+
+impl HerdrClient {
+    /// Whether it still runs.
+    pub fn alive(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_none()
+    }
+}
+
+impl Drop for HerdrClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for HerdrServer {
+    fn drop(&mut self) {
+        let _ = self.try_call("server.stop", serde_json::json!({}));
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < due {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
