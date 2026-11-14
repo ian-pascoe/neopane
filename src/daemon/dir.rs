@@ -786,7 +786,17 @@ mod tests {
         let root = scratch.0.join("not").join("there");
         let base = base_dir(&root, uid()).unwrap().0;
         assert_eq!(root.join(format!("{NAME}-{}", uid())), base);
-        assert!(fs::symlink_metadata(&base).unwrap().is_dir());
+        for made in [&scratch.0.join("not"), &root, &base] {
+            let meta = fs::symlink_metadata(made).unwrap();
+            assert!(meta.is_dir(), "{}", made.display());
+            assert_eq!(0o700, meta.mode() & 0o7777, "{}", made.display());
+        }
+
+        // a file where the root would be is refused, naming the root
+        let file = scratch.0.join("file");
+        fs::write(&file, "").unwrap();
+        let err = base_dir(&file, uid()).unwrap_err();
+        assert!(matches!(&err, Error::Io(p, _) if *p == file), "{err}");
     }
 
     #[test]
