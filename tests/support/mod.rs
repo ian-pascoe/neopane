@@ -804,13 +804,14 @@ impl HerdrServer {
             });
         }
         let child = cmd.spawn().unwrap();
+        let keys = File::from(master.try_clone().unwrap());
         std::thread::spawn(move || {
             use std::io::Read;
             let mut master = File::from(master);
             let mut buf = [0u8; 4096];
             while let Ok(1..) = master.read(&mut buf) {}
         });
-        HerdrClient { child }
+        HerdrClient { child, keys }
     }
 
     /// The rows and columns of pane `pane`'s pty, as its process's
@@ -857,6 +858,8 @@ impl HerdrServer {
 /// A user's `herdr` client in a pty, from [`HerdrServer::attach`].
 pub struct HerdrClient {
     child: std::process::Child,
+    /// The pty's master: what's written is what the user's terminal sends.
+    pub keys: File,
 }
 
 impl HerdrClient {
