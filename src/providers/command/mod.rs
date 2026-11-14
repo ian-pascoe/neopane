@@ -31,10 +31,11 @@
 //!   With `report_layout`, a line's `focus` waits instead: it may have
 //!   been read before a focus act landed and come after its answer, and
 //!   `provider_focus.rs` takes no report to be older than the focus
-//!   answered (SPI-1159). The first report started
-//!   after the line, and after the last focus act ended, tells where
-//!   focus is in its place; one that read none, failed or is unsupported,
-//!   the line's own.
+//!   answered (SPI-1159). The first report started after the line, and
+//!   after the last focus act ended, tells where focus is in its place;
+//!   one that read none, failed or is unsupported, the line's own. Such a
+//!   report also tells a focus other than the one last told, which a
+//!   line, naming only a change from its own last line, may not.
 //!   Lines over 64 KiB are dropped. Once it ends, or a restart can't start,
 //!   it starts again after 1 s, then 2 s, doubling up to 60 s; one that ran
 //!   60 s waits 1 s again. Exit 69, or a first start that fails, ends it for
@@ -245,8 +246,8 @@ struct Running {
     timed_out: bool,
     /// `focus_acts_ended` as it started.
     focus_acts_before: u64,
-    /// `focus_lines` as it started.
-    focus_lines_before: u64,
+    /// `lines` as it started.
+    lines_before: u64,
 }
 
 /// `events`, while the runner has it.
@@ -291,11 +292,17 @@ pub(crate) struct CommandProvider {
     /// takes a reported focus after the act for the user's own move.
     focus_acts_ended: u64,
     /// The focus the last `events` line that named one named, not told
-    /// yet, and how many such lines have come. It may have been read
-    /// before a focus act landed: the first report started after it, and
-    /// after the last focus act ended, tells where focus is instead.
+    /// yet. It may have been read before a focus act landed: the first
+    /// report started after it, and after the last focus act ended, tells
+    /// where focus is instead.
     line_focus: Option<TerminalId>,
-    focus_lines: u64,
+    /// How many lines `events` has printed.
+    lines: u64,
+    /// The focus last told. `events` names a focus only when it changed
+    /// from its own last line, which may not be the focus told: a report
+    /// started after its last line, and after the last focus act ended,
+    /// tells a focus other than this one too.
+    told_focus: Option<TerminalId>,
     /// Whether `report_layout` may tell an `events` line's focus: it has
     /// one, not found unsupported.
     reports: bool,
@@ -350,7 +357,8 @@ impl CommandProvider {
             running: Vec::new(),
             focus_acts_ended: 0,
             line_focus: None,
-            focus_lines: 0,
+            lines: 0,
+            told_focus: None,
             reports: false,
             kills: Vec::new(),
             events: VecDeque::new(),
@@ -535,6 +543,7 @@ impl CommandProvider {
     /// told, then that the layout changed. Its `focus` is told as the
     /// report the change asks for tells it, if `report_layout` may.
     fn on_events_line(&mut self, line: &[u8]) {
+        self.lines += 1;
         let Ok(serde_json::Value::Object(o)) = serde_json::from_slice(line.trim_ascii()) else {
             self.events.push_back(ProviderEvent::LayoutChanged);
             return;
@@ -548,9 +557,8 @@ impl CommandProvider {
         if let Some(t) = id("focus") {
             if self.reports {
                 self.line_focus = Some(t);
-                self.focus_lines += 1;
             } else {
-                self.events.push_back(ProviderEvent::Focused(t));
+                self.tell_focus(t);
             }
         }
         if let Some(t) = id("closed") {
@@ -620,9 +628,10 @@ impl CommandProvider {
             }
             if r.cap == Capability::ReportLayout
                 && !r.timed_out
-                && r.focus_lines_before == self.focus_lines
+                && r.lines_before == self.lines
+                && self.command(Capability::Events).is_some()
             {
-                self.tell_line_focus(&outcome, after_acts);
+                self.tell_report_focus(&outcome, after_acts);
             }
             if !r.timed_out {
                 self.events
@@ -643,26 +652,35 @@ impl CommandProvider {
         self.arm_timer(now);
     }
 
-    /// A report that started after the last `events` line naming a focus
-    /// ended as `outcome`, having started after the last focus act ended
-    /// if `after_acts`: the focus it read is told for the line's, or, if it
-    /// read none, failed or is unsupported, the line's own. One that may
-    /// have read focus before a focus act landed tells nothing: the line
+    /// A report that started after `events`' last line ended as
+    /// `outcome`, having started after the last focus act ended if
+    /// `after_acts`. The focus it read is told for the line's, if a line's
+    /// waits, or if it isn't the focus last told; if it read none, failed
+    /// or is unsupported, a line's waiting is told as it said. One that may
+    /// have read focus before a focus act landed tells nothing: a line's
     /// waits for the next.
-    fn tell_line_focus(&mut self, outcome: &Outcome, after_acts: bool) {
-        let Some(line) = &self.line_focus else {
-            return;
-        };
-        let t = match outcome {
+    fn tell_report_focus(&mut self, outcome: &Outcome, after_acts: bool) {
+        let read = match outcome {
             Outcome::Done(Answer::Layout(_)) if !after_acts => return,
-            Outcome::Done(Answer::Layout(l)) => l.current.clone().unwrap_or_else(|| line.clone()),
+            Outcome::Done(Answer::Layout(l)) => l.current.clone(),
             Outcome::Unsupported => {
                 self.reports = false;
-                line.clone()
+                None
             }
-            _ => line.clone(),
+            _ => None,
         };
-        self.line_focus = None;
+        let t = match (read, self.line_focus.take()) {
+            (Some(t), Some(_)) => t,
+            (Some(t), None) if self.told_focus.as_ref() != Some(&t) => t,
+            (None, Some(line)) => line,
+            _ => return,
+        };
+        self.tell_focus(t);
+    }
+
+    /// Tells the pane provider has focused `t`.
+    fn tell_focus(&mut self, t: TerminalId) {
+        self.told_focus = Some(t.clone());
         self.events.push_back(ProviderEvent::Focused(t));
     }
 
@@ -736,7 +754,7 @@ impl PaneProvider for CommandProvider {
             due: now + timeout,
             timed_out: false,
             focus_acts_before: self.focus_acts_ended,
-            focus_lines_before: self.focus_lines,
+            lines_before: self.lines,
         });
         self.arm_timer(now);
     }

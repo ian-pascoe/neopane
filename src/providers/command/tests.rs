@@ -688,6 +688,79 @@ fn an_events_focus_read_before_a_focus_act_landed_never_undoes_it() {
     assert!(told.contains(&focused("b")), "{told:?}");
 }
 
+/// Hands `p` its loop's readiness, asking `report_layout` for each layout
+/// change as the daemon does, until `enough` says what it told is enough
+/// and every report asked has answered: what it told, answers aside. At
+/// most 5 s.
+fn reporting_each_change(
+    p: &mut CommandProvider,
+    asked: &mut u64,
+    enough: impl Fn(&[ProviderEvent]) -> bool,
+) -> Vec<ProviderEvent> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut told, mut answered) = (Vec::new(), *asked);
+    loop {
+        while let Some(e) = p.next() {
+            match e {
+                ProviderEvent::LayoutChanged => {
+                    *asked += 1;
+                    p.ask(AskId(*asked), Ask::ReportLayout);
+                }
+                ProviderEvent::Answered { .. } => answered += 1,
+                _ => told.push(e),
+            }
+        }
+        if enough(&told) && answered == *asked {
+            return told;
+        }
+        assert!(Instant::now() < deadline, "only told {told:?}");
+        wait_ready(p, Duration::from_millis(100));
+    }
+}
+
+/// `events` prints a focus only when it changed from its own last line.
+/// Once its line was stale and a report told where focus really was, a
+/// move back to what the line said comes as a bare line: the report it
+/// asks for tells it.
+#[test]
+fn a_move_back_to_a_stale_lines_focus_is_told_from_the_report() {
+    let dir = Scratch::new("back-focus");
+    let (go, focus) = (dir.join("go"), dir.join("focus"));
+    let path = std::ffi::CString::new(go.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(0, unsafe { libc::mkfifo(path.as_ptr(), 0o600) });
+    let events = format!(
+        r#"read _ < '{go}'; echo '{{"focus":"%0"}}'; read _ < '{go}'; echo; exec sleep 30"#,
+        go = go.display()
+    );
+    let report = format!(
+        r#"echo "{{\"areas\":[{{\"id\":\"@0\",\"terminals\":[
+           {{\"terminal\":\"%0\",\"rect\":[0,0,1,1]}},{{\"terminal\":\"%1\",\"rect\":[0,0,1,1]}}]}}],
+           \"focus\":\"$(cat '{}')\"}}""#,
+        focus.display()
+    );
+    let mut p = runner(
+        &[
+            (Capability::ReportLayout, &["sh", "-c", &report]),
+            (Capability::Events, &["sh", "-c", &events]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    );
+    let mut asked = 0;
+    // the stale line: the report after it reads %1
+    std::fs::write(&focus, "%1").unwrap();
+    std::fs::write(&go, "\n").unwrap();
+    let told = reporting_each_change(&mut p, &mut asked, |t| t.contains(&focused("%1")));
+    assert!(!told.contains(&focused("%0")), "{told:?}");
+    // the move back, a bare line
+    std::fs::write(&focus, "%0").unwrap();
+    std::fs::write(&go, "\n").unwrap();
+    let told = reporting_each_change(&mut p, &mut asked, |t| t.contains(&focused("%0")));
+    assert_eq!(vec![focused("%0")], told);
+}
+
 #[test]
 fn the_users_move_after_a_focus_act_is_still_followed() {
     let dir = Scratch::new("user-focus");

@@ -223,8 +223,12 @@ doesn't follow it as it comes, but as the first report started after the
 line, and after the last such command ended, says: that report's `focus`,
 or, if it gives none, fails or exits 69, the line's own. A report that
 started before a focus command ended tells nothing for it; a later line
-does. Without `report_layout`, the daemon follows a line's `focus` as it
-comes, so a line read before one of its focus commands landed can undo it.
+does. A report started after the last line, and after the last focus
+command ended, is also followed when its `focus` isn't the one the daemon
+last followed: `events` need only name a focus when it changed from its
+own last line, which the daemon may not have followed. Without
+`report_layout`, the daemon follows a line's `focus` as it comes, so a
+line read before one of its focus commands landed can undo it.
 
 When `events` ends, it starts again after 1 s, then 2 s, doubling up to
 60 s; once it has run for 60 s, the wait is 1 s again. A restart that can't
