@@ -27,8 +27,9 @@
 //!   decision D7, #93 decision 18, ADR 0006 as #126 amends it). Each line
 //!   it prints is told as `ProviderEvent::LayoutChanged`, for the daemon to
 //!   ask `report_layout` through its layout queue; a JSON object line's
-//!   `closed` is told as `Closed` before it. A line's `focus`, a terminal
-//!   the daemon is to follow:
+//!   `closed` is told as `Closed` before it, and before its `focus`: a
+//!   move told with a close may be the pane provider's own. A line's
+//!   `focus`, a terminal the daemon is to follow:
 //!   - Without `report_layout`, it is told as `Focused` before it.
 //!   - With `report_layout`, it waits: it may have been read before a
 //!     focus act landed and come after its answer, and `provider_focus.rs`
@@ -564,6 +565,9 @@ impl CommandProvider {
                 .filter(|s| !s.is_empty())
                 .map(TerminalId::from)
         };
+        if let Some(t) = id("closed") {
+            self.events.push_back(ProviderEvent::Closed(t));
+        }
         if let Some(t) = id("focus") {
             if self.follows_reports {
                 self.events.push_back(ProviderEvent::FocusHeard(t.clone()));
@@ -571,9 +575,6 @@ impl CommandProvider {
             } else {
                 self.tell_focus(t);
             }
-        }
-        if let Some(t) = id("closed") {
-            self.events.push_back(ProviderEvent::Closed(t));
         }
         self.events.push_back(ProviderEvent::LayoutChanged);
     }

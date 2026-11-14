@@ -1345,6 +1345,8 @@ impl Daemon {
     /// window, or end if it was the last pane.
     fn pane_gone(&mut self, id: u32) -> Result<()> {
         self.read_layout_again();
+        // the pane provider may move focus as the terminal goes
+        self.focus.pane_closed(Instant::now());
         let i = self.panes.index_of(id).unwrap();
         let p = &mut self.panes.list[i];
         p.closing = Some(Close::TerminalHungUp);
@@ -2170,6 +2172,9 @@ impl Daemon {
                 ProviderEvent::Answered { id, outcome } => {
                     if let Some(p) = &mut self.provider {
                         self.asks.answered(p.as_mut(), id, outcome, Instant::now());
+                    }
+                    if self.asks.take_closed_late() {
+                        self.focus.pane_closed(Instant::now());
                     }
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
@@ -7333,6 +7338,45 @@ mod tests {
             focus_answered(&mut fx);
             assert_eq!(0, asked_focus(&mut fx, "t3"), "{close_first}");
             assert_eq!(1000, fx.d.nvim.current_win, "{close_first}");
+        }
+    }
+
+    #[test]
+    fn the_pane_providers_own_move_as_a_pane_closes_and_a_window_opens_isnt_the_users() {
+        // `:q | vsplit` in t2's window, t2's terminal going each way the
+        // daemon may learn of it; the new window, current, waits on its
+        // open
+        for how in ["asked", "told", "hung up", "opened too late"] {
+            let mut fx = three_panes_on_t2();
+            match how {
+                "asked" => fx.d.act(asks::close(TerminalId::from("t2"))),
+                "told" => {
+                    let closed = ProviderEvent::Closed(TerminalId::from("t2"));
+                    fake(&mut fx.d).push(closed);
+                    fx.d.drain_provider().unwrap();
+                }
+                "hung up" => fx.d.pane_gone(51).unwrap(),
+                _ => {
+                    fake(&mut fx.d).opened(super::super::provider::AskId(999), "late");
+                    fx.d.drain_provider().unwrap();
+                }
+            }
+            // a close asked is answered before the open is asked
+            let f = fake(&mut fx.d);
+            if let Some((id, Ask::Close { .. })) = f.asks.last().cloned() {
+                f.answer(id, Outcome::Done(Answer::Nothing));
+                fx.d.drain_provider().unwrap();
+            }
+            opening_for(&mut fx.d, 1003);
+            let open = fake(&mut fx.d).last_id();
+            fx.d.nvim.current_win = 1003;
+            // the pane provider focuses t3 itself as t2's terminal goes
+            provider_heard(&mut fx, "t3");
+            assert!(!fx.d.focus.is_holding(Instant::now()), "{how}");
+            opened_as_n(&mut fx, open);
+            assert_eq!(1, asked_focus(&mut fx, "block:n"), "{how}");
+            provider_focused(&mut fx, "t3");
+            assert_eq!(1003, fx.d.nvim.current_win, "{how}");
         }
     }
 

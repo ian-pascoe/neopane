@@ -34,9 +34,13 @@
 //!   later move is heard or told first. Its own line may come late or
 //!   never: a pane provider whose open swaps panes may move focus for a
 //!   moment as it opens. A move heard as ours lands, to a terminal not
-//!   known, is the user's too. Neither holds while a pane closed as ours
-//!   landed, or less than 1 s before it was asked: a pane provider may
-//!   move focus itself as a pane closes.
+//!   known, is the user's too.
+//! - **A pane closing.** A pane provider may move focus itself as a pane
+//!   closes: nothing told within a close's reach is the user's move. A
+//!   move heard less than 1 s after a pane closed starts no hold, and one
+//!   told ends a hold a pane closed in as no move; neither rule above
+//!   holds for a focus act landing as a pane closed, or asked less than
+//!   1 s after.
 //! - **Read again.** A report ignored as ours landed, while a move to a
 //!   terminal not asked was heard, may have been the user's move back:
 //!   focus is read again once none lands (`take_recheck`).
@@ -79,6 +83,9 @@ struct Hold {
     until: Option<Instant>,
     /// The newest focus act asked meanwhile.
     parked: Option<TerminalId>,
+    /// Whether a pane closed meanwhile: the move told then may be the pane
+    /// provider's own.
+    closed: bool,
 }
 
 /// What the daemon last saw or asked.
@@ -176,8 +183,8 @@ impl ProviderFocus {
     /// have, nor one while a focus act of the daemon's is still landing,
     /// unless it names a terminal not known, and the pane provider hears
     /// moves, and no pane closed as it landed or just before. Told when none
-    /// lands it ends the hold; the user's drops the focus parked or to ask
-    /// again.
+    /// lands it ends the hold, never as the user's move if a pane closed
+    /// meanwhile; the user's drops the focus parked or to ask again.
     pub(crate) fn reported(&mut self, t: &TerminalId) -> bool {
         let user = match &mut self.last {
             Last::Unknown => false,
@@ -194,6 +201,8 @@ impl ProviderFocus {
             }
             Last::Asked(a) => a.terminal != *t,
         };
+        // ending a hold a pane closed in: perhaps the pane provider's own
+        let user = user && !self.hold.as_ref().is_some_and(|h| h.closed);
         self.last = Last::Settled(t.clone());
         self.ends_hold(user);
         user
@@ -242,8 +251,9 @@ impl ProviderFocus {
     /// where focus is once it has read it: whether that is the user's move,
     /// for the daemon to follow and ask again once none lands, being to a
     /// terminal not known as one lands, which may undo it, unless a pane
-    /// closed as it landed or just before. Otherwise, unless `t` is known or
-    /// no focus was said yet, the hold starts, or starts again. A focus to
+    /// closed as it landed or just before. Otherwise, unless `t` is known,
+    /// no focus was said yet, or a pane closed less than 1 s ago, the hold
+    /// starts, or starts again. A focus to
     /// ask again yields to it, unless `t` is that or one asked.
     pub(crate) fn heard(&mut self, t: &TerminalId, now: Instant) -> bool {
         self.hears = true;
@@ -268,10 +278,16 @@ impl ProviderFocus {
         {
             return !a.flight.closed;
         }
+        // a pane closed less than 1 s ago: the move may be the pane
+        // provider's own
+        if self.closed.is_some() {
+            return false;
+        }
         let parked = self.hold.take().and_then(|h| h.parked);
         self.hold = Some(Hold {
             until: Some(now + HOLD),
             parked,
+            closed: false,
         });
         false
     }
@@ -335,6 +351,9 @@ impl ProviderFocus {
         match &mut self.last {
             Last::Asked(a) if a.in_flight > 0 => a.flight.closed = true,
             _ => self.closed = Some(now),
+        }
+        if let Some(h) = &mut self.hold {
+            h.closed = true;
         }
     }
 
@@ -679,6 +698,28 @@ mod tests {
         f.asked(t("g"));
         assert!(f.heard(&t("h"), now + JUST_CLOSED));
         assert!(f.reported(&t("h")));
+    }
+
+    #[test]
+    fn a_move_heard_less_than_1_s_after_a_pane_closed_starts_no_hold() {
+        let (mut f, now) = (ProviderFocus::default(), Instant::now());
+        f.reported(&t("a"));
+        f.pane_closed(now);
+        f.heard(&t("c"), now + JUST_CLOSED - ms(1));
+        assert!(!f.is_holding(now + JUST_CLOSED - ms(1)));
+        f.heard(&t("c"), now + JUST_CLOSED);
+        assert!(f.is_holding(now + JUST_CLOSED));
+    }
+
+    #[test]
+    fn a_report_ending_a_hold_a_pane_closed_in_isnt_the_users_move() {
+        let (mut f, now) = (ProviderFocus::default(), Instant::now());
+        f.reported(&t("a"));
+        f.heard(&t("c"), now);
+        f.park(&t("b"), now);
+        f.pane_closed(now);
+        assert!(!f.reported(&t("c")));
+        assert_eq!(Some(t("b")), f.take_parked(now));
     }
 
     #[test]

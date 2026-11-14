@@ -212,7 +212,9 @@ say:
 ```
 
 - `focus`: the user moved focus to this terminal.
-- `closed`: this terminal closed; only logged for now.
+- `closed`: this terminal closed. A move told less than 1 s after it, or
+  on the same line, may be the pane provider's own, and isn't taken for
+  the user's (see below).
 
 Any other line, such as an empty one, only has the layout read again.
 
@@ -244,14 +246,16 @@ report says, the line having the daemon run one:
   runs then. The hold lasts while another command the report waits
   behind runs, or times out, then 1 s at most. It needs both `events` and
   `report_layout`; before a report has told any focus, a line only says
-  where focus starts, and holds nothing.
+  where focus starts, and holds nothing. Nor does a line less than 1 s
+  after a terminal closed, and a report ending a hold a terminal closed
+  in isn't the user's move: a pane provider may move focus itself as a
+  terminal closes.
 - While one of the daemon's focus commands lands, a line or a report
   whose `focus` names a terminal the daemon doesn't know is the user's
   move, which that command may undo: the daemon follows it, and focuses
   it again once none lands, if it is a Neovim pane's terminal and no
   later move came. Not while a terminal closed as the command landed, or
-  less than 1 s before it was asked: a pane provider may move focus
-  itself as a terminal closes. This too needs both `events` and
+  less than 1 s before it was asked. This too needs both `events` and
   `report_layout`.
 - Once `report_layout` exits 69, it is run no more, and lines are
   followed as without it.
