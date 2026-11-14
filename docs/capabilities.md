@@ -384,17 +384,18 @@ reach, its workspaces no boundary. Terminal ids are herdr pane ids, such as
   `ATTACH`, with no shell; `pane.move` puts that pane beside `ORIGIN`
   (`focus:false`), split right for `left` and `right`, down for `up` and
   `down`, its `ratio`, the first pane's share, `1 - RATIO`, or `RATIO` for
-  `left` and `up`, clamped to 0.1–0.9; for `left` and `up`, `pane.swap` with `ORIGIN`
-  as its source, which focuses it, then `pane.focus` gives the server's
-  focus back if it was elsewhere. Last, the tab's root split (`path: []`)
-  is set to the ratio it has, which has herdr resize the ptys a move leaves
-  at their old size, and again 100 ms later, for a terminal that went to
-  the alternate screen before a client drew it there. A `zoomed_tab` reply,
-  or any failure after `layout.apply`, closes the pane made and exits 1;
-  the requests have 4 s, and the close 0.5 s of its own. A `layout.apply`
-  with no answer, or one that can't be read, closes the tab labelled
-  `TITLE`, if herdr has it by then. Prints the pane id, which the move
-  keeps. An attach command not UTF-8 exits 1: herdr's JSON can't carry it.
+  `left` and `up`, clamped to 0.1–0.9; for `left` and `up`, `pane.swap`
+  with `ORIGIN` as its source, which focuses it, then `pane.focus` gives
+  the server's focus back if it was elsewhere. Last, the tab's root split
+  (`path: []`) is set to the ratio it has, which has herdr resize the ptys
+  a move leaves at their old size, and again 100 ms later, for a terminal
+  that went to the alternate screen before a client drew it there. A
+  `zoomed_tab` reply, or any failure after `layout.apply`, closes the pane
+  made and exits 1; the requests have 4 s, and the close 0.5 s of its own.
+  A `layout.apply` with no answer, or one that can't be read, closes the
+  tab labelled `TITLE`, if herdr has it by then. Prints the pane id, which
+  the move keeps. An attach command not UTF-8 exits 1: herdr's JSON can't
+  carry it.
 - `close`: `pane.close`; done when herdr says `pane_not_found`.
 - `report_layout`: one `session.snapshot`: an area per tab of every
   workspace, its id the tab's, foreign panes included. Rects are herdr's,

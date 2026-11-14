@@ -5,9 +5,9 @@
 //! checked by the daemon (`by_config`). With no file, the built-in
 //! `<name>.default` chooses, run in the daemon itself (`config::default_of`):
 //! the one built-in the attach's environment names, tmux's, herdr's or
-//! zellij's table or Rex, else none; naming several, the multiplexers' `inside`
-//! proofs decide, run on a thread of their own (`DefaultRun`). The hint
-//! `none` skips both.
+//! zellij's table or Rex, else none; naming several, the multiplexers'
+//! `inside` proofs decide, run on a thread of their own (`DefaultRun`). The
+//! hint `none` skips both.
 //!
 //! Choosing Rex only starts connecting to it, which never blocks: the
 //! daemon's loop takes the steps, and its `find` confirms the choice.

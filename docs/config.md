@@ -524,14 +524,14 @@ no config, and each Neovim window gets a zellij pane of its own, split beside
 the pane it came from, named `neopane`. No zellij client's focus moves. The
 default knows zellij by its own variables, `ZELLIJ` and `ZELLIJ_PANE_ID`, and
 where tmux's, herdr's or Rex's are set too, asks `neopane.inside.zellij`
-after tmux's and herdr's (see [The default](#the-default)); its `find` checks the same, then that the
-session lists the pane. Every zellij call is `zellij --session
-"$ZELLIJ_SESSION_NAME" action …`, in the environment of the terminal that
-chose zellij: zellij finds a session by its socket directory
-(`ZELLIJ_SOCKET_DIR`) and its cache, under `HOME`. A terminal of another
-zellij session, or with another `ZELLIJ_SOCKET_DIR`, is out of reach: a
-window opened from it is drawn in its pane. A config gets the same table
-from `neopane.builtin.zellij()`.
+after tmux's and herdr's (see [The default](#the-default)); its `find`
+checks the same, then that the session lists the pane. Every zellij call is
+`zellij --session "$ZELLIJ_SESSION_NAME" action …`, in the environment of
+the terminal that chose zellij: zellij finds a session by its socket
+directory (`ZELLIJ_SOCKET_DIR`) and its cache, under `HOME`. A terminal of
+another zellij session, or with another `ZELLIJ_SOCKET_DIR`, is out of
+reach: a window opened from it is drawn in its pane. A config gets the same
+table from `neopane.builtin.zellij()`.
 
 Its limits, for now:
 
