@@ -398,11 +398,6 @@ impl Live {
         assert_eq!(s["provider"], "zellij", "{}", live.log());
         let origin = live.until_focused(&live.origin);
         assert_eq!(origin, [live.origin.as_str()], "{}", live.log());
-        // zellij tells a pane it has focus as the client lands on it, and
-        // may tell it again once its program reads focus reports: one read
-        // after a test's first act would take Neovim back to the origin's
-        // window, as a user going there would
-        std::thread::sleep(Duration::from_millis(1000));
         Some(live)
     }
 
