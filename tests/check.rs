@@ -1160,6 +1160,43 @@ fn a_zellij_below_the_floor_says_it_misses_every_capability_and_a_missing_one_is
 }
 
 #[test]
+fn a_zellij_whose_version_fails_or_prints_nothing_has_no_version_and_isnt_too_old() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("zellij-noversion");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("zellij");
+    for version in [
+        "echo 'zellij 0.45.1' >&2; exit 1",
+        "echo 'zellij 0.45.1'; exit 1",
+        "exit 0",
+    ] {
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ {version}; }}\necho '[]'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+        assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+        assert_eq!(
+            zellij_section(&out),
+            [
+                format!("zellij  {}", fake.display()),
+                "  session  work".to_string(),
+                "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set".to_string(),
+                "  server  answers".to_string(),
+            ],
+            "{version}"
+        );
+        let out = in_zellij(&home, "work", &[], bin.as_os_str(), &["--json"]);
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["zellij"]["version"], Value::Null, "{version}");
+        assert_eq!(v["zellij"]["missing"], serde_json::json!([]), "{version}");
+    }
+}
+
+#[test]
 fn a_zellij_report_with_no_session_says_which_variable_is_missing() {
     let home = Home::new("zellij-nosession");
     let bin = home.dir.join("bin");

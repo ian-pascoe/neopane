@@ -491,6 +491,12 @@ fn rex_lines(r: &RexReport) -> Vec<String> {
     lines
 }
 
+/// A version's numbers, dotted: `3.2`, `0.46.0`.
+fn dotted(parts: &[u32]) -> String {
+    let parts: Vec<String> = parts.iter().map(u32::to_string).collect();
+    parts.join(".")
+}
+
 /// The tmux section's lines.
 fn tmux_lines(t: &TmuxReport) -> Vec<String> {
     let mut lines = vec![match &t.path {
@@ -510,15 +516,13 @@ fn tmux_lines(t: &TmuxReport) -> Vec<String> {
     });
     let this = t.version.as_deref().unwrap_or("unknown");
     for m in &t.missing {
-        let (major, minor) = m.needs;
+        let needs = dotted(&[m.needs.0, m.needs.1]);
         lines.push(match m.capability {
             Some(cap) => format!(
-                "  {}  exits 69: needs tmux {major}.{minor}, this is {this}",
+                "  {}  exits 69: needs tmux {needs}, this is {this}",
                 cap.name()
             ),
-            None => {
-                format!("  missing  every capability (needs tmux {major}.{minor}, this is {this})")
-            }
+            None => format!("  missing  every capability (needs tmux {needs}, this is {this})"),
         });
     }
     lines
@@ -530,10 +534,9 @@ fn tmux_json(t: &TmuxReport) -> Value {
         .missing
         .iter()
         .map(|m| {
-            let (major, minor) = m.needs;
             json!({
                 "capability": m.capability.map(Capability::name),
-                "needs": format!("{major}.{minor}"),
+                "needs": dotted(&[m.needs.0, m.needs.1]),
             })
         })
         .collect();
@@ -570,9 +573,9 @@ fn zellij_lines(z: &ZellijReport) -> Vec<String> {
     });
     let this = z.version.as_deref().unwrap_or("unknown");
     for m in &z.missing {
-        let (major, minor, patch) = m.needs;
+        let needs = dotted(&[m.needs.0, m.needs.1, m.needs.2]);
         lines.push(format!(
-            "  missing  every capability (needs zellij {major}.{minor}.{patch}, this is {this})"
+            "  missing  every capability (needs zellij {needs}, this is {this})"
         ));
     }
     lines
@@ -584,10 +587,9 @@ fn zellij_json(z: &ZellijReport) -> Value {
         .missing
         .iter()
         .map(|m| {
-            let (major, minor, patch) = m.needs;
             json!({
                 "capability": null,
-                "needs": format!("{major}.{minor}.{patch}"),
+                "needs": dotted(&[m.needs.0, m.needs.1, m.needs.2]),
             })
         })
         .collect();

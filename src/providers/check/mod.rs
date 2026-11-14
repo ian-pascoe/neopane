@@ -230,11 +230,12 @@ fn gather(o: &Options) -> Check {
     }
     if let Some((choice, how)) = &check.chose {
         let (choice, how) = (choice.clone(), *how);
-        let uses = runs_builtin(&choice, BuiltinTable::Tmux);
-        if !uses.is_empty() {
-            check.tmux = Some(tmux::check::probe(&check.attach, &uses));
+        let tmux_uses = runs_builtin(&choice, BuiltinTable::Tmux);
+        if !tmux_uses.is_empty() {
+            check.tmux = Some(tmux::check::probe(&check.attach, &tmux_uses));
         }
-        if !runs_builtin(&choice, BuiltinTable::Zellij).is_empty() {
+        let zellij_uses = runs_builtin(&choice, BuiltinTable::Zellij);
+        if !zellij_uses.is_empty() {
             check.zellij = Some(zellij::check::probe(&check.attach));
         }
         decide(&mut check, &choice, how, o.no_find, tty.as_ref());

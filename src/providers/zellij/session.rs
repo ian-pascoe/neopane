@@ -144,10 +144,7 @@ impl Session {
         }
         let mut cmd = Command::new(&self.program);
         if let Some(env) = &self.env {
-            cmd.env_clear().envs(
-                env.iter()
-                    .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
-            );
+            in_env(&mut cmd, env);
         }
         cmd.arg("--session")
             .arg(OsStr::from_bytes(&self.name))
@@ -239,15 +236,30 @@ pub(super) fn version() -> Result<String, String> {
 }
 
 /// The installed zellij's version, run in environment `env` alone, `zellij`
-/// found on its `PATH`, killed at `due`.
+/// found on its `PATH`, killed at `due`; an error if `--version` fails or
+/// prints nothing.
 pub(super) fn version_within(env: &[(Vec<u8>, Vec<u8>)], due: Instant) -> Result<String, Ran> {
+    let shown = "zellij --version";
     let mut cmd = Command::new("zellij");
-    cmd.arg("--version").env_clear().envs(
+    cmd.arg("--version");
+    in_env(&mut cmd, env);
+    let (status, out, _) = exec(cmd, shown, Some(due))?;
+    let version = version_of(&out);
+    if !status.success() {
+        return Err(Ran::Failed(format!("{shown} failed ({status})")));
+    }
+    if version.is_empty() {
+        return Err(Ran::Failed(format!("{shown} printed nothing")));
+    }
+    Ok(version)
+}
+
+/// Has `cmd` run in environment `env` alone.
+fn in_env(cmd: &mut Command, env: &[(Vec<u8>, Vec<u8>)]) {
+    cmd.env_clear().envs(
         env.iter()
             .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
     );
-    let (_, out, _) = exec(cmd, "zellij --version", Some(due))?;
-    Ok(version_of(&out))
 }
 
 /// The version `zellij --version` printed as `out`, after `zellij `, such

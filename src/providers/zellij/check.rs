@@ -18,7 +18,7 @@ use crate::util::seconds;
 pub(crate) fn probe(attach: &Attach) -> ZellijReport {
     let env = commands_env(&attach.env);
     let due = Instant::now() + TIME;
-    let timed_out = |ran: Ran| match ran {
+    let shown = |ran: Ran| match ran {
         Ran::TimedOut(_) => format!("no answer within {} s", seconds(TIME)),
         other => other.to_string(),
     };
@@ -34,7 +34,7 @@ pub(crate) fn probe(attach: &Attach) -> ZellijReport {
         Session::within(name, env)
             .run_until(None, &["list-panes", "--json"], due)
             .map(|_| ())
-            .map_err(timed_out)
+            .map_err(shown)
     };
     ZellijReport {
         path,
