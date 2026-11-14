@@ -14,15 +14,42 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::name::NAME;
+use crate::providers::builtin::Given;
 
 /// A reply recorded from herdr 0.9.5, by its file name in `fixtures/`
 /// less `0.9.5-` and `.json`.
 pub(super) fn recorded(name: &str) -> String {
+    fixture(&format!("{name}.json"))
+}
+
+/// The lines of a subscription recorded from herdr 0.9.5, its first the
+/// reply to `events.subscribe`, by its file name in `fixtures/` less
+/// `0.9.5-` and `.ndjson`.
+pub(super) fn recorded_stream(name: &str) -> Vec<String> {
+    fixture(&format!("{name}.ndjson"))
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+fn fixture(name: &str) -> String {
     let file = format!(
-        "{}/src/providers/herdr/fixtures/0.9.5-{name}.json",
+        "{}/src/providers/herdr/fixtures/0.9.5-{name}",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file}: {e}"))
+}
+
+/// What a capability is given beside `fake`: its `<NAME>_*` inputs
+/// `vars`, and the choosing attach's `HERDR_SOCKET_PATH`.
+pub(super) fn given(fake: &Fake, vars: &[(&str, &str)]) -> Given {
+    let up = crate::name::upper();
+    let mut env: Vec<(String, Vec<u8>)> = vars
+        .iter()
+        .map(|(k, v)| (format!("{up}_{k}"), v.as_bytes().to_vec()))
+        .collect();
+    env.push(("HERDR_SOCKET_PATH".into(), fake.path()));
+    Given::from(move |name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()))
 }
 
 /// What the fake answers a method with.
@@ -32,6 +59,9 @@ pub(super) enum Reply {
     Line(String),
     /// Nothing, holding the connection open until the client gives up.
     Silence,
+    /// These lines, as a subscription sends them, then the connection
+    /// held open while the fake lives, or closed if `end`.
+    Stream { lines: Vec<String>, end: bool },
 }
 
 /// A fake herdr, removed as it drops.
@@ -57,6 +87,8 @@ impl Fake {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (its_asked, its_stop) = (asked.clone(), stop.clone());
+        // the subscriptions held open, closed as the fake drops
+        let held: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
         std::thread::spawn(move || {
             let mut used: HashMap<String, usize> = HashMap::new();
             for conn in listener.incoming() {
@@ -89,6 +121,14 @@ impl Fake {
                             std::thread::sleep(Duration::from_secs(5));
                             drop(conn);
                         });
+                    }
+                    Some(Reply::Stream { lines, end }) => {
+                        for l in &lines {
+                            answer(&conn, l);
+                        }
+                        if !end {
+                            held.lock().unwrap().push(conn);
+                        }
                     }
                     None => answer(
                         &conn,

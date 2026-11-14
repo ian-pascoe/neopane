@@ -233,7 +233,7 @@ pub(super) fn close(given: &Given) -> Result<(), String> {
 }
 
 /// Input `name`, which must be set, as text.
-fn input(given: &Given, name: &str) -> Result<String, String> {
+pub(super) fn input(given: &Given, name: &str) -> Result<String, String> {
     let shown = name.to_ascii_uppercase();
     let value = given.var(name).filter(|v| !v.is_empty());
     let value = value.ok_or_else(|| format!("{shown} isn't set"))?;
@@ -255,7 +255,7 @@ fn ratio(given: &Given) -> Result<f64, String> {
 
 /// The attach command's words, from `ATTACH`, as UTF-8: herdr's JSON
 /// can't carry other bytes.
-fn attach_words(given: &Given) -> Result<Vec<String>, String> {
+pub(super) fn attach_words(given: &Given) -> Result<Vec<String>, String> {
     given
         .attach_words()?
         .into_iter()
@@ -268,20 +268,8 @@ fn attach_words(given: &Given) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fake::{Fake, Reply, recorded};
+    use super::super::fake::{Fake, Reply, given, recorded};
     use super::*;
-
-    /// What a capability is given beside `fake`: its `<NAME>_*` inputs
-    /// `vars`, and the choosing attach's `HERDR_SOCKET_PATH`.
-    fn given(fake: &Fake, vars: &[(&str, &str)]) -> Given {
-        let up = crate::name::upper();
-        let mut env: Vec<(String, Vec<u8>)> = vars
-            .iter()
-            .map(|(k, v)| (format!("{up}_{k}"), v.as_bytes().to_vec()))
-            .collect();
-        env.push(("HERDR_SOCKET_PATH".into(), fake.path()));
-        Given::from(move |name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()))
-    }
 
     const ATTACH: &str = "/bin/np attach --address '/tmp/a b'";
 

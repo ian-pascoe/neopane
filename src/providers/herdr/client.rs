@@ -84,6 +84,16 @@ impl Herdr {
 
     /// Sends one request and reads its reply's line.
     fn exchange(&self, method: &str, params: Value) -> Result<Vec<u8>, String> {
+        self.request(method, params).map(|(_, line, _)| line)
+    }
+
+    /// Sends one request and reads its reply's line: the connection, the
+    /// line, and what came after it.
+    fn request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<(UnixStream, Vec<u8>, Vec<u8>), String> {
         let path = OsStr::from_bytes(&self.socket);
         let cant_reach = |e: std::io::Error| {
             format!(
@@ -107,18 +117,86 @@ impl Herdr {
                 _ => cant_reach(e),
             })?;
         match read_line(&conn, self.due) {
-            Ok(Some(line)) => Ok(line),
+            Ok(Some((line, rest))) => Ok((conn, line, rest)),
             Ok(None) => Err(late()),
             Err(e) => Err(cant_reach(e)),
+        }
+    }
+
+    /// Subscribes to the events of `kinds`, such as `pane.focused`: the
+    /// subscription, herdr having said it started within this server's
+    /// time, or why there's none.
+    pub(super) fn subscribe(&self, kinds: &[&str]) -> Result<Subscription, String> {
+        let subscriptions: Vec<Value> = kinds.iter().map(|k| json!({ "type": k })).collect();
+        let (conn, line, rest) = self.request(
+            "events.subscribe",
+            json!({ "subscriptions": subscriptions }),
+        )?;
+        let started = result_of(&line)?;
+        if started["type"] != "subscription_started" {
+            return Err(UNREADABLE.into());
+        }
+        Ok(Subscription {
+            conn,
+            pending: rest,
+        })
+    }
+}
+
+/// A subscription to herdr's events: one connection, held open, that
+/// herdr writes an event to as a line, each as it happens.
+pub(super) struct Subscription {
+    conn: UnixStream,
+    /// What was read past the last line taken.
+    pending: Vec<u8>,
+}
+
+impl Subscription {
+    /// The next event, `{"event": KIND, "data": {...}}`, waiting for it as
+    /// long as it takes; or why the subscription ended: herdr's error, such
+    /// as `events_lost`, the connection closed, as at a live handoff, or a
+    /// line that can't be read.
+    pub(super) fn next(&mut self) -> Result<Value, String> {
+        let line = self.line()?;
+        let event: Value = serde_json::from_slice(&line).map_err(|_| UNREADABLE)?;
+        if event.get("error").is_some_and(Value::is_object) {
+            // as a reply's: herdr's message
+            return Err(result_of(&line).err().map_or(UNREADABLE.into(), |r| r.why));
+        }
+        if !event["event"].is_string() {
+            return Err(UNREADABLE.into());
+        }
+        Ok(event)
+    }
+
+    /// The next line, without its newline.
+    fn line(&mut self) -> Result<Vec<u8>, String> {
+        let mut buf = [0u8; 16 << 10];
+        loop {
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let line = self.pending[..end].to_vec();
+                self.pending.drain(..=end);
+                return Ok(line);
+            }
+            if self.pending.len() > MAX_REPLY {
+                return Err(UNREADABLE.into());
+            }
+            match self.conn.read(&mut buf) {
+                Ok(0) => return Err("herdr ended the subscription".into()),
+                Ok(n) => self.pending.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("can't read herdr's events: {e}")),
+            }
         }
     }
 }
 
 /// The first line `conn` gives, without its newline, or all it gives
-/// before it ends; None if `due` passes first. It waits with `poll`, and
-/// sets no socket option: herdr closes the connection once it has
-/// replied, and macOS then refuses any (`EINVAL`), the reply unread.
-fn read_line(conn: &UnixStream, due: Instant) -> std::io::Result<Option<Vec<u8>>> {
+/// before it ends, and what it gave after that line; None if `due` passes
+/// first. It waits with `poll`, and sets no socket option: herdr closes
+/// the connection once it has replied, and macOS then refuses any
+/// (`EINVAL`), the reply unread.
+fn read_line(conn: &UnixStream, due: Instant) -> std::io::Result<Option<(Vec<u8>, Vec<u8>)>> {
     let mut reply = Vec::new();
     let mut buf = [0u8; 16 << 10];
     loop {
@@ -141,8 +219,9 @@ fn read_line(conn: &UnixStream, due: Instant) -> std::io::Result<Option<Vec<u8>>
         .iter()
         .position(|&b| b == b'\n')
         .unwrap_or(reply.len());
+    let rest = reply.get(end + 1..).unwrap_or_default().to_vec();
     reply.truncate(end);
-    Ok(Some(reply))
+    Ok(Some((reply, rest)))
 }
 
 /// Whether `conn` has something to read, or has ended, before `due`.
@@ -268,11 +347,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let due = Instant::now() + Duration::from_secs(2);
         let line = read_line(&ours, due).unwrap();
-        assert_eq!(line.as_deref(), Some(&b"{\"result\":{}}"[..]));
+        assert_eq!(line, Some((b"{\"result\":{}}".to_vec(), b"more".to_vec())));
         // none at all, closed: what there is, nothing
         let (ours, theirs) = UnixStream::pair().unwrap();
         drop(theirs);
-        assert_eq!(read_line(&ours, due).unwrap(), Some(vec![]));
+        assert_eq!(read_line(&ours, due).unwrap(), Some((vec![], vec![])));
         // open and silent: none, once due
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let soon = Instant::now() + Duration::from_millis(50);

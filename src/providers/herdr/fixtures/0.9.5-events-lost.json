@@ -1,0 +1,1 @@
+{"id":"x","error":{"code":"events_lost","message":"event subscription fell behind retained history; resubscribe and resync with session.snapshot"}}

@@ -250,14 +250,22 @@ mod tests {
                 "-- {NAME}.builtin.herdr() in B 1.\n\
                  -- To change it, copy it into your init.lua and return it from provider().\n\
                  return {{\n  \
-                   name = \"herdr\",\n{}{}{}{}  \
+                   name = \"herdr\",\n{}  \
                    context_vars = {{ \"HERDR_SOCKET_PATH\" }},\n  \
                    find_vars = {{ \"HERDR_PANE_ID\" }},\n\
                  }}\n",
-                cap("close"),
-                cap("find"),
-                cap("report_layout"),
-                cap("open_beside"),
+                [
+                    "close",
+                    "find",
+                    "focus",
+                    "focus_direction",
+                    "report_layout",
+                    "events",
+                    "open_beside",
+                    "open_tab_page",
+                ]
+                .map(cap)
+                .concat(),
             )
         );
     }
