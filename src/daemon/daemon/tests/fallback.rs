@@ -201,6 +201,29 @@ fn after_the_attach_timeout_the_window_is_in_its_origin_pane_with_a_warning_and_
     );
 }
 
+/// An open killed at its timeout may have opened a terminal all the same,
+/// whose attach comes before the failure does: it is ended as closed, its
+/// window drawn in its origin pane.
+#[test]
+fn a_terminal_attached_before_its_open_failed_is_ended_as_closed() {
+    let mut fx = fixture();
+    let (origin, _live) = split_off_origin(&mut fx, 1002);
+    fx.d.new_pane(1002).unwrap();
+    let asked = fx.d.panes.by_win(1002).unwrap();
+    let (asked, pane) = (asked.id, asked.attach_id.unwrap());
+    let (helper, _pty, _at) = attach_terminal(&mut fx, pane, 80, 11);
+    assert!(fx.d.panes.by_id(asked).unwrap().terminal_surface.is_some());
+
+    open_ends(&mut fx, Outcome::Failed("killed at its timeout".into()));
+    assert!(fx.d.panes.by_id(asked).is_none());
+    assert_in_origin(&fx.d, origin, 1002);
+    let said = crate::daemon::attach_conn::read_all_frames(&helper);
+    let Some(Message::End(z)) = said.last() else {
+        panic!("{said:?}")
+    };
+    assert_eq!(Ending::Closed, z.as_ending());
+}
+
 #[test]
 fn a_terminal_attaching_in_time_stops_its_wait() {
     let mut fx = fixture();

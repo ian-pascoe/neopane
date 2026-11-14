@@ -391,9 +391,17 @@ plugin pane is `plugin_N`.
   showing them again is done within 3 s, then that within 1 s more, so
   the floats are shown again before the 5 s timeout: a step past its time
   is killed, and any left, the swap say, skipped. Prints `terminal_N`.
-- `close`: `close-pane --pane-id`, which is done for a pane already gone;
-  if it fails, done only when `list-panes` doesn't list the pane, else it
-  exits 1, a session that can't be listed too.
+  A `new-pane` killed at its time may have opened its pane all the same,
+  running the attach with an id nobody was told: the open has failed, so
+  the daemon has given the pane up. An attach that comes after the
+  failure is refused, its pane id expired; one that came before it is
+  ended as closed when it comes. Either way the attach exits, and
+  `--close-on-exit` closes the pane.
+- `close`: `close-pane --pane-id`, which is done for a pane already gone.
+  If it fails, it is done when `list-panes` doesn't list the pane, or when
+  zellij says the session isn't there (`There is no active session!`, or
+  `Session 'NAME' not found` with others running), as its panes aren't
+  either; else, the listing failing too, it exits 1.
 - `report_layout`: `list-panes --json` and `list-tabs --json --all`; an
   area per tab, `tab_N`, by its stable id. Its extent starts at the top
   left of the tab's tiled selectable panes and is the tab's viewport in

@@ -34,12 +34,15 @@ pub(super) enum Ran {
     /// It was killed at its deadline, or never started for lack of time:
     /// whatever it was to do may be done or not.
     TimedOut(String),
+    /// The session isn't there: ended, or never started, so none of its
+    /// panes are.
+    NoSession(String),
 }
 
 impl std::fmt::Display for Ran {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ran::Failed(why) | Ran::TimedOut(why) => f.write_str(why),
+            Ran::Failed(why) | Ran::TimedOut(why) | Ran::NoSession(why) => f.write_str(why),
         }
     }
 }
@@ -80,8 +83,8 @@ impl Session {
     }
 
     /// `zellij --session NAME action args…`'s stdout, or why it failed.
-    pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, String> {
-        Ok(self.run_as(None, args, None)?)
+    pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, Ran> {
+        self.run_as(None, args, None)
     }
 
     /// The same, killed at `due` if it hasn't exited by then, and not run
@@ -155,7 +158,19 @@ impl Session {
         }
         let err = String::from_utf8_lossy(&err);
         let first = err.lines().next().unwrap_or_default();
-        Err(Ran::Failed(format!("{shown} failed ({status}): {first}")))
+        let why = format!("{shown} failed ({status}): {first}");
+        if self.is_gone(first) {
+            return Err(Ran::NoSession(why));
+        }
+        Err(Ran::Failed(why))
+    }
+
+    /// Whether `line`, the first of zellij's stderr, says this session
+    /// isn't there, as 0.46 says it: `There is no active session!` with
+    /// none at all, `Session 'NAME' not found. …` with others.
+    fn is_gone(&self, line: &str) -> bool {
+        let missing = format!("Session '{}' not found", self.name());
+        line == "There is no active session!" || line.starts_with(&missing)
     }
 }
 

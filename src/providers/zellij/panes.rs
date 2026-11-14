@@ -172,16 +172,18 @@ pub(super) fn close(given: &Given) -> Result<(), String> {
 /// there.
 fn closed(session: &Session, pane: u32) -> Result<(), String> {
     let id = format!("terminal_{pane}");
-    let Err(why) = session.run(&["close-pane", "--pane-id", &id]) else {
-        return Ok(());
+    let why = match session.run(&["close-pane", "--pane-id", &id]) {
+        Ok(_) | Err(Ran::NoSession(_)) => return Ok(()),
+        Err(why) => why,
     };
-    // done only if the session's listing proves it gone
-    let listed = session
-        .run(&["list-panes", "--json"])
-        .and_then(|out| pane_rows(&out));
-    match listed {
-        Ok(rows) if terminal_row(&rows, pane).is_none() => Ok(()),
-        Ok(_) => Err(why),
+    // done only if the session's listing proves it gone, or that the
+    // session is
+    let listed = session.run(&["list-panes", "--json"]);
+    match listed.map(|out| pane_rows(&out)) {
+        Ok(Ok(rows)) if terminal_row(&rows, pane).is_none() => Ok(()),
+        Ok(Ok(_)) => Err(why.to_string()),
+        Err(Ran::NoSession(_)) => Ok(()),
+        Ok(Err(unlisted)) => Err(format!("{why}; and can't tell it's gone: {unlisted}")),
         Err(unlisted) => Err(format!("{why}; and can't tell it's gone: {unlisted}")),
     }
 }
@@ -267,16 +269,31 @@ mod tests {
         }
     }
 
-    const MS: Duration = Duration::from_millis(1);
+    /// A deadline far past what the steps before the one that blocks take,
+    /// however loaded the machine: only that one, which sleeps a minute
+    /// unless killed, runs into it.
+    const DUE: Duration = Duration::from_secs(2);
+
+    /// A step that blocks until it is killed.
+    const BLOCKS: &str = "exec sleep 60";
+
+    /// What `open` comes to on `fake`, its steps due in [`DUE`], showing
+    /// the floats in as long again; and that it came to it by then, after
+    /// the step that blocks, if `blocks`, was killed at its deadline.
+    fn open_on(fake: &Fake, blocks: bool) -> Result<String, String> {
+        let start = Instant::now();
+        let due = start + DUE;
+        let opened = left_of_0().open(&fake.session(), due, due + DUE);
+        let took = start.elapsed();
+        assert!(!blocks || took >= DUE, "{took:?}");
+        assert!(took < 2 * DUE, "{took:?}");
+        opened
+    }
 
     #[test]
     fn a_split_past_its_deadline_is_killed_and_the_floats_shown_again() {
-        let fake = fake("split-late", true, &[("new-pane", "exec sleep 5")]);
-        let start = Instant::now();
-        let due = start + 300 * MS;
-        let opened = left_of_0().open(&fake.session(), due, due + 2000 * MS);
-        assert!(opened.unwrap_err().contains("out of time"));
-        assert!(start.elapsed() < 1500 * MS, "{:?}", start.elapsed());
+        let fake = fake("split-late", true, &[("new-pane", BLOCKS)]);
+        assert!(open_on(&fake, true).unwrap_err().contains("out of time"));
         assert_eq!(
             fake.asked(),
             [
@@ -294,16 +311,9 @@ mod tests {
         let fake = fake(
             "swap-late",
             true,
-            &[
-                ("new-pane", "echo terminal_5"),
-                ("move-pane", "exec sleep 5"),
-            ],
+            &[("new-pane", "echo terminal_5"), ("move-pane", BLOCKS)],
         );
-        let start = Instant::now();
-        let due = start + 400 * MS;
-        let opened = left_of_0().open(&fake.session(), due, due + 2000 * MS);
-        assert_eq!(opened, Ok("terminal_5".into()));
-        assert!(start.elapsed() < 1500 * MS, "{:?}", start.elapsed());
+        assert_eq!(open_on(&fake, true), Ok("terminal_5".into()));
         assert_eq!(
             fake.asked(),
             [
@@ -320,17 +330,11 @@ mod tests {
     #[test]
     fn a_hide_killed_at_the_deadline_fails_the_open_and_shows_the_floats_again() {
         // killed, it may have hidden them
-        let fake = fake(
-            "hide-late",
-            true,
-            &[("hide-floating-panes", "exec sleep 5")],
-        );
-        let due = Instant::now() + 300 * MS;
-        let opened = left_of_0().open(&fake.session(), due, due + 2000 * MS);
+        let fake = fake("hide-late", true, &[("hide-floating-panes", BLOCKS)]);
+        let why = open_on(&fake, true).unwrap_err();
         assert!(
-            opened
-                .unwrap_err()
-                .starts_with("can't hide tab 0's floating panes")
+            why.starts_with("can't hide tab 0's floating panes"),
+            "{why}"
         );
         assert_eq!(
             fake.asked(),
@@ -360,9 +364,7 @@ mod tests {
             true,
             &[("hide-floating-panes", "echo 'Tab not found' >&2; exit 1")],
         );
-        let due = Instant::now() + 2000 * MS;
-        let opened = left_of_0().open(&fake.session(), due, due + 1000 * MS);
-        let why = opened.unwrap_err();
+        let why = open_on(&fake, false).unwrap_err();
         assert!(
             why.starts_with("can't hide tab 0's floating panes"),
             "{why}"
@@ -377,30 +379,67 @@ mod tests {
     #[test]
     fn with_no_floats_shown_the_split_and_swap_alone_run() {
         let fake = fake("no-floats", false, &[("new-pane", "echo terminal_5")]);
-        let due = Instant::now() + 2000 * MS;
-        let opened = left_of_0().open(&fake.session(), due, due + 1000 * MS);
-        assert_eq!(opened, Ok("terminal_5".into()));
+        assert_eq!(open_on(&fake, false), Ok("terminal_5".into()));
         assert_eq!(
             fake.asked(),
             ["list-panes", "list-tabs", "new-pane", "move-pane"]
         );
     }
 
+    /// Fails as 0.46.0 does for a session that isn't there, `line` its
+    /// first line on stderr.
+    fn no_session(line: &str) -> String {
+        format!("echo \"{line}\" >&2; exit 1")
+    }
+
     #[test]
     fn close_is_done_only_when_the_listing_proves_the_pane_gone() {
-        let failing = "echo 'no session' >&2; exit 1";
+        let failing = "echo 'Pane with id Terminal(3) not found' >&2; exit 2";
         let gone = fake("close-gone", false, &[("close-pane", failing)]);
         assert_eq!(closed(&gone.session(), 3), Ok(()));
         let there = fake("close-there", false, &[("close-pane", failing)]);
         assert!(closed(&there.session(), 0).is_err());
         let unknown = Fake::new(
             "close-unknown",
-            &[("close-pane", failing), ("list-panes", failing)],
+            &[("close-pane", failing), ("list-panes", "exit 1")],
         );
         let why = closed(&unknown.session(), 3).unwrap_err();
         assert!(why.contains("can't tell it's gone"), "{why}");
         let done = Fake::new("close-done", &[("close-pane", "true")]);
         assert_eq!(closed(&done.session(), 3), Ok(()));
+    }
+
+    #[test]
+    fn close_is_done_in_a_session_that_has_ended() {
+        // no session at all; others, but not this one
+        for (i, line) in [
+            "There is no active session!",
+            "Session 'work' not found. The following sessions are active:",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ended = no_session(line);
+            let both = Fake::new(
+                &format!("close-ended-{i}"),
+                &[("close-pane", &ended), ("list-panes", &ended)],
+            );
+            assert_eq!(closed(&both.session(), 3), Ok(()), "{line}");
+            assert_eq!(both.asked(), ["close-pane"], "{line}");
+            // ended between the two
+            let between = Fake::new(
+                &format!("close-between-{i}"),
+                &[("close-pane", "exit 1"), ("list-panes", &ended)],
+            );
+            assert_eq!(closed(&between.session(), 3), Ok(()), "{line}");
+        }
+        // another session's name is no proof
+        let other = no_session("Session 'other' not found.");
+        let other = Fake::new(
+            "close-other",
+            &[("close-pane", &other), ("list-panes", &other)],
+        );
+        assert!(closed(&other.session(), 3).is_err());
     }
 
     #[test]
