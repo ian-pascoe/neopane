@@ -38,10 +38,14 @@ fn daemon_env(tmp: &std::path::Path) -> Vec<(String, &OsStr)> {
 
 /// The pane whose id is `terminal_N`, `id`.
 fn pane<'a>(panes: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+    find_terminal(panes, id).unwrap_or_else(|| panic!("no {id} in {panes:?}"))
+}
+
+/// Terminal pane `id` in `panes`, if it is listed.
+fn find_terminal<'a>(panes: &'a [serde_json::Value], id: &str) -> Option<&'a serde_json::Value> {
     panes
         .iter()
         .find(|p| p["is_plugin"] == false && format!("terminal_{}", p["id"]) == id)
-        .unwrap_or_else(|| panic!("no {id} in {panes:?}"))
 }
 
 /// Where terminal pane `id`'s left edge is in `panes`, if it is listed.
@@ -59,11 +63,9 @@ fn before_in(a: Option<u64>, b: Option<u64>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a < b)
 }
 
+/// Terminal pane `id`'s `edge` in `panes`, if it is listed.
 fn edge_of(panes: &[serde_json::Value], id: &str, edge: &str) -> Option<u64> {
-    let p = panes
-        .iter()
-        .find(|p| p["is_plugin"] == false && format!("terminal_{}", p["id"]) == id)?;
-    p[edge].as_u64()
+    find_terminal(panes, id)?[edge].as_u64()
 }
 
 /// The terminal pane in `now` that `before` hasn't.
