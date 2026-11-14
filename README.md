@@ -417,9 +417,12 @@ the terminal must be the one of the pane `HERDR_PANE_ID` names, so herdr's
 variables inherited by another terminal choose none, which only the log
 tells. It needs herdr 0.9.5 or newer. Focus follows Neovim's current
 window both ways, and a tab page gets a herdr tab of its own; herdr has one
-focus per server, so every herdr client attached follows. Moves and resizes
-aren't there yet. `neopane provider show herdr` prints its table, which
-`neopane.builtin.herdr()` returns for your config to change
+focus per server, so every herdr client attached follows. Panes are moved
+and resized as Neovim lays its windows out, a move within a herdr tab going
+out to a tab of its own and back
+([ADR 0018](docs/adr/0018-herdrs-pane-provider-places-through-a-tab-of-its-own-and-sizes-by-its-split-ids.md)),
+and a zoomed pane is shown alone. `neopane provider show herdr` prints its
+table, which `neopane.builtin.herdr()` returns for your config to change
 ([docs/config.md](docs/config.md#herdr)).
 
 ### Your own

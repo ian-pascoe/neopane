@@ -1,5 +1,11 @@
 # herdr's pane provider opens a terminal in a new tab and moves it
 
+Amended by SPI-1140 (ADR 0018): `place_beside` moves a terminal the same
+way, from its own tab by way of a tab of its own. The move focuses the
+moved pane, and the swap takes it as its source, only if it had the
+server's focus; an open's new pane never has, so the open below is
+unchanged.
+
 herdr's pane provider opens a terminal beside another by making it in a new
 tab with its argv and moving it, because herdr's split takes no command;
 typing the command into a shell was rejected as shell-dependent and leaving

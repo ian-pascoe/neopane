@@ -319,6 +319,15 @@ mod tests {
         );
     }
 
+    /// herdr 0.9.5's events as its own keys zoomed a pane, then unzoomed
+    /// it: a `layout.updated` each, and nothing else.
+    #[test]
+    fn zooming_and_unzooming_each_have_the_layout_read() {
+        let fake = subscribed(recorded_stream("events-zoom"), true, &[Some("w1:p3")]);
+        let (lines, _) = run(&fake);
+        assert_eq!(lines, [r#"{"focus":"w1:p3"}"#, "", ""]);
+    }
+
     #[test]
     fn an_exited_pane_is_closed() {
         let fake = subscribed(

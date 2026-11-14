@@ -69,6 +69,8 @@ impl BuiltinTable {
                 Capability::Focus,
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
+                Capability::PlaceBeside,
+                Capability::Resize,
             ],
             BuiltinTable::Zellij => &[
                 Capability::Find,
@@ -249,6 +251,8 @@ mod tests {
             "focus",
             "focus_direction",
             "open_tab_page",
+            "place_beside",
+            "resize",
         ]
         .into_iter()
         .map(|cap| (cap, format!("{{exe}} provider builtin herdr {cap}")))

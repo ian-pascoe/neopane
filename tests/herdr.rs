@@ -663,3 +663,455 @@ fn events_comes_back_after_a_live_handoff() {
         assert_eq!(now.as_deref(), Some(win.as_str()), "{pane}: {}", live.log());
     }
 }
+
+/// `provider builtin herdr cap` on `herdr`'s server, with `vars`
+/// (`<NAME>_` left out) as its only `<NAME>_*` variables besides the
+/// protocol's.
+fn act(herdr: &HerdrServer, cap: &str, vars: &[(&str, &str)]) -> std::process::Output {
+    let up = NAME.to_ascii_uppercase();
+    let mut cmd = Command::new(exe());
+    cmd.args(["provider", "builtin", "herdr", cap]);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with(&format!("{up}_")) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env(format!("{up}_PROTOCOL"), "1")
+        .env(format!("{up}_CAPABILITY"), cap)
+        .env("HERDR_SOCKET_PATH", &herdr.socket);
+    for (k, v) in vars {
+        cmd.env(format!("{up}_{k}"), v);
+    }
+    cmd.stdin(Stdio::null()).output().unwrap()
+}
+
+/// A pane split off `target`, `direction` (`right` or `down`): its id.
+fn split(herdr: &HerdrServer, target: &str, direction: &str) -> String {
+    let made = herdr.call(
+        "pane.split",
+        json!({ "target_pane_id": target, "direction": direction }),
+    );
+    made["pane"]["pane_id"].as_str().unwrap().to_string()
+}
+
+/// Pane `pane`'s rect in its tab: `[x, y, width, height]`, and the tab.
+fn rect_of(herdr: &HerdrServer, pane: &str) -> ([u64; 4], String) {
+    let layout = tab_of(herdr, pane);
+    let p = layout["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["pane_id"] == pane)
+        .unwrap_or_else(|| panic!("no {pane} in {layout}"));
+    let cell = |k: &str| p["rect"][k].as_u64().unwrap();
+    let tab = layout["tab_id"].as_str().unwrap().to_string();
+    ([cell("x"), cell("y"), cell("width"), cell("height")], tab)
+}
+
+#[test]
+fn place_beside_moves_a_pane_within_its_tab_or_from_another_and_leaves_focus_alone() {
+    if !have_herdr() {
+        return;
+    }
+    let tmp = scratch("hd-place");
+    let herdr = HerdrServer::start(&tmp, &[]);
+    // P1 | (P2 / P3), headless 120x40, P3 focused
+    let p1 = workspace(&herdr, &tmp, None);
+    let p2 = split(&herdr, &p1, "right");
+    let p3 = split(&herdr, &p2, "down");
+    herdr.call("pane.focus", json!({ "pane_id": p3 }));
+    let tabs = || {
+        herdr.call("tab.list", json!({}))["tabs"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let focused = || {
+        herdr.call("session.snapshot", json!({}))["snapshot"]["focused_pane_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let place = |terminal: &str, origin: &str, direction: &str| {
+        act(
+            &herdr,
+            "place_beside",
+            &[
+                ("TERMINAL", terminal),
+                ("ORIGIN", origin),
+                ("DIRECTION", direction),
+                ("SIZE", "10"),
+                ("RATIO", "0.3"),
+            ],
+        )
+    };
+
+    // P3 left of P1, in their tab: out to a tab of its own and back, its
+    // id kept, then sized: its SIZE of 10 and its frame
+    let out = place(&p3, &p1, "left");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (r3, tab) = rect_of(&herdr, &p3);
+    let (r1, tab1) = rect_of(&herdr, &p1);
+    assert_eq!(tab, tab1);
+    assert_eq!((r3[0], r3[2], r1[0], r1[2]), (0, 12, 12, 48));
+    assert_eq!(tabs(), 1);
+    assert_eq!(focused(), p3);
+
+    // a pane alone in a tab of its own, below P2: one move, its tab gone
+    let applied = herdr.call(
+        "layout.apply",
+        json!({
+            "workspace_id": "w1",
+            "focus": false,
+            "root": { "type": "pane", "command": ["/bin/sleep", "100"] },
+        }),
+    );
+    let p4 = applied["layout"]["root"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(tabs(), 2);
+    let out = place(&p4, &p2, "down");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (r4, tab4) = rect_of(&herdr, &p4);
+    let (r2, _) = rect_of(&herdr, &p2);
+    assert_eq!(tab4, tab);
+    assert_eq!((r4[0], r4[1]), (r2[0], r2[1] + r2[3]));
+    assert_eq!(tabs(), 1);
+    assert_eq!(focused(), p3);
+
+    // a zoomed tab: nothing moves
+    herdr.call("pane.zoom", json!({ "pane_id": p1, "mode": "on" }));
+    let before = tab_of(&herdr, &p1);
+    let out = place(&p2, &p1, "right");
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert_eq!(
+        err.trim(),
+        format!("herdr place_beside: herdr tab {tab} is zoomed")
+    );
+    assert_eq!(tab_of(&herdr, &p1), before);
+
+    drop(herdr);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn resize_gives_the_terminal_its_cells_inside_its_frame() {
+    if !have_herdr() {
+        return;
+    }
+    let tmp = scratch("hd-resize");
+    let herdr = HerdrServer::start(&tmp, &[]);
+    // (P1 / P3) | P2, headless 120x40
+    let p1 = workspace(&herdr, &tmp, None);
+    let p2 = split(&herdr, &p1, "right");
+    let p3 = split(&herdr, &p1, "down");
+    let resize = |terminal: &str, origin: &str, direction: &str, size: &str| {
+        act(
+            &herdr,
+            "resize",
+            &[
+                ("TERMINAL", terminal),
+                ("ORIGIN", origin),
+                ("DIRECTION", direction),
+                ("SIZE", size),
+                ("RATIO", "0.5"),
+            ],
+        )
+    };
+    for (terminal, origin, direction, size, axis, want) in [
+        // P2's 30 columns of content, and a frame of a cell each side
+        (&p2, &p1, "right", "30", 2, 32),
+        (&p1, &p2, "left", "50", 2, 52),
+        (&p3, &p1, "down", "12", 3, 14),
+    ] {
+        let out = resize(terminal, origin, direction, size);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(rect_of(&herdr, terminal).0[axis], want, "{terminal} {size}");
+    }
+    // stacked, not side by side: nothing changes
+    let before = tab_of(&herdr, &p1);
+    let out = resize(&p3, &p1, "right", "12");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(tab_of(&herdr, &p1), before);
+
+    drop(herdr);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// herdr's own zoom key, prefix `z`, zooms the focused pane and unzooms
+/// it: `events` prints a line for each, so the layout is read again, and
+/// `report_layout` shows the zoomed pane alone, the other in the tab's
+/// `~hidden` area, then both again. herdr's zoom follows focus: its focus
+/// key, prefix `l`, moves focus within the zoomed tab, which then shows
+/// the pane focused alone.
+#[test]
+fn zooming_and_unzooming_with_herdrs_keys_has_the_layout_read_again() {
+    if !have_herdr() {
+        return;
+    }
+    use std::io::{BufRead, Write};
+    let tmp = scratch("hd-zoomkeys");
+    let herdr = HerdrServer::start(&tmp, &[]);
+    let p1 = workspace(&herdr, &tmp, None);
+    let p2 = split(&herdr, &p1, "right");
+    let mut client = herdr.attach(100, 30);
+    let area = || tab_of(&herdr, &p1)["area"].clone();
+    let sized = until(|a: &Value| a["width"] != 120, area);
+    assert_ne!(sized["width"], 120, "the client never gave its size");
+    herdr.call("pane.focus", json!({ "pane_id": p1 }));
+    let tab = tab_of(&herdr, &p1)["tab_id"].as_str().unwrap().to_string();
+
+    let up = NAME.to_ascii_uppercase();
+    let mut events = Command::new(exe())
+        .args(["provider", "builtin", "herdr", "events"])
+        .env(format!("{up}_PROTOCOL"), "1")
+        .env(format!("{up}_CAPABILITY"), "events")
+        .env("HERDR_SOCKET_PATH", &herdr.socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = events.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    // where focus starts
+    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(first, format!(r#"{{"focus":"{p1}"}}"#));
+    let areas = || {
+        let out = act(&herdr, "report_layout", &[]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["areas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                let ids = a["terminals"].as_array().unwrap().iter();
+                let ids = ids.map(|t| t["terminal"].as_str().unwrap().to_string());
+                (a["id"].as_str().unwrap().to_string(), ids.collect())
+            })
+            .collect::<Vec<(String, Vec<String>)>>()
+    };
+    let zoomed_on = |shown: &str, hidden: &str| {
+        vec![
+            (tab.clone(), vec![shown.to_string()]),
+            (format!("{tab}~hidden"), vec![hidden.to_string()]),
+        ]
+    };
+    let unzoomed = vec![(tab.clone(), vec![p1.clone(), p2.clone()])];
+    let focus_line = format!(r#"{{"focus":"{p2}"}}"#);
+    // zoomed on P1; then herdr's own focus key moves focus to P2 within the
+    // zoomed tab, which stays zoomed, now on P2; then unzoomed
+    for (key, line, want) in [
+        (b"z", "", zoomed_on(&p1, &p2)),
+        (b"l", focus_line.as_str(), zoomed_on(&p2, &p1)),
+        (b"z", "", unzoomed),
+    ] {
+        // nothing left over from the step before
+        std::thread::sleep(Duration::from_millis(300));
+        while rx.try_recv().is_ok() {}
+        client.keys.write_all(b"\x02").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        client.keys.write_all(key).unwrap();
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(got.as_deref(), Ok(line), "no line for prefix {key:?}");
+        assert_eq!(until(|a| *a == want, areas), want);
+    }
+    assert!(client.alive());
+
+    let _ = events.kill();
+    let _ = events.wait();
+    drop(client);
+    drop(herdr);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+impl Live {
+    /// `:tabnew`, then `:vsplit` in it, once both panes are there: the
+    /// herdr panes of the new tab page's windows, the first window's and
+    /// the split's, and the windows.
+    fn tab_page_of_two(&self) -> ((String, String), (String, String)) {
+        let first = remote_expr(&self.ending.sock, "execute('tabnew') .. win_getid()").unwrap();
+        let s = until(|s: &Value| s["panes"] == 2, || self.status());
+        assert_eq!(s["panes"], 2, "its attach never came: {}", self.log());
+        let snapshot = self.herdr.call("session.snapshot", json!({}));
+        let pane = snapshot["snapshot"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pane_id"] != self.origin.as_str())
+            .unwrap()["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let split = remote_expr(&self.ending.sock, "execute('vsplit') .. win_getid()").unwrap();
+        let s = until(|s: &Value| s["panes"] == 3, || self.status());
+        assert_eq!(s["panes"], 3, "its attach never came: {}", self.log());
+        let placed = |l: &Value| {
+            let sizes = framed(l);
+            sizes.len() == 2 && sizes[1].0 == pane
+        };
+        let layout = until(placed, || tab_of(&self.herdr, &pane));
+        assert!(placed(&layout), "{layout}: {}", self.log());
+        let new = framed(&layout)[0].0.clone();
+        ((pane, new), (first, split))
+    }
+
+    /// Waits for the herdr panes of `pane`'s tab to be `order`, left to
+    /// right, each pty at its rect's size less its frame, and each window
+    /// of `wins`, in tab page `tab`, as wide as its pane's pty: the
+    /// columns of each pane, or what was last seen.
+    fn until_laid_out(&self, pane: &str, order: &[&str], tab: u32, wins: &[&str]) -> Vec<u16> {
+        let seen = || {
+            let layout = tab_of(&self.herdr, pane);
+            let sizes = framed(&layout);
+            let ids: Vec<&str> = sizes.iter().map(|s| s.0.as_str()).collect();
+            let ptys: Vec<_> = sizes.iter().map(|s| self.herdr.pty_size(&s.0)).collect();
+            let widths: Vec<String> = wins
+                .iter()
+                .map(|w| {
+                    let expr = format!("execute('{tab}tabnext') .. winwidth({w})");
+                    remote_expr(&self.ending.sock, &expr).unwrap_or_default()
+                })
+                .collect();
+            let ok = ids == order
+                && sizes.iter().zip(&ptys).all(|(s, p)| Some(s.1) == *p)
+                && sizes
+                    .iter()
+                    .zip(&widths)
+                    .all(|(s, w)| w.parse::<u16>().ok() == Some(s.1.1));
+            (
+                ok,
+                format!("{ids:?} {sizes:?} ptys {ptys:?} windows {widths:?}"),
+                sizes,
+            )
+        };
+        let got = until(|g: &(bool, String, _)| g.0, seen);
+        assert!(got.0, "{}: {}", got.1, self.log());
+        got.2.iter().map(|s| s.1.1).collect()
+    }
+}
+
+/// A tab page whose windows Neovim lays out in one flush, before they are
+/// external, in another order than their panes open in: the daemon moves
+/// a pane within its herdr tab (`place_beside`, out to a tab of its own
+/// and back), and every pane and window comes out at its size. (`<C-w>L`
+/// on a window already in its pane is undone, as a layout plugin's move
+/// is: the window goes back to its pane, where it was.)
+#[test]
+fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
+    let Some(live) = Live::start("hd-move") else {
+        return;
+    };
+    // the split made left of the first window, then moved right of it;
+    // then in another tab page, made right of it, then moved left
+    let mut seen = vec![live.origin.clone()];
+    for (n, split, wincmd) in [(2, "vsplit", "L"), (3, "belowright vsplit", "H")] {
+        let made = format!(
+            "execute('tabnew') .. win_getid() .. ' ' .. execute('{split}') .. \
+             win_getid() .. execute('wincmd {wincmd}')"
+        );
+        let made = remote_expr(&live.ending.sock, &made).unwrap();
+        let (first, split) = made.split_once(' ').unwrap();
+        // the daemon's, and two a tab page
+        let panes = 2 * n - 1;
+        let s = until(|s: &Value| s["panes"] == panes, || live.status());
+        assert_eq!(s["panes"], panes, "its attach never came: {}", live.log());
+        // the split's window is current: its pane has the focus
+        let in_two = |f: &String| {
+            let panes = tab_of(&live.herdr, f)["panes"].as_array().map(Vec::len);
+            !seen.contains(f) && panes == Some(2)
+        };
+        let focused = until(in_two, || live.focused());
+        assert!(in_two(&focused), "{focused}: {}", live.log());
+        let layout = tab_of(&live.herdr, &focused);
+        let other = framed(&layout)
+            .into_iter()
+            .map(|p| p.0)
+            .find(|p| *p != focused)
+            .unwrap_or_else(|| panic!("{layout}: {}", live.log()));
+        let (order, wins) = match wincmd {
+            "L" => ([other.as_str(), focused.as_str()], [first, split]),
+            _ => ([focused.as_str(), other.as_str()], [split, first]),
+        };
+        live.until_laid_out(&focused, &order, n, &wins);
+        seen.extend([focused.clone(), other.clone()]);
+        // the move kept the pane's id and its focus, and left no tab
+        assert_eq!(live.focused(), focused, "{}", live.log());
+        let tabs = live.herdr.call("tab.list", json!({}))["tabs"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(tabs as u32, n, "{}", live.log());
+    }
+}
+
+impl Live {
+    /// `:vertical resize N` of each of `wins`, left and right, of tab page
+    /// `tab`, whose herdr panes, `pane` among them, are `order`: the right
+    /// one, whose pane the daemon sizes, gets N columns, within one. The
+    /// left one gets what is left, three columns short: herdr frames each
+    /// of the two panes, four columns in all, where Neovim has one
+    /// separator. A known limit, to be fixed in the core (SPI-1193).
+    fn vertical_resizes(&self, tab: u32, pane: &str, order: &[&str], wins: [&str; 2]) {
+        for (nth, win) in wins.into_iter().enumerate() {
+            for n in [20, 45, 30] {
+                // fitted to its pane as the last step left it: a fit
+                // landing after the resize would undo it
+                self.until_laid_out(pane, order, tab, &wins);
+                let resize =
+                    format!("execute('{tab}tabnext') .. win_execute({win}, 'vertical resize {n}')");
+                remote_expr(&self.ending.sock, &resize).unwrap();
+                let want = if nth == 1 {
+                    n - 1..=n + 1
+                } else {
+                    n - 3..=n - 3
+                };
+                let sized = |w: &Vec<u16>| w.len() == 2 && want.contains(&i32::from(w[nth]));
+                let cols = || {
+                    let sizes = framed(&tab_of(&self.herdr, pane));
+                    sizes.iter().map(|s| s.1.1).collect::<Vec<u16>>()
+                };
+                let got = until(sized, cols);
+                assert!(
+                    sized(&got),
+                    "{got:?}, not {want:?} for {win}: {}",
+                    self.log()
+                );
+            }
+        }
+    }
+}
+
+/// `:vertical resize N` in a tab page with a tab page area: its panes are
+/// placed, then sized.
+#[test]
+fn vertical_resize_gives_the_herdr_pane_that_many_columns() {
+    let Some(live) = Live::start("hd-vres") else {
+        return;
+    };
+    let ((pane, new), (first, split)) = live.tab_page_of_two();
+    live.vertical_resizes(2, &pane, &[&new, &pane], [&split, &first]);
+}
+
+/// The first tab page has no tab page area: its panes stay where they
+/// opened, and are only sized, the daemon's own too.
+#[test]
+fn vertical_resize_in_the_first_tab_page_gives_the_herdr_pane_that_many_columns() {
+    let Some(live) = Live::start("hd-vres1") else {
+        return;
+    };
+    let right = live.win();
+    let left_pane = live.vsplit();
+    let left = live.win();
+    let origin = live.origin.clone();
+    live.vertical_resizes(1, &origin, &[&left_pane, &origin], [&left, &right]);
+}

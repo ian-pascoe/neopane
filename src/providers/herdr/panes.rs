@@ -6,17 +6,10 @@
 //! 2. `layout.apply` makes a tab (`focus:false`) in the origin's
 //!    workspace, its one pane running the attach command, with no shell,
 //!    labelled with the pane title (`TITLE`).
-//! 3. `pane.move` puts that pane beside the origin, which empties and
-//!    closes its tab. herdr only puts it right of or below the origin,
-//!    and its `ratio` is the first pane's share.
-//! 4. For left or up, `pane.swap` swaps the two. A swap focuses its
-//!    source, the origin: the server's focus is put back if it was
-//!    elsewhere.
-//! 5. The tab's root split is set to the ratio it has: herdr resizes no
-//!    pty on a move, and laying out the tab again resizes every one. It is
-//!    set again 100 ms later: a terminal that went to the alternate screen
-//!    before a client drew it in its new tab is otherwise left a column
-//!    short, herdr keeping its scrollbar's column, until the next layout.
+//! 3. [`put_beside`] moves that pane beside the origin, which empties and
+//!    closes its tab, swaps the two for left or up, and lays the tab out
+//!    again, as herdr resizes no pty on a move. `place_beside` puts a pane
+//!    beside its origin the same way.
 //!
 //! Any failure after the tab is made closes its pane, with a deadline of
 //! its own, so a step that ran out of time still cleans up. A
@@ -30,6 +23,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::client::{Herdr, UNREADABLE, text};
+use super::splits::Axis;
 use crate::providers::builtin::Given;
 
 /// What `open_beside` has, of its 5 s, for opening.
@@ -50,24 +44,8 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
 /// failure `cleanup` more.
 fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Result<String, String> {
     let origin = input(given, "origin")?;
-    let direction = given.var("direction").unwrap_or_default();
-    let (split, before) = match direction.as_slice() {
-        b"left" => ("right", true),
-        b"right" => ("right", false),
-        b"up" => ("down", true),
-        b"down" => ("down", false),
-        other => {
-            return Err(format!(
-                "DIRECTION {:?} isn't left, right, up or down",
-                String::from_utf8_lossy(other)
-            ));
-        }
-    };
+    let side = Side::of(given)?;
     let ratio = ratio(given)?;
-    // herdr's ratio is the first pane's share: the origin's, or after a
-    // swap, the new one's
-    let first = if before { ratio } else { 1.0 - ratio };
-    let first = first.clamp(0.1, 0.9);
     let words = attach_words(given)?;
     let label = given
         .var("title")
@@ -83,7 +61,7 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
         return Err(format!("herdr tab {tab} is zoomed"));
     }
     let workspace = text(layout, "workspace_id")?;
-    let focused = snapshot["focused_pane_id"].as_str().map(String::from);
+    let focused = snapshot["focused_pane_id"].as_str();
     let mut apply = json!({
         "workspace_id": workspace,
         "focus": false,
@@ -104,64 +82,15 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
             close_labelled(&herdr.again(cleanup), label);
         }
     })?;
-    let placed = (|| {
-        let moved = herdr.call(
-            "pane.move",
-            json!({
-                "pane_id": made,
-                "focus": false,
-                "destination": {
-                    "type": "tab",
-                    "tab_id": tab,
-                    "target_pane_id": origin,
-                    "split": split,
-                    "ratio": first,
-                },
-            }),
-        )?;
-        let moved = &moved["move_result"];
-        if moved["changed"] != true {
-            return Err(match moved["reason"].as_str() {
-                Some("zoomed_tab") => format!("herdr tab {tab} is zoomed"),
-                Some(reason) => format!("herdr didn't move pane {made} beside {origin}: {reason}"),
-                None => UNREADABLE.into(),
-            });
-        }
-        let pane = text(&moved["pane"], "pane_id")?.to_string();
-        let mut laid_out = moved["target_layout"].clone();
-        if before {
-            let swapped = herdr.call(
-                "pane.swap",
-                json!({ "source_pane_id": origin, "target_pane_id": pane }),
-            )?;
-            laid_out = swapped["swap"]["layout"].clone();
-            if let Some(focused) = focused.filter(|f| *f != origin)
-                && let Err(e) = herdr.call("pane.focus", json!({ "pane_id": focused }))
-            {
-                eprintln!("herdr open_beside: can't focus {focused} again: {}", e.why);
-            }
-        }
-        let root = root_ratio(&laid_out).ok_or(UNREADABLE)?;
-        let lay_out = || {
-            herdr.call(
-                "layout.set_split_ratio",
-                json!({ "tab_id": tab, "path": [], "ratio": root }),
-            )
-        };
-        lay_out()?;
-        // a terminal that went to the alternate screen before a client
-        // drew it in its new tab keeps the scrollbar's column until the
-        // tab is laid out again, once drawn
-        std::thread::sleep(SETTLE);
-        if let Err(e) = lay_out() {
-            eprintln!(
-                "herdr open_beside: can't lay tab {tab} out again: {}",
-                e.why
-            );
-        }
-        Ok(pane)
-    })();
-    placed.inspect_err(|_| {
+    let beside = Beside {
+        capability: "open_beside",
+        origin: &origin,
+        tab: &tab,
+        side,
+        ratio,
+        focused,
+    };
+    put_beside(&herdr, &made, &beside).inspect_err(|_| {
         // in its tab, or wherever it is
         let closed = herdr
             .again(cleanup)
@@ -170,6 +99,122 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
             eprintln!("herdr open_beside: can't close pane {made}: {}", e.why);
         }
     })
+}
+
+/// Where [`put_beside`] puts a pane.
+pub(super) struct Beside<'a> {
+    /// The capability putting it, for stderr.
+    pub capability: &'static str,
+    pub origin: &'a str,
+    /// The origin's tab.
+    pub tab: &'a str,
+    pub side: Side,
+    /// The pane's share of the origin's room, `RATIO`.
+    pub ratio: f64,
+    /// The server's focused pane before, which keeps the focus.
+    pub focused: Option<&'a str>,
+}
+
+/// Moves `pane`, in a tab other than the origin's, beside the origin, and
+/// lays the origin's tab out again: its id there, or why not.
+///
+/// herdr puts it only right of or below the origin, its `ratio` the first
+/// pane's share; for left or up, `pane.swap` swaps the two. The server's
+/// focus stays on the pane it was on: the move focuses the pane only if
+/// it had the focus, and a swap focuses its source, the pane if it had the
+/// focus, else the origin, the focus then being put back if it was
+/// elsewhere. Last, the tab's root split is set to the ratio it has:
+/// herdr resizes no pty on a move, and laying the tab out again resizes
+/// every one. It is set again 100 ms later: a terminal that went to the
+/// alternate screen before a client drew it in its new place is otherwise
+/// left a column short, herdr keeping its scrollbar's column, until the
+/// next layout.
+pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<String, String> {
+    let Beside {
+        capability,
+        origin,
+        tab,
+        side,
+        ratio,
+        focused,
+    } = *at;
+    // herdr's ratio is the first pane's share: the origin's, or after a
+    // swap, the moved one's
+    let first = if side.before { ratio } else { 1.0 - ratio };
+    let first = first.clamp(0.1, 0.9);
+    let had_focus = focused == Some(pane);
+    let destination = json!({
+        "type": "tab",
+        "tab_id": tab,
+        "target_pane_id": origin,
+        "split": side.axis.herdr(),
+        "ratio": first,
+    });
+    let moved = move_pane(herdr, pane, destination, had_focus, |reason| match reason {
+        "zoomed_tab" => format!("herdr tab {tab} is zoomed"),
+        reason => format!("herdr didn't move pane {pane} beside {origin}: {reason}"),
+    })?;
+    let pane = text(&moved["pane"], "pane_id")?.to_string();
+    let mut laid_out = moved["target_layout"].clone();
+    if side.before {
+        let (source, target) = if had_focus {
+            (pane.as_str(), origin)
+        } else {
+            (origin, pane.as_str())
+        };
+        let swapped = herdr.call(
+            "pane.swap",
+            json!({ "source_pane_id": source, "target_pane_id": target }),
+        )?;
+        laid_out = swapped["swap"]["layout"].clone();
+        if let Some(focused) = focused.filter(|f| *f != source)
+            && let Err(e) = herdr.call("pane.focus", json!({ "pane_id": focused }))
+        {
+            eprintln!("herdr {capability}: can't focus {focused} again: {}", e.why);
+        }
+    }
+    let root = root_ratio(&laid_out).ok_or(UNREADABLE)?;
+    let lay_out = || {
+        herdr.call(
+            "layout.set_split_ratio",
+            json!({ "tab_id": tab, "path": [], "ratio": root }),
+        )
+    };
+    lay_out()?;
+    // a terminal that went to the alternate screen before a client drew
+    // it in its new place keeps the scrollbar's column until the tab is
+    // laid out again, once drawn
+    std::thread::sleep(SETTLE);
+    if let Err(e) = lay_out() {
+        eprintln!(
+            "herdr {capability}: can't lay tab {tab} out again: {}",
+            e.why
+        );
+    }
+    Ok(pane)
+}
+
+/// Moves `pane` to `destination`, a `pane.move` destination, focusing it
+/// if `focus`: herdr's `move_result`, or why it didn't move, `refused`
+/// saying why for herdr's reason.
+pub(super) fn move_pane(
+    herdr: &Herdr,
+    pane: &str,
+    destination: Value,
+    focus: bool,
+    refused: impl FnOnce(&str) -> String,
+) -> Result<Value, String> {
+    let moved = herdr.call(
+        "pane.move",
+        json!({ "pane_id": pane, "focus": focus, "destination": destination }),
+    )?;
+    let moved = &moved["move_result"];
+    if moved["changed"] != true {
+        return Err(moved["reason"]
+            .as_str()
+            .map_or_else(|| UNREADABLE.into(), refused));
+    }
+    Ok(moved.clone())
 }
 
 /// Closes the tab labelled `label`, which a `layout.apply` with no answer
@@ -198,7 +243,7 @@ fn close_labelled(herdr: &Herdr, label: &str) {
 
 /// The layout, in `snapshot`, of the tab holding pane `pane`, or why
 /// there's none.
-fn tab_of<'a>(snapshot: &'a Value, pane: &str) -> Result<&'a Value, String> {
+pub(super) fn tab_of<'a>(snapshot: &'a Value, pane: &str) -> Result<&'a Value, String> {
     let layouts = snapshot["layouts"].as_array().ok_or(UNREADABLE)?;
     layouts
         .iter()
@@ -232,6 +277,35 @@ pub(super) fn close(given: &Given) -> Result<(), String> {
     }
 }
 
+/// The side of its origin a terminal goes or is on, from `DIRECTION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Side {
+    /// Along which herdr splits them: herdr puts a pane only right of or
+    /// below another.
+    pub axis: Axis,
+    /// Left of or above the origin.
+    pub before: bool,
+}
+
+impl Side {
+    pub(super) fn of(given: &Given) -> Result<Side, String> {
+        let direction = given.var("direction").unwrap_or_default();
+        let (axis, before) = match direction.as_slice() {
+            b"left" => (Axis::SideBySide, true),
+            b"right" => (Axis::SideBySide, false),
+            b"up" => (Axis::Stacked, true),
+            b"down" => (Axis::Stacked, false),
+            other => {
+                return Err(format!(
+                    "DIRECTION {:?} isn't left, right, up or down",
+                    String::from_utf8_lossy(other)
+                ));
+            }
+        };
+        Ok(Side { axis, before })
+    }
+}
+
 /// Input `name`, which must be set, as text.
 pub(super) fn input(given: &Given, name: &str) -> Result<String, String> {
     let shown = name.to_ascii_uppercase();
@@ -240,8 +314,8 @@ pub(super) fn input(given: &Given, name: &str) -> Result<String, String> {
     String::from_utf8(value).map_err(|_| format!("{shown} isn't UTF-8"))
 }
 
-/// `RATIO`, the new terminal's share, between 0 and 1; 0.5 if unset.
-fn ratio(given: &Given) -> Result<f64, String> {
+/// `RATIO`, the terminal's share, between 0 and 1; 0.5 if unset.
+pub(super) fn ratio(given: &Given) -> Result<f64, String> {
     let Some(ratio) = given.var("ratio").filter(|r| !r.is_empty()) else {
         return Ok(0.5);
     };
