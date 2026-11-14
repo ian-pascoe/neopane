@@ -614,6 +614,368 @@ fn an_events_line_over_64_kib_is_dropped() {
     assert_eq!(2, changes(&told));
 }
 
+/// A runner with `focus`, which does nothing, `report_layout`, which
+/// reports `reported` focused, and `events`, which prints `{"focus":
+/// LINE}` once the test writes to the FIFO `go` in `dir`.
+fn focusing(dir: &Scratch, line: &str, reported: &str) -> CommandProvider {
+    let go = dir.join("go");
+    let path = std::ffi::CString::new(go.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(0, unsafe { libc::mkfifo(path.as_ptr(), 0o600) });
+    let events = format!(
+        r#"read _ < '{}'; echo '{{"focus":"{line}"}}'; exec sleep 30"#,
+        go.display()
+    );
+    let report = format!(
+        r#"echo '{{"areas":[{{"id":"w","terminals":[{{"terminal":"{line}","rect":[0,0,1,1]}},
+           {{"terminal":"{reported}","rect":[0,0,1,1]}}]}}],"focus":"{reported}"}}'"#
+    );
+    runner(
+        &[
+            (Capability::Focus, &["true"]),
+            (Capability::ReportLayout, &["sh", "-c", &report]),
+            (Capability::Events, &["sh", "-c", &events]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    )
+}
+
+/// Has `p` focus `b`, waits for its answer, then lets `events` print its
+/// line, and asks `report_layout` for each layout change after, as the
+/// daemon does: what it tells after the answer, until it tells a focus.
+fn after_focusing_b(p: &mut CommandProvider, dir: &Scratch) -> Vec<ProviderEvent> {
+    p.ask(
+        AskId(1),
+        Ask::Focus {
+            terminal: TerminalId::from("b"),
+        },
+    );
+    told(p, |t| {
+        t.iter()
+            .any(|e| matches!(e, ProviderEvent::Answered { id: AskId(1), .. }))
+    });
+    std::fs::write(dir.join("go"), "\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut told, mut asked) = (Vec::new(), 1);
+    loop {
+        while let Some(e) = p.next() {
+            if e == ProviderEvent::LayoutChanged {
+                asked += 1;
+                p.ask(AskId(asked), Ask::ReportLayout);
+            }
+            told.push(e);
+        }
+        if told.iter().any(|e| matches!(e, ProviderEvent::Focused(_))) {
+            return told;
+        }
+        assert!(Instant::now() < deadline, "only told {told:?}");
+        wait_ready(p, Duration::from_millis(100));
+    }
+}
+
+/// The races SPI-1159 found: `events` read focus before the focus act
+/// landed, and its line came after the act's answer. Told as it came, the
+/// daemon would take it for the user's move and undo its own.
+#[test]
+fn an_events_focus_read_before_a_focus_act_landed_never_undoes_it() {
+    let dir = Scratch::new("stale-focus");
+    let mut p = focusing(&dir, "a", "b");
+    let told = after_focusing_b(&mut p, &dir);
+    assert!(!told.contains(&focused("a")), "{told:?}");
+    // where focus is, as a report started after the line reads it
+    assert!(told.contains(&focused("b")), "{told:?}");
+}
+
+/// Hands `p` its loop's readiness, asking `report_layout` for each layout
+/// change as the daemon does, until `enough` says what it told is enough
+/// and every report asked has answered: what it told, answers aside. At
+/// most 5 s.
+fn reporting_each_change(
+    p: &mut CommandProvider,
+    asked: &mut u64,
+    enough: impl Fn(&[ProviderEvent]) -> bool,
+) -> Vec<ProviderEvent> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut told, mut answered) = (Vec::new(), *asked);
+    loop {
+        while let Some(e) = p.next() {
+            match e {
+                ProviderEvent::LayoutChanged => {
+                    *asked += 1;
+                    p.ask(AskId(*asked), Ask::ReportLayout);
+                }
+                ProviderEvent::Answered { .. } => answered += 1,
+                _ => told.push(e),
+            }
+        }
+        if enough(&told) && answered == *asked {
+            return told;
+        }
+        assert!(Instant::now() < deadline, "only told {told:?}");
+        wait_ready(p, Duration::from_millis(100));
+    }
+}
+
+/// `events` prints a focus only when it changed from its own last line.
+/// Once its line was stale and a report told where focus really was, a
+/// move back to what the line said comes as a bare line: the report it
+/// asks for tells it.
+#[test]
+fn a_move_back_to_a_stale_lines_focus_is_told_from_the_report() {
+    let dir = Scratch::new("back-focus");
+    let (go, focus) = (dir.join("go"), dir.join("focus"));
+    let path = std::ffi::CString::new(go.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(0, unsafe { libc::mkfifo(path.as_ptr(), 0o600) });
+    let events = format!(
+        r#"read _ < '{go}'; echo '{{"focus":"%0"}}'; read _ < '{go}'; echo; exec sleep 30"#,
+        go = go.display()
+    );
+    let report = format!(
+        r#"echo "{{\"areas\":[{{\"id\":\"@0\",\"terminals\":[
+           {{\"terminal\":\"%0\",\"rect\":[0,0,1,1]}},{{\"terminal\":\"%1\",\"rect\":[0,0,1,1]}}]}}],
+           \"focus\":\"$(cat '{}')\"}}""#,
+        focus.display()
+    );
+    let mut p = runner(
+        &[
+            (Capability::ReportLayout, &["sh", "-c", &report]),
+            (Capability::Events, &["sh", "-c", &events]),
+        ],
+        Duration::from_secs(5),
+        &[("PATH", "/usr/bin:/bin")],
+        "/",
+    );
+    let mut asked = 0;
+    // the stale line: the report after it reads %1
+    std::fs::write(&focus, "%1").unwrap();
+    std::fs::write(&go, "\n").unwrap();
+    let told = reporting_each_change(&mut p, &mut asked, |t| t.contains(&focused("%1")));
+    assert!(!told.contains(&focused("%0")), "{told:?}");
+    // the move back, a bare line
+    std::fs::write(&focus, "%0").unwrap();
+    std::fs::write(&go, "\n").unwrap();
+    let told = reporting_each_change(&mut p, &mut asked, |t| t.contains(&focused("%0")));
+    assert_eq!(vec![focused("%0")], told);
+}
+
+#[test]
+fn the_users_move_after_a_focus_act_is_still_followed() {
+    let dir = Scratch::new("user-focus");
+    let mut p = focusing(&dir, "c", "c");
+    let told = after_focusing_b(&mut p, &dir);
+    assert!(told.contains(&focused("c")), "{told:?}");
+}
+
+/// Makes a FIFO at `path`.
+fn fifo(path: &std::path::Path) {
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(0, unsafe { libc::mkfifo(c.as_ptr(), 0o600) });
+}
+
+/// A runner whose commands a test runs step by step, through FIFOs in its
+/// scratch directory: `events` prints each line written to `ev`; `focus`
+/// ends once `act` is written; `report_layout`, once `rep` is written,
+/// reports focused what the file `focus` says, of a, b and c, or fails if
+/// it says `fail`, exits 69 if `unsupported`, or runs past its time if
+/// `hang`. Answers are taken off as they come, and what else it tells is
+/// returned; it never asks a report itself.
+struct Stepped {
+    dir: Scratch,
+    p: CommandProvider,
+    asked: u64,
+}
+
+impl Stepped {
+    /// `report_layout` has `report_time`.
+    fn new(tag: &str, report_time: Duration) -> Stepped {
+        let dir = Scratch::new(tag);
+        for f in ["ev", "act", "rep"] {
+            fifo(&dir.join(f));
+        }
+        let at = |f: &str| dir.join(f).display().to_string();
+        let events = format!(r#"while :; do read l < '{}'; echo "$l"; done"#, at("ev"));
+        let focus = format!("read _ < '{}'", at("act"));
+        let report = format!(
+            r#"read _ < '{}'; f=$(cat '{}')
+               case $f in fail) exit 1;; unsupported) exit 69;; hang) exec sleep 30;; esac
+               t='{{"rect":[0,0,1,1],"terminal":'
+               echo "{{\"areas\":[{{\"id\":\"w\",\"terminals\":[$t\"a\"}},$t\"b\"}},$t\"c\"}}]}}],\"focus\":\"$f\"}}""#,
+            at("rep"),
+            at("focus")
+        );
+        let command = |cap, argv: &[&str], timeout| CapCommand {
+            cap,
+            argv: argv.iter().map(|w| w.as_bytes().to_vec()).collect(),
+            timeout,
+            protocol: 1,
+        };
+        let long = Duration::from_secs(5);
+        let spec = Spec {
+            commands: vec![
+                command(Capability::Focus, &["sh", "-c", &focus], long),
+                command(
+                    Capability::ReportLayout,
+                    &["sh", "-c", &report],
+                    report_time,
+                ),
+                command(Capability::Events, &["sh", "-c", &events], long),
+            ],
+            ..Spec::named("test")
+        };
+        let env = [(b"PATH".to_vec(), b"/usr/bin:/bin".to_vec())];
+        let mut p = CommandProvider::new(spec, &env, b"/", None).unwrap();
+        // the start's
+        assert_eq!(Some(ProviderEvent::LayoutChanged), p.next());
+        Stepped { dir, p, asked: 0 }
+    }
+
+    /// What it tells until `enough` says it's enough, answers aside, and
+    /// how many answers came; at most 5 s.
+    fn until(&mut self, enough: impl Fn(&[ProviderEvent], u64) -> bool) -> Vec<ProviderEvent> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut told, mut answered) = (Vec::new(), 0);
+        loop {
+            while let Some(e) = self.p.next() {
+                match e {
+                    ProviderEvent::Answered { .. } => answered += 1,
+                    e => told.push(e),
+                }
+            }
+            if enough(&told, answered) {
+                return told;
+            }
+            assert!(Instant::now() < deadline, "only told {told:?}");
+            wait_ready(&mut self.p, Duration::from_millis(100));
+        }
+    }
+
+    /// `events` prints `line`: what it tells until the layout change.
+    fn line(&mut self, line: &str) -> Vec<ProviderEvent> {
+        std::fs::write(self.dir.join("ev"), format!("{line}\n")).unwrap();
+        self.until(|t, _| t.contains(&ProviderEvent::LayoutChanged))
+    }
+
+    fn ask(&mut self, ask: Ask) {
+        self.asked += 1;
+        self.p.ask(AskId(self.asked), ask);
+    }
+
+    fn ask_focus(&mut self, t: &str) {
+        self.ask(Ask::Focus {
+            terminal: TerminalId::from(t),
+        });
+    }
+
+    /// The focus act ends: what it tells until its answer.
+    fn end_act(&mut self) -> Vec<ProviderEvent> {
+        std::fs::write(self.dir.join("act"), "\n").unwrap();
+        self.until(|_, answered| answered == 1)
+    }
+
+    /// The report reads `focus` and ends.
+    fn release_report(&self, focus: &str) {
+        std::fs::write(self.dir.join("focus"), focus).unwrap();
+        std::fs::write(self.dir.join("rep"), "\n").unwrap();
+    }
+
+    /// The report reads `focus` and ends: what it tells until its answer.
+    fn end_report(&mut self, focus: &str) -> Vec<ProviderEvent> {
+        self.release_report(focus);
+        self.until(|_, answered| answered == 1)
+    }
+}
+
+#[test]
+fn what_a_report_after_the_last_line_tells_of_focus() {
+    let (a, b) = (TerminalId::from("a"), TerminalId::from("b"));
+    let tell = |t: &TerminalId| FocusStep::Tell(t.clone());
+    // (read, line waiting, told, after the last focus act): what it does
+    let rows = [
+        (Some(&a), Some(&b), None, false, FocusStep::AskAgain),
+        (None, Some(&b), None, false, FocusStep::AskAgain),
+        (Some(&a), None, None, false, FocusStep::Nothing),
+        (Some(&a), Some(&b), Some(&b), true, tell(&a)),
+        (None, Some(&b), None, true, tell(&b)),
+        (Some(&a), None, Some(&b), true, tell(&a)),
+        (Some(&a), None, None, true, tell(&a)),
+        (Some(&a), None, Some(&a), true, FocusStep::Nothing),
+        (None, None, Some(&a), true, FocusStep::Nothing),
+    ];
+    for (read, line, told, after_acts, want) in rows {
+        assert_eq!(
+            want,
+            focus_to_tell(read, line, told, after_acts),
+            "{read:?} {line:?} {told:?} {after_acts}"
+        );
+    }
+}
+
+/// The user's move, after a focus act landed, comes as a line while a
+/// report started before the act ended runs: that report can't tell it,
+/// and asks for another, which does.
+#[test]
+fn a_lines_focus_a_report_started_before_a_focus_act_ended_cant_tell_asks_another() {
+    let mut s = Stepped::new("held-again", Duration::from_secs(5));
+    s.ask_focus("b");
+    s.line(r#"{"focus":"c"}"#);
+    s.ask(Ask::ReportLayout);
+    s.end_act();
+    let told = s.end_report("c");
+    assert_eq!(vec![ProviderEvent::LayoutChanged], told);
+    s.ask(Ask::ReportLayout);
+    assert_eq!(vec![focused("c")], s.end_report("c"));
+}
+
+/// A stale line, read before a focus act landed: a report started before
+/// the act ended that fails or is unsupported doesn't tell it.
+#[test]
+fn a_report_started_before_a_focus_act_ended_that_fails_tells_no_stale_line() {
+    for how in ["fail", "unsupported"] {
+        let mut s = Stepped::new("stale-failed", Duration::from_secs(5));
+        s.ask_focus("b");
+        s.line(r#"{"focus":"a"}"#);
+        s.ask(Ask::ReportLayout);
+        s.end_act();
+        let told = s.end_report(how);
+        assert!(
+            !told.iter().any(|e| matches!(e, ProviderEvent::Focused(_))),
+            "{how}: {told:?}"
+        );
+    }
+}
+
+/// A report that ran past its time tells the line's focus as a failed one
+/// does.
+#[test]
+fn a_report_past_its_time_tells_the_lines_focus() {
+    let mut s = Stepped::new("timed-out", Duration::from_millis(300));
+    s.line(r#"{"focus":"c"}"#);
+    s.ask(Ask::ReportLayout);
+    s.release_report("hang");
+    let told = s.until(|t, _| t.contains(&focused("c")));
+    assert_eq!(vec![focused("c")], told);
+}
+
+/// The daemon focused b, then the user went back to a before `events`
+/// printed b: its line is bare, as a was its last. The report after it
+/// tells a, though a was told last, before the daemon's own focus.
+#[test]
+fn after_a_focus_act_a_report_tells_the_focus_told_before_it() {
+    let mut s = Stepped::new("after-act", Duration::from_secs(5));
+    s.line(r#"{"focus":"a"}"#);
+    s.ask(Ask::ReportLayout);
+    assert_eq!(vec![focused("a")], s.end_report("a"));
+    s.ask_focus("b");
+    s.end_act();
+    s.line("");
+    s.ask(Ask::ReportLayout);
+    assert_eq!(vec![focused("a")], s.end_report("a"));
+}
+
 /// A runner whose `events` is `argv`, its time told by the returned cell.
 fn events_on_clock(argv: &[&str]) -> (CommandProvider, std::rc::Rc<std::cell::Cell<Instant>>) {
     let now = std::rc::Rc::new(std::cell::Cell::new(Instant::now()));
