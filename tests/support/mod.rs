@@ -576,18 +576,14 @@ impl ZellijSession {
 
     /// Opens a pane running `command` with `env` set, once it is ready,
     /// where zellij finds room: its id, `terminal_N`. A pane's environment
-    /// is the server's, not the caller's: `env` sets the rest. On Linux, a
-    /// pane's command may start before its terminal has a size: it waits
-    /// for one, up to 5 s.
+    /// is the server's, not the caller's: `env` sets the rest.
     pub fn open(&self, env: &[(&str, &std::ffi::OsStr)], command: &[&str]) -> String {
         self.ready();
         let set: Vec<String> = env
             .iter()
             .map(|(k, v)| format!("{k}={}", v.to_str().unwrap()))
             .collect();
-        let sized = "i=0; while [ \"$(stty size 2>/dev/null)\" = '0 0' ] && [ $i -lt 100 ]; do \
-                     sleep 0.05; i=$((i + 1)); done; exec \"$@\"";
-        let mut args = vec!["new-pane", "--", "sh", "-c", sized, "sh", "env"];
+        let mut args = vec!["new-pane", "--", "env"];
         args.extend(set.iter().map(String::as_str));
         args.extend(command);
         let id = self.run(&args);

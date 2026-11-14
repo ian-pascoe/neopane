@@ -173,6 +173,19 @@ pub struct Size {
 }
 
 impl Size {
+    /// What a helper says of a terminal that still has no size: Neovim takes
+    /// none with a 0.
+    pub const STAND_IN: Size = Size {
+        cols: 80,
+        rows: 24,
+        px: None,
+    };
+
+    /// Whether it has room for Neovim: no 0 in `cols` or `rows`.
+    pub fn has_room(&self) -> bool {
+        self.cols > 0 && self.rows > 0
+    }
+
     fn writer(&self) -> MapWriter {
         let mut w = MapWriter::default();
         w.int("cols", self.cols).int("rows", self.rows);
