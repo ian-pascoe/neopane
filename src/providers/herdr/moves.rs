@@ -1,14 +1,25 @@
 //! Moving and sizing a terminal against its origin: `place_beside` and
 //! `resize`.
 //!
-//! `resize` reads the terminal's tab with `pane.layout`, and its split
-//! tree from the split ids (`splits.rs`). The lowest split holding the
-//! terminal and `ORIGIN` gets the ratio that gives the terminal's part
-//! `SIZE` cells of content: each pane across it along the split has a
-//! frame of a cell on each side, as herdr's default borders draw a tab
-//! with a split, and a Neovim pane is on the alternate screen, where
-//! herdr keeps no scrollbar column. One `layout.set_split_ratio`, which
-//! lays the tab out again, resizing every pty in it.
+//! - `place_beside`: a zoomed tab, the origin's or the terminal's, is
+//!   refused before anything moves, as herdr refuses to move a pane into
+//!   or out of one; so is a terminal in another workspace, which a move
+//!   would give another id. From another tab, one `pane.move` beside the
+//!   origin ([`put_beside`]). Within the origin's tab, which herdr refuses
+//!   (`same_tab`), two: out to a new tab of its workspace, `focus:false`,
+//!   then beside the origin. If that second move fails, the terminal is
+//!   left in its tab of its own and it exits 1, with no way back: the
+//!   daemon's next placing moves it. Last, with `SIZE`, the `resize`
+//!   below, since within one tab the room the terminal leaves goes to its
+//!   neighbour.
+//! - `resize` reads the terminal's tab with `pane.layout`, and its split
+//!   tree from the split ids (`splits.rs`). The lowest split holding the
+//!   terminal and `ORIGIN` gets the ratio that gives the terminal's part
+//!   `SIZE` cells of content: each pane across it along the split has a
+//!   frame of a cell on each side, as herdr's default borders draw a tab
+//!   with a split, and a Neovim pane is on the alternate screen, where
+//!   herdr keeps no scrollbar column. One `layout.set_split_ratio`, which
+//!   lays the tab out again, resizing every pty in it. A zoom stays.
 
 use std::time::Duration;
 

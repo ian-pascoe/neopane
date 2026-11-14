@@ -360,8 +360,8 @@ a zoom as it is.
 ### herdr
 
 `<name>.builtin.herdr()`: `find`, `close`, `report_layout`, `open_beside`,
-`open_tab_page`, `focus`, `focus_direction` and `events`, on the herdr
-server whose socket
+`open_tab_page`, `place_beside`, `resize`, `focus`, `focus_direction` and
+`events`, on the herdr server whose socket
 `HERDR_SOCKET_PATH` names, in its socket API: newline-delimited JSON, one
 request per connection, a reply's fields it doesn't read ignored; `events`
 holds its one connection open. Context variables
@@ -406,9 +406,13 @@ tab page area. herdr has one focus per server, not per client: `focus`,
   which take in a pane's frame, as fractions of the tab's area. Insets are
   an alternate-screen program's with herdr's default borders: `[1, 1, 1,
   1]` in a tab with a split, none for a lone pane; on the primary screen
-  herdr keeps one more column on the right, for its scrollbar. `focus` is
-  the server's focused pane, which a close moves with no focus event: with
-  `events`, a report's focus is the one the daemon follows.
+  herdr keeps one more column on the right, for its scrollbar. In a zoomed
+  tab, the zoomed pane, the tab's focused one, is alone in the tab's area at
+  `[0, 0, 1, 1]`, its inset `[1, 1, 1, 1]` as herdr keeps its frame where
+  the tab has others; the panes the zoom hides are in `<tab id>~hidden`,
+  such as `w1:t2~hidden`, at the unzoomed rects herdr still gives them.
+  `focus` is the server's focused pane, which a close moves with no focus
+  event: with `events`, a report's focus is the one the daemon follows.
 - `open_tab_page`: `pane.get` for `ORIGIN`'s workspace, then `layout.apply`
   makes a tab there (`focus:false`), whose one pane runs the attach
   command from `ATTACH`, with no shell; prints its pane id. The server's
@@ -417,6 +421,36 @@ tab page area. herdr has one focus per server, not per client: `focus`,
   itself: the daemon gives the pane up, so its attach is refused, or ended
   as closed if it came first, and ends; herdr closes a pane whose command
   ended, and a tab with its last pane.
+- `place_beside`: exit 1, with `herdr tab w1:t1 is zoomed`, if the tab of
+  `ORIGIN` or of the terminal is zoomed, as herdr moves no pane into or out
+  of one; and if the terminal is in another workspace than `ORIGIN`, as a
+  move there would give it another id. From another tab, one `pane.move`
+  beside `ORIGIN`, as `open_beside` moves its pane: split right or down,
+  its `ratio` `1 - RATIO`, or `RATIO` and a `pane.swap` for `left` and
+  `up`, then the tab's root split set to the ratio it has, twice. herdr
+  refuses a move within one tab (`same_tab`), so from `ORIGIN`'s own tab
+  it takes two: out to a new tab of the workspace (`new_tab`,
+  `focus:false`), then beside `ORIGIN`; if the second fails, the terminal
+  is left in that tab and it exits 1, with no way back. The server's focus
+  stays where it was: the move back focuses the terminal only if it had
+  the focus, and the swap's source is the terminal if it had the focus,
+  else `ORIGIN`, the focus then put back if it was elsewhere. Last, with
+  `SIZE`, the `resize` below, since within one tab the room the terminal
+  leaves goes to its neighbour. The pane keeps its id. The tab it passes
+  through may show in herdr's tab bar for a frame, as `open_beside`'s
+  does. The requests have 1.5 s.
+- `resize`: `pane.layout` of the terminal's tab, whose split tree it reads
+  from herdr's split ids: `split_<n>_root`, or `split_<n>_<bits>`, `<n>`
+  the split's place in pre-order and the bits its `layout.set_split_ratio`
+  path from the root, `0` into the first child and `1` into the second.
+  herdr doesn't document them, so they are read strictly: an id of any
+  other form, or splits and panes that aren't where their ids and herdr's
+  rounding put them, exit 1, resizing nothing. The lowest split holding the
+  terminal and `ORIGIN` gets the ratio that gives the terminal's part
+  `SIZE` cells of content plus a frame of two cells for each pane across
+  it, herdr's default borders, in one `layout.set_split_ratio`, which
+  lays the tab out again; herdr keeps each part of a split at 10 % or
+  more. `DIRECTION` must be along the split. A zoom stays as it is.
 - `focus`: `pane.focus` on the terminal, which goes to its tab and
   workspace.
 - `focus_direction`: `COUNT` steps of `pane.focus_direction`, the first
@@ -441,7 +475,8 @@ tab page area. herdr has one focus per server, not per client: `focus`,
     event that adds nothing prints nothing; a read that fails, a bare
     line, the report it has the daemon run telling focus.
   - **Other events** print a bare line, as does an event of a kind it
-    didn't subscribe to. A JSON line that is no event is skipped.
+    didn't subscribe to. Zooming and unzooming, with herdr's keys or its
+    API, send `layout.updated`. A JSON line that is no event is skipped.
   - **Its end:** exit 1, never 69, when herdr ends the subscription: an
     `events_lost` error, the connection closed, as every connection is at
     a live handoff, a line that isn't JSON, or no herdr to subscribe to.

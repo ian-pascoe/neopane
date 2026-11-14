@@ -6,17 +6,10 @@
 //! 2. `layout.apply` makes a tab (`focus:false`) in the origin's
 //!    workspace, its one pane running the attach command, with no shell,
 //!    labelled with the pane title (`TITLE`).
-//! 3. `pane.move` puts that pane beside the origin, which empties and
-//!    closes its tab. herdr only puts it right of or below the origin,
-//!    and its `ratio` is the first pane's share.
-//! 4. For left or up, `pane.swap` swaps the two. A swap focuses its
-//!    source, the origin: the server's focus is put back if it was
-//!    elsewhere.
-//! 5. The tab's root split is set to the ratio it has: herdr resizes no
-//!    pty on a move, and laying out the tab again resizes every one. It is
-//!    set again 100 ms later: a terminal that went to the alternate screen
-//!    before a client drew it in its new tab is otherwise left a column
-//!    short, herdr keeping its scrollbar's column, until the next layout.
+//! 3. [`put_beside`] moves that pane beside the origin, which empties and
+//!    closes its tab, swaps the two for left or up, and lays the tab out
+//!    again, as herdr resizes no pty on a move. `place_beside` puts a pane
+//!    beside its origin the same way.
 //!
 //! Any failure after the tab is made closes its pane, with a deadline of
 //! its own, so a step that ran out of time still cleans up. A

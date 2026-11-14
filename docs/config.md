@@ -519,7 +519,22 @@ the tab laid out again (ADR 0017). Its limits:
   keys.
 - A tab page gets a herdr tab of its own, in the workspace of the pane it
   opened from.
-- For now no moves, resizes or floats: a float group is drawn in its pane.
+- herdr moves no pane within its tab, so a pane neopane moves there goes
+  out to a tab of its own and back, which may show in the tab bar for a
+  frame. If herdr refuses the way back, the pane stays in that tab until
+  neopane next places it. Nothing moves in a zoomed tab, nor to another
+  workspace.
+- Sizes are set through herdr's split ids, which herdr doesn't document:
+  neopane reads them strictly, and if a herdr reads them otherwise,
+  resizing fails, changing nothing, and says so in the log.
+- Each of herdr's panes has its own frame, where Neovim has one separator
+  between two windows: in a row of two, the right one's pane gets the
+  columns Neovim gives its window, and the left one's three fewer, after
+  `:vertical resize` on either. herdr keeps each side of a split at 10 %
+  of it or more.
+- A zoomed tab shows the zoomed pane alone; the panes it hides are a layout
+  area of their own.
+- For now no floats: a float group is drawn in its pane.
 
 ### zellij
 

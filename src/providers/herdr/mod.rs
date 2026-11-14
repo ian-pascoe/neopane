@@ -13,7 +13,12 @@
 //!   whose pane is moved beside the origin, then the tab laid out again;
 //!   `pane.close`, done if already gone.
 //! - `report_layout` (`layout.rs`): one area per tab of every workspace,
-//!   from `session.snapshot`, with the alternate screen's insets.
+//!   from `session.snapshot`, with the alternate screen's insets; a zoomed
+//!   tab's zoomed pane alone, the panes it hides in `<tab id>~hidden`.
+//! - `place_beside` and `resize` (`moves.rs`): a move beside the origin,
+//!   two within one tab, out to a tab of its own and back, as herdr moves
+//!   no pane within its tab; `layout.set_split_ratio` on the lowest split
+//!   holding both, its path read from herdr's split ids (`splits.rs`).
 //! - `focus` and `focus_direction` (`focus.rs`): `pane.focus`; steps of
 //!   `pane.focus_direction` from the server's focus, stopping at the
 //!   tab's edge. herdr's focus is one per server: it moves every client.
