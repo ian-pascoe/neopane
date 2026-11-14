@@ -32,7 +32,9 @@
 //!   - Without `report_layout`, it is told as `Focused` before it.
 //!   - With `report_layout`, it waits: it may have been read before a
 //!     focus act landed and come after its answer, and `provider_focus.rs`
-//!     takes no report to be older than the focus answered (SPI-1159). A
+//!     takes no report to be older than the focus answered (SPI-1159).
+//!     It is told as `FocusHeard` at once, for the daemon to hold the
+//!     focus acts it asks meanwhile (SPI-1190). A
 //!     report started after the last line, and after the last focus act
 //!     ended, tells the focus it read in its place, or, if it read none,
 //!     failed or ran past its time, the line's own. One started before a
@@ -565,6 +567,7 @@ impl CommandProvider {
         };
         if let Some(t) = id("focus") {
             if self.follows_reports {
+                self.events.push_back(ProviderEvent::FocusHeard(t.clone()));
                 self.line_focus = Some(t);
             } else {
                 self.tell_focus(t);

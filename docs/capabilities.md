@@ -236,6 +236,11 @@ report says, the line having the daemon run one:
   daemon last followed since a focus command ended. `events` need only
   name a focus when it changed from its own last line, which the daemon
   may not have followed.
+- A line naming a terminal other than the one the daemon focused or
+  last followed holds the `focus` commands the daemon asks after it,
+  until a report tells where focus is, 1 s at most: if the user moved,
+  as a window's terminal opened, the move stands and the focus held is
+  dropped; otherwise it runs then.
 - Once `report_layout` exits 69, it is run no more, and lines are
   followed as without it.
 

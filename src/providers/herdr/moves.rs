@@ -438,6 +438,7 @@ mod tests {
                 "session.snapshot",
                 "pane.move",
                 "pane.move",
+                "session.snapshot",
                 "pane.swap",
                 "layout.set_split_ratio",
                 "layout.set_split_ratio",
@@ -481,11 +482,11 @@ mod tests {
         // the swap's source, which it focuses, is the pane that had the
         // focus
         assert_eq!(
-            asked[3]["params"],
+            asked[4]["params"],
             json!({ "source_pane_id": "w1:p3", "target_pane_id": "w1:p1" })
         );
         // the root split, at the ratio the swap left it
-        let set = &asked[4]["params"];
+        let set = &asked[5]["params"];
         assert_eq!(
             (&set["tab_id"], &set["path"]),
             (&json!("w1:t1"), &json!([]))
@@ -493,8 +494,8 @@ mod tests {
         assert!(close_to(&set["ratio"], 0.6), "{set}");
         // then its SIZE, 12 columns and its frame, of the 44 it shares
         // with the origin
-        assert_eq!(asked[6]["params"], json!({ "pane_id": "w1:p3" }));
-        let set = &asked[7]["params"];
+        assert_eq!(asked[7]["params"], json!({ "pane_id": "w1:p3" }));
+        let set = &asked[8]["params"];
         assert_eq!(
             (&set["tab_id"], &set["path"]),
             (&json!("w1:t1"), &json!([false, false]))
@@ -511,11 +512,11 @@ mod tests {
         let asked = fake.asked();
         assert_eq!(asked[2]["params"]["focus"], false);
         assert_eq!(
-            asked[3]["params"],
+            asked[4]["params"],
             json!({ "source_pane_id": "w1:p1", "target_pane_id": "w1:p3" })
         );
-        assert_eq!(asked[4]["method"], "pane.focus");
-        assert_eq!(asked[4]["params"], json!({ "pane_id": "w1:p2" }));
+        assert_eq!(asked[5]["method"], "pane.focus");
+        assert_eq!(asked[5]["params"], json!({ "pane_id": "w1:p2" }));
         // on the origin: the swap leaves it there
         let fake = placing(focused_on("w1:p1"), "place-move-back");
         assert_eq!(place(&fake, "w1:p3", "w1:p1", "left"), Ok(()));

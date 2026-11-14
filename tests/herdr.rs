@@ -467,8 +467,7 @@ impl Live {
 
     /// `:vsplit`, once its pane has attached and been placed, and the
     /// daemon's focus of it has landed: the new window's pane, left of the
-    /// origin. A move made before then is undone by that focus, asked as
-    /// the window opened and run once the pane is there.
+    /// origin, which herdr's own keys then move from.
     fn vsplit(&self) -> String {
         self.ex("vsplit");
         let s = until(|s: &Value| s["panes"] == 2, || self.status());
@@ -486,7 +485,6 @@ impl Live {
         assert_eq!(sizes[1].0, self.origin, "{layout}");
         let left = sizes[0].0.clone();
         assert_eq!(self.until_focused(&left), left, "{}", self.log());
-        std::thread::sleep(Duration::from_millis(500));
         left
     }
 
@@ -1114,4 +1112,37 @@ fn vertical_resize_in_the_first_tab_page_gives_the_herdr_pane_that_many_columns(
     let left = live.win();
     let origin = live.origin.clone();
     live.vertical_resizes(1, &origin, &[&left_pane, &origin], [&left, &right]);
+}
+
+/// The user moves herdr's focus while a split's pane opens, before the
+/// daemon's focus of it runs: the move stands, and Neovim's current
+/// window follows it (SPI-1190).
+#[test]
+fn a_focus_move_while_a_split_opens_stands() {
+    let Some(live) = Live::start("hd-quick") else {
+        return;
+    };
+    let first = live.win();
+    let left = live.vsplit();
+    let second = live.win();
+    live.herdr
+        .call("pane.focus", json!({ "pane_id": live.origin }));
+    assert_eq!(
+        live.until_win(&first),
+        Some(first.clone()),
+        "{}",
+        live.log()
+    );
+    // the first window split again, and at once, as a user's key would,
+    // focus moved to the pane of the second
+    live.ex("vsplit");
+    live.herdr.call("pane.focus", json!({ "pane_id": left }));
+    let s = until(|s: &Value| s["panes"] == 3, || live.status());
+    assert_eq!(s["panes"], 3, "its attach never came: {}", live.log());
+    let want = (left.clone(), second.clone());
+    let now = || (live.focused(), live.win());
+    assert_eq!(until(|got| *got == want, now), want, "{}", live.log());
+    // the new pane's focus, its open done, never takes it
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(now(), want, "it went back: {}", live.log());
 }
