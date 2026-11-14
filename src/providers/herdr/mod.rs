@@ -34,8 +34,10 @@ mod events;
 mod fake;
 mod focus;
 mod layout;
+mod moves;
 mod panes;
 mod proof;
+mod splits;
 mod tab_page;
 
 pub(crate) use proof::inside;
@@ -55,6 +57,8 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Focus => focus::focus(given).map(|()| None),
         Capability::FocusDirection => focus::focus_direction(given).map(|()| None),
         Capability::OpenTabPage => tab_page::open_tab_page(given).map(Some),
+        Capability::PlaceBeside => moves::place_beside(given).map(|()| None),
+        Capability::Resize => moves::resize(given).map(|()| None),
         // it runs until herdr ends it: exit 1, so the daemon starts it again
         Capability::Events => Err(events::events(given)),
         _ => return UNSUPPORTED,

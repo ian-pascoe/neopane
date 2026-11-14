@@ -257,6 +257,8 @@ mod tests {
                 [
                     "close",
                     "find",
+                    "place_beside",
+                    "resize",
                     "focus",
                     "focus_direction",
                     "report_layout",

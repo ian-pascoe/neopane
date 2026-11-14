@@ -11,6 +11,10 @@
 //!   round in a tab with a split, and none for a lone pane. On the
 //!   primary screen herdr keeps a column more on the right for its
 //!   scrollbar.
+//! - A zoomed tab shows its zoomed pane, its focused one, alone, filling
+//!   its area, framed as it is when the tab has a split; herdr gives the
+//!   panes it hides their unzoomed rects, which are reported in an area of
+//!   their own, `<tab id>~hidden`.
 //! - `focus` is the server's focused pane: focus is one per server.
 
 use serde_json::{Value, json};
@@ -31,7 +35,10 @@ pub(super) fn report_layout(given: &Given) -> Result<String, String> {
 /// The report of herdr's `snapshot`.
 fn layout(snapshot: &Value) -> Result<Value, String> {
     let layouts = snapshot["layouts"].as_array().ok_or(UNREADABLE)?;
-    let areas = layouts.iter().map(area).collect::<Result<Vec<_>, _>>()?;
+    let mut areas = Vec::new();
+    for l in layouts {
+        areas.extend(areas_of(l)?);
+    }
     let mut report = json!({ "areas": areas });
     if let Some(focus) = snapshot["focused_pane_id"].as_str() {
         report["focus"] = focus.into();
@@ -39,8 +46,9 @@ fn layout(snapshot: &Value) -> Result<Value, String> {
     Ok(report)
 }
 
-/// The layout area of one tab's `layout`.
-fn area(layout: &Value) -> Result<Value, String> {
+/// The layout areas of one tab's `layout`: the tab's; and in a zoomed tab
+/// with others hidden, theirs, `<tab id>~hidden`, where they were.
+fn areas_of(layout: &Value) -> Result<Vec<Value>, String> {
     let id = text(layout, "tab_id")?;
     let [ax, ay, aw, ah] = rect(&layout["area"])?;
     if aw <= 0.0 || ah <= 0.0 {
@@ -48,21 +56,44 @@ fn area(layout: &Value) -> Result<Value, String> {
     }
     let panes = layout["panes"].as_array().ok_or(UNREADABLE)?;
     let framed = panes.len() > 1;
+    let terminal = |p: &Value, rect: [f64; 4]| -> Result<Value, String> {
+        let mut terminal = json!({ "terminal": text(p, "pane_id")?, "rect": rect });
+        if framed {
+            terminal["inset"] = json!([1, 1, 1, 1]);
+        }
+        Ok(terminal)
+    };
+    let where_it_is = |p: &Value| -> Result<Value, String> {
+        let [x, y, w, h] = rect(&p["rect"])?;
+        terminal(p, [(x - ax) / aw, (y - ay) / ah, w / aw, h / ah])
+    };
+    // herdr gives a zoomed tab's panes their unzoomed rects: the zoomed
+    // one, its focused pane, takes the whole area, keeping its frame
+    if layout["zoomed"] == true {
+        let zoomed = layout["focused_pane_id"].as_str().ok_or(UNREADABLE)?;
+        let (shown, hidden): (Vec<&Value>, Vec<&Value>) =
+            panes.iter().partition(|p| p["pane_id"] == zoomed);
+        let [shown] = shown[..] else {
+            return Err(UNREADABLE.into());
+        };
+        let mut areas = vec![json!({
+            "id": id,
+            "terminals": [terminal(shown, [0.0, 0.0, 1.0, 1.0])?],
+        })];
+        if !hidden.is_empty() {
+            let hidden = hidden
+                .into_iter()
+                .map(where_it_is)
+                .collect::<Result<Vec<_>, _>>()?;
+            areas.push(json!({ "id": format!("{id}~hidden"), "terminals": hidden }));
+        }
+        return Ok(areas);
+    }
     let terminals = panes
         .iter()
-        .map(|p| {
-            let [x, y, w, h] = rect(&p["rect"])?;
-            let mut terminal = json!({
-                "terminal": text(p, "pane_id")?,
-                "rect": [(x - ax) / aw, (y - ay) / ah, w / aw, h / ah],
-            });
-            if framed {
-                terminal["inset"] = json!([1, 1, 1, 1]);
-            }
-            Ok(terminal)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(json!({ "id": id, "terminals": terminals }))
+        .map(where_it_is)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vec![json!({ "id": id, "terminals": terminals })])
 }
 
 /// A herdr rect, `{x, y, width, height}` in cells.
@@ -105,6 +136,74 @@ mod tests {
                 "focus": "w1:p2",
             })
         );
+    }
+
+    /// herdr's tab w1:t1 zoomed on w1:p3, `(P3 | P1) / (P4 | P5)` left of
+    /// `P2 / P6`, 74x29: `pane.layout` gives every pane its unzoomed rect.
+    #[test]
+    fn a_zoomed_tab_shows_its_zoomed_pane_alone_and_hides_the_rest_where_they_were() {
+        let report = layout(&snapshot("session-snapshot-zoomed-3")).unwrap();
+        let (w, h) = (74.0, 29.0);
+        let hidden = |id: &str, x: f64, y: f64, pw: f64, ph: f64| json!({"terminal": id, "rect": [x / w, y / h, pw / w, ph / h], "inset": [1, 1, 1, 1]});
+        assert_eq!(
+            report,
+            json!({
+                "areas": [
+                    {
+                        "id": "w1:t1",
+                        "terminals": [
+                            {"terminal": "w1:p3", "rect": [0.0, 0.0, 1.0, 1.0], "inset": [1, 1, 1, 1]},
+                        ],
+                    },
+                    {
+                        "id": "w1:t1~hidden",
+                        "terminals": [
+                            hidden("w1:p1", 11.0, 0.0, 26.0, 15.0),
+                            hidden("w1:p4", 0.0, 15.0, 15.0, 14.0),
+                            hidden("w1:p5", 15.0, 15.0, 22.0, 14.0),
+                            hidden("w1:p2", 37.0, 0.0, 37.0, 15.0),
+                            hidden("w1:p6", 37.0, 15.0, 37.0, 14.0),
+                        ],
+                    },
+                ],
+                "focus": "w1:p3",
+            })
+        );
+        // the zoomed tab among others: its hidden panes come after it
+        let report = layout(&snapshot("session-snapshot-zoomed")).unwrap();
+        let ids: Vec<&str> = report["areas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["w1:t1", "w2:t1", "w2:t1~hidden"]);
+        assert_eq!(
+            report["areas"][1]["terminals"],
+            json!([{"terminal": "w2:p1", "rect": [0.0, 0.0, 1.0, 1.0], "inset": [1, 1, 1, 1]}])
+        );
+    }
+
+    #[test]
+    fn a_zoomed_lone_pane_is_unframed_and_a_zoom_on_no_pane_of_its_tab_cant_be_read() {
+        let s = |focused: &str| {
+            json!({
+                "layouts": [{
+                    "tab_id": "w1:t1",
+                    "zoomed": true,
+                    "focused_pane_id": focused,
+                    "area": {"x": 0, "y": 0, "width": 10, "height": 4},
+                    "panes": [{"pane_id": "w1:p1", "rect": {"x": 0, "y": 0, "width": 10, "height": 4}}],
+                }],
+            })
+        };
+        assert_eq!(
+            layout(&s("w1:p1")).unwrap(),
+            json!({"areas": [{"id": "w1:t1", "terminals": [
+                {"terminal": "w1:p1", "rect": [0.0, 0.0, 1.0, 1.0]}
+            ]}]})
+        );
+        assert_eq!(layout(&s("w1:p2")), Err(UNREADABLE.into()));
     }
 
     #[test]
