@@ -236,11 +236,21 @@ report says, the line having the daemon run one:
   daemon last followed since a focus command ended. `events` need only
   name a focus when it changed from its own last line, which the daemon
   may not have followed.
-- A line naming a terminal other than the one the daemon focused or
-  last followed holds the `focus` commands the daemon asks after it,
-  until a report tells where focus is, 1 s at most: if the user moved,
-  as a window's terminal opened, the move stands and the focus held is
-  dropped; otherwise it runs then.
+- A line whose `focus` names a terminal the daemon doesn't know (the
+  focus a report last told it, or one it asked focused since) holds the
+  `focus` commands the daemon asks after it, until a report tells where
+  focus is: if the user moved, as a window's terminal opened, the move
+  stands and the newest `focus` command waiting is dropped; otherwise it
+  runs then. A report the daemon ignores, as one of its focus commands
+  lands, doesn't end the hold. The hold lasts while another command the
+  report waits behind runs, then 1 s at most. It needs both `events` and
+  `report_layout`; before a report has told any focus, a line only says
+  where focus starts, and holds nothing.
+- While one of the daemon's focus commands lands, a line or a report
+  whose `focus` names a terminal the daemon doesn't know is the user's
+  move, which that command may undo: the daemon follows it, and focuses
+  it again once none lands, if it is a Neovim pane's terminal and no
+  later move came. This too needs both `events` and `report_layout`.
 - Once `report_layout` exits 69, it is run no more, and lines are
   followed as without it.
 

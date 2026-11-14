@@ -33,18 +33,17 @@
 //!   - With `report_layout`, it waits: it may have been read before a
 //!     focus act landed and come after its answer, and `provider_focus.rs`
 //!     takes no report to be older than the focus answered (SPI-1159).
-//!     It is told as `FocusHeard` at once, for the daemon to hold the
-//!     focus acts it asks meanwhile (SPI-1190). A
-//!     report started after the last line, and after the last focus act
-//!     ended, tells the focus it read in its place, or, if it read none,
-//!     failed or ran past its time, the line's own. One started before a
-//!     focus act ended tells nothing, whatever became of it, and says the
-//!     layout changed, for another to be asked. A report's exit 69 ends
-//!     the waiting, as without `report_layout`.
-//!     A report started after the last line, and after the last focus act
-//!     ended, also tells the focus it read if it isn't the one last told
-//!     since a focus act ended: a line names a focus only when it changed
-//!     from its own last line.
+//!     It is told as `FocusHeard` at once, for the daemon to park the
+//!     focus acts it asks meanwhile (SPI-1190). A report started after the
+//!     last line, and after the last focus act ended, tells the focus it
+//!     read in its place, or, if it read none, failed or ran past its
+//!     time, the line's own. One started before a focus act ended tells
+//!     nothing, whatever became of it, and says the layout changed, for
+//!     another to be asked. A report's exit 69 ends the waiting, as
+//!     without `report_layout`. A report started after the last line, and
+//!     after the last focus act ended, also tells the focus it read if it
+//!     isn't the one last told since a focus act ended: a line names a
+//!     focus only when it changed from its own last line.
 //!
 //!   Lines over 64 KiB are dropped. Once it ends, or a restart can't start,
 //!   it starts again after 1 s, then 2 s, doubling up to 60 s; one that ran

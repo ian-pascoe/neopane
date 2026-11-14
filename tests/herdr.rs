@@ -466,8 +466,11 @@ impl Live {
     }
 
     /// `:vsplit`, once its pane has attached and been placed, and the
-    /// daemon's focus of it has landed: the new window's pane, left of the
-    /// origin, which herdr's own keys then move from.
+    /// daemon's focus of it has landed, and `events` has seen it land: the
+    /// new window's pane, left of the origin, which herdr's own keys then
+    /// move from. `events` reads focus a moment after each focus event and
+    /// prints it only if it changed from its last line, so a move back
+    /// before it read the landing goes unseen.
     fn vsplit(&self) -> String {
         self.ex("vsplit");
         let s = until(|s: &Value| s["panes"] == 2, || self.status());
@@ -485,6 +488,7 @@ impl Live {
         assert_eq!(sizes[1].0, self.origin, "{layout}");
         let left = sizes[0].0.clone();
         assert_eq!(self.until_focused(&left), left, "{}", self.log());
+        std::thread::sleep(Duration::from_millis(500));
         left
     }
 

@@ -124,9 +124,9 @@ pub(super) struct Beside<'a> {
 /// it had the focus, and a swap focuses its source, the pane if it has the
 /// focus, else the origin, the focus then being put back if it is
 /// elsewhere, as read just before the swap: the user may have moved it
-/// since `focused` was read. Last, the tab's root split is set to the ratio it has:
-/// herdr resizes no pty on a move, and laying the tab out again resizes
-/// every one. It is set again 100 ms later: a terminal that went to the
+/// since `focused` was read. Last, the tab's root split is set to the
+/// ratio it has: herdr resizes no pty on a move, and laying the tab out
+/// again resizes every one. It is set again 100 ms later: a terminal that went to the
 /// alternate screen before a client drew it in its new place is otherwise
 /// left a column short, herdr keeping its scrollbar's column, until the
 /// next layout.

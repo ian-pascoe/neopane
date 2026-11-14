@@ -292,6 +292,15 @@ impl Asks {
         self.sent.iter().any(|s| s.ask.capability() == cap)
     }
 
+    /// Whether a layout act other than `report_layout` is asked and
+    /// unanswered: a report waits behind it.
+    pub(crate) fn runs_layout_act(&self) -> bool {
+        self.sent
+            .iter()
+            .map(|s| s.ask.capability())
+            .any(|c| c.is_layout() && c != Capability::ReportLayout)
+    }
+
     /// Whether a `place_beside` or `resize` is asked or waiting.
     pub(crate) fn placing(&self) -> bool {
         let asked = self.sent.iter().map(|s| &s.ask);
