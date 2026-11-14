@@ -3,9 +3,9 @@
 //! `ZELLIJ_SESSION_NAME`, in the choosing attach's environment: zellij
 //! 0.46 finds a session by name through its socket directory
 //! (`ZELLIJ_SOCKET_DIR`) and its cache directory (`HOME`'s), both the
-//! attach's. `ZELLIJ_PANE_ID` is taken from every call but a split's,
-//! which names its origin: zellij takes it as the pane issuing the
-//! action.
+//! attach's. `ZELLIJ_PANE_ID` is taken from every call but a split's or
+//! a float's, which names its origin: zellij takes it as the pane issuing
+//! the action.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -29,8 +29,15 @@ pub(super) struct Session {
 /// How a call of zellij failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Ran {
-    /// It couldn't start, or exited unsuccessfully: why.
+    /// It couldn't start: why.
     Failed(String),
+    /// It exited unsuccessfully, with `code`, none if a signal ended it,
+    /// its stderr's first line `said`: why.
+    Exited {
+        code: Option<i32>,
+        said: String,
+        why: String,
+    },
     /// It was killed at its deadline, or never started for lack of time:
     /// whatever it was to do may be done or not.
     TimedOut(String),
@@ -42,7 +49,10 @@ pub(super) enum Ran {
 impl std::fmt::Display for Ran {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ran::Failed(why) | Ran::TimedOut(why) | Ran::NoSession(why) => f.write_str(why),
+            Ran::Failed(why)
+            | Ran::Exited { why, .. }
+            | Ran::TimedOut(why)
+            | Ran::NoSession(why) => f.write_str(why),
         }
     }
 }
@@ -85,6 +95,13 @@ impl Session {
     /// `zellij --session NAME action args…`'s stdout, or why it failed.
     pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, Ran> {
         self.run_as(None, args, None)
+    }
+
+    /// The same, issued from terminal pane `pane`, with
+    /// `ZELLIJ_PANE_ID=pane`, which a `new-pane --no-focus` opens beside or
+    /// over, in its tab.
+    pub(super) fn run_from<S: AsRef<OsStr>>(&self, pane: u32, args: &[S]) -> Result<Vec<u8>, Ran> {
+        self.run_as(Some(pane), args, None)
     }
 
     /// The same, killed at `due` if it hasn't exited by then, and not run
@@ -162,7 +179,11 @@ impl Session {
         if self.is_gone(first) {
             return Err(Ran::NoSession(why));
         }
-        Err(Ran::Failed(why))
+        Err(Ran::Exited {
+            code: status.code(),
+            said: first.to_string(),
+            why,
+        })
     }
 
     /// Whether `line`, the first of zellij's stderr, says this session

@@ -29,8 +29,8 @@ pub(super) fn open_float(given: &Given) -> Result<String, Failure> {
     };
     let origin = pane_id(given, "origin")?;
     let words = attach_words(given)?;
-    let at = [number(given, "x")?, number(given, "y")?];
-    let size = [cells(given, "cols")?, cells(given, "rows")?];
+    let at = [given.integer("x")?, given.integer("y")?];
+    let size = [given.cells("cols")?, given.cells("rows")?];
     let shown = server.run(&["display-message", "-p", "-t", &origin, PANES])?;
     let [x, y, ox, oy] = placement(geometry, at, size, &shown)?;
     let mut args: Vec<OsString> = vec!["new-pane".into(), "-d".into()];
@@ -60,30 +60,6 @@ fn placement(
         )
     })?;
     Ok(flags(geometry, at, size, corner, window))
-}
-
-/// Input `name`, an integer, or why not.
-fn number(given: &Given, name: &str) -> Result<i64, String> {
-    let n = given.var(name).unwrap_or_default();
-    std::str::from_utf8(&n)
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| {
-            format!(
-                "{} {:?} isn't an integer",
-                name.to_ascii_uppercase(),
-                String::from_utf8_lossy(&n)
-            )
-        })
-}
-
-/// Input `name`, a count of cells, one at least, or why not.
-fn cells(given: &Given, name: &str) -> Result<u32, String> {
-    number(given, name)?
-        .try_into()
-        .ok()
-        .filter(|&n: &u32| n >= 1)
-        .ok_or_else(|| format!("{} isn't a count of cells", name.to_ascii_uppercase()))
 }
 
 /// What `new-pane`'s `-x -y -X -Y` give, which depends on tmux's version.

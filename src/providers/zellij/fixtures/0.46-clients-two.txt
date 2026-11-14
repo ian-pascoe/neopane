@@ -1,0 +1,3 @@
+CLIENT_ID  ZELLIJ_PANE_ID RUNNING_COMMAND
+1          terminal_0     N/A            
+101        terminal_12    sleep 100000   

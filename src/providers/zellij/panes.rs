@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::session::{Ran, Session};
-use super::{pane_rows, terminal_number, terminal_of, terminal_row};
+use super::{pane_rows, printed_terminal, terminal_of, terminal_row};
 use crate::name::NAME;
 use crate::providers::builtin::Given;
 
@@ -126,7 +126,10 @@ impl Split {
         .map(OsStr::new)
         .to_vec();
         args.extend(self.words.iter().map(OsString::as_os_str));
-        let new = printed_terminal(&session.run_until(Some(self.origin), &args, due)?)?;
+        let new = printed_terminal(
+            &session.run_until(Some(self.origin), &args, due)?,
+            "new-pane",
+        )?;
         if let Some(swap) = self.swap
             && let Err(why) = session.run_until(None, &["move-pane", "--pane-id", &new, swap], due)
         {
@@ -151,16 +154,6 @@ fn floats_shown(panes: &[u8], tabs: &[u8], origin: u32) -> Option<u64> {
         .iter()
         .any(|t| t["tab_id"].as_u64() == Some(tab) && t["are_floating_panes_visible"] == true);
     shown.then_some(tab)
-}
-
-/// The pane id `new-pane` printed, `out`, or why it isn't a terminal's.
-fn printed_terminal(out: &[u8]) -> Result<String, String> {
-    let id = String::from_utf8_lossy(out);
-    let id = id.lines().next().unwrap_or_default().trim();
-    if terminal_number(id.as_bytes()).is_none() {
-        return Err(format!("new-pane printed {id:?}, not a terminal pane's id"));
-    }
-    Ok(id.to_string())
 }
 
 /// Closes the pane, or says why it may still be there.
@@ -190,54 +183,8 @@ fn closed(session: &Session, pane: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
+    use super::super::fake::Fake;
     use super::*;
-
-    /// A fake zellij in a directory of its own: it logs each action's
-    /// name, one a line, and answers it as `answers` say, a shell snippet
-    /// per action. Removed as it drops.
-    struct Fake {
-        dir: PathBuf,
-    }
-
-    impl Fake {
-        fn new(test: &str, answers: &[(&str, &str)]) -> Fake {
-            let dir = std::env::temp_dir().join(format!("zj-fake-{test}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let log = dir.join("log");
-            let mut script = format!(
-                "#!/bin/sh\nshift 3\necho \"$1\" >> '{}'\ncase \"$1\" in\n",
-                log.display()
-            );
-            for (action, answer) in answers {
-                script.push_str(&format!("{action}) {answer} ;;\n"));
-            }
-            script.push_str("esac\n");
-            let program = dir.join("zellij");
-            std::fs::write(&program, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Fake { dir }
-        }
-
-        fn session(&self) -> Session {
-            Session::faked(&self.dir.join("zellij"), "work")
-        }
-
-        /// The actions it was asked, in order.
-        fn asked(&self) -> Vec<String> {
-            let log = std::fs::read_to_string(self.dir.join("log")).unwrap_or_default();
-            log.lines().map(String::from).collect()
-        }
-    }
-
-    impl Drop for Fake {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
 
     /// terminal_0 in tab 0, which shows its floats if `floats`.
     fn listed(floats: bool) -> [(&'static str, String); 2] {
@@ -440,14 +387,6 @@ mod tests {
             &[("close-pane", &other), ("list-panes", &other)],
         );
         assert!(closed(&other.session(), 3).is_err());
-    }
-
-    #[test]
-    fn only_a_terminal_id_is_taken_from_new_pane() {
-        assert_eq!(Ok("terminal_7".into()), printed_terminal(b"terminal_7\n"));
-        assert!(printed_terminal(b"plugin_7\n").is_err());
-        assert!(printed_terminal(b"").is_err());
-        assert!(printed_terminal(b"Cannot split\n").is_err());
     }
 
     #[test]
