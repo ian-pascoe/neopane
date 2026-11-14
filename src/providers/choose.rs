@@ -4,9 +4,10 @@
 //! daemon's loop never waits for it (`ConfigRun`), and what it returned is
 //! checked by the daemon (`by_config`). With no file, the built-in
 //! `<name>.default` chooses, run in the daemon itself (`config::default_of`):
-//! the one built-in the attach's environment names, tmux's table or Rex,
-//! else none; naming several, the multiplexers' `inside` proofs decide, run
-//! on a thread of their own (`DefaultRun`). The hint `none` skips both.
+//! the one built-in the attach's environment names, tmux's, herdr's or
+//! zellij's table or Rex, else none; naming several, the multiplexers'
+//! `inside` proofs decide, run on a thread of their own (`DefaultRun`). The
+//! hint `none` skips both.
 //!
 //! Choosing Rex only starts connecting to it, which never blocks: the
 //! daemon's loop takes the steps, and its `find` confirms the choice.
@@ -144,8 +145,9 @@ pub(crate) fn by_proofs(
     }
     match defaulted.choice() {
         Choice::None if defaulted.named.is_empty() => Chosen::None {
-            why: "none of tmux's variables (TERM_PROGRAM=tmux, TMUX), zellij's (ZELLIJ, \
-                  ZELLIJ_PANE_ID) or Rex's (REX_SERVER, REX_SESSION) are set"
+            why: "none of tmux's variables (TERM_PROGRAM=tmux, TMUX), herdr's \
+                  (TERM_PROGRAM=herdr, HERDR_SOCKET_PATH), zellij's (ZELLIJ, ZELLIJ_PANE_ID) \
+                  or Rex's (REX_SERVER, REX_SESSION) are set"
                 .into(),
         },
         Choice::None => Chosen::None {

@@ -357,6 +357,54 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
 pane unzoom its window, as tmux's own commands do; `open_tab_page` leaves
 a zoom as it is.
 
+### herdr
+
+`<name>.builtin.herdr()`: `find`, `close`, `report_layout` and
+`open_beside`, on the herdr server whose socket `HERDR_SOCKET_PATH` names,
+in its socket API: newline-delimited JSON, one request per connection, a
+reply's fields it doesn't read ignored. Context variables
+`HERDR_SOCKET_PATH`, find variables `HERDR_PANE_ID`: a herdr server is the
+reach, its workspaces no boundary. Terminal ids are herdr pane ids, such as
+`w1:p4`, which a live handoff keeps. A herdr tab is a layout area.
+
+- `find`: `ping` first, refusing a protocol below 22 (herdr 0.9.5's),
+  naming both; a newer one is tried, with a line on stderr. Then
+  `pane.process_info` for the attaching terminal's `HERDR_PANE_ID`
+  (`<NAME>_ENV_HERDR_PANE_ID`), and the controlling terminal of its
+  `shell_pid`, compared with `TTY` by device: herdr's own `tty` field is
+  always empty, and `HERDR_PANE_ID` leaks into the panes of a tmux run in a
+  herdr pane. The choosing attach's `HERDR_ENV` must be `1`. Where it can't
+  be proved, the pane having no process or its terminal being unreadable,
+  it trusts `HERDR_PANE_ID`, the pane being there, as Rex's trusts
+  `REX_BLOCK`. Prints the pane id. It has 0.5 s. `<name>.inside.herdr`
+  runs the same proof, unprovable being no.
+- `open_beside`: exit 1, with `herdr tab w1:t1 is zoomed`, if `ORIGIN`'s tab
+  is zoomed. Else `layout.apply` makes a tab (`focus:false`) in `ORIGIN`'s
+  workspace, labelled `TITLE`, whose one pane runs the attach command from
+  `ATTACH`, with no shell; `pane.move` puts that pane beside `ORIGIN`
+  (`focus:false`), split right for `left` and `right`, down for `up` and
+  `down`, its `ratio`, the first pane's share, `1 - RATIO`, or `RATIO` for
+  `left` and `up`, clamped to 0.1–0.9; for `left` and `up`, `pane.swap`
+  with `ORIGIN` as its source, which focuses it, then `pane.focus` gives
+  the server's focus back if it was elsewhere. Last, the tab's root split
+  (`path: []`) is set to the ratio it has, which has herdr resize the ptys
+  a move leaves at their old size, and again 100 ms later, for a terminal
+  that went to the alternate screen before a client drew it there. A
+  `zoomed_tab` reply, or any failure after `layout.apply`, closes the pane
+  made and exits 1; the requests have 4 s, and the close 0.5 s of its own.
+  A `layout.apply` with no answer, or one that can't be read, closes the
+  tab labelled `TITLE`, if herdr has it by then. Prints the pane id, which
+  the move keeps. An attach command not UTF-8 exits 1: herdr's JSON can't
+  carry it.
+- `close`: `pane.close`; done when herdr says `pane_not_found`.
+- `report_layout`: one `session.snapshot`: an area per tab of every
+  workspace, its id the tab's, foreign panes included. Rects are herdr's,
+  which take in a pane's frame, as fractions of the tab's area. Insets are
+  an alternate-screen program's with herdr's default borders: `[1, 1, 1,
+  1]` in a tab with a split, none for a lone pane; on the primary screen
+  herdr keeps one more column on the right, for its scrollbar. `focus` is
+  the server's focused pane: herdr has one focus per server.
+
 ### zellij
 
 `<name>.builtin.zellij()`: `find`, `open_beside`, `close` and

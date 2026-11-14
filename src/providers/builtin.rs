@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-use super::{tmux, zellij};
+use super::{herdr, tmux, zellij};
 use crate::config::{Attach, BuiltinTable, Capability, Proof};
 use crate::name::{NAME, upper};
 
@@ -67,6 +67,7 @@ fn run(words: &[OsString], given: &Given) -> u8 {
     }
     match table {
         BuiltinTable::Tmux => tmux::run(cap, given),
+        BuiltinTable::Herdr => herdr::run(cap, given),
         BuiltinTable::Zellij => zellij::run(cap, given),
     }
 }
@@ -78,6 +79,7 @@ fn run(words: &[OsString], given: &Given) -> u8 {
 pub(crate) fn inside(table: BuiltinTable, attach: &Attach) -> Proof {
     match table {
         BuiltinTable::Tmux => tmux::inside(attach),
+        BuiltinTable::Herdr => herdr::inside(attach),
         BuiltinTable::Zellij => zellij::inside(attach),
     }
 }

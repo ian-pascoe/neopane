@@ -165,7 +165,7 @@ The tab page a window belongs to: the one it was opened in, or for a split, its 
 _Avoid_: owning tab, the window's tab page
 
 **Tab page area**:
-Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
+Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window, a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
 _Avoid_: tab layer, floating tab page, tab (on its own)
 
 ### Pane providers
@@ -191,15 +191,15 @@ A terminal provider and a layout provider used together as one pane provider, ea
 _Avoid_: combination, combo
 
 **Built-in provider**:
-A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex` or `tmux`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
+A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex`, `tmux`, `herdr` or `zellij`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
 _Avoid_: default provider, bundled provider
 
 **Built-in default**:
-What chooses the pane provider with no config, and what `<name>.default` returns to one: the one built-in provider the attach's environment names, running nothing; naming several, as in a tmux started from a Rex pane, the first multiplexer whose inside proof proves, else Rex if named, else none. Its guess, if its `find` refuses it, is only logged.
+What chooses the pane provider with no config, and what `<name>.default` returns to one: the one built-in provider the attach's environment names, running nothing; naming several, as in a tmux or herdr server started from a Rex pane, the first multiplexer whose inside proof proves, else Rex if named, else none. Its guess, if its `find` refuses it, is only logged.
 _Avoid_: default provider, fallback
 
 **Inside proof**:
-A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's does, or the process table alone, as zellij's does. That built-in's `find` runs it first, and the built-in default asks it where variables name several built-ins.
+A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's and herdr's do, or the process table alone, as zellij's does. That built-in's `find` runs it first, though herdr's trusts a pane it can't prove where `inside.herdr` says no, and the built-in default asks it where variables name several built-ins.
 _Avoid_: detection, nesting check
 
 **Built-in command**:
@@ -281,6 +281,18 @@ _Avoid_: floating pane (on its own), layer (Rex's API word)
 **Rex session**:
 What `REX_SESSION` names: the Rex tabs one Rex server keeps for a session, and the attach context of Rex's pane provider. A terminal in another Rex session is out of its reach.
 _Avoid_: session (on its own)
+
+### herdr's pane provider
+
+Terms used only by the built-in `herdr` pane provider (`src/providers/herdr/`); the core never uses them.
+
+**herdr tab**:
+A tab of a herdr workspace: the layout area of herdr's pane provider, its id the tab's, such as `w1:t2`.
+_Avoid_: tab (on its own), tab page (that is Neovim's)
+
+**herdr workspace**:
+A group of herdr tabs in one herdr server. Not a boundary of reach: that is the herdr server, which `HERDR_SOCKET_PATH` names, every workspace of it.
+_Avoid_: workspace (on its own), session (herdr's word for its saved state)
 
 ### zellij's pane provider
 

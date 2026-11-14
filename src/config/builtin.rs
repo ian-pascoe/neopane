@@ -16,11 +16,17 @@ use super::wire::{Answer, Called, Ran};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinTable {
     Tmux,
+    Herdr,
     Zellij,
 }
 
 impl BuiltinTable {
-    pub const ALL: [BuiltinTable; 2] = [BuiltinTable::Tmux, BuiltinTable::Zellij];
+    /// In proving order: the built-in default proves them in this order.
+    pub const ALL: [BuiltinTable; 3] = [
+        BuiltinTable::Tmux,
+        BuiltinTable::Herdr,
+        BuiltinTable::Zellij,
+    ];
 
     pub fn from_name(name: &[u8]) -> Option<BuiltinTable> {
         BuiltinTable::ALL
@@ -33,6 +39,7 @@ impl BuiltinTable {
     pub fn name(self) -> &'static str {
         match self {
             BuiltinTable::Tmux => "tmux",
+            BuiltinTable::Herdr => "herdr",
             BuiltinTable::Zellij => "zellij",
         }
     }
@@ -53,6 +60,12 @@ impl BuiltinTable {
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
             ],
+            BuiltinTable::Herdr => &[
+                Capability::Find,
+                Capability::Close,
+                Capability::ReportLayout,
+                Capability::OpenBeside,
+            ],
             BuiltinTable::Zellij => &[
                 Capability::Find,
                 Capability::Close,
@@ -64,10 +77,12 @@ impl BuiltinTable {
 
     /// Its context variables and find variables: none of tmux's, as `TMUX`
     /// leaks into terminals tmux doesn't run, so its `find` proves a pane
-    /// by its tty alone; zellij's session, and the pane its `find` checks.
+    /// by its tty alone; herdr's server, by its socket, and zellij's
+    /// session; and the pane each one's `find` checks.
     pub fn vars(self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
             BuiltinTable::Tmux => (&[], &[]),
+            BuiltinTable::Herdr => (&["HERDR_SOCKET_PATH"], &["HERDR_PANE_ID"]),
             BuiltinTable::Zellij => (
                 &["ZELLIJ_SESSION_NAME", "ZELLIJ_SOCKET_DIR"],
                 &["ZELLIJ_PANE_ID"],
@@ -204,6 +219,32 @@ mod tests {
             assert_eq!(provider.context_vars, context, "{b:?}");
             assert_eq!(provider.find_vars, find, "{b:?}");
         }
+    }
+
+    #[test]
+    fn herdr_runs_the_binary_for_its_four_and_reaches_by_its_socket_and_pane() {
+        let t = BuiltinTable::Herdr.table();
+        let shown: Vec<(&str, String)> = t
+            .capabilities
+            .iter()
+            .map(|(c, argv)| {
+                let words: Vec<_> = argv.iter().map(|w| String::from_utf8_lossy(w)).collect();
+                (c.name(), words.join(" "))
+            })
+            .collect();
+        let want: Vec<(&str, String)> = ["find", "close", "report_layout", "open_beside"]
+            .into_iter()
+            .map(|cap| (cap, format!("{{exe}} provider builtin herdr {cap}")))
+            .collect();
+        assert_eq!(shown, want);
+        let list = |v: &str| Value::List(vec![Value::String(v.as_bytes().to_vec())]);
+        assert_eq!(
+            t.settings,
+            [
+                (Setting::ContextVars, list("HERDR_SOCKET_PATH")),
+                (Setting::FindVars, list("HERDR_PANE_ID")),
+            ]
+        );
     }
 
     #[test]

@@ -1,0 +1,1 @@
+{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":52774,"foreground_process_group_id":52774,"foreground_processes":[{"pid":52774,"name":"bash","argv0":"sh","argv":["-sh"],"cmdline":"-sh","cwd":"/private/tmp/hx"}]}}}

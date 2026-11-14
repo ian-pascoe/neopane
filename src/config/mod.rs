@@ -92,15 +92,22 @@ impl Defaulted {
 
 /// The built-ins an environment names, from its variables only, the
 /// multiplexers in proving order, then Rex: tmux when `TERM_PROGRAM` is
-/// `tmux` and `TMUX` is set and not empty, zellij when `ZELLIJ` is set and
-/// `ZELLIJ_PANE_ID` set and not empty, Rex when `REX_SERVER` and
-/// `REX_SESSION` are both set, even if empty. A multiplexer's panes
-/// inherit whatever started its server, so several may be named.
+/// `tmux` and `TMUX` is set and not empty, herdr when `TERM_PROGRAM` is
+/// `herdr` and `HERDR_SOCKET_PATH` is set and not empty, zellij when
+/// `ZELLIJ` is set and `ZELLIJ_PANE_ID` set and not empty, Rex when
+/// `REX_SERVER` and `REX_SESSION` are both set, even if empty. A
+/// multiplexer's panes inherit whatever started its server, so several
+/// may be named.
 pub fn named(var: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<DefaultName> {
     let mut named = Vec::new();
     if var("TERM_PROGRAM").as_deref() == Some(b"tmux") && var("TMUX").is_some_and(|t| !t.is_empty())
     {
         named.push(DefaultName::Table(BuiltinTable::Tmux));
+    }
+    if var("TERM_PROGRAM").as_deref() == Some(b"herdr")
+        && var("HERDR_SOCKET_PATH").is_some_and(|s| !s.is_empty())
+    {
+        named.push(DefaultName::Table(BuiltinTable::Herdr));
     }
     if var("ZELLIJ").is_some() && var("ZELLIJ_PANE_ID").is_some_and(|p| !p.is_empty()) {
         named.push(DefaultName::Table(BuiltinTable::Zellij));
@@ -261,6 +268,61 @@ mod default_tests {
             []
         );
         assert_eq!(named(var(&[("TERM_PROGRAM", "tmux"), ("TMUX", "")])), []);
+    }
+
+    const HERDR: DefaultName = DefaultName::Table(BuiltinTable::Herdr);
+    const IN_HERDR: [(&str, &str); 2] = [
+        ("TERM_PROGRAM", "herdr"),
+        ("HERDR_SOCKET_PATH", "/tmp/h/h.sock"),
+    ];
+
+    #[test]
+    fn the_environment_names_herdr_after_tmux_and_before_rex() {
+        assert_eq!(named(var(&IN_HERDR)), [HERDR]);
+        assert_eq!(
+            named(var(&[IN_REX, IN_HERDR].concat())),
+            [HERDR, DefaultName::Rex]
+        );
+        // a tmux in a herdr pane: TERM_PROGRAM is the innermost's
+        let in_both = [IN_HERDR[1], IN_TMUX[0], IN_TMUX[1]];
+        assert_eq!(named(var(&in_both)), [TMUX]);
+        // the socket alone, empty, or TERM_PROGRAM alone, names no herdr
+        assert_eq!(named(var(&IN_HERDR[1..])), []);
+        assert_eq!(named(var(&IN_HERDR[..1])), []);
+        assert_eq!(
+            named(var(&[("TERM_PROGRAM", "herdr"), ("HERDR_SOCKET_PATH", "")])),
+            []
+        );
+        let d = default_of(var(&IN_HERDR), never);
+        assert_eq!(d.chose, Some(HERDR));
+        let d = default_of(var(&[IN_HERDR, IN_REX].concat()), |t| {
+            assert_eq!(t, BuiltinTable::Herdr);
+            proof(true, "herdr pane w1:p4")
+        });
+        assert_eq!(d.chose, Some(HERDR));
+    }
+
+    #[test]
+    fn herdr_is_proved_before_zellij_and_after_tmux() {
+        // a zellij in a herdr pane: herdr's variables leak into its panes
+        let both = [IN_HERDR, IN_ZELLIJ].concat();
+        assert_eq!(named(var(&both)), [HERDR, ZELLIJ]);
+        let mut asked = Vec::new();
+        let d = default_of(var(&both), |t| {
+            asked.push(t);
+            proof(t == BuiltinTable::Zellij, "")
+        });
+        assert_eq!(asked, [BuiltinTable::Herdr, BuiltinTable::Zellij]);
+        assert_eq!(d.chose, Some(ZELLIJ));
+        // TERM_PROGRAM names one of tmux and herdr, the innermost
+        let in_tmux_in_herdr = [
+            IN_HERDR[1],
+            IN_TMUX[0],
+            IN_TMUX[1],
+            IN_ZELLIJ[0],
+            IN_ZELLIJ[1],
+        ];
+        assert_eq!(named(var(&in_tmux_in_herdr)), [TMUX, ZELLIJ]);
     }
 
     #[test]
