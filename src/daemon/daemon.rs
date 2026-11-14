@@ -933,17 +933,23 @@ impl Daemon {
     /// Pane `id`, with no terminal id, reported focus `report` at `at`: a
     /// focus-in starts the wait for it to stand, unless its window is current
     /// or it may be the echo of a focus asked; a focus-out ends the wait.
-    /// One before the pane has a window, or Neovim a current one, only says
-    /// where focus starts, as a terminal tells once focus reports are turned
-    /// on: the pane's window becomes current as it gets it, and the user
-    /// may have moved on by the time it stands (SPI-1192).
+    ///
+    /// A focus-in before the pane has a window, or before Neovim has a
+    /// current one, only says where focus starts. A terminal sends one as
+    /// the daemon starts: tmux as its client attaches to a pane with focus
+    /// reports on, zellij as its client lands and again as they are turned
+    /// on. The pane's window becomes current as it gets it, and the user
+    /// may have moved on by the time the report stands (SPI-1192).
     fn watch_focus_in(&mut self, id: u32, report: Option<FocusReport>, at: Instant) -> Result<()> {
         match report {
             Some(FocusReport::In) => {
                 let win = self.panes.by_id(id).and_then(|p| p.neovim_window_handle);
-                let Some(win) = win.filter(|_| self.nvim.current_win != 0) else {
+                let Some(win) = win else {
                     return Ok(());
                 };
+                if !self.neovim_has_current_win() {
+                    return Ok(());
+                }
                 if self.is_current_win(win) || self.focus.unanswered(at) {
                     return Ok(());
                 }
@@ -962,7 +968,11 @@ impl Daemon {
 
     /// The focus-in timer fired, at `now`: a pane whose focus-in has stood
     /// long enough becomes current, unless the pane provider found it
-    /// meanwhile: then it tells the pane's focus, as for any pane it knows.
+    /// meanwhile. Then the focus-in is dropped, as for any pane the pane
+    /// provider knows, and its later moves are followed. A move it told
+    /// before `find` answered is lost: no pane had its terminal then, and
+    /// nothing tells it again. The pane becomes current at its next key or
+    /// click.
     fn focus_in_stood(&mut self, now: Instant) -> Result<()> {
         let Some((id, since)) = self.focus_in else {
             return Ok(());
@@ -987,6 +997,12 @@ impl Daemon {
         self.trace_tab_move(from_tab, id);
         self.nvim.client.flush()?;
         self.draw()
+    }
+
+    /// Whether Neovim has said which window is current: not yet as the
+    /// daemon starts.
+    fn neovim_has_current_win(&self) -> bool {
+        self.nvim.current_win != 0
     }
 
     /// Whether `win` is Neovim's current window, no float over it current.
@@ -7029,27 +7045,28 @@ mod tests {
     }
 
     #[test]
-    fn a_focus_in_as_the_daemon_starts_only_says_where_focus_starts() {
+    fn a_focus_in_before_its_pane_has_a_window_only_says_where_focus_starts() {
         let mut fx = focusing();
         // the daemon's first pane, attaching: no window yet, nor terminal id
         let a = focus_pane(&mut fx, 1, 1000, None);
         fx.d.panes.by_id_mut(a).unwrap().neovim_window_handle = None;
-        let at = Instant::now();
-        // its terminal says it has focus as focus reports are turned on
-        fx.d.on_read(a, b"\x1b[I", at).unwrap();
+        fx.d.nvim.current_win = 1001;
+        // its terminal says it has focus as tmux's client attaches
+        fx.d.on_read(a, b"\x1b[I", Instant::now()).unwrap();
         assert_eq!(None, fx.d.focus_in);
-        // setup gives it its window, before Neovim says it's current
-        fx.d.panes.by_id_mut(a).unwrap().neovim_window_handle = Some(1000);
+    }
+
+    #[test]
+    fn a_focus_in_before_neovim_has_a_current_window_only_says_where_focus_starts() {
+        let mut fx = focusing();
+        // setup gave the first pane its window; Neovim hasn't said it's
+        // current yet
+        let a = focus_pane(&mut fx, 1, 1000, None);
         assert_eq!(0, fx.d.nvim.current_win);
-        fx.d.on_read(a, b"\x1b[I\x1b[O\x1b[I", at).unwrap();
+        // zellij's, as its client lands and focus reports are turned on
+        fx.d.on_read(a, b"\x1b[I\x1b[O\x1b[I", Instant::now())
+            .unwrap();
         assert_eq!(None, fx.d.focus_in);
-        // the pane provider finds it, and a :tabnew moves on before 80 ms
-        // are up
-        fx.d.panes.by_id_mut(a).unwrap().terminal = Some(TerminalId::from("t1"));
-        focus_pane(&mut fx, 2, 1003, Some("t2"));
-        fx.d.nvim.current_win = 1003;
-        fx.d.focus_in_stood(at + Duration::from_millis(80)).unwrap();
-        assert_eq!(1003, fx.d.nvim.current_win);
     }
 
     #[test]
@@ -7063,7 +7080,8 @@ mod tests {
         assert_eq!(Some((a, at)), fx.d.focus_in);
         // found before it stood: the pane provider tells its focus
         fx.d.panes.by_id_mut(a).unwrap().terminal = Some(TerminalId::from("t1"));
-        fx.d.focus_in_stood(at + Duration::from_millis(80)).unwrap();
+        let settle = Duration::from_millis(u64::from(FOCUS_IN_SETTLE_MS));
+        fx.d.focus_in_stood(at + settle).unwrap();
         assert_eq!(1001, fx.d.nvim.current_win);
         assert_eq!(None, fx.d.focus_in);
     }
