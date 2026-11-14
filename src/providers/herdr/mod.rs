@@ -14,17 +14,29 @@
 //!   `pane.close`, done if already gone.
 //! - `report_layout` (`layout.rs`): one area per tab of every workspace,
 //!   from `session.snapshot`, with the alternate screen's insets.
+//! - `focus` and `focus_direction` (`focus.rs`): `pane.focus`; steps of
+//!   `pane.focus_direction` from the server's focus, stopping at the
+//!   tab's edge. herdr's focus is one per server: it moves every client.
+//! - `open_tab_page` (`tab_page.rs`): `layout.apply`, a tab of the
+//!   origin's workspace running the attach, unfocused: a herdr tab is a
+//!   tab page area.
+//! - `events` (`events.rs`): one `events.subscribe` held open, focus read
+//!   from a fresh snapshot, never an event; it runs until herdr ends the
+//!   subscription, then exits 1.
 //!
 //! Each capability gives the line it prints, or why it failed; `run`
 //! prints it, or the failure as one `herdr CAPABILITY: why` line on
 //! stderr, and gives the exit status.
 
 mod client;
+mod events;
 #[cfg(test)]
 mod fake;
+mod focus;
 mod layout;
 mod panes;
 mod proof;
+mod tab_page;
 
 pub(crate) use proof::inside;
 
@@ -40,6 +52,11 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::OpenBeside => panes::open_beside(given).map(Some),
         Capability::Close => panes::close(given).map(|()| None),
         Capability::ReportLayout => layout::report_layout(given).map(Some),
+        Capability::Focus => focus::focus(given).map(|()| None),
+        Capability::FocusDirection => focus::focus_direction(given).map(|()| None),
+        Capability::OpenTabPage => tab_page::open_tab_page(given).map(Some),
+        // it runs until herdr ends it: exit 1, so the daemon starts it again
+        Capability::Events => Err(events::events(given)),
         _ => return UNSUPPORTED,
     };
     match done {

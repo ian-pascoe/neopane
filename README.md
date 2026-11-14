@@ -415,7 +415,9 @@ made in a tab of its own, running the attach with no shell, and moved
 that tab flashes in herdr's tab bar for a frame. herdr checks the choice:
 the terminal must be the one of the pane `HERDR_PANE_ID` names, so herdr's
 variables inherited by another terminal choose none, which only the log
-tells. It needs herdr 0.9.5 or newer. Focus, tab pages, moves and resizes
+tells. It needs herdr 0.9.5 or newer. Focus follows Neovim's current
+window both ways, and a tab page gets a herdr tab of its own; herdr has one
+focus per server, so every herdr client attached follows. Moves and resizes
 aren't there yet. `neopane provider show herdr` prints its table, which
 `neopane.builtin.herdr()` returns for your config to change
 ([docs/config.md](docs/config.md#herdr)).

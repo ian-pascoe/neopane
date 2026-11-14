@@ -65,6 +65,10 @@ impl BuiltinTable {
                 Capability::Close,
                 Capability::ReportLayout,
                 Capability::OpenBeside,
+                Capability::Events,
+                Capability::Focus,
+                Capability::FocusDirection,
+                Capability::OpenTabPage,
             ],
             BuiltinTable::Zellij => &[
                 Capability::Find,
@@ -222,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn herdr_runs_the_binary_for_its_four_and_reaches_by_its_socket_and_pane() {
+    fn herdr_runs_the_binary_for_its_capabilities_and_reaches_by_its_socket_and_pane() {
         let t = BuiltinTable::Herdr.table();
         let shown: Vec<(&str, String)> = t
             .capabilities
@@ -232,10 +236,19 @@ mod tests {
                 (c.name(), words.join(" "))
             })
             .collect();
-        let want: Vec<(&str, String)> = ["find", "close", "report_layout", "open_beside"]
-            .into_iter()
-            .map(|cap| (cap, format!("{{exe}} provider builtin herdr {cap}")))
-            .collect();
+        let want: Vec<(&str, String)> = [
+            "find",
+            "close",
+            "report_layout",
+            "open_beside",
+            "events",
+            "focus",
+            "focus_direction",
+            "open_tab_page",
+        ]
+        .into_iter()
+        .map(|cap| (cap, format!("{{exe}} provider builtin herdr {cap}")))
+        .collect();
         assert_eq!(shown, want);
         let list = |v: &str| Value::List(vec![Value::String(v.as_bytes().to_vec())]);
         assert_eq!(

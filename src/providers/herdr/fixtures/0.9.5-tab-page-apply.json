@@ -1,0 +1,1 @@
+{"id":"x","result":{"type":"layout_apply","layout":{"workspace_id":"w1","tab_id":"w1:t5","zoomed":false,"focused_pane_id":"w1:p8","root":{"type":"pane","pane_id":"w1:p8","cwd":"/private/tmp/np-hd-exp","command":["/bin/sleep","100"]}}}}

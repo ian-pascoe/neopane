@@ -165,7 +165,7 @@ The tab page a window belongs to: the one it was opened in, or for a split, its 
 _Avoid_: owning tab, the window's tab page
 
 **Tab page area**:
-Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window, a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
+Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
 _Avoid_: tab layer, floating tab page, tab (on its own)
 
 ### Pane providers
@@ -287,7 +287,7 @@ _Avoid_: session (on its own)
 Terms used only by the built-in `herdr` pane provider (`src/providers/herdr/`); the core never uses them.
 
 **herdr tab**:
-A tab of a herdr workspace: the layout area of herdr's pane provider, its id the tab's, such as `w1:t2`.
+A tab of a herdr workspace: the layout area of herdr's pane provider, its id the tab's, such as `w1:t2`, and a tab page area's home.
 _Avoid_: tab (on its own), tab page (that is Neovim's)
 
 **herdr workspace**:

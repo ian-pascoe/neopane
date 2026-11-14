@@ -1,0 +1,12 @@
+{"id":"x","result":{"type":"subscription_started"}}
+{"data":{"pane_id":"w1:p1","type":"pane_focused","workspace_id":"w1"},"event":"pane_focused"}
+{"data":{"pane_id":"w1:p6","type":"pane_focused","workspace_id":"w1"},"event":"pane_focused"}
+{"data":{"closed_tab_id":"w1:t4","pane":{"agent_status":"unknown","cwd":"/private/tmp/np-hd-exp","focused":false,"foreground_cwd":"/private/tmp/np-hd-exp","pane_id":"w1:p7","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"tab_id":"w1:t1","terminal_id":"term_660343364fd894","workspace_id":"w1"},"previous_pane_id":"w1:p7","previous_tab_id":"w1:t4","previous_workspace_id":"w1","type":"pane_moved"},"event":"pane_moved"}
+{"data":{"pane":{"agent_status":"unknown","cwd":"/private/tmp/np-hd-exp","focused":false,"foreground_cwd":"/private/tmp/np-hd-exp","pane_id":"w1:p7","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"tab_id":"w1:t4","terminal_id":"term_660343364fd894","workspace_id":"w1"},"type":"pane_created"},"event":"pane_created"}
+{"data":{"layout":{"area":{"height":40,"width":120,"x":0,"y":0},"focused_pane_id":"w1:p7","panes":[{"focused":true,"pane_id":"w1:p7","rect":{"height":40,"width":120,"x":0,"y":0}}],"splits":[],"tab_id":"w1:t4","workspace_id":"w1","zoomed":false},"type":"layout_updated"},"event":"layout_updated"}
+{"data":{"layout":{"area":{"height":40,"width":120,"x":0,"y":0},"focused_pane_id":"w1:p6","panes":[{"focused":false,"pane_id":"w1:p1","rect":{"height":20,"width":60,"x":0,"y":0}},{"focused":false,"pane_id":"w1:p7","rect":{"height":20,"width":60,"x":0,"y":20}},{"focused":true,"pane_id":"w1:p6","rect":{"height":40,"width":60,"x":60,"y":0}}],"splits":[{"direction":"right","id":"split_0_root","ratio":0.5,"rect":{"height":40,"width":120,"x":0,"y":0}},{"direction":"down","id":"split_1_0","ratio":0.5,"rect":{"height":40,"width":60,"x":0,"y":0}}],"tab_id":"w1:t1","workspace_id":"w1","zoomed":false},"type":"layout_updated"},"event":"layout_updated"}
+{"data":{"tab_id":"w1:t1","type":"tab_focused","workspace_id":"w1"},"event":"tab_focused"}
+{"data":{"tab_id":"w1:t1","type":"tab_focused","workspace_id":"w1"},"event":"tab_focused"}
+{"data":{"tab_id":"w1:t4","type":"tab_closed","workspace_id":"w1"},"event":"tab_closed"}
+{"data":{"type":"workspace_focused","workspace_id":"w1"},"event":"workspace_focused"}
+{"data":{"type":"workspace_focused","workspace_id":"w1"},"event":"workspace_focused"}
