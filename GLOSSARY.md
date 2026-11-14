@@ -287,9 +287,9 @@ _Avoid_: session (on its own)
 Terms used only by the built-in `zellij` pane provider (`src/providers/zellij/`); the core never uses them.
 
 **Zellij session**:
-What `ZELLIJ_SESSION_NAME` names: the zellij tabs one zellij server keeps, and the attach context of zellij's pane provider, which reaches it through the choosing attach's `ZELLIJ_SOCKET_DIR` and `HOME`. A terminal in another zellij session is out of its reach.
-_Avoid_: session (on its own)
+What `ZELLIJ_SESSION_NAME` names: the zellij tabs one zellij server keeps, and the attach context of zellij's pane provider, which reaches it through the choosing attach's `ZELLIJ_SOCKET_DIR` and `HOME`. A terminal in another zellij session is out of its reach. Within zellij's own code and docs, "session" alone means this one.
+_Avoid_: server (zellij's runs one session; the session is what's named)
 
 **Zellij tab**:
-A tab of a zellij session: the space its tiled panes share, bars excluded, is a layout area, with zellij's floating panes over it. `open_tab_page` makes one as a tab page area.
-_Avoid_: tab (on its own), tab page (that is Neovim's)
+A tab of a zellij session: the space its tiled panes share, bars excluded, is a layout area, with zellij's floating panes over it. Within zellij's own code and docs, "tab" alone means this.
+_Avoid_: tab page (that is Neovim's)

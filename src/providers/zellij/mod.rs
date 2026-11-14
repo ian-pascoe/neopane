@@ -31,6 +31,8 @@ mod session;
 
 pub(crate) use inside::inside;
 
+use serde_json::Value;
+
 use super::builtin::{DONE, FAILED, Given, UNSUPPORTED, print_line};
 use crate::config::Capability;
 
@@ -75,6 +77,24 @@ fn terminal_of(given: &Given, name: &str) -> Result<u32, String> {
             String::from_utf8_lossy(&id)
         )
     })
+}
+
+/// The rows `list-panes --json` printed, `out`, one per pane, or why
+/// there are none.
+fn pane_rows(out: &[u8]) -> Result<Vec<Value>, String> {
+    let rows: Value =
+        serde_json::from_slice(out).map_err(|e| format!("list-panes printed no JSON: {e}"))?;
+    match rows {
+        Value::Array(rows) => Ok(rows),
+        _ => Err("list-panes printed no list".into()),
+    }
+}
+
+/// Terminal pane `terminal_N`'s row in `rows`, if listed: plugin panes
+/// number apart from terminal panes.
+fn terminal_row(rows: &[Value], n: u32) -> Option<&Value> {
+    rows.iter()
+        .find(|p| p["id"].as_u64() == Some(u64::from(n)) && p["is_plugin"] == false)
 }
 
 #[cfg(test)]

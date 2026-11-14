@@ -7,9 +7,11 @@
 //! which names its origin: zellij takes it as the pane issuing the
 //! action.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::providers::builtin::Given;
 
@@ -20,6 +22,32 @@ pub(super) const OLDEST: (u32, u32, u32) = (0, 46, 0);
 /// A zellij session, by its name.
 pub(super) struct Session {
     name: Vec<u8>,
+    /// `zellij`, found on `PATH`; a test's fake.
+    program: OsString,
+}
+
+/// How a call of zellij failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Ran {
+    /// It couldn't start, or exited unsuccessfully: why.
+    Failed(String),
+    /// It was killed at its deadline, or never started for lack of time:
+    /// whatever it was to do may be done or not.
+    TimedOut(String),
+}
+
+impl std::fmt::Display for Ran {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ran::Failed(why) | Ran::TimedOut(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<Ran> for String {
+    fn from(ran: Ran) -> String {
+        ran.to_string()
+    }
 }
 
 impl Session {
@@ -31,7 +59,19 @@ impl Session {
                 "ZELLIJ_SESSION_NAME isn't set: the choosing attach isn't in zellij".into(),
             );
         }
-        Ok(Session { name })
+        Ok(Session {
+            name,
+            program: "zellij".into(),
+        })
+    }
+
+    /// Session `name`, its calls run by `program`, a fake zellij.
+    #[cfg(test)]
+    pub(super) fn faked(program: &std::path::Path, name: &str) -> Session {
+        Session {
+            name: name.into(),
+            program: program.into(),
+        }
     }
 
     /// Its name, for messages.
@@ -41,42 +81,81 @@ impl Session {
 
     /// `zellij --session NAME action args…`'s stdout, or why it failed.
     pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, String> {
-        self.run_as(None, args)
+        Ok(self.run_as(None, args, None)?)
     }
 
-    /// The same, issued from terminal pane `pane`: with
+    /// The same, killed at `due` if it hasn't exited by then, and not run
+    /// at all past it; issued from terminal pane `pane`, if given, with
     /// `ZELLIJ_PANE_ID=pane`, which a `new-pane --no-focus` splits.
-    pub(super) fn run_from<S: AsRef<OsStr>>(
+    pub(super) fn run_until<S: AsRef<OsStr>>(
         &self,
-        pane: u32,
+        pane: Option<u32>,
         args: &[S],
-    ) -> Result<Vec<u8>, String> {
-        self.run_as(Some(pane), args)
+        due: Instant,
+    ) -> Result<Vec<u8>, Ran> {
+        self.run_as(pane, args, Some(due))
     }
 
-    fn run_as<S: AsRef<OsStr>>(&self, pane: Option<u32>, args: &[S]) -> Result<Vec<u8>, String> {
-        let mut cmd = Command::new("zellij");
+    fn run_as<S: AsRef<OsStr>>(
+        &self,
+        pane: Option<u32>,
+        args: &[S],
+        due: Option<Instant>,
+    ) -> Result<Vec<u8>, Ran> {
+        let shown: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
+        let shown = format!("zellij action {}", shown.join(" "));
+        if due.is_some_and(|due| Instant::now() >= due) {
+            return Err(Ran::TimedOut(format!("{shown}: no time left to run it")));
+        }
+        let mut cmd = Command::new(&self.program);
         cmd.arg("--session")
             .arg(OsStr::from_bytes(&self.name))
             .arg("action")
             .args(args)
             .env_remove("ZELLIJ_PANE_ID")
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(pane) = pane {
             cmd.env("ZELLIJ_PANE_ID", pane.to_string());
         }
-        let out = cmd.output().map_err(|e| format!("can't run zellij: {e}"))?;
-        if out.status.success() {
-            return Ok(out.stdout);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Ran::Failed(format!("can't run zellij: {e}")))?;
+        let read = |pipe: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut out = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut out);
+                }
+                out
+            })
+        };
+        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if due.is_none_or(|due| Instant::now() < due) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Ran::TimedOut(format!("{shown}: killed, out of time")));
+                }
+            }
+        };
+        let (out, err) = (
+            stdout.join().unwrap_or_default(),
+            stderr.join().unwrap_or_default(),
+        );
+        if status.success() {
+            return Ok(out);
         }
-        let err = String::from_utf8_lossy(&out.stderr);
+        let err = String::from_utf8_lossy(&err);
         let first = err.lines().next().unwrap_or_default();
-        let shown: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
-        Err(format!(
-            "zellij action {} failed ({}): {first}",
-            shown.join(" "),
-            out.status
-        ))
+        Err(Ran::Failed(format!("{shown} failed ({status}): {first}")))
     }
 }
 

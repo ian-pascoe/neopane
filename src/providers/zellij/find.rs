@@ -4,10 +4,9 @@
 //! the context variables require; and the pane listed by the session, not
 //! exited. It prints `terminal_N`, else exits 1.
 
-use serde_json::Value;
-
 use super::inside::{Looked, prove};
 use super::session::{Session, too_old, version};
+use super::{pane_rows, terminal_row};
 use crate::providers::builtin::Given;
 use crate::providers::tty;
 
@@ -45,16 +44,9 @@ pub(super) fn find(given: &Given) -> Result<String, String> {
 /// Whether `list-panes --json`, `panes`, lists terminal pane `pane`, not
 /// exited, or why not.
 fn listed(panes: &[u8], pane: u32) -> Result<(), String> {
-    let panes: Vec<Value> =
-        serde_json::from_slice(panes).map_err(|e| format!("list-panes printed no list: {e}"))?;
-    let found = panes.iter().find(|p| {
-        p["id"].as_u64() == Some(u64::from(pane)) && p["is_plugin"].as_bool() == Some(false)
-    });
-    match found {
+    match terminal_row(&pane_rows(panes)?, pane) {
         None => Err(format!("no pane terminal_{pane}")),
-        Some(p) if p["exited"].as_bool() == Some(true) => {
-            Err(format!("terminal_{pane} has exited"))
-        }
+        Some(p) if p["exited"] == true => Err(format!("terminal_{pane} has exited")),
         Some(_) => Ok(()),
     }
 }

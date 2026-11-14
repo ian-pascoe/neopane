@@ -479,7 +479,8 @@ Its limits, for now:
   zellij resizes only in steps of 5 %, so the table has no `place_beside`
   or `resize`: a pane keeps the size zellij gives it.
 - A split fails while the tab shows its floating panes: they are hidden
-  around each split and shown again, so they may flicker.
+  around each split and shown again, so they may flicker. If they can't be
+  hidden, the open fails, as any failed open does, with no split.
 - No `open_float`, `open_tab_page`, `focus` or `focus_direction` yet:
   floats are drawn in their pane, tab pages in the pane they opened in, and
   Neovim moves no zellij client's focus.

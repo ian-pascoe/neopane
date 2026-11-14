@@ -386,9 +386,14 @@ plugin pane is `plugin_N`.
   ignored. A split fails while the origin's tab shows its floating panes,
   and may still start its command: so first, `list-panes` and `list-tabs`
   saying the origin's tab shows them, they are hidden around the split and
-  its swap (`hide-floating-panes` and `show-floating-panes --tab-id`).
-  Prints `terminal_N`.
-- `close`: `close-pane --pane-id`, which is done for a pane already gone.
+  its swap (`hide-floating-panes` and `show-floating-panes --tab-id`);
+  hiding them failing fails the open, with no split. Every step but
+  showing them again is done within 3 s, then that within 1 s more, so
+  the floats are shown again before the 5 s timeout: a step past its time
+  is killed, and any left, the swap say, skipped. Prints `terminal_N`.
+- `close`: `close-pane --pane-id`, which is done for a pane already gone;
+  if it fails, done only when `list-panes` doesn't list the pane, else it
+  exits 1, a session that can't be listed too.
 - `report_layout`: `list-panes --json` and `list-tabs --json --all`; an
   area per tab, `tab_N`, by its stable id. Its extent starts at the top
   left of the tab's tiled selectable panes and is the tab's viewport in

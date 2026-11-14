@@ -106,6 +106,12 @@ fn layout(panes: &[u8], tabs: &[u8]) -> Result<Value, String> {
         if ours.is_empty() {
             continue;
         }
+        // With no tiled pane, the area counts from the screen's top left,
+        // off by any bar above or left of the viewport: neither listing
+        // says where the viewport starts, and the bars, which would, are
+        // listed only with `list-panes --all`. A tab of floats alone may
+        // not even last: in 0.46, closing a lone tab's last tiled pane, a
+        // float still in it, ended the session.
         let tiled = ours.iter().filter(|p| !p.is_floating);
         let x0 = tiled.clone().map(|p| p.frame[0]).min().unwrap_or(0);
         let y0 = tiled.map(|p| p.frame[1]).min().unwrap_or(0);
