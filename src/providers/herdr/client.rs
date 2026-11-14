@@ -6,6 +6,7 @@
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -105,31 +106,70 @@ impl Herdr {
                 ErrorKind::WouldBlock | ErrorKind::TimedOut => late(),
                 _ => cant_reach(e),
             })?;
-        let mut reply = Vec::new();
-        let mut buf = [0u8; 16 << 10];
-        loop {
-            conn.set_read_timeout(Some(left()?)).map_err(cant_reach)?;
-            match conn.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    reply.extend_from_slice(&buf[..n]);
-                    if reply.contains(&b'\n') || reply.len() > MAX_REPLY {
-                        break;
-                    }
+        match read_line(&conn, self.due) {
+            Ok(Some(line)) => Ok(line),
+            Ok(None) => Err(late()),
+            Err(e) => Err(cant_reach(e)),
+        }
+    }
+}
+
+/// The first line `conn` gives, without its newline, or all it gives
+/// before it ends; None if `due` passes first. It waits with `poll`, and
+/// sets no socket option: herdr closes the connection once it has
+/// replied, and macOS then refuses any (`EINVAL`), the reply unread.
+fn read_line(conn: &UnixStream, due: Instant) -> std::io::Result<Option<Vec<u8>>> {
+    let mut reply = Vec::new();
+    let mut buf = [0u8; 16 << 10];
+    loop {
+        if !readable_by(conn, due)? {
+            return Ok(None);
+        }
+        match (&*conn).read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                reply.extend_from_slice(&buf[..n]);
+                if reply.contains(&b'\n') || reply.len() > MAX_REPLY {
+                    break;
                 }
-                Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    return Err(late());
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let end = reply
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(reply.len());
+    reply.truncate(end);
+    Ok(Some(reply))
+}
+
+/// Whether `conn` has something to read, or has ended, before `due`.
+fn readable_by(conn: &UnixStream, due: Instant) -> std::io::Result<bool> {
+    loop {
+        let left = due.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let mut fds = [libc::pollfd {
+            fd: conn.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // rounded up, so it never wakes early and spins
+        let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as libc::c_int;
+        // SAFETY: one valid pollfd, for the call only.
+        match unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } {
+            n if n > 0 => return Ok(true),
+            0 => {}
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != ErrorKind::Interrupted {
+                    return Err(e);
                 }
-                Err(e) => return Err(cant_reach(e)),
             }
         }
-        let end = reply
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(reply.len());
-        reply.truncate(end);
-        Ok(reply)
     }
 }
 
@@ -216,6 +256,27 @@ mod tests {
         // a code with no message says the code
         let r = result_of(br#"{"error":{"code":"x_y"}}"#).unwrap_err();
         assert_eq!(r.why, "herdr: x_y");
+    }
+
+    #[test]
+    fn a_reply_already_in_from_a_server_that_closed_is_read() {
+        // herdr replies and closes at once: on macOS, a socket option set
+        // after that fails, the reply unread
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        theirs.write_all(b"{\"result\":{}}\nmore").unwrap();
+        drop(theirs);
+        std::thread::sleep(Duration::from_millis(20));
+        let due = Instant::now() + Duration::from_secs(2);
+        let line = read_line(&ours, due).unwrap();
+        assert_eq!(line.as_deref(), Some(&b"{\"result\":{}}"[..]));
+        // none at all, closed: what there is, nothing
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        drop(theirs);
+        assert_eq!(read_line(&ours, due).unwrap(), Some(vec![]));
+        // open and silent: none, once due
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let soon = Instant::now() + Duration::from_millis(50);
+        assert_eq!(read_line(&ours, soon).unwrap(), None);
     }
 
     #[test]
