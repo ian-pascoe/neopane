@@ -728,7 +728,8 @@ saying why, and starts nothing:
   no hint; on `neopane` and `neopane attach`, an empty `--provider` falls
   back to `$NEOPANE_PROVIDER`.
 - `NEOPANE_TMPDIR`: a relative path is taken from the directory `neopane`
-  runs in.
+  runs in. A directory that isn't there is made, with its parents, mode
+  0700.
 - `NEOPANE_LOG`: `warn`: what went wrong; `info`, the default: that, and
   what happened; `debug`: that, and the trace timestamps
   [docs/latency.md](docs/latency.md) reads. Any other value logs a warning,

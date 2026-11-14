@@ -156,9 +156,14 @@ pub fn tmp_root(tmpdir: Option<&OsStr>) -> PathBuf {
 }
 
 /// The user's base directory, `<root>/<name>-<uid>`: made if it isn't there,
-/// then refused unless it is a real directory (by `lstat`), `uid`'s, and
-/// mode 0700.
+/// with `root` and its parents if they aren't either, then refused unless it
+/// is a real directory (by `lstat`), `uid`'s, and mode 0700.
 pub fn base_dir(root: &Path, uid: u32) -> Result<Base, Error> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(root)
+        .map_err(|e| Error::Io(root.to_path_buf(), e))?;
     let path = root.join(format!("{NAME}-{uid}"));
     match fs::DirBuilder::new().mode(0o700).create(&path) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(Error::Io(path, e)),
@@ -773,6 +778,15 @@ mod tests {
         std::os::unix::fs::symlink(&base, root.0.join(format!("{NAME}-{other}"))).unwrap();
         let err = base_dir(&root.0, other).unwrap_err();
         assert!(matches!(err, Error::NotPrivate { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_root_that_isnt_there_is_made_with_its_parents() {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("not").join("there");
+        let base = base_dir(&root, uid()).unwrap().0;
+        assert_eq!(root.join(format!("{NAME}-{}", uid())), base);
+        assert!(fs::symlink_metadata(&base).unwrap().is_dir());
     }
 
     #[test]
