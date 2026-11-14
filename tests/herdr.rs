@@ -135,9 +135,21 @@ fn in_a_herdr_pane_a_split_opens_a_herdr_pane_beside_it_at_its_size_and_close_re
     // one below, none: each running the attach, in its tab, both at their
     // sizes, and :close removes it
     for (split, new_at) in [("vsplit", 0), ("belowright split", 1)] {
+        // the daemon asks for half its origin, along the split, as a share
+        let (rows, cols) = herdr.pty_size(&origin).expect("the origin's size");
+        let (along, axis, extent) = match new_at {
+            0 => (cols, "x", "width"),
+            _ => (rows, "y", "height"),
+        };
+        let asked = f64::from(along / 2) / f64::from(along);
         remote_expr(&sock, &format!("execute('{split}')")).unwrap();
         assert_eq!(until(|n| *n == 2, panes), 2, "{split}: {}", log());
         let layout = tab_of(&herdr, &origin);
+        let share = share_of(&layout, new_at, axis, extent);
+        assert!(
+            (share - asked).abs() <= cell(&layout, extent),
+            "{split}: a share of {share}, asked {asked}: {layout}"
+        );
         let sizes = framed(&layout);
         assert_eq!(sizes[1 - new_at].0, origin, "{split}: {layout}");
         let new = sizes[new_at].0.clone();
@@ -166,6 +178,74 @@ fn in_a_herdr_pane_a_split_opens_a_herdr_pane_beside_it_at_its_size_and_close_re
     }
 
     drop(ending);
+    drop(herdr);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The share of `layout`'s area along `axis` (`x` or `y`, `extent` being
+/// `width` or `height`) that its pane at index `at` takes, panes in order
+/// along that axis.
+fn share_of(layout: &Value, at: usize, axis: &str, extent: &str) -> f64 {
+    let mut panes = layout["panes"].as_array().unwrap().clone();
+    panes.sort_by_key(|p| p["rect"][axis].as_u64().unwrap());
+    let cells = panes[at]["rect"][extent].as_f64().unwrap();
+    cells / layout["area"][extent].as_f64().unwrap()
+}
+
+/// One cell of `layout`'s area along `extent`, as a share.
+fn cell(layout: &Value, extent: &str) -> f64 {
+    1.0 / layout["area"][extent].as_f64().unwrap()
+}
+
+#[test]
+fn open_beside_gives_the_new_pane_its_ratio_on_every_side() {
+    if !have_herdr() {
+        return;
+    }
+    let tmp = scratch("hd-ratio");
+    let herdr = HerdrServer::start(&tmp, &[]);
+    let origin = workspace(&herdr, &tmp, None);
+    let up = NAME.to_ascii_uppercase();
+    // the new pane first along the axis, or second
+    for (direction, at, axis, extent) in [
+        ("left", 0, "x", "width"),
+        ("right", 1, "x", "width"),
+        ("up", 0, "y", "height"),
+        ("down", 1, "y", "height"),
+    ] {
+        let out = Command::new(exe())
+            .args(["provider", "builtin", "herdr", "open_beside"])
+            .env(format!("{up}_PROTOCOL"), "1")
+            .env(format!("{up}_CAPABILITY"), "open_beside")
+            .env(format!("{up}_ORIGIN"), &origin)
+            .env(format!("{up}_DIRECTION"), direction)
+            .env(format!("{up}_RATIO"), "0.3")
+            .env(format!("{up}_ATTACH"), "/bin/sleep 100")
+            .env(format!("{up}_TITLE"), format!("t-{direction}"))
+            .env("HERDR_SOCKET_PATH", &herdr.socket)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{direction}: {}",
+            text(&out.stderr)
+        );
+        let new = text(&out.stdout).trim().to_string();
+        let layout = tab_of(&herdr, &origin);
+        let mut panes = layout["panes"].as_array().unwrap().clone();
+        panes.sort_by_key(|p| p["rect"][axis].as_u64().unwrap());
+        assert_eq!(panes[at]["pane_id"], new.as_str(), "{direction}: {layout}");
+        // RATIO is the new pane's share, on either side of a swap
+        let share = share_of(&layout, at, axis, extent);
+        assert!(
+            (share - 0.3).abs() <= cell(&layout, extent),
+            "{direction}: a share of {share}: {layout}"
+        );
+        herdr.call("pane.close", json!({ "pane_id": new }));
+    }
+
     drop(herdr);
     let _ = std::fs::remove_dir_all(&tmp);
 }
