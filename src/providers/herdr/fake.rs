@@ -40,6 +40,10 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file}: {e}"))
 }
 
+/// An attach command, as `ATTACH` has it: its words are `/bin/np`,
+/// `attach`, `--address` and `/tmp/a b`.
+pub(super) const ATTACH: &str = "/bin/np attach --address '/tmp/a b'";
+
 /// What a capability is given beside `fake`: its `<NAME>_*` inputs
 /// `vars`, and the choosing attach's `HERDR_SOCKET_PATH`.
 pub(super) fn given(fake: &Fake, vars: &[(&str, &str)]) -> Given {

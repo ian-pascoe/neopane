@@ -144,7 +144,10 @@ fn in_a_herdr_pane_a_split_opens_a_herdr_pane_beside_it_at_its_size_and_close_re
         let asked = f64::from(along / 2) / f64::from(along);
         remote_expr(&sock, &format!("execute('{split}')")).unwrap();
         assert_eq!(until(|n| *n == 2, panes), 2, "{split}: {}", log());
-        let layout = tab_of(&herdr, &origin);
+        // moved beside the origin before it is swapped to its left: wait
+        // for the origin to be where it ends up
+        let placed = |l: &Value| framed(l).get(1 - new_at).map(|p| &p.0) == Some(&origin);
+        let layout = until(placed, || tab_of(&herdr, &origin));
         let share = share_of(&layout, new_at, axis, extent);
         assert!(
             (share - asked).abs() <= cell(&layout, extent),

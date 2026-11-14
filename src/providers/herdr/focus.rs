@@ -6,7 +6,8 @@
 //! - `focus_direction`: `COUNT` steps of `pane.focus_direction`, the first
 //!   from the server's focused pane, as `session.snapshot` has it, and
 //!   each after from where the last landed. herdr's own stop at the tab's
-//!   edge, answering `no_neighbor`: there it stops, done.
+//!   edge, answering `no_neighbor`: there it stops, done. Any other step
+//!   that moves nothing fails, with herdr's reason.
 
 use std::time::Duration;
 
@@ -61,8 +62,14 @@ pub(super) fn focus_direction(given: &Given) -> Result<(), String> {
         )?;
         let stepped = &stepped["focus"];
         if stepped["changed"] != true {
-            // at the tab's edge: herdr's own reason is no_neighbor
-            break;
+            return match stepped["reason"].as_str() {
+                // at the tab's edge: done
+                Some("no_neighbor") => Ok(()),
+                Some(reason) => Err(format!(
+                    "herdr didn't move focus {direction} from {from}: {reason}"
+                )),
+                None => Err(UNREADABLE.into()),
+            };
         }
         from = stepped["focused_pane_id"]
             .as_str()
@@ -153,6 +160,30 @@ mod tests {
             steps(&fake),
             [json!({ "pane_id": "w1:p2", "direction": "left" })]
         );
+    }
+
+    #[test]
+    fn a_step_that_moves_nothing_for_another_reason_fails_with_it() {
+        let edge = recorded("focus-direction-edge");
+        for (reply, why) in [
+            (
+                edge.replace("no_neighbor", "zoomed"),
+                "herdr didn't move focus left from w1:p2: zoomed",
+            ),
+            (edge.replace(r#""reason":"no_neighbor","#, ""), UNREADABLE),
+            (recorded("pane-not-found"), "herdr: pane not found"),
+        ] {
+            let fake = Fake::serve(vec![
+                (
+                    "session.snapshot",
+                    Reply::Line(recorded("session-snapshot")),
+                ),
+                ("pane.focus_direction", Reply::Line(reply)),
+            ]);
+            let given = given(&fake, &[("DIRECTION", "left"), ("COUNT", "3")]);
+            assert_eq!(focus_direction(&given), Err(why.into()));
+            assert_eq!(steps(&fake).len(), 1);
+        }
     }
 
     #[test]

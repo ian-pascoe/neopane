@@ -155,18 +155,20 @@ impl Subscription {
     /// The next event, `{"event": KIND, "data": {...}}`, waiting for it as
     /// long as it takes; or why the subscription ended: herdr's error, such
     /// as `events_lost`, the connection closed, as at a live handoff, or a
-    /// line that can't be read.
+    /// line that isn't JSON. A JSON line with no `event` named, such as a
+    /// keepalive a later herdr might send, is skipped.
     pub(super) fn next(&mut self) -> Result<Value, String> {
-        let line = self.line()?;
-        let event: Value = serde_json::from_slice(&line).map_err(|_| UNREADABLE)?;
-        if event.get("error").is_some_and(Value::is_object) {
-            // as a reply's: herdr's message
-            return Err(result_of(&line).err().map_or(UNREADABLE.into(), |r| r.why));
+        loop {
+            let line = self.line()?;
+            let event: Value = serde_json::from_slice(&line).map_err(|_| UNREADABLE)?;
+            if event.get("error").is_some_and(Value::is_object) {
+                // as a reply's: herdr's message
+                return Err(result_of(&line).err().map_or(UNREADABLE.into(), |r| r.why));
+            }
+            if event["event"].is_string() {
+                return Ok(event);
+            }
         }
-        if !event["event"].is_string() {
-            return Err(UNREADABLE.into());
-        }
-        Ok(event)
     }
 
     /// The next line, without its newline.

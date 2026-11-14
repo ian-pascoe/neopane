@@ -5607,6 +5607,46 @@ mod tests {
         assert_eq!(block_id(9), sent.origin(1));
     }
 
+    /// An `open_tab_page` that ran out of time may have opened its terminal
+    /// all the same: its pane id expires, so an attach after the failure is
+    /// refused, and one before it is ended as closed. Either way its helper
+    /// exits, which ends a terminal that runs nothing else, as herdr's
+    /// tab does.
+    #[test]
+    fn a_terminal_of_a_failed_open_tab_page_is_refused_or_ended_as_closed() {
+        use crate::attach::{Ending, Message, Refusal};
+        for attached_first in [false, true] {
+            let mut fx = two_windows_of_a_tab_page();
+            let origin = attach_pane_9(&mut fx.d);
+            fx.d.new_pane(1).unwrap();
+            let p = fx.d.panes.by_win(1).unwrap();
+            let (asked, pane) = (p.id, p.attach_id.unwrap());
+            assert_ne!(origin, asked);
+            let before = attached_first.then(|| attach_terminal(&mut fx, pane, 80, 23));
+
+            let f = fake(&mut fx.d);
+            f.answer(f.last_id(), Outcome::Failed("killed at its timeout".into()));
+            fx.d.drain_provider().unwrap();
+            assert!(fx.d.panes.by_id(asked).is_none(), "{attached_first}");
+            // a later attach is refused: expired, or taken by the first
+            let refused = match attached_first {
+                false => Refusal::PaneExpired,
+                true => Refusal::PaneTaken,
+            };
+            assert_eq!(Err(refused), fx.d.panes.ids.check(&pane));
+            assert_holds_tab_page_2(&fx.d, origin);
+            if let Some((helper, _pty, _at)) = before {
+                let said = crate::daemon::attach_conn::read_all_frames(&helper);
+                let Some(Message::End(z)) = said.last() else {
+                    panic!("{said:?}")
+                };
+                assert_eq!(Ending::Closed, z.as_ending());
+            }
+            // nothing to close: the open printed no id
+            assert_eq!(vec!["open_tab_page"], asked_capabilities(&mut fx.d));
+        }
+    }
+
     #[test]
     fn without_open_tab_page_a_tab_page_is_drawn_whole_in_the_pane_it_opened_in() {
         let f = FakeProvider::with(&[Capability::OpenBeside, Capability::Close]);

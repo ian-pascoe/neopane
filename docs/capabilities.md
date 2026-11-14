@@ -359,8 +359,9 @@ a zoom as it is.
 
 ### herdr
 
-`<name>.builtin.herdr()`: every capability but `open`, `open_float`,
-`place_beside` and `resize`, on the herdr server whose socket
+`<name>.builtin.herdr()`: `find`, `close`, `report_layout`, `open_beside`,
+`open_tab_page`, `focus`, `focus_direction` and `events`, on the herdr
+server whose socket
 `HERDR_SOCKET_PATH` names, in its socket API: newline-delimited JSON, one
 request per connection, a reply's fields it doesn't read ignored; `events`
 holds its one connection open. Context variables
@@ -409,33 +410,42 @@ tab page area. herdr has one focus per server, not per client: `focus`,
   the server's focused pane, which a close moves with no focus event: with
   `events`, a report's focus is the one the daemon follows.
 - `open_tab_page`: `pane.get` for `ORIGIN`'s workspace, then `layout.apply`
-  makes a tab there (`focus:false`), whose one pane runs
-  the attach command from `ATTACH`, with no shell; prints its pane id. The
-  server's focus stays: the daemon focuses the pane when Neovim goes to its
-  tab page. A tab made by an apply that got no answer in its 4 s closes
-  itself: its attach is refused, the daemon having given its pane up, and
-  ends.
+  makes a tab there (`focus:false`), whose one pane runs the attach
+  command from `ATTACH`, with no shell; prints its pane id. The server's
+  focus stays: the daemon focuses the pane when Neovim goes to its tab
+  page. A tab made by an apply that got no answer in its 4 s closes
+  itself: the daemon gives the pane up, so its attach is refused, or ended
+  as closed if it came first, and ends; herdr closes a pane whose command
+  ended, and a tab with its last pane.
 - `focus`: `pane.focus` on the terminal, which goes to its tab and
   workspace.
 - `focus_direction`: `COUNT` steps of `pane.focus_direction`, the first
   from the server's focused pane as `session.snapshot` has it, each after
-  from the pane the last landed on, stopping, done, where herdr answers
-  `no_neighbor`, at the tab's edge.
-- `events`: one `events.subscribe`, to `pane.focused`, `pane.exited`,
-  `pane.closed`, `pane.moved`, `pane.created`, `layout.updated`,
-  `tab.focused`, `tab.closed` and `workspace.focused`, held open. Its first
-  line is where focus starts, `{"focus":"w1:p4"}`, if herdr has a focused
-  pane. `pane.exited` and `pane.closed` print `{"closed":"w1:p4"}`. herdr
-  sends events out of causal order, a `pane.focused` before the
-  `pane.created` of its pane, so focus is never read from one: after a
-  focus event, or a close (`pane.exited`, `pane.closed`, `tab.closed`), which
-  moves the server's focus with no focus event, it reads a fresh
-  `session.snapshot` on a connection of its own, and adds `"focus"` to the
-  line only when the focused pane changed from the last it printed. A
-  focus event that moved nothing prints nothing; every other event a bare
-  line. It exits 1, never 69, when herdr ends the subscription: an
-  `events_lost` error, the connection closed, as every connection is at a
-  live handoff, or no herdr to subscribe to; the daemon starts it again.
+  from the pane the last landed on. Where herdr answers `no_neighbor`, at
+  the tab's edge, it stops, done; a step that moves nothing for any other
+  reason exits 1, with herdr's reason.
+- `events`: one `events.subscribe`, held open, to `pane.focused`,
+  `pane.exited`, `pane.closed`, `pane.moved`, `pane.created`,
+  `layout.updated`, `tab.focused`, `tab.closed` and `workspace.focused`
+  (herdr names them with an underscore in the events it sends,
+  `pane_focused`).
+  - **First line:** where focus starts, `{"focus":"w1:p4"}`, if herdr has a
+    focused pane.
+  - **Closes:** `pane.exited` and `pane.closed` print `{"closed":"w1:p4"}`.
+  - **Focus** is never read from an event: herdr sends them out of causal
+    order, a `pane.focused` before the `pane.created` of its pane. After a
+    focus event, or a close (`pane.exited`, `pane.closed`, `tab.closed`),
+    which moves the server's focus with no focus event, it reads a fresh
+    `session.snapshot` on a connection of its own, and adds `"focus"` to
+    the line only when the focused pane isn't the last it printed. A focus
+    event that adds nothing prints nothing; a read that fails, a bare
+    line, the report it has the daemon run telling focus.
+  - **Other events** print a bare line, as does an event of a kind it
+    didn't subscribe to. A JSON line that is no event is skipped.
+  - **Its end:** exit 1, never 69, when herdr ends the subscription: an
+    `events_lost` error, the connection closed, as every connection is at
+    a live handoff, a line that isn't JSON, or no herdr to subscribe to.
+    The daemon starts it again.
 
 ### zellij
 

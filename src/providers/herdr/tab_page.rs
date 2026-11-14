@@ -4,8 +4,9 @@
 //! is: the daemon focuses the new pane when Neovim goes to its tab page.
 //!
 //! A `layout.apply` with no answer may have made its tab all the same:
-//! the daemon gives up a pane whose open failed and refuses its attach,
-//! which ends, and herdr closes its pane and the tab with it.
+//! the daemon gives up a pane whose open failed, refusing its attach, or
+//! ending it as closed if it came first, and the attach ends; herdr closes
+//! a pane whose command ended, and a tab with its last pane.
 
 use std::time::Duration;
 
@@ -38,10 +39,8 @@ pub(super) fn open_tab_page(given: &Given) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fake::{Fake, Reply, given, recorded};
+    use super::super::fake::{ATTACH, Fake, Reply, given, recorded};
     use super::*;
-
-    const ATTACH: &str = "/bin/np attach --address '/tmp/a b'";
 
     #[test]
     fn it_runs_the_attach_in_a_new_unfocused_tab_of_the_origins_workspace() {

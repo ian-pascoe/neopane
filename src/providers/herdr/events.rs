@@ -1,23 +1,26 @@
 //! `events`: herdr's own events, from one `events.subscribe` held open, a
 //! line for the daemon as each comes.
 //!
-//! - `pane.exited` and `pane.closed` print `{"closed": ID}`; every other
-//!   event but a focus event a bare line, so the layout is read again: a
-//!   move, a new pane, a layout or a tab closed.
-//! - Focus is never read from an event: herdr sends them out of causal
-//!   order, a `pane.focused` coming before the `pane.created` of its
-//!   pane, two in a row naming the panes in either order. On a focus event
-//!   (`pane.focused`, `tab.focused`, `workspace.focused`), and on a close,
-//!   which moves the server's focus with no focus event, it reads a fresh
-//!   `session.snapshot` on a connection of its own, and adds `"focus": ID`
-//!   only when the server's focused pane changed from the last it printed.
-//!   A focus event that moved nothing prints nothing.
-//! - Its first line is where focus starts, read once subscribed, if
+//! - **Closes:** `pane.exited` and `pane.closed` print `{"closed": ID}`.
+//! - **Focus** is never read from an event: herdr sends them out of causal
+//!   order, a `pane.focused` coming before the `pane.created` of its pane,
+//!   two in a row naming the panes in either order. After a focus event
+//!   (`pane.focused`, `tab.focused`, `workspace.focused`), or a close
+//!   (`pane.exited`, `pane.closed`, `tab.closed`), which moves the
+//!   server's focus with no focus event, it reads a fresh
+//!   `session.snapshot` on a connection of its own, and adds
+//!   `"focus": ID` only when the server's focused pane isn't the last it
+//!   printed. A focus event that adds nothing prints nothing; a read that
+//!   fails, a bare line, the report it has the daemon run telling focus.
+//! - **The rest** (a move, a new pane, a layout) print a bare line, so the
+//!   layout is read again; so does an event of a kind it doesn't know.
+//! - **Its first line** is where focus starts, read once subscribed, if
 //!   herdr has a focused pane: the daemon follows moves from there.
-//! - It ends, exit 1, never 69, when herdr ends the subscription: an
+//! - **It ends**, exit 1, never 69, when herdr ends the subscription: an
 //!   `events_lost` error, herdr closing it, as every connection at a live
-//!   handoff, or no herdr to subscribe to. The daemon starts it again,
-//!   and reads the layout.
+//!   handoff, a line that isn't JSON, or no herdr to subscribe to. The
+//!   daemon starts it again, and reads the layout. A JSON line that is no
+//!   event, as a keepalive might be, is skipped.
 
 use std::time::Duration;
 
@@ -26,18 +29,76 @@ use serde_json::{Map, Value, json};
 use super::client::Herdr;
 use crate::providers::builtin::{DONE, Given, print_line};
 
-/// The events subscribed to.
-pub(super) const SUBSCRIPTIONS: [&str; 9] = [
-    "pane.focused",
-    "pane.exited",
-    "pane.closed",
-    "pane.moved",
-    "pane.created",
-    "layout.updated",
-    "tab.focused",
-    "tab.closed",
-    "workspace.focused",
-];
+/// An event `events` subscribes to. herdr spells each kind twice: dotted
+/// in a subscription, `pane.focused`, and with an underscore in the event
+/// it sends, `pane_focused`; [`Kind::names`] gives both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    PaneFocused,
+    PaneExited,
+    PaneClosed,
+    PaneMoved,
+    PaneCreated,
+    LayoutUpdated,
+    TabFocused,
+    TabClosed,
+    WorkspaceFocused,
+}
+
+impl Kind {
+    /// Every kind subscribed to, in the order subscribed.
+    const ALL: [Kind; 9] = [
+        Kind::PaneFocused,
+        Kind::PaneExited,
+        Kind::PaneClosed,
+        Kind::PaneMoved,
+        Kind::PaneCreated,
+        Kind::LayoutUpdated,
+        Kind::TabFocused,
+        Kind::TabClosed,
+        Kind::WorkspaceFocused,
+    ];
+
+    /// Its name in a subscription, and in an event herdr sends.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Kind::PaneFocused => ("pane.focused", "pane_focused"),
+            Kind::PaneExited => ("pane.exited", "pane_exited"),
+            Kind::PaneClosed => ("pane.closed", "pane_closed"),
+            Kind::PaneMoved => ("pane.moved", "pane_moved"),
+            Kind::PaneCreated => ("pane.created", "pane_created"),
+            Kind::LayoutUpdated => ("layout.updated", "layout_updated"),
+            Kind::TabFocused => ("tab.focused", "tab_focused"),
+            Kind::TabClosed => ("tab.closed", "tab_closed"),
+            Kind::WorkspaceFocused => ("workspace.focused", "workspace_focused"),
+        }
+    }
+
+    /// The kind of an event herdr sent, by its `event`; None for one it
+    /// wasn't asked for.
+    fn of_event(name: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.names().1 == name)
+    }
+
+    /// A pane's end: its id is printed as `closed`.
+    fn closes_a_pane(self) -> bool {
+        matches!(self, Kind::PaneExited | Kind::PaneClosed)
+    }
+
+    /// Focus moved, though maybe not where the event says.
+    fn focuses(self) -> bool {
+        matches!(
+            self,
+            Kind::PaneFocused | Kind::TabFocused | Kind::WorkspaceFocused
+        )
+    }
+
+    /// After it, the server's focus is read again: a focus event, or a
+    /// close, which moves focus with no focus event.
+    fn may_move_focus(self) -> bool {
+        self.focuses() || self.closes_a_pane() || self == Kind::TabClosed
+    }
+}
 
 /// What subscribing has, and each read of the server's focus.
 const ASK_TIME: Duration = Duration::from_millis(900);
@@ -56,7 +117,8 @@ fn watch(given: &Given, mut print: impl FnMut(&str) -> bool) -> String {
         Ok(h) => h,
         Err(why) => return why,
     };
-    let mut events = match herdr.subscribe(&SUBSCRIPTIONS) {
+    let subscriptions = Kind::ALL.map(|k| k.names().0);
+    let mut events = match herdr.subscribe(&subscriptions) {
         Ok(e) => e,
         Err(why) => return why,
     };
@@ -67,13 +129,13 @@ fn watch(given: &Given, mut print: impl FnMut(&str) -> bool) -> String {
             .as_str()
             .map(String::from))
     };
-    // where focus starts, read once subscribed: what moves it after is in
-    // an event
-    let mut focus = focused().unwrap_or_else(|why| {
+    // the focus last printed: where it starts, read once subscribed, what
+    // moves it after being in an event
+    let mut printed = focused().unwrap_or_else(|why| {
         eprintln!("herdr events: can't read where focus starts: {why}");
         None
     });
-    if let Some(pane) = &focus
+    if let Some(pane) = &printed
         && !print(&json!({ "focus": pane }).to_string())
     {
         return GONE.into();
@@ -83,32 +145,24 @@ fn watch(given: &Given, mut print: impl FnMut(&str) -> bool) -> String {
             Ok(e) => e,
             Err(why) => return why,
         };
-        let kind = event["event"].as_str().unwrap_or_default();
+        let kind = event["event"].as_str().and_then(Kind::of_event);
         let mut line = Map::new();
-        let closes = matches!(kind, "pane_exited" | "pane_closed");
-        if closes && let Some(pane) = event["data"]["pane_id"].as_str() {
+        if kind.is_some_and(Kind::closes_a_pane)
+            && let Some(pane) = event["data"]["pane_id"].as_str()
+        {
             line.insert("closed".into(), pane.into());
         }
-        let focuses = matches!(kind, "pane_focused" | "tab_focused" | "workspace_focused");
-        // a close moves the server's focus with no focus event
-        if focuses || closes || kind == "tab_closed" {
+        if kind.is_some_and(Kind::may_move_focus) {
             match focused() {
-                Ok(now) => {
-                    if let Some(pane) = now.as_ref().filter(|n| focus.as_ref() != Some(n)) {
-                        line.insert("focus".into(), pane.as_str().into());
-                    } else if focuses {
-                        // focus didn't move, nor did the layout
-                        focus = now;
-                        continue;
-                    }
-                    focus = now;
+                Ok(Some(now)) if printed.as_ref() != Some(&now) => {
+                    line.insert("focus".into(), now.as_str().into());
+                    printed = Some(now);
                 }
-                Err(why) => {
-                    // the report the line asks for tells it; the next read
-                    // is printed, whatever it is
-                    eprintln!("herdr events: can't read the server's focus: {why}");
-                    focus = None;
-                }
+                // nothing new: a focus event changed no layout
+                Ok(_) if kind.is_some_and(Kind::focuses) => continue,
+                Ok(_) => {}
+                // the report the line has the daemon run tells focus
+                Err(why) => eprintln!("herdr events: can't read the server's focus: {why}"),
             }
         }
         let line = if line.is_empty() {
@@ -166,7 +220,32 @@ mod tests {
             .iter()
             .map(|s| s["type"].as_str().unwrap())
             .collect();
-        assert_eq!(kinds, SUBSCRIPTIONS);
+        assert_eq!(
+            kinds,
+            [
+                "pane.focused",
+                "pane.exited",
+                "pane.closed",
+                "pane.moved",
+                "pane.created",
+                "layout.updated",
+                "tab.focused",
+                "tab.closed",
+                "workspace.focused",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_kinds_event_name_is_its_subscription_name_with_an_underscore() {
+        // as herdr 0.9.5's schema spells them: a typo in one would make
+        // its events lines that tell nothing
+        for kind in Kind::ALL {
+            let (subscription, event) = kind.names();
+            assert_eq!(subscription.replacen('.', "_", 1), event, "{kind:?}");
+            assert_eq!(Kind::of_event(event), Some(kind));
+        }
+        assert_eq!(Kind::of_event("pane.focused"), None);
     }
 
     /// herdr 0.9.5's events, as it sent them for a pane made in a tab of
@@ -252,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn a_focus_herdr_cant_tell_has_the_layout_read_and_the_next_one_printed() {
+    fn a_focus_herdr_cant_tell_has_the_layout_read_and_the_next_one_printed_if_new() {
         let snapshot_fails = Reply::Line(recorded("pane-not-found"));
         let fake = Fake::serve(vec![
             (
@@ -262,16 +341,16 @@ mod tests {
                     end: true,
                 },
             ),
-            ("session.snapshot", focused(Some("w1:p5"))),
+            ("session.snapshot", focused(Some("w1:p1"))),
             ("session.snapshot", snapshot_fails),
             ("session.snapshot", focused(Some("w1:p5"))),
         ]);
         let (lines, _) = run(&fake);
         // the start; pane.focused unread: a bare line; pane.created and
-        // layout.updated; tab.focused read again, the same, printed
+        // layout.updated; tab.focused read, new, printed
         assert_eq!(
             lines,
-            [r#"{"focus":"w1:p5"}"#, "", "", "", r#"{"focus":"w1:p5"}"#]
+            [r#"{"focus":"w1:p1"}"#, "", "", "", r#"{"focus":"w1:p5"}"#]
         );
 
         // no focused pane at the start: no first line
@@ -282,6 +361,48 @@ mod tests {
         );
         let (lines, _) = run(&fake);
         assert_eq!(lines, [r#"{"focus":"w1:p5"}"#]);
+    }
+
+    /// Focus on w1:p1, then on no pane, then on w1:p1 again, read after
+    /// three focus events: w1:p1 was the last printed, so it isn't again.
+    #[test]
+    fn focus_is_printed_only_when_it_isnt_the_last_printed() {
+        let focus_event = recorded_stream("events-close-focused")[1].clone();
+        let fake = subscribed(
+            vec![
+                recorded("subscribed"),
+                focus_event.clone(),
+                focus_event.clone(),
+                focus_event,
+            ],
+            true,
+            &[Some("w1:p1"), None, Some("w1:p1"), Some("w1:p5")],
+        );
+        let (lines, _) = run(&fake);
+        // the start, then none to print, w1:p1 again, then w1:p5
+        assert_eq!(lines, [r#"{"focus":"w1:p1"}"#, r#"{"focus":"w1:p5"}"#]);
+    }
+
+    /// A line that is JSON but no event, as a keepalive might be, is
+    /// skipped; one that isn't JSON ends it.
+    #[test]
+    fn a_json_line_thats_no_event_is_skipped_and_one_thats_not_json_ends_it() {
+        let fake = subscribed(
+            vec![
+                recorded("subscribed"),
+                r#"{"keepalive":true}"#.into(),
+                r#"{"event":3,"data":{}}"#.into(),
+                "[]".into(),
+                recorded("event-pane-exited"),
+                "nope".into(),
+                recorded("event-pane-exited"),
+            ],
+            true,
+            &[None],
+        );
+        let (lines, why) = run(&fake);
+        assert_eq!(lines, [r#"{"closed":"w1:p3"}"#]);
+        assert_eq!(why, "herdr's answer can't be read");
     }
 
     #[test]

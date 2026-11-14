@@ -268,10 +268,8 @@ pub(super) fn attach_words(given: &Given) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fake::{Fake, Reply, given, recorded};
+    use super::super::fake::{ATTACH, Fake, Reply, given, recorded};
     use super::*;
-
-    const ATTACH: &str = "/bin/np attach --address '/tmp/a b'";
 
     /// herdr 0.9.5 as it answered one open beside `w2:p3`.
     fn opening(moved: &str) -> Fake {
