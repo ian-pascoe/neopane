@@ -500,7 +500,12 @@ herdr's split can't run a command, so a new pane is made in a tab of its
 own, running the attach with no shell, then moved beside its origin, and
 the tab laid out again (ADR 0017). Its limits:
 
-- The temporary tab flashes in herdr's tab bar for one frame.
+- The temporary tab flashes in herdr's tab bar for one frame, labelled with
+  the pane's title, `neopane-` and a token.
+- If herdr doesn't answer the request that makes the tab in time, the open
+  fails and closes the tab with that label. A tab herdr makes only after
+  that shows until its attach is refused, its pane given up, and closes
+  with it.
 - A pane can't open beside one in a zoomed tab: the open fails, leaving no
   tab behind, as when herdr can't.
 - Each pane's frame is reported as herdr's default borders draw it: a cell
