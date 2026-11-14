@@ -179,7 +179,7 @@ mod tests {
     fn an_unknown_name_lists_the_builtins() {
         assert_eq!(
             show(Some("foo"), "b").unwrap_err(),
-            "no built-in pane provider named foo (built-ins: rex, tmux, zellij)"
+            "no built-in pane provider named foo (built-ins: rex, tmux, herdr, zellij)"
         );
     }
 
@@ -190,6 +190,7 @@ mod tests {
             format!(
                 "rex     return \"rex\" from provider() (built in; no Lua table)\n\
                  tmux    {NAME}.builtin.tmux()\n\
+                 herdr   {NAME}.builtin.herdr()\n\
                  zellij  {NAME}.builtin.zellij()\n"
             )
         );
@@ -234,6 +235,29 @@ mod tests {
                    open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"tmux\", \
                  \"open_tab_page\" }},\n\
                  }}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn herdrs_table_shows_its_reach_after_its_capabilities() {
+        let cap = |c: &str| {
+            format!("  {c} = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr\", \"{c}\" }},\n")
+        };
+        assert_eq!(
+            show(Some("herdr"), "B 1").unwrap(),
+            format!(
+                "-- {NAME}.builtin.herdr() in B 1.\n\
+                 -- To change it, copy it into your init.lua and return it from provider().\n\
+                 return {{\n  \
+                   name = \"herdr\",\n{}{}{}{}  \
+                   context_vars = {{ \"HERDR_SOCKET_PATH\" }},\n  \
+                   find_vars = {{ \"HERDR_PANE_ID\" }},\n\
+                 }}\n",
+                cap("close"),
+                cap("find"),
+                cap("report_layout"),
+                cap("open_beside"),
             )
         );
     }

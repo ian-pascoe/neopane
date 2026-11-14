@@ -774,7 +774,7 @@ fn the_global_and_require_give_the_same_table() {
     assert_eq!(
         f.run().printed,
         [format!(
-            "true\t{}\t9.8.7\t{dir}\ttable\ttable\ttmux,zellij\ttmux,zellij",
+            "true\t{}\t9.8.7\t{dir}\ttable\ttable\therdr,tmux,zellij\therdr,tmux,zellij",
             std::env::consts::OS
         )]
     );
@@ -1026,6 +1026,16 @@ fn builtin_tmux_takes_no_options() {
 }
 
 #[test]
+fn builtin_herdr_is_the_herdr_table_and_passes_the_checker() {
+    let (choice, warnings) = chosen(&returning("{name}.builtin.herdr()"));
+    assert_eq!(warnings, Vec::<String>::new());
+    let herdr = whole(choice);
+    assert_eq!(herdr, config::BuiltinTable::Herdr.provider());
+    assert_eq!(herdr.context_vars, ["HERDR_SOCKET_PATH"]);
+    assert_eq!(herdr.find_vars, ["HERDR_PANE_ID"]);
+}
+
+#[test]
 fn builtin_zellij_is_the_zellij_table_and_passes_the_checker() {
     let (choice, warnings) = chosen(&returning("{name}.builtin.zellij()"));
     assert_eq!(warnings, Vec::<String>::new());
@@ -1068,7 +1078,7 @@ fn provider_show_prints_what_builtin_returns() {
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
     // set means present, even empty, as the daemon reads its own
-    let envs: [&[(&str, &str)]; 11] = [
+    let envs: [&[(&str, &str)]; 13] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
@@ -1087,6 +1097,16 @@ fn default_agrees_with_the_daemons() {
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
+        &[
+            ("TERM_PROGRAM", "herdr"),
+            ("HERDR_SOCKET_PATH", "/tmp/h.sock"),
+        ],
+        &[
+            ("TERM_PROGRAM", "herdr"),
+            ("HERDR_SOCKET_PATH", "/tmp/h.sock"),
+            ("REX_SERVER", "ws://x"),
+            ("REX_SESSION", "s"),
+        ],
         &[("ZELLIJ", "0"), ("ZELLIJ_PANE_ID", "3")],
         &[
             ("ZELLIJ", "0"),
@@ -1097,18 +1117,26 @@ fn default_agrees_with_the_daemons() {
     ];
     // the last of each names both: with no tty, `inside` can't prove it
     let want = [
-        false, true, false, false, true, true, true, false, true, false, true,
+        false, true, false, false, true, true, true, false, true, false, true, false, true,
     ];
     let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
     let wants_tmux = [
-        false, false, false, false, false, false, false, true, false, false, false,
+        false, false, false, false, false, false, false, true, false, false, false, false, false,
+    ];
+    let herdr = Choice::Whole(config::BuiltinTable::Herdr.provider());
+    let wants_herdr = [
+        false, false, false, false, false, false, false, false, false, true, false, false, false,
     ];
     let zellij = Choice::Whole(config::BuiltinTable::Zellij.provider());
     let wants_zellij = [
-        false, false, false, false, false, false, false, false, false, true, false,
+        false, false, false, false, false, false, false, false, false, false, false, true, false,
     ];
-    for (((env, want), wants_tmux), wants_zellij) in
-        envs.into_iter().zip(want).zip(wants_tmux).zip(wants_zellij)
+    for ((((env, want), wants_tmux), wants_herdr), wants_zellij) in envs
+        .into_iter()
+        .zip(want)
+        .zip(wants_tmux)
+        .zip(wants_herdr)
+        .zip(wants_zellij)
     {
         let mut f = Fixture::new(source);
         f.attach.env = env
@@ -1120,6 +1148,7 @@ fn default_agrees_with_the_daemons() {
         let rex = Choice::Builtin(Builtin::Rex);
         assert_eq!(daemons == rex, want, "{env:?}");
         assert_eq!(daemons == tmux, wants_tmux, "{env:?}");
+        assert_eq!(daemons == herdr, wants_herdr, "{env:?}");
         assert_eq!(daemons == zellij, wants_zellij, "{env:?}");
     }
 }
@@ -1150,6 +1179,23 @@ fn inside_never_raises() {
              print({name}.inside.zellij({ env = 2, tty = {}, pid = 'x' })) return {}"
         ),
         ["false\tZELLIJ_PANE_ID isn't set"; 3]
+    );
+}
+
+#[test]
+fn inside_herdr_never_raises() {
+    assert_eq!(
+        printed(
+            "print({name}.inside.herdr()) print({name}.inside.herdr(1)) \
+             print({name}.inside.herdr({ env = 2, tty = {} })) \
+             print({name}.inside.herdr({ env = { HERDR_ENV = '1' } })) return {}"
+        ),
+        [
+            "false\tHERDR_ENV isn't 1",
+            "false\tHERDR_ENV isn't 1",
+            "false\tHERDR_ENV isn't 1",
+            "false\tHERDR_PANE_ID isn't set",
+        ]
     );
 }
 
