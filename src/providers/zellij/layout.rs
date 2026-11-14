@@ -22,7 +22,8 @@
 //!   The full screen pane is the one `is_fullscreen` and the size of the
 //!   viewport: a pane any client has focused may be `is_fullscreen` too.
 //! - `focus` is the pane of the one client `list-clients` lists; none with
-//!   none or several, as it can't tell which the user types in. Not
+//!   none or several, as it can't tell which the user types in, and none
+//!   if `list-clients` fails, which the layout read doesn't. Not
 //!   `is_focused`, which is true of a pane any client has focused, or once
 //!   had.
 
@@ -33,11 +34,19 @@ use crate::providers::builtin::Given;
 
 /// The live layout, as one line of JSON, or why there's none.
 pub(super) fn report_layout(given: &Given) -> Result<String, String> {
-    let session = Session::of(given)?;
+    Ok(reported(&Session::of(given)?)?.to_string())
+}
+
+/// `session`'s live layout, or why there's none. Without `list-clients`,
+/// it has no `focus`, said on stderr.
+fn reported(session: &Session) -> Result<Value, String> {
     let panes = session.run(&["list-panes", "--json"])?;
     let tabs = session.run(&["list-tabs", "--json", "--all"])?;
-    let clients = session.run(&["list-clients"])?;
-    Ok(layout(&panes, &tabs, &clients)?.to_string())
+    let clients = session.run(&["list-clients"]).unwrap_or_else(|why| {
+        eprintln!("zellij report_layout: no focus: {why}");
+        Vec::new()
+    });
+    layout(&panes, &tabs, &clients)
 }
 
 /// What `list-panes --json` gives of a pane.
@@ -140,12 +149,7 @@ fn layout(panes: &[u8], tabs: &[u8], clients: &[u8]) -> Result<Value, String> {
         let tiled = ours.iter().filter(|p| !p.is_floating);
         let x0 = tiled.clone().map(|p| p.frame[0]).min().unwrap_or(0);
         let y0 = tiled.map(|p| p.frame[1]).min().unwrap_or(0);
-        let full = ours.iter().copied().find(|p| {
-            tab.fullscreen
-                && p.is_fullscreen
-                && !p.is_floating
-                && [p.frame[2], p.frame[3]] == [w as i64, h as i64]
-        });
+        let full = full_screen_pane(&tab, &ours);
         // a plugin's id may be a terminal's number
         let (shown, hidden): (Vec<&Pane>, Vec<&Pane>) = ours
             .iter()
@@ -160,10 +164,20 @@ fn layout(panes: &[u8], tabs: &[u8], clients: &[u8]) -> Result<Value, String> {
         }
     }
     let mut report = json!({ "areas": areas });
-    if let Some(focus) = focus(clients) {
+    if let Some(focus) = client_pane(clients) {
         report["focus"] = focus.into();
     }
     Ok(report)
+}
+
+/// The pane of `tab`, of its panes `ours`, that is full screen, if any:
+/// the tiled one `is_fullscreen` and the size of the viewport, as a pane
+/// any client has focused may be `is_fullscreen` too.
+fn full_screen_pane<'a>(tab: &Tab, ours: &[&'a Pane]) -> Option<&'a Pane> {
+    let [w, h] = tab.viewport.map(|n| n as i64);
+    ours.iter().copied().find(|p| {
+        tab.fullscreen && p.is_fullscreen && !p.is_floating && [p.frame[2], p.frame[3]] == [w, h]
+    })
 }
 
 impl Pane {
@@ -210,7 +224,7 @@ impl Pane {
 /// `clients`: a header row, then a row per client, its id, then its pane's.
 /// That pane, if there's one client; none with none or several, as
 /// zellij doesn't say which the user types in.
-fn focus(clients: &[u8]) -> Option<String> {
+fn client_pane(clients: &[u8]) -> Option<String> {
     let clients = std::str::from_utf8(clients).ok()?;
     let mut rows = clients
         .lines()
@@ -227,6 +241,7 @@ fn focus(clients: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fake::Fake;
     use super::*;
 
     /// A terminal as the report gives it, with its inset.
@@ -444,11 +459,14 @@ mod tests {
     #[test]
     fn zellij_0_46_focus_is_the_pane_of_the_one_client() {
         assert_eq!(
-            focus(include_bytes!("fixtures/0.46-clients-one.txt")).as_deref(),
+            client_pane(include_bytes!("fixtures/0.46-clients-one.txt")).as_deref(),
             Some("terminal_0")
         );
-        assert_eq!(focus(NO_CLIENT), None);
-        assert_eq!(focus(include_bytes!("fixtures/0.46-clients-two.txt")), None);
+        assert_eq!(client_pane(NO_CLIENT), None);
+        assert_eq!(
+            client_pane(include_bytes!("fixtures/0.46-clients-two.txt")),
+            None
+        );
         let report = layout(
             include_bytes!("fixtures/0.46-fullscreen-panes.json"),
             include_bytes!("fixtures/0.46-fullscreen-tabs.json"),
@@ -458,17 +476,51 @@ mod tests {
         assert_eq!(report["focus"], "terminal_0");
     }
 
+    /// A layout read without `list-clients` is reported without `focus`.
+    #[test]
+    fn without_list_clients_the_layout_has_no_focus() {
+        let fixture = |f: &str| {
+            format!(
+                "cat '{}/src/providers/zellij/fixtures/{f}'",
+                env!("CARGO_MANIFEST_DIR")
+            )
+        };
+        let (panes, tabs) = (
+            fixture("0.46-fullscreen-panes.json"),
+            fixture("0.46-fullscreen-tabs.json"),
+        );
+        let failing = "echo 'Session crashed' >&2; exit 1";
+        let fake = Fake::new(
+            "report-no-clients",
+            &[
+                ("list-panes", &panes),
+                ("list-tabs", &tabs),
+                ("list-clients", failing),
+            ],
+        );
+        let report = reported(&fake.session()).unwrap();
+        assert_eq!(report["areas"].as_array().map(Vec::len), Some(3));
+        assert_eq!(report.get("focus"), None);
+        assert_eq!(fake.asked(), ["list-panes", "list-tabs", "list-clients"]);
+        // a listing that fails still fails it
+        let fake = Fake::new(
+            "report-no-tabs",
+            &[("list-panes", &panes), ("list-tabs", failing)],
+        );
+        assert!(reported(&fake.session()).is_err());
+    }
+
     #[test]
     fn focus_is_only_ever_a_pane_id() {
         let one =
             |pane: &str| format!("CLIENT_ID  ZELLIJ_PANE_ID RUNNING_COMMAND\n1  {pane}  N/A\n");
         assert_eq!(
-            focus(one("plugin_2").as_bytes()).as_deref(),
+            client_pane(one("plugin_2").as_bytes()).as_deref(),
             Some("plugin_2")
         );
         for not in ["terminal_", "terminal_x", "2", "%2", "N/A", ""] {
-            assert_eq!(focus(one(not).as_bytes()), None, "{not:?}");
+            assert_eq!(client_pane(one(not).as_bytes()), None, "{not:?}");
         }
-        assert_eq!(focus(b"\xff"), None);
+        assert_eq!(client_pane(b"\xff"), None);
     }
 }

@@ -27,8 +27,8 @@ pub(super) fn open_float(given: &Given) -> Result<String, String> {
     let float = Float {
         origin: terminal_of(given, "origin")?,
         words: given.attach_words()?,
-        at: [number(given, "x")?, number(given, "y")?],
-        size: [cells(given, "cols")?, cells(given, "rows")?],
+        at: [given.integer("x")?, given.integer("y")?],
+        size: [given.cells("cols")?, given.cells("rows")?],
     };
     float.open(&session)
 }
@@ -98,30 +98,6 @@ fn frame(at: [i64; 2], size: [u32; 2], corner: [i64; 2]) -> [i64; 4] {
         cols + 2,
         rows + 2,
     ]
-}
-
-/// Input `name`, an integer, or why not.
-fn number(given: &Given, name: &str) -> Result<i64, String> {
-    let n = given.var(name).unwrap_or_default();
-    std::str::from_utf8(&n)
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| {
-            format!(
-                "{} {:?} isn't an integer",
-                name.to_ascii_uppercase(),
-                String::from_utf8_lossy(&n)
-            )
-        })
-}
-
-/// Input `name`, a count of cells, one at least, or why not.
-fn cells(given: &Given, name: &str) -> Result<u32, String> {
-    number(given, name)?
-        .try_into()
-        .ok()
-        .filter(|&n: &u32| n >= 1)
-        .ok_or_else(|| format!("{} isn't a count of cells", name.to_ascii_uppercase()))
 }
 
 #[cfg(test)]

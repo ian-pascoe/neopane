@@ -124,6 +124,31 @@ impl Given {
         }
         Ok(words.into_iter().map(OsString::from_vec).collect())
     }
+
+    /// Input `name`, an integer, such as `X`, or why not.
+    pub(crate) fn integer(&self, name: &str) -> Result<i64, String> {
+        let n = self.var(name).unwrap_or_default();
+        std::str::from_utf8(&n)
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| {
+                format!(
+                    "{} {:?} isn't an integer",
+                    name.to_ascii_uppercase(),
+                    String::from_utf8_lossy(&n)
+                )
+            })
+    }
+
+    /// Input `name`, a count of cells, one at least, such as `COLS`, or why
+    /// not.
+    pub(crate) fn cells(&self, name: &str) -> Result<u32, String> {
+        self.integer(name)?
+            .try_into()
+            .ok()
+            .filter(|&n: &u32| n >= 1)
+            .ok_or_else(|| format!("{} isn't a count of cells", name.to_ascii_uppercase()))
+    }
 }
 
 /// The words of `line`, as `<NAME>_ATTACH` has them: each bare, or in
@@ -184,6 +209,28 @@ pub(crate) fn print_line(line: &[u8]) -> u8 {
 mod tests {
     use super::*;
     use crate::attach::attach_line;
+
+    #[test]
+    fn an_integer_and_a_count_of_cells_are_read_or_say_why_not() {
+        let var = |v: &'static str| {
+            let name = format!("{}_X", upper());
+            Given::from(move |k: &str| (k == name).then(|| v.as_bytes().to_vec()))
+        };
+        assert_eq!(var("-3").integer("x"), Ok(-3));
+        assert_eq!(var("7").cells("x"), Ok(7));
+        assert_eq!(
+            var("3.5").integer("x"),
+            Err("X \"3.5\" isn't an integer".into())
+        );
+        assert_eq!(var("").integer("x"), Err("X \"\" isn't an integer".into()));
+        for none in ["0", "-1", "99999999999"] {
+            assert_eq!(
+                var(none).cells("x"),
+                Err("X isn't a count of cells".into()),
+                "{none}"
+            );
+        }
+    }
 
     #[test]
     fn the_attach_line_reads_back_as_its_words() {

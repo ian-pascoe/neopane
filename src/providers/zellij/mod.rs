@@ -14,8 +14,9 @@
 //!   tab's floats hidden around the split if they show; `close-pane`.
 //! - `open_float` (`float.rs`): `new-pane --floating --pinned true
 //!   --no-focus` over the origin's tab, its content on the float group.
-//! - `open_tab_page` (`tab_page.rs`): `new-tab --no-focus`, checked in
-//!   `list-panes`: a zellij tab is a tab page area.
+//! - `open_tab_page` (`tab_page.rs`): `new-tab --no-focus`, its pane, the
+//!   one running the attach, found in `list-panes`: a zellij tab is a tab
+//!   page area.
 //! - `focus` and `focus_direction` (`focus.rs`): `focus-pane-id` and
 //!   `move-focus`, for the client that last typed.
 //! - `report_layout` (`layout.rs`): one area per tab, from `list-panes`
@@ -95,15 +96,20 @@ fn terminal_of(given: &Given, name: &str) -> Result<u32, String> {
     })
 }
 
+/// The first line of what zellij printed, `out`, trimmed.
+fn first_line(out: &[u8]) -> String {
+    let out = String::from_utf8_lossy(out);
+    out.lines().next().unwrap_or_default().trim().to_string()
+}
+
 /// The pane id an open printed, `out`, `what` it ran, or why it isn't a
 /// terminal's.
 fn printed_terminal(out: &[u8], what: &str) -> Result<String, String> {
-    let id = String::from_utf8_lossy(out);
-    let id = id.lines().next().unwrap_or_default().trim();
+    let id = first_line(out);
     if terminal_number(id.as_bytes()).is_none() {
         return Err(format!("{what} printed {id:?}, not a terminal pane's id"));
     }
-    Ok(id.to_string())
+    Ok(id)
 }
 
 /// The rows `list-panes --json` printed, `out`, one per pane, or why

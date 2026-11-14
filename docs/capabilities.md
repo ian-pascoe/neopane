@@ -511,32 +511,37 @@ client, and with no client attached, `focus_direction` fails.
   Neovim goes to its tab page. `new-tab` prints the tab's id, and with no
   client attached prints one and makes nothing: so it prints the tab's
   terminal pane, as `list-panes` lists it, and without one exits 1, `zellij
-  made no tab (id N)`.
+  made no tab (id N)`. The tab is made from the user's tab template, such
+  as a `new_tab_template` of several panes, the attach in its bare one: of
+  several, it prints the one whose `terminal_command`, the words joined by
+  spaces, is the attach's, and with none such exits 1, rather than take a
+  pane of the user's.
 - `focus`: `focus-pane-id`, which goes to the pane's tab; a pane already
-  focused (exit 2, `Pane Terminal(N) is already focused`) is done.
-  Focusing a float shows its tab's floats, and a tiled pane hides them.
+  focused, exit 2 with `Pane Terminal(N) is already focused` on stderr, is
+  done, and any other failure is one. Focusing a float shows its tab's
+  floats, and a tiled pane hides them.
 - `focus_direction`: `move-focus DIRECTION`, `COUNT` times, one call each.
   It never wraps: at the tab's edge it moves nowhere.
 - `report_layout`: `list-panes --json`, `list-tabs --json --all` and
-  `list-clients`; an
-  area per tab, `tab_N`, by its stable id. Its extent starts at the top
-  left of the tab's tiled selectable panes and is the tab's viewport in
-  size, so the tab and status bars, which can't be selected, are outside
-  it. Every selectable pane is in it; one zellij suppresses, hidden in a
-  stack or replaced in place, isn't. Each rect is the pane's frame; its
-  inset is the frame less the content on each edge, such as `[0, 1, 1, 0]`
-  for a tiled pane's title row and the separator on its right, `[1, 1, 1,
-  1]` for a float, which is `"floating": true` whether its tab shows its
-  floats or not: `list-panes` doesn't tell a pinned float, shown either
-  way, from a hidden one. In a tab with a pane full screen
+  `list-clients`; an area per tab, `tab_N`, by its stable id. Its extent
+  starts at the top left of the tab's tiled selectable panes and is the
+  tab's viewport in size, so the tab and status bars, which can't be
+  selected, are outside it. Every selectable pane is in it; one zellij
+  suppresses, hidden in a stack or replaced in place, isn't. Each rect is
+  the pane's frame; its inset is the frame less the content on each edge,
+  such as `[0, 1, 1, 0]` for a tiled pane's title row and the separator on
+  its right, `[1, 1, 1, 1]` for a float, which is `"floating": true` whether
+  its tab shows its floats or not: `list-panes` doesn't tell a pinned float,
+  shown either way, from a hidden one. In a tab with a pane full screen
   (`is_fullscreen_active`), `tab_N` holds that pane, at `[0, 0, 1, 1]`, and
   the floats; the tab's other tiled panes are in `tab_N~hidden`, at the
-  rects `list-panes` gives them, where they are without it. The full
-  screen pane is the one `is_fullscreen` and the size of the viewport,
-  as `is_fullscreen` is true of any pane a client has focused. `focus` is
-  the pane of the one client `list-clients` lists; with none or several,
-  none, as zellij doesn't say which the user types in. Not `is_focused`,
-  which is true of a pane any client ever focused.
+  rects `list-panes` gives them, where they are without it. The full screen
+  pane is the one `is_fullscreen` and the size of the viewport, as
+  `is_fullscreen` is true of any pane a client has focused. `focus` is the
+  pane of the one client `list-clients` lists; with none or several, none,
+  as zellij doesn't say which the user types in, and none, said on stderr,
+  if `list-clients` fails. Not `is_focused`, which is true of a pane any
+  client ever focused.
 
 No `place_beside` or `resize`: zellij moves a pane only by swapping it with
 a neighbour, and resizes only by steps of 5 % of the tab. No `events`:

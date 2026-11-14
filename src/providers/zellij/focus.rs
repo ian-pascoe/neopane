@@ -5,7 +5,8 @@
 //! still exits 0; with no client attached, `move-focus` fails.
 //!
 //! - `focus`: `focus-pane-id`, which goes to the pane's tab. A pane already
-//!   focused exits 2, `Pane Terminal(N) is already focused`: done. Focusing
+//!   focused exits 2, saying `Pane Terminal(N) is already focused` on
+//!   stderr: done. Any other failure is one. Focusing
 //!   a floating pane shows its tab's floats, and a tiled one hides them.
 //! - `focus_direction`: `move-focus` `COUNT` times, one call each. It never
 //!   wraps: at the tab's edge it moves nowhere, and exits 0.
@@ -19,15 +20,17 @@ pub(super) fn focus(given: &Given) -> Result<(), String> {
     focused(&Session::of(given)?, terminal_of(given, "terminal")?)
 }
 
-/// Focuses terminal pane `pane` of `session`, or says why not.
+/// Focuses terminal pane `pane` of `session`, or says why not: one already
+/// focused is done, as zellij says it with exit 2.
 fn focused(session: &Session, pane: u32) -> Result<(), String> {
+    let already = format!("Pane Terminal({pane}) is already focused");
     match session.run(&["focus-pane-id", &format!("terminal_{pane}")]) {
         Ok(_) => Ok(()),
-        Err(Ran::Failed(why))
-            if why.ends_with(&format!(": Pane Terminal({pane}) is already focused")) =>
-        {
-            Ok(())
-        }
+        Err(Ran::Exited {
+            code: Some(2),
+            said,
+            ..
+        }) if said == already => Ok(()),
         Err(why) => Err(why.into()),
     }
 }
@@ -76,9 +79,15 @@ mod tests {
         let fake = Fake::new("focus-already", &[("focus-pane-id", already)]);
         assert_eq!(focused(&fake.session(), 3), Ok(()));
         assert_eq!(fake.calls(), ["focus-pane-id terminal_3"]);
-        // another pane's, or another failure, isn't
+        // another pane's, or another status, or another failure, isn't
         let other = Fake::new("focus-other", &[("focus-pane-id", already)]);
         assert!(focused(&other.session(), 4).is_err());
+        let not_2 = "echo 'Pane Terminal(3) is already focused' >&2; exit 1";
+        let not_2 = Fake::new("focus-not-2", &[("focus-pane-id", not_2)]);
+        assert!(focused(&not_2.session(), 3).is_err());
+        let on_stdout = "echo 'Pane Terminal(3) is already focused'; exit 2";
+        let on_stdout = Fake::new("focus-stdout", &[("focus-pane-id", on_stdout)]);
+        assert!(focused(&on_stdout.session(), 3).is_err());
         let gone = "echo 'Pane with id Terminal(3) not found' >&2; exit 2";
         let gone = Fake::new("focus-gone", &[("focus-pane-id", gone)]);
         let why = focused(&gone.session(), 3).unwrap_err();

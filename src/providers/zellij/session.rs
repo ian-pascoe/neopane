@@ -29,8 +29,15 @@ pub(super) struct Session {
 /// How a call of zellij failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Ran {
-    /// It couldn't start, or exited unsuccessfully: why.
+    /// It couldn't start: why.
     Failed(String),
+    /// It exited unsuccessfully, with `code`, none if a signal ended it,
+    /// its stderr's first line `said`: why.
+    Exited {
+        code: Option<i32>,
+        said: String,
+        why: String,
+    },
     /// It was killed at its deadline, or never started for lack of time:
     /// whatever it was to do may be done or not.
     TimedOut(String),
@@ -42,7 +49,10 @@ pub(super) enum Ran {
 impl std::fmt::Display for Ran {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ran::Failed(why) | Ran::TimedOut(why) | Ran::NoSession(why) => f.write_str(why),
+            Ran::Failed(why)
+            | Ran::Exited { why, .. }
+            | Ran::TimedOut(why)
+            | Ran::NoSession(why) => f.write_str(why),
         }
     }
 }
@@ -169,7 +179,11 @@ impl Session {
         if self.is_gone(first) {
             return Err(Ran::NoSession(why));
         }
-        Err(Ran::Failed(why))
+        Err(Ran::Exited {
+            code: status.code(),
+            said: first.to_string(),
+            why,
+        })
     }
 
     /// Whether `line`, the first of zellij's stderr, says this session

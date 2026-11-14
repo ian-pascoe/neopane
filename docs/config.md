@@ -552,6 +552,9 @@ Its limits, for now:
 - A split fails while the tab shows its floating panes: they are hidden
   around each split and shown again, so they may flicker. If they can't be
   hidden, the open fails, as any failed open does, with no split.
+- A tab page's zellij tab is made from your tab template: with a
+  `new_tab_template` of several panes, its window opens in the bare one,
+  and the others run what the template says, as foreign panes.
 - zellij shows a tab's floating panes only while one has focus: Neovim's
   are pinned, so they show over the tab whichever pane has focus, as a
   Neovim float does, and hiding the tab's floats leaves them shown.
