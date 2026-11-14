@@ -65,6 +65,8 @@ pub(crate) struct Asks {
     unsupported: CapabilitySet,
     /// Capabilities whose failure has warned.
     warned: CapabilitySet,
+    /// Whether it closed a terminal opened too late, not yet taken.
+    closed_late: bool,
     /// The capabilities of acts the pane provider answered, whatever came
     /// of them, not yet taken.
     ran: Vec<Capability>,
@@ -163,6 +165,7 @@ impl Asks {
             // its act timed out and fell back: nothing will use the terminal
             if let Outcome::Done(Answer::Terminal(t)) = outcome {
                 log_info!("{NAME} daemon: {}: closing {t}, opened too late", p.name());
+                self.closed_late = true;
                 self.act(Some(p), Ask::Close { terminal: t }, now);
             }
             return;
@@ -290,6 +293,20 @@ impl Asks {
     /// Whether an act of `cap` is asked and unanswered.
     pub(crate) fn asked(&self, cap: Capability) -> bool {
         self.sent.iter().any(|s| s.ask.capability() == cap)
+    }
+
+    /// Whether it closed a terminal opened too late since last asked.
+    pub(crate) fn take_closed_late(&mut self) -> bool {
+        std::mem::take(&mut self.closed_late)
+    }
+
+    /// Whether a layout act other than `report_layout` is asked and
+    /// unanswered: a report waits behind it.
+    pub(crate) fn runs_layout_act(&self) -> bool {
+        self.sent
+            .iter()
+            .map(|s| s.ask.capability())
+            .any(|c| c.is_layout() && c != Capability::ReportLayout)
     }
 
     /// Whether a `place_beside` or `resize` is asked or waiting.

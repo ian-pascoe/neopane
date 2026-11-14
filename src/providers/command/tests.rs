@@ -588,8 +588,8 @@ fn each_events_line_says_the_layout_changed_after_its_focus_and_closed() {
     assert_eq!(
         vec![
             ProviderEvent::LayoutChanged,
-            focused("x"),
             ProviderEvent::Closed(TerminalId::from("y")),
+            focused("x"),
             ProviderEvent::LayoutChanged,
             ProviderEvent::LayoutChanged,
         ],
@@ -912,6 +912,32 @@ fn what_a_report_after_the_last_line_tells_of_focus() {
             "{read:?} {line:?} {told:?} {after_acts}"
         );
     }
+}
+
+/// A line's focus, waiting for a report to tell it, is told as heard at
+/// once: the daemon holds the focus acts it asks until then (SPI-1190).
+#[test]
+fn a_lines_focus_waiting_for_a_report_is_told_as_heard_at_once() {
+    let mut s = Stepped::new("heard", Duration::from_secs(5));
+    let heard = ProviderEvent::FocusHeard(TerminalId::from("c"));
+    let told = s.line(r#"{"focus":"c"}"#);
+    assert_eq!(vec![heard, ProviderEvent::LayoutChanged], told);
+    s.ask(Ask::ReportLayout);
+    assert_eq!(vec![focused("c")], s.end_report("c"));
+}
+
+/// A line's `closed` is told before its `focus`: the move may be the pane
+/// provider's own, as the terminal closed.
+#[test]
+fn a_lines_close_is_told_before_its_focus() {
+    let mut s = Stepped::new("closed-first", Duration::from_secs(5));
+    let told = s.line(r#"{"focus":"c","closed":"b"}"#);
+    let want = vec![
+        ProviderEvent::Closed(TerminalId::from("b")),
+        ProviderEvent::FocusHeard(TerminalId::from("c")),
+        ProviderEvent::LayoutChanged,
+    ];
+    assert_eq!(want, told);
 }
 
 /// The user's move, after a focus act landed, comes as a line while a

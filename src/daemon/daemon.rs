@@ -262,6 +262,8 @@ pub(crate) enum Token {
     Config,
     /// The built-in default's proofs for a choice are done.
     Default,
+    /// A move heard holds focus acts no longer.
+    FocusHoldTimer,
 }
 
 impl Token {
@@ -286,13 +288,14 @@ impl Token {
             15 => Token::StopTimer,
             16 => Token::Config,
             17 => Token::Default,
+            18 => Token::FocusHoldTimer,
             _ => return None,
         })
     }
 }
 
 // the fixed tokens must stay below the pane tokens
-const _: () = assert!((Token::Default as usize) < pane::TOKEN_BASE);
+const _: () = assert!((Token::FocusHoldTimer as usize) < pane::TOKEN_BASE);
 
 /// How long losing focus waits before Neovim hears of it: focus moving
 /// from one pane to another, such as into a floating pane, arrives as an
@@ -609,6 +612,7 @@ impl Daemon {
             Some(Token::StopTimer) => self.stop_wait_over(),
             Some(Token::Config) => self.on_config()?,
             Some(Token::Default) => self.on_default()?,
+            Some(Token::FocusHoldTimer) => self.focus_hold_over(Instant::now())?,
             Some(Token::HelperListener) => {}
             None => self.on_pane(e)?,
         }
@@ -1341,6 +1345,8 @@ impl Daemon {
     /// window, or end if it was the last pane.
     fn pane_gone(&mut self, id: u32) -> Result<()> {
         self.read_layout_again();
+        // the pane provider may move focus as the terminal goes
+        self.focus.pane_closed(Instant::now());
         let i = self.panes.index_of(id).unwrap();
         let p = &mut self.panes.list[i];
         p.closing = Some(Close::TerminalHungUp);
@@ -2086,13 +2092,22 @@ impl Daemon {
     // The pane provider
 
     /// Asks the pane provider to focus terminal `t`, unless it has or will
-    /// once a focus asked lands, or can't.
+    /// once a focus asked lands, or can't. While a move it heard isn't
+    /// told, it is parked instead (`provider_focus.rs`).
     fn focus_terminal(&mut self, t: Option<&TerminalId>) {
         let Some(t) = t else {
             return;
         };
         let p = self.provider.as_deref();
-        if self.focus.has_focused(t) || !self.asks.may_ask(p, Capability::Focus) {
+        if !self.asks.may_ask(p, Capability::Focus) {
+            return;
+        }
+        let now = Instant::now();
+        self.restart_hold_in_the_way(now);
+        if self.focus.park(t, now) {
+            return;
+        }
+        if self.focus.has_focused(t) {
             return;
         }
         self.focus.asked(t.clone());
@@ -2104,6 +2119,10 @@ impl Daemon {
     /// Asks the pane provider for `ask`, or falls back without it. What
     /// became of it, `run_steps` acts on.
     pub(crate) fn act(&mut self, ask: Ask) {
+        // the pane provider may move focus as it closes a terminal
+        if let Ask::Close { .. } = ask {
+            self.focus.pane_closed(Instant::now());
+        }
         let p = self
             .provider
             .as_mut()
@@ -2154,13 +2173,20 @@ impl Daemon {
                     if let Some(p) = &mut self.provider {
                         self.asks.answered(p.as_mut(), id, outcome, Instant::now());
                     }
+                    if self.asks.take_closed_late() {
+                        self.focus.pane_closed(Instant::now());
+                    }
                 }
                 ProviderEvent::Layout(l) => self.on_live_layout(l)?,
                 ProviderEvent::LayoutChanged => self.ask_for_report(),
                 ProviderEvent::Focused(t) => self.on_focused(&t, Instant::now())?,
+                ProviderEvent::FocusHeard(t) => self.on_focus_heard(&t, Instant::now())?,
                 // its pane hangs up by itself; ending a requested pane's
                 // wait on it is for later
-                ProviderEvent::Closed(t) => log_info!("{NAME} daemon: {t} closed"),
+                ProviderEvent::Closed(t) => {
+                    log_info!("{NAME} daemon: {t} closed");
+                    self.focus.pane_closed(Instant::now());
+                }
                 ProviderEvent::Gone { reason } => self.gone_choosing_or_after(&reason)?,
             }
         }
@@ -2278,6 +2304,14 @@ impl Daemon {
             if self.asks.settles_placement(&step) {
                 log::trace(Point::Placed, 0);
             }
+            // answered or timed out, it may have been in the way of the
+            // report the hold waits for
+            if let Step::Done(ask, _) | Step::FallBack(ask) = &step
+                && ask.capability().is_layout()
+                && ask.capability() != Capability::ReportLayout
+            {
+                self.focus.restart_hold(Instant::now());
+            }
             match step {
                 Step::Done(ask @ Ask::Find { .. }, answer) => self.found(&ask, answer)?,
                 Step::NotFound(ask, why) => self.not_found(&ask, &why)?,
@@ -2287,10 +2321,10 @@ impl Daemon {
                     self.opened_without_id(&ask)?
                 }
                 Step::Done(Ask::ReportLayout, Answer::Layout(l)) => self.on_reported(l)?,
-                Step::Done(Ask::Focus { .. }, _) => self.focus.ended(true, Instant::now()),
+                Step::Done(Ask::Focus { .. }, _) => self.focus_ended(true),
                 Step::Done(..) => {}
                 Step::FallBack(Ask::Focus { .. }) | Step::Replaced(Ask::Focus { .. }) => {
-                    self.focus.ended(false, Instant::now())
+                    self.focus_ended(false)
                 }
                 Step::Replaced(_) => {}
                 Step::FallBack(ask) => self.fall_back(ask)?,
@@ -2301,6 +2335,18 @@ impl Daemon {
             }
         }
         Ok(())
+    }
+
+    /// A focus act ended, and worked if `done`. Once none lands, the
+    /// user's move told meanwhile is asked again, and a report ignored as
+    /// one landed after a move was heard has focus read again.
+    fn focus_ended(&mut self, done: bool) {
+        self.focus.ended(done, Instant::now());
+        let reask = self.focus.take_reask();
+        self.focus_terminal(reask.as_ref());
+        if self.focus.take_recheck() {
+            self.ask_for_report();
+        }
     }
 
     /// Pane `id`, opened by `open`, is placed beside its origin once it has
@@ -2641,7 +2687,9 @@ impl Daemon {
             }
             None => false,
         };
-        if !self.focus.reported(t) {
+        let user = self.focus.reported(t);
+        self.release_parked(now);
+        if !user {
             return Ok(());
         }
         let shown = self.panes.by_terminal(t.as_str()).map(|p| p.id);
@@ -2649,7 +2697,73 @@ impl Daemon {
             self.give_focus_back();
             return Ok(());
         }
+        // told as ours lands, which may undo it: one of our panes' is
+        // asked again once none does
+        if !fresh {
+            self.ask_again_once_none_lands(t);
+        }
         self.on_provider_focus(t)
+    }
+
+    /// The user moved focus to `t` as a focus act of ours lands, which may
+    /// undo it: one of our panes' is asked again once none does.
+    fn ask_again_once_none_lands(&mut self, t: &TerminalId) {
+        if self.panes.by_terminal(t.as_str()).is_some() {
+            self.focus.ask_again(t.clone());
+        }
+    }
+
+    /// The pane provider heard focus move to `t`, at `now`, to tell once
+    /// read: focus acts asked meanwhile are parked for it, while what the
+    /// report waits behind runs, then 1 s at most.
+    fn on_focus_heard(&mut self, t: &TerminalId, now: Instant) -> Result<()> {
+        let user = self.focus.heard(t, now);
+        self.restart_hold_in_the_way(now);
+        self.arm_focus_hold_timer(now)?;
+        // a terminal just opened that took focus isn't the user's move
+        if !user || self.just_opened.iter().any(|(o, _)| o == t) {
+            return Ok(());
+        }
+        self.ask_again_once_none_lands(t);
+        self.on_provider_focus(t)
+    }
+
+    /// While a layout act other than a report runs, the report that ends
+    /// the hold waits behind it: the hold's time starts again at `now`.
+    fn restart_hold_in_the_way(&mut self, now: Instant) {
+        if self.asks.runs_layout_act() {
+            self.focus.restart_hold(now);
+        }
+    }
+
+    /// Asks the focus parked, once the hold has ended at `now`.
+    fn release_parked(&mut self, now: Instant) {
+        let parked = self.focus.take_parked(now);
+        self.focus_terminal(parked.as_ref());
+    }
+
+    /// Starts the hold timer for the hold's end, if a move heard holds.
+    fn arm_focus_hold_timer(&self, now: Instant) -> Result<()> {
+        let Some(due) = self.focus.hold_due() else {
+            return Ok(());
+        };
+        // round up, so the timer doesn't fire before the hold ends
+        let ms = due
+            .saturating_duration_since(now)
+            .as_micros()
+            .div_ceil(1000);
+        self.add_timer(Token::FocusHoldTimer, u32::try_from(ms).unwrap_or(u32::MAX))
+    }
+
+    /// The hold timer fired, at `now`: the focus parked, its move never
+    /// told, is asked once the hold's time is up.
+    fn focus_hold_over(&mut self, now: Instant) -> Result<()> {
+        self.restart_hold_in_the_way(now);
+        if self.focus.is_holding(now) {
+            return self.arm_focus_hold_timer(now);
+        }
+        self.release_parked(now);
+        Ok(())
     }
 
     /// Asks the pane provider to focus the current pane's terminal again.
@@ -6965,6 +7079,437 @@ mod tests {
         let now = Instant::now();
         fx.d.on_focused(&TerminalId::from("block:n"), now).unwrap();
         assert_eq!(Some(id), fx.d.current_pane_id());
+    }
+
+    /// `:vsplit` from t1's window: the new window, current, waits on its
+    /// open, and t3's pane is beside them, in a daemon whose fake pane
+    /// provider can focus and report. The open's id.
+    fn splitting_beside_t3(fx: &mut Fixture) -> super::super::provider::AskId {
+        focus_pane(fx, 50, 1000, Some("t1"));
+        focus_pane(fx, 51, 1002, Some("t3"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(fx, "t1");
+        opening(&mut fx.d);
+        fx.d.nvim.current_win = 1001;
+        fake(&mut fx.d).last_id()
+    }
+
+    /// A daemon whose fake pane provider can open, focus and report, with
+    /// `events`: it may hear moves.
+    fn hearing() -> Fixture {
+        let mut f = FakeProvider::telling();
+        f.caps.insert(Capability::Focus);
+        let mut fx = with_provider(Some(Box::new(f)));
+        fx.d.nvim.ready = true;
+        fx
+    }
+
+    /// The pane provider heard focus move to `t`, to tell once read.
+    fn provider_heard(fx: &mut Fixture, t: &str) {
+        fake(&mut fx.d).push(ProviderEvent::FocusHeard(TerminalId::from(t)));
+        fx.d.drain_provider().unwrap();
+    }
+
+    /// The open `open` is done, as `block:n`.
+    fn opened_as_n(fx: &mut Fixture, open: super::super::provider::AskId) {
+        fake(&mut fx.d).opened(open, "block:n");
+        fx.d.drain_provider().unwrap();
+    }
+
+    /// Whether the daemon asked to focus `t`, how many times.
+    fn asked_focus(fx: &mut Fixture, t: &str) -> usize {
+        let want = focus_ask(t);
+        fake(&mut fx.d)
+            .asked()
+            .iter()
+            .filter(|a| **a == want)
+            .count()
+    }
+
+    /// The focus act running is answered: done.
+    fn focus_answered(fx: &mut Fixture) {
+        let f = fake(&mut fx.d);
+        let id = f
+            .asks
+            .iter()
+            .rev()
+            .find(|(_, a)| matches!(a, Ask::Focus { .. }));
+        let id = id.map(|(id, _)| *id).unwrap();
+        f.answer(id, Outcome::Done(Answer::Nothing));
+        fx.d.drain_provider().unwrap();
+    }
+
+    #[test]
+    fn a_users_move_heard_while_a_window_opens_stands_and_its_focus_never_runs() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        // the user moves to t3 as it opens: heard, told once read again
+        provider_heard(&mut fx, "t3");
+        opened_as_n(&mut fx, open);
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        // nor later, the hold over
+        let later = Instant::now() + super::super::provider_focus::HOLD * 2;
+        fx.d.focus_hold_over(later).unwrap();
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+        assert_eq!(1002, fx.d.nvim.current_win);
+    }
+
+    #[test]
+    fn a_move_heard_that_was_none_lets_the_new_windows_focus_run_once_told() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        provider_heard(&mut fx, "t3");
+        opened_as_n(&mut fx, open);
+        // focus was on t1 all along
+        provider_focused(&mut fx, "t1");
+        assert_eq!(Some(&focus_ask("block:n")), fake(&mut fx.d).asked().last());
+        assert_eq!(1001, fx.d.nvim.current_win);
+    }
+
+    #[test]
+    fn a_move_heard_holds_while_the_open_its_report_waits_behind_runs_then_1_s() {
+        let hold = super::super::provider_focus::HOLD;
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        provider_heard(&mut fx, "t3");
+        let heard = Instant::now();
+        // past the hold's 1 s, the open still running
+        fx.d.focus_hold_over(heard + hold).unwrap();
+        assert!(fx.d.focus.is_holding(heard + hold));
+        opened_as_n(&mut fx, open);
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+        // 1 s after the last check while it ran, never told
+        fx.d.focus_hold_over(heard + hold * 2 - ms(1)).unwrap();
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+        fx.d.focus_hold_over(heard + hold * 2).unwrap();
+        assert_eq!(Some(&focus_ask("block:n")), fake(&mut fx.d).asked().last());
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_focus_asked_once_the_hold_is_over_isnt_followed_by_the_one_parked() {
+        let hold = super::super::provider_focus::HOLD;
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        focus_answered(&mut fx);
+        provider_focused(&mut fx, "block:n");
+        // a move heard, its hold nearly over, parks t1's focus
+        let heard = Instant::now() - hold + ms(50);
+        fx.d.on_focus_heard(&TerminalId::from("t3"), heard).unwrap();
+        fx.d.focus_terminal(Some(&TerminalId::from("t1")));
+        assert_eq!(0, asked_focus(&mut fx, "t1"));
+        std::thread::sleep(ms(60));
+        // over, before its timer fires: t3 is asked, and t1 never
+        fx.d.focus_terminal(Some(&TerminalId::from("t3")));
+        assert_eq!(1, asked_focus(&mut fx, "t3"));
+        fx.d.focus_hold_over(Instant::now()).unwrap();
+        focus_answered(&mut fx);
+        assert_eq!(0, asked_focus(&mut fx, "t1"));
+    }
+
+    #[test]
+    fn a_users_move_told_as_the_new_windows_focus_lands_is_followed_and_asked_again_after_it() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        assert_eq!(1, asked_focus(&mut fx, "block:n"));
+        // heard and read before ours landed: t1 was where focus was, so
+        // t3 is the user's move, which ours may undo
+        provider_heard(&mut fx, "t3");
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        assert_eq!(0, asked_focus(&mut fx, "t3"));
+        focus_answered(&mut fx);
+        assert_eq!(Some(&focus_ask("t3")), fake(&mut fx.d).asked().last());
+        focus_answered(&mut fx);
+        // ours, and then t3's, landing
+        provider_focused(&mut fx, "block:n");
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+    }
+
+    #[test]
+    fn from_a_pane_provider_that_hears_no_moves_a_report_as_ours_lands_is_ignored() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1001, fx.d.nvim.current_win);
+        let asks = fake(&mut fx.d).asks.len();
+        focus_answered(&mut fx);
+        // nothing asked again, nor read again
+        assert_eq!(asks, fake(&mut fx.d).asks.len());
+    }
+
+    #[test]
+    fn a_users_move_whose_own_line_never_came_told_as_ours_lands_stands() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        // it hears moves: where focus is
+        provider_heard(&mut fx, "t1");
+        opened_as_n(&mut fx, open);
+        // an open that swaps panes hid the line of the move to t3: a
+        // report tells it
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        focus_answered(&mut fx);
+        assert_eq!(Some(&focus_ask("t3")), fake(&mut fx.d).asked().last());
+    }
+
+    #[test]
+    fn a_users_move_heard_as_the_new_windows_focus_lands_and_never_told_stands() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        // its line came as ours landed, which undid it
+        provider_heard(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        focus_answered(&mut fx);
+        assert_eq!(Some(&focus_ask("t3")), fake(&mut fx.d).asked().last());
+        // ours, read after it landed: no move
+        provider_focused(&mut fx, "block:n");
+        focus_answered(&mut fx);
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+    }
+
+    #[test]
+    fn a_second_quick_move_back_as_ours_lands_is_lost_to_the_first() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        provider_heard(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        // Neovim's note of the switch the move had it make: t3's focus is
+        // asked, behind ours
+        switch_answered(&mut fx);
+        fx.d.on_current(1002).unwrap();
+        // at once back to t1, known: its report as ours lands is ignored
+        provider_heard(&mut fx, "t1");
+        provider_focused(&mut fx, "t1");
+        focus_answered(&mut fx);
+        assert_eq!(Some(&focus_ask("t3")), fake(&mut fx.d).asked().last());
+        // t3's lands after the move back, undoing it; focus read again
+        // finds t3, where Neovim is: the second move is lost, as before
+        // these rules
+        focus_answered(&mut fx);
+        assert_eq!(Some(&Ask::ReportLayout), fake(&mut fx.d).asked().last());
+        provider_focused(&mut fx, "t3");
+        assert_eq!(1002, fx.d.nvim.current_win);
+    }
+
+    /// t1's, t2's and t3's panes, of windows 1000, 1001 and 1002, focus
+    /// on t2, in a daemon whose pane provider hears moves.
+    fn three_panes_on_t2() -> Fixture {
+        let mut fx = hearing();
+        focus_pane(&mut fx, 50, 1000, Some("t1"));
+        focus_pane(&mut fx, 51, 1001, Some("t2"));
+        focus_pane(&mut fx, 52, 1002, Some("t3"));
+        fx.d.nvim.current_win = 1001;
+        provider_focused(&mut fx, "t2");
+        provider_heard(&mut fx, "t2");
+        fx
+    }
+
+    #[test]
+    fn the_pane_providers_own_move_as_a_pane_closes_isnt_taken_for_the_users() {
+        // :q in t2's window, both orders the daemon may ask in
+        for close_first in [true, false] {
+            let mut fx = three_panes_on_t2();
+            let close = || asks::close(TerminalId::from("t2"));
+            if close_first {
+                fx.d.act(close());
+            }
+            fx.d.nvim.current_win = 1000;
+            fx.d.focus_terminal(Some(&TerminalId::from("t1")));
+            if !close_first {
+                fx.d.act(close());
+            }
+            // the pane provider focuses t3 itself as t2's pane closes
+            provider_heard(&mut fx, "t3");
+            provider_focused(&mut fx, "t3");
+            assert_eq!(1000, fx.d.nvim.current_win, "{close_first}");
+            focus_answered(&mut fx);
+            assert_eq!(0, asked_focus(&mut fx, "t3"), "{close_first}");
+            assert_eq!(1000, fx.d.nvim.current_win, "{close_first}");
+        }
+    }
+
+    #[test]
+    fn the_pane_providers_own_move_as_a_pane_closes_and_a_window_opens_isnt_the_users() {
+        // `:q | vsplit` in t2's window, t2's terminal going each way the
+        // daemon may learn of it; the new window, current, waits on its
+        // open
+        for how in ["asked", "told", "hung up", "opened too late"] {
+            let mut fx = three_panes_on_t2();
+            match how {
+                "asked" => fx.d.act(asks::close(TerminalId::from("t2"))),
+                "told" => {
+                    let closed = ProviderEvent::Closed(TerminalId::from("t2"));
+                    fake(&mut fx.d).push(closed);
+                    fx.d.drain_provider().unwrap();
+                }
+                "hung up" => fx.d.pane_gone(51).unwrap(),
+                _ => {
+                    fake(&mut fx.d).opened(super::super::provider::AskId(999), "late");
+                    fx.d.drain_provider().unwrap();
+                }
+            }
+            // a close asked is answered before the open is asked
+            let f = fake(&mut fx.d);
+            if let Some((id, Ask::Close { .. })) = f.asks.last().cloned() {
+                f.answer(id, Outcome::Done(Answer::Nothing));
+                fx.d.drain_provider().unwrap();
+            }
+            opening_for(&mut fx.d, 1003);
+            let open = fake(&mut fx.d).last_id();
+            fx.d.nvim.current_win = 1003;
+            // the pane provider focuses t3 itself as t2's terminal goes
+            provider_heard(&mut fx, "t3");
+            assert!(!fx.d.focus.is_holding(Instant::now()), "{how}");
+            opened_as_n(&mut fx, open);
+            assert_eq!(1, asked_focus(&mut fx, "block:n"), "{how}");
+            provider_focused(&mut fx, "t3");
+            assert_eq!(1003, fx.d.nvim.current_win, "{how}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_just_opened_heard_taking_focus_as_ours_lands_isnt_the_users_move() {
+        let mut fx = hearing();
+        focus_pane(&mut fx, 50, 1000, Some("t1"));
+        focus_pane(&mut fx, 51, 1002, Some("t3"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(&mut fx, "t1");
+        provider_heard(&mut fx, "t1");
+        // a window opens that isn't current, as Neovim goes to t3's
+        opening(&mut fx.d);
+        let open = fake(&mut fx.d).last_id();
+        fx.d.nvim.current_win = 1002;
+        fx.d.focus_terminal(Some(&TerminalId::from("t3")));
+        opened_as_n(&mut fx, open);
+        // its terminal took focus as it was made
+        provider_heard(&mut fx, "block:n");
+        assert_eq!(1002, fx.d.nvim.current_win);
+        focus_answered(&mut fx);
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+    }
+
+    #[test]
+    fn a_terminal_just_opened_told_as_ours_lands_isnt_asked_again() {
+        let mut fx = hearing();
+        focus_pane(&mut fx, 50, 1000, Some("t1"));
+        focus_pane(&mut fx, 51, 1002, Some("t3"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(&mut fx, "t1");
+        provider_heard(&mut fx, "t1");
+        opening(&mut fx.d);
+        let open = fake(&mut fx.d).last_id();
+        fx.d.nvim.current_win = 1002;
+        fx.d.focus_terminal(Some(&TerminalId::from("t3")));
+        opened_as_n(&mut fx, open);
+        // Neovim goes to its window as t3's focus lands, and its terminal,
+        // which took focus as it was made, is told
+        fx.d.nvim.current_win = 1001;
+        provider_focused(&mut fx, "block:n");
+        focus_answered(&mut fx);
+        assert_eq!(0, asked_focus(&mut fx, "block:n"));
+    }
+
+    /// A move to t3 heard while the new window's open runs, in
+    /// `splitting_beside_t3`: the open's id.
+    fn heard_as_it_opens(fx: &mut Fixture) -> super::super::provider::AskId {
+        let open = splitting_beside_t3(fx);
+        provider_heard(fx, "t3");
+        std::thread::sleep(ms(5));
+        open
+    }
+
+    #[test]
+    fn the_hold_starts_again_as_the_open_in_its_way_is_answered_or_times_out() {
+        let hold = super::super::provider_focus::HOLD;
+        // answered
+        let mut fx = hearing();
+        let open = heard_as_it_opens(&mut fx);
+        let at = Instant::now();
+        opened_as_n(&mut fx, open);
+        assert!(fx.d.focus.hold_due().unwrap() >= at + hold);
+        // timed out
+        let mut fx = hearing();
+        heard_as_it_opens(&mut fx);
+        let at = Instant::now();
+        let p = fx.d.provider.as_mut().unwrap();
+        fx.d.asks.time_out(p.as_mut(), at + Duration::from_secs(10));
+        fx.d.run_steps().unwrap();
+        assert!(fx.d.focus.hold_due().unwrap() >= at + hold);
+    }
+
+    #[test]
+    fn the_hold_starts_again_as_a_focus_is_asked_while_the_open_runs() {
+        let hold = super::super::provider_focus::HOLD;
+        let mut fx = hearing();
+        heard_as_it_opens(&mut fx);
+        let at = Instant::now();
+        fx.d.focus_terminal(Some(&TerminalId::from("t1")));
+        assert!(fx.d.focus.hold_due().unwrap() >= at + hold);
+    }
+
+    #[test]
+    fn a_report_running_isnt_in_the_way_of_the_hold() {
+        let hold = super::super::provider_focus::HOLD;
+        let mut fx = three_panes_on_t2();
+        fx.d.act(Ask::ReportLayout);
+        provider_heard(&mut fx, "t3");
+        fx.d.nvim.current_win = 1000;
+        fx.d.focus_terminal(Some(&TerminalId::from("t1")));
+        assert_eq!(0, asked_focus(&mut fx, "t1"));
+        fx.d.focus_hold_over(Instant::now() + hold).unwrap();
+        assert_eq!(1, asked_focus(&mut fx, "t1"));
+    }
+
+    /// Neovim answers the window switch in flight.
+    fn switch_answered(fx: &mut Fixture) {
+        let id = fx.d.nvim.switch_in_flight().expect("a switch in flight");
+        let mut nil = Vec::new();
+        msgpack::write_nil(&mut nil);
+        fx.d.on_response(id, None, Decoder::of(&nil)).unwrap();
+    }
+
+    #[test]
+    fn a_users_move_to_a_terminal_not_ours_as_ours_lands_isnt_asked_again() {
+        let mut fx = hearing();
+        let open = splitting_beside_t3(&mut fx);
+        opened_as_n(&mut fx, open);
+        provider_heard(&mut fx, "elsewhere");
+        provider_focused(&mut fx, "elsewhere");
+        focus_answered(&mut fx);
+        assert_eq!(0, asked_focus(&mut fx, "elsewhere"));
+    }
+
+    #[test]
+    fn a_report_ignored_as_our_focus_lands_after_a_move_heard_has_focus_read_again() {
+        let mut fx = hearing();
+        focus_pane(&mut fx, 1, 1000, Some("t1"));
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(&mut fx, "t1");
+        fx.d.nvim.current_win = 1001;
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        // the user's move back, or from before ours landed
+        provider_heard(&mut fx, "t1");
+        provider_focused(&mut fx, "t1");
+        assert_eq!(1001, fx.d.nvim.current_win);
+        focus_answered(&mut fx);
+        assert_eq!(Some(&Ask::ReportLayout), fake(&mut fx.d).asked().last());
+        // read after ours: the user's move back
+        provider_focused(&mut fx, "t1");
+        assert_eq!(1000, fx.d.nvim.current_win);
     }
 
     // Pane lifecycle. Already pinned above: a window waiting for its tab

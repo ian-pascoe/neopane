@@ -121,14 +121,15 @@ pub(super) struct Beside<'a> {
 /// herdr puts it only right of or below the origin, its `ratio` the first
 /// pane's share; for left or up, `pane.swap` swaps the two. The server's
 /// focus stays on the pane it was on: the move focuses the pane only if
-/// it had the focus, and a swap focuses its source, the pane if it had the
-/// focus, else the origin, the focus then being put back if it was
-/// elsewhere. Last, the tab's root split is set to the ratio it has:
-/// herdr resizes no pty on a move, and laying the tab out again resizes
-/// every one. It is set again 100 ms later: a terminal that went to the
-/// alternate screen before a client drew it in its new place is otherwise
-/// left a column short, herdr keeping its scrollbar's column, until the
-/// next layout.
+/// it had the focus, and a swap focuses its source, the pane if it has the
+/// focus, else the origin, the focus then being put back if it is
+/// elsewhere, as read just before the swap: the user may have moved it
+/// since `focused` was read. Last, the tab's root split is set to the
+/// ratio it has: herdr resizes no pty on a move, and laying the tab out
+/// again resizes every one. It is set again 100 ms later: a terminal that
+/// went to the alternate screen before a client drew it in its new place
+/// is otherwise left a column short, herdr keeping its scrollbar's column,
+/// until the next layout.
 pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<String, String> {
     let Beside {
         capability,
@@ -157,7 +158,13 @@ pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<Strin
     let pane = text(&moved["pane"], "pane_id")?.to_string();
     let mut laid_out = moved["target_layout"].clone();
     if side.before {
-        let (source, target) = if had_focus {
+        // where the focus is now: the user may have moved it since
+        let now = herdr.call("session.snapshot", json!({})).ok();
+        let now = now
+            .as_ref()
+            .and_then(|s| s["snapshot"]["focused_pane_id"].as_str());
+        let focused = now.or(focused);
+        let (source, target) = if focused == Some(pane.as_str()) {
             (pane.as_str(), origin)
         } else {
             (origin, pane.as_str())
@@ -455,6 +462,7 @@ mod tests {
                 "session.snapshot",
                 "layout.apply",
                 "pane.move",
+                "session.snapshot",
                 "pane.swap",
                 "pane.focus",
                 "layout.set_split_ratio",
@@ -467,11 +475,46 @@ mod tests {
         assert_eq!(to["split"], "right");
         assert!(close_to(&to["ratio"], 0.4), "{to}");
         assert_eq!(
-            asked[3]["params"],
+            asked[4]["params"],
             json!({ "source_pane_id": "w2:p3", "target_pane_id": "w2:p4" })
         );
         // the server's focus was w1:p1, not the origin
-        assert_eq!(asked[4]["params"], json!({ "pane_id": "w1:p1" }));
+        assert_eq!(asked[5]["params"], json!({ "pane_id": "w1:p1" }));
+    }
+
+    /// The recorded snapshot of `opening`, the server's focus on `focus`.
+    fn open_snapshot_on(focus: &str) -> Reply {
+        let mut reply: Value = serde_json::from_str(&recorded("open-snapshot")).unwrap();
+        reply["result"]["snapshot"]["focused_pane_id"] = focus.into();
+        Reply::Line(reply.to_string())
+    }
+
+    /// The user moved focus while it opened: the swap gives it back where
+    /// it is just before, not where it was as the open began (SPI-1190).
+    #[test]
+    fn left_gives_the_focus_back_where_the_user_moved_it_while_it_opened() {
+        for (now, focus_after) in [("w2:p9", Some("w2:p9")), ("w2:p3", None)] {
+            let fake = Fake::serve(vec![
+                ("session.snapshot", Reply::Line(recorded("open-snapshot"))),
+                ("session.snapshot", open_snapshot_on(now)),
+                ("layout.apply", Reply::Line(recorded("open-apply"))),
+                ("pane.move", Reply::Line(recorded("open-move"))),
+                ("pane.swap", Reply::Line(recorded("open-swap"))),
+                ("pane.focus", Reply::Line(recorded("open-focus"))),
+                (
+                    "layout.set_split_ratio",
+                    Reply::Line(recorded("open-set-ratio")),
+                ),
+            ]);
+            assert_eq!(open(&fake, "left", "0.4"), Ok("w2:p4".into()));
+            let asked = fake.asked();
+            let i = asked.iter().position(|a| a["method"] == "pane.swap");
+            assert_eq!(asked[i.unwrap() - 1]["method"], "session.snapshot");
+            // the swap's source is the origin, which it focuses
+            let focused = asked.iter().find(|a| a["method"] == "pane.focus");
+            let focused = focused.map(|a| a["params"]["pane_id"].as_str().unwrap());
+            assert_eq!(focus_after, focused, "{now}");
+        }
     }
 
     #[test]
@@ -482,7 +525,7 @@ mod tests {
         let to = &asked[2]["params"]["destination"];
         assert_eq!(to["split"], "down");
         assert!(close_to(&to["ratio"], 0.1), "{to}");
-        assert_eq!(asked[3]["method"], "pane.swap");
+        assert_eq!(asked[4]["method"], "pane.swap");
         let fake = opening("open-move");
         assert_eq!(open(&fake, "down", "0.95"), Ok("w2:p4".into()));
         let to = &fake.asked()[2]["params"]["destination"];

@@ -466,9 +466,11 @@ impl Live {
     }
 
     /// `:vsplit`, once its pane has attached and been placed, and the
-    /// daemon's focus of it has landed: the new window's pane, left of the
-    /// origin. A move made before then is undone by that focus, asked as
-    /// the window opened and run once the pane is there.
+    /// daemon's focus of it has landed, and `events` has seen it land: the
+    /// new window's pane, left of the origin, which herdr's own keys then
+    /// move from. `events` reads focus a moment after each focus event and
+    /// prints it only if it changed from its last line, so a move back
+    /// before it read the landing goes unseen.
     fn vsplit(&self) -> String {
         self.ex("vsplit");
         let s = until(|s: &Value| s["panes"] == 2, || self.status());
@@ -1114,4 +1116,62 @@ fn vertical_resize_in_the_first_tab_page_gives_the_herdr_pane_that_many_columns(
     let left = live.win();
     let origin = live.origin.clone();
     live.vertical_resizes(1, &origin, &[&left_pane, &origin], [&left, &right]);
+}
+
+/// The user moves herdr's focus while a split's pane opens, before the
+/// daemon's focus of it runs: the move stands, and Neovim's current
+/// window follows it (SPI-1190).
+///
+/// Passes if any of 3 attempts does, each with a fresh setup: herdr's
+/// `events` reads focus behind the open's other events, and a move made
+/// as the open swaps panes can go unseen until the daemon's focus has
+/// undone it, a race the daemon can't see (follow-up: SPI-1203). Without
+/// SPI-1190's rules every attempt fails.
+#[test]
+fn a_focus_move_while_a_split_opens_stands() {
+    let mut failed = Vec::new();
+    for n in 1..=3 {
+        let Some(live) = Live::start(&format!("hd-quick{n}")) else {
+            return;
+        };
+        match move_while_a_split_opens(&live) {
+            Ok(()) => return,
+            Err(why) => failed.push(format!("attempt {n}: {why}")),
+        }
+    }
+    panic!("{}", failed.join("\n\n"));
+}
+
+/// One attempt of `a_focus_move_while_a_split_opens_stands`: why it
+/// failed, if it did.
+fn move_while_a_split_opens(live: &Live) -> Result<(), String> {
+    let first = live.win();
+    let left = live.vsplit();
+    let second = live.win();
+    live.herdr
+        .call("pane.focus", json!({ "pane_id": live.origin }));
+    if live.until_win(&first) != Some(first.clone()) {
+        return Err(format!("Neovim never followed to {first}: {}", live.log()));
+    }
+    // the first window split again, and at once, as a user's key would,
+    // focus moved to the pane of the second
+    live.ex("vsplit");
+    live.herdr.call("pane.focus", json!({ "pane_id": left }));
+    let s = until(|s: &Value| s["panes"] == 3, || live.status());
+    if s["panes"] != 3 {
+        return Err(format!("its attach never came: {}", live.log()));
+    }
+    let want = (left.clone(), second.clone());
+    let now = || (live.focused(), live.win());
+    let got = until(|got| *got == want, now);
+    if got != want {
+        return Err(format!("{got:?}, not {want:?}: {}", live.log()));
+    }
+    // the new pane's focus, its open done, never takes it
+    std::thread::sleep(Duration::from_millis(1500));
+    let got = now();
+    if got != want {
+        return Err(format!("it went back to {got:?}: {}", live.log()));
+    }
+    Ok(())
 }
