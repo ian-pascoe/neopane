@@ -449,14 +449,16 @@ tab page area. herdr has one focus per server, not per client: `focus`,
 
 ### zellij
 
-`<name>.builtin.zellij()`: `find`, `open_beside`, `close` and
-`report_layout`, on the zellij session `ZELLIJ_SESSION_NAME` names. Every
+`<name>.builtin.zellij()`: every capability but `open`, `place_beside`,
+`resize` and `events`, on the zellij session `ZELLIJ_SESSION_NAME` names. Every
 call is `zellij --session "$ZELLIJ_SESSION_NAME" action …` in the choosing
 attach's environment, whose `ZELLIJ_SOCKET_DIR` and `HOME` find the
 session, less `ZELLIJ_PANE_ID`, which zellij takes as the pane issuing the
 action. Context variables `ZELLIJ_SESSION_NAME` and `ZELLIJ_SOCKET_DIR`;
 find variable `ZELLIJ_PANE_ID`. Terminal ids are `terminal_N`; a foreign
-plugin pane is `plugin_N`.
+plugin pane is `plugin_N`. A zellij tab is a tab page area. zellij acts for
+the client that last pressed a key: until one has, a focus act moves no
+client, and with no client attached, `focus_direction` fails.
 
 - `find`: zellij 0.46.0 or newer, else `zellij 0.45.1 is older than
   0.46.0`. Then a proof from the process table, as zellij tells no pane's
@@ -492,7 +494,31 @@ plugin pane is `plugin_N`.
   zellij says the session isn't there (`There is no active session!`, or
   `Session 'NAME' not found` with others running), as its panes aren't
   either; else, the listing failing too, it exits 1.
-- `report_layout`: `list-panes --json` and `list-tabs --json --all`; an
+- `open_float`: `new-pane --floating --pinned true --no-focus
+  --close-on-exit --name <name> -x -y --width --height -- ATTACH…`, with
+  `ZELLIJ_PANE_ID` the origin's number, which opens it in the origin's
+  tab, moving no client's focus. zellij shows a tab's floats only while
+  one of them has focus, and focusing a tiled pane hides them: the float
+  is pinned, shown whichever pane has focus, as a Neovim float is shown
+  whichever window is current. The flags are the float's frame, in cells
+  of the screen, as `list-panes` gives the origin's content: its top left
+  moved by `X`,`Y`, less a cell, and `COLS`+2 by `ROWS`+2, a left or top
+  under 0 made 0. zellij keeps a float inside its tab; nothing corrects
+  it after, as the next `report_layout` says where it went. `AREA_BOUNDS`
+  is ignored. Prints `terminal_N`.
+- `open_tab_page`: `new-tab --close-on-exit --no-focus -- ATTACH…`, a
+  tab after the last, moving no client: the daemon focuses its pane when
+  Neovim goes to its tab page. `new-tab` prints the tab's id, and with no
+  client attached prints one and makes nothing: so it prints the tab's
+  terminal pane, as `list-panes` lists it, and without one exits 1, `zellij
+  made no tab (id N)`.
+- `focus`: `focus-pane-id`, which goes to the pane's tab; a pane already
+  focused (exit 2, `Pane Terminal(N) is already focused`) is done.
+  Focusing a float shows its tab's floats, and a tiled pane hides them.
+- `focus_direction`: `move-focus DIRECTION`, `COUNT` times, one call each.
+  It never wraps: at the tab's edge it moves nowhere.
+- `report_layout`: `list-panes --json`, `list-tabs --json --all` and
+  `list-clients`; an
   area per tab, `tab_N`, by its stable id. Its extent starts at the top
   left of the tab's tiled selectable panes and is the tab's viewport in
   size, so the tab and status bars, which can't be selected, are outside
@@ -501,12 +527,22 @@ plugin pane is `plugin_N`.
   inset is the frame less the content on each edge, such as `[0, 1, 1, 0]`
   for a tiled pane's title row and the separator on its right, `[1, 1, 1,
   1]` for a float, which is `"floating": true` whether its tab shows its
-  floats or not. No `focus`: zellij's `is_focused` is true of a pane any
-  client ever focused.
+  floats or not: `list-panes` doesn't tell a pinned float, shown either
+  way, from a hidden one. In a tab with a pane full screen
+  (`is_fullscreen_active`), `tab_N` holds that pane, at `[0, 0, 1, 1]`, and
+  the floats; the tab's other tiled panes are in `tab_N~hidden`, at the
+  rects `list-panes` gives them, where they are without it. The full
+  screen pane is the one `is_fullscreen` and the size of the viewport,
+  as `is_fullscreen` is true of any pane a client has focused. `focus` is
+  the pane of the one client `list-clients` lists; with none or several,
+  none, as zellij doesn't say which the user types in. Not `is_focused`,
+  which is true of a pane any client ever focused.
 
 No `place_beside` or `resize`: zellij moves a pane only by swapping it with
-a neighbour, and resizes only by steps of 5 % of the tab. No `open_float`,
-`open_tab_page`, `focus`, `focus_direction` or `events` yet.
+a neighbour, and resizes only by steps of 5 % of the tab. No `events`:
+zellij's command line streams no layout or focus change, so a focus move
+made with zellij's keys is learned at the next report, such as the one a
+pane's focus report has the daemon run.
 
 ## Placeholders
 

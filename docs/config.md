@@ -525,7 +525,11 @@ the tab laid out again (ADR 0017). Its limits:
 
 On by default: run `neopane` in a zellij pane (zellij 0.46.0 or newer), with
 no config, and each Neovim window gets a zellij pane of its own, split beside
-the pane it came from, named `neopane`. No zellij client's focus moves. The
+the pane it came from, named `neopane`; a group of floats you enter gets a
+zellij floating pane, pinned, and each tab page a zellij tab. `<C-w>h/j/k/l`
+move zellij's focus, stopping at the tab's edge, and going to a tab page
+focuses its tab. zellij moves the focus of the client that last pressed a
+key: until you have typed in it, Neovim moves no zellij client's focus. The
 default knows zellij by its own variables, `ZELLIJ` and `ZELLIJ_PANE_ID`, and
 where tmux's, herdr's or Rex's are set too, asks `neopane.inside.zellij`
 after tmux's and herdr's (see [The default](#the-default)); its `find`
@@ -543,13 +547,18 @@ Its limits, for now:
   window opened on the left or above, as `:vsplit` and `:split` open it, is
   split to the right or below, then swapped with the pane it came from.
   zellij resizes only in steps of 5 %, so the table has no `place_beside`
-  or `resize`: a pane keeps the size zellij gives it.
+  or `resize`: a pane keeps the size zellij gives it, so three windows side
+  by side take a half and two quarters.
 - A split fails while the tab shows its floating panes: they are hidden
   around each split and shown again, so they may flicker. If they can't be
   hidden, the open fails, as any failed open does, with no split.
-- No `open_float`, `open_tab_page`, `focus` or `focus_direction` yet:
-  floats are drawn in their pane, tab pages in the pane they opened in, and
-  Neovim moves no zellij client's focus.
+- zellij shows a tab's floating panes only while one has focus: Neovim's
+  are pinned, so they show over the tab whichever pane has focus, as a
+  Neovim float does, and hiding the tab's floats leaves them shown.
+- With several clients attached, zellij doesn't say which you type in, so
+  a focus move made with zellij's own keys isn't followed by Neovim, and
+  with one, it is followed only at the next report, such as when the pane
+  you went to reports focus: zellij can't tell neopane unasked.
 
 ## Editor setup
 

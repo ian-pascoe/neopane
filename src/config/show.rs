@@ -199,8 +199,8 @@ mod tests {
     #[test]
     fn zellijs_table_shows_its_variables() {
         let shown = show(Some("zellij"), "B 1").unwrap();
-        let tail = "  open_beside = { \"{exe}\", \"provider\", \"builtin\", \"zellij\", \
-                    \"open_beside\" },\n  \
+        let tail = "  open_tab_page = { \"{exe}\", \"provider\", \"builtin\", \"zellij\", \
+                    \"open_tab_page\" },\n  \
                     context_vars = { \"ZELLIJ_SESSION_NAME\", \"ZELLIJ_SOCKET_DIR\" },\n  \
                     find_vars = { \"ZELLIJ_PANE_ID\" },\n}\n";
         assert!(shown.ends_with(tail), "{shown}");

@@ -3,9 +3,9 @@
 //! `ZELLIJ_SESSION_NAME`, in the choosing attach's environment: zellij
 //! 0.46 finds a session by name through its socket directory
 //! (`ZELLIJ_SOCKET_DIR`) and its cache directory (`HOME`'s), both the
-//! attach's. `ZELLIJ_PANE_ID` is taken from every call but a split's,
-//! which names its origin: zellij takes it as the pane issuing the
-//! action.
+//! attach's. `ZELLIJ_PANE_ID` is taken from every call but a split's or
+//! a float's, which names its origin: zellij takes it as the pane issuing
+//! the action.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -85,6 +85,13 @@ impl Session {
     /// `zellij --session NAME action args…`'s stdout, or why it failed.
     pub(super) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Vec<u8>, Ran> {
         self.run_as(None, args, None)
+    }
+
+    /// The same, issued from terminal pane `pane`, with
+    /// `ZELLIJ_PANE_ID=pane`, which a `new-pane --no-focus` opens beside or
+    /// over, in its tab.
+    pub(super) fn run_from<S: AsRef<OsStr>>(&self, pane: u32, args: &[S]) -> Result<Vec<u8>, Ran> {
+        self.run_as(Some(pane), args, None)
     }
 
     /// The same, killed at `due` if it hasn't exited by then, and not run

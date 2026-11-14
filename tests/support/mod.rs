@@ -337,50 +337,10 @@ impl TmuxServer {
     /// A user's client, `tmux attach`, in a pty of its own, 80x24: what it
     /// draws is read and dropped. Detached as it drops.
     pub fn attach(&self) -> TmuxClient {
-        let (mut master, mut slave) = (-1, -1);
-        let mut size = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: valid out-pointers; no name or termios.
-        let rc = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut size,
-            )
-        };
-        assert_eq!(0, rc);
-        // SAFETY: openpty made both, and they are ours alone.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         let mut cmd = self.command();
         cmd.args(["attach", "-t", "%0"])
-            .env("TERM", "xterm-256color")
-            .stdin(slave.try_clone().unwrap())
-            .stdout(slave.try_clone().unwrap())
-            .stderr(slave);
-        // SAFETY: only async-signal-safe calls between fork and exec.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-                Ok(())
-            });
-        }
-        let child = cmd.spawn().unwrap();
-        let keys = File::from(master.try_clone().unwrap());
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut master = File::from(master);
-            let mut buf = [0u8; 4096];
-            while let Ok(1..) = master.read(&mut buf) {}
-        });
+            .env("TERM", "xterm-256color");
+        let (child, keys) = client_in_pty(cmd, [80, 24]);
         TmuxClient { child, keys }
     }
 
@@ -426,6 +386,54 @@ impl Drop for TmuxServer {
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
+}
+
+/// A user's client, `cmd`, started in a pty of its own of `size` cells,
+/// cols and rows, as its controlling terminal: what it draws is read and
+/// dropped. The client, and the pty's master: what's written to it is what
+/// the user's terminal sends.
+fn client_in_pty(mut cmd: Command, size: [u16; 2]) -> (std::process::Child, File) {
+    let (mut master, mut slave) = (-1, -1);
+    let mut size = libc::winsize {
+        ws_row: size[1],
+        ws_col: size[0],
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: valid out-pointers; no name or termios.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    assert_eq!(0, rc);
+    // SAFETY: openpty made both, and they are ours alone.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    cmd.stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().unwrap();
+    let keys = File::from(master.try_clone().unwrap());
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut master = File::from(master);
+        let mut buf = [0u8; 4096];
+        while let Ok(1..) = master.read(&mut buf) {}
+    });
+    (child, keys)
 }
 
 /// The oldest zellij the built-in works with.
@@ -619,6 +627,53 @@ impl ZellijSession {
         }
     }
 
+    /// A user's client, `zellij attach`, in a pty of its own, 120x40, once
+    /// zellij lists it and acts for it: zellij acts for the client that
+    /// last typed, and before any has, its focus actions move nobody. It
+    /// types `Ctrl-U`, which no zellij mode binds, until `focus-pane-id`
+    /// moves it to a pane opened for that, then closed: a key typed while
+    /// the client starts may be lost. Detached as it drops.
+    pub fn attached(&self) -> ZellijClient {
+        let mut cmd = self.command();
+        cmd.args(["attach", &self.name]);
+        let (child, keys) = client_in_pty(cmd, [120, 40]);
+        let mut client = ZellijClient { child, keys };
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.clients().is_empty() {
+            assert!(
+                std::time::Instant::now() < due,
+                "zellij attach never attached"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let probe = self.run(&["new-pane", "--no-focus", "--", "sleep", "100000"]);
+        loop {
+            client.typed(b"\x15");
+            let _ = self
+                .command()
+                .args(["--session", &self.name, "action", "focus-pane-id", &probe])
+                .output();
+            if self.clients() == [probe.as_str()] {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < due,
+                "zellij never acted for the client that typed"
+            );
+        }
+        self.run(&["close-pane", "--pane-id", &probe]);
+        client
+    }
+
+    /// The pane each client focuses, as `list-clients` lists them.
+    pub fn clients(&self) -> Vec<String> {
+        self.run(&["list-clients"])
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_whitespace().nth(1).map(String::from))
+            .collect()
+    }
+
     /// Its terminal panes, as `terminal_N`.
     pub fn terminals(&self) -> Vec<String> {
         self.panes()
@@ -626,6 +681,29 @@ impl ZellijSession {
             .filter(|p| p["is_plugin"] == false)
             .map(|p| format!("terminal_{}", p["id"]))
             .collect()
+    }
+}
+
+/// A user's `zellij attach` in a pty, from [`ZellijSession::attached`].
+pub struct ZellijClient {
+    child: std::process::Child,
+    /// The pty's master: what's written is what the user's terminal sends.
+    keys: File,
+}
+
+impl ZellijClient {
+    /// Types `keys`, then lets zellij read them.
+    pub fn typed(&mut self, keys: &[u8]) {
+        use std::io::Write;
+        self.keys.write_all(keys).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+impl Drop for ZellijClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -767,50 +845,10 @@ impl HerdrServer {
     /// A user's client, `herdr`, in a pty of its own, `cols` x `rows`:
     /// what it draws is read and dropped. Killed as it drops.
     pub fn attach(&self, cols: u16, rows: u16) -> HerdrClient {
-        let (mut master, mut slave) = (-1, -1);
-        let mut size = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: valid out-pointers; no name or termios.
-        let rc = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut size,
-            )
-        };
-        assert_eq!(0, rc);
-        // SAFETY: openpty made both, and they are ours alone.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         let mut cmd = Command::new("herdr");
         HerdrServer::isolate(&mut cmd, &self.dir);
-        cmd.env("TERM", "xterm-256color")
-            .stdin(slave.try_clone().unwrap())
-            .stdout(slave.try_clone().unwrap())
-            .stderr(slave);
-        // SAFETY: only async-signal-safe calls between fork and exec.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::setsid();
-                libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-                Ok(())
-            });
-        }
-        let child = cmd.spawn().unwrap();
-        let keys = File::from(master.try_clone().unwrap());
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut master = File::from(master);
-            let mut buf = [0u8; 4096];
-            while let Ok(1..) = master.read(&mut buf) {}
-        });
+        cmd.env("TERM", "xterm-256color");
+        let (child, keys) = client_in_pty(cmd, [cols, rows]);
         HerdrClient { child, keys }
     }
 

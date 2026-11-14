@@ -75,6 +75,10 @@ impl BuiltinTable {
                 Capability::Close,
                 Capability::ReportLayout,
                 Capability::OpenBeside,
+                Capability::OpenFloat,
+                Capability::Focus,
+                Capability::FocusDirection,
+                Capability::OpenTabPage,
             ],
         }
     }
@@ -261,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn zellij_runs_the_binary_for_find_close_report_layout_and_open_beside_in_its_session() {
+    fn zellij_runs_the_binary_for_every_capability_but_open_place_beside_resize_and_events() {
         let t = BuiltinTable::Zellij.table();
         let shown: Vec<(&str, String)> = t
             .capabilities
@@ -283,6 +287,19 @@ mod tests {
                 (
                     "open_beside",
                     "{exe} provider builtin zellij open_beside".to_string()
+                ),
+                (
+                    "open_float",
+                    "{exe} provider builtin zellij open_float".to_string()
+                ),
+                ("focus", "{exe} provider builtin zellij focus".to_string()),
+                (
+                    "focus_direction",
+                    "{exe} provider builtin zellij focus_direction".to_string()
+                ),
+                (
+                    "open_tab_page",
+                    "{exe} provider builtin zellij open_tab_page".to_string()
                 ),
             ]
         );
