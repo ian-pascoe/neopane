@@ -604,9 +604,19 @@ impl ZellijSession {
         text(&out.stdout).trim().to_string()
     }
 
-    /// Its panes, as `list-panes --json` lists them.
+    /// Its panes, as `list-panes --json` lists them. zellij sometimes
+    /// prints nothing, and exits 0, while it changes its panes: it asks
+    /// again, for up to 5 s.
     pub fn panes(&self) -> Vec<serde_json::Value> {
-        serde_json::from_str(&self.run(&["list-panes", "--json"])).unwrap()
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let listed = self.run(&["list-panes", "--json"]);
+            if !listed.is_empty() || std::time::Instant::now() > due {
+                return serde_json::from_str(&listed)
+                    .unwrap_or_else(|e| panic!("list-panes printed {listed:?}: {e}"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// Its terminal panes, as `terminal_N`.
