@@ -843,7 +843,9 @@ fn resize_gives_the_terminal_its_cells_inside_its_frame() {
 /// herdr's own zoom key, prefix `z`, zooms the focused pane and unzooms
 /// it: `events` prints a line for each, so the layout is read again, and
 /// `report_layout` shows the zoomed pane alone, the other in the tab's
-/// `~hidden` area, then both again.
+/// `~hidden` area, then both again. herdr's zoom follows focus: its focus
+/// key, prefix `l`, moves focus within the zoomed tab, which then shows
+/// the pane focused alone.
 #[test]
 fn zooming_and_unzooming_with_herdrs_keys_has_the_layout_read_again() {
     if !have_herdr() {
@@ -898,17 +900,29 @@ fn zooming_and_unzooming_with_herdrs_keys_has_the_layout_read_again() {
             })
             .collect::<Vec<(String, Vec<String>)>>()
     };
-    let zoomed = vec![
-        (tab.clone(), vec![p1.clone()]),
-        (format!("{tab}~hidden"), vec![p2.clone()]),
-    ];
+    let zoomed_on = |shown: &str, hidden: &str| {
+        vec![
+            (tab.clone(), vec![shown.to_string()]),
+            (format!("{tab}~hidden"), vec![hidden.to_string()]),
+        ]
+    };
     let unzoomed = vec![(tab.clone(), vec![p1.clone(), p2.clone()])];
-    for want in [zoomed, unzoomed] {
+    let focus_line = format!(r#"{{"focus":"{p2}"}}"#);
+    // zoomed on P1; then herdr's own focus key moves focus to P2 within the
+    // zoomed tab, which stays zoomed, now on P2; then unzoomed
+    for (key, line, want) in [
+        (b"z", "", zoomed_on(&p1, &p2)),
+        (b"l", focus_line.as_str(), zoomed_on(&p2, &p1)),
+        (b"z", "", unzoomed),
+    ] {
+        // nothing left over from the step before
+        std::thread::sleep(Duration::from_millis(300));
+        while rx.try_recv().is_ok() {}
         client.keys.write_all(b"\x02").unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        client.keys.write_all(b"z").unwrap();
-        let line = rx.recv_timeout(Duration::from_secs(5));
-        assert_eq!(line.as_deref(), Ok(""), "no line for the zoom");
+        client.keys.write_all(key).unwrap();
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(got.as_deref(), Ok(line), "no line for prefix {key:?}");
         assert_eq!(until(|a| *a == want, areas), want);
     }
     assert!(client.alive());
@@ -1046,7 +1060,7 @@ impl Live {
     /// one, whose pane the daemon sizes, gets N columns, within one. The
     /// left one gets what is left, three columns short: herdr frames each
     /// of the two panes, four columns in all, where Neovim has one
-    /// separator.
+    /// separator. A known limit, to be fixed in the core (SPI-1193).
     fn vertical_resizes(&self, tab: u32, pane: &str, order: &[&str], wins: [&str; 2]) {
         for (nth, win) in wins.into_iter().enumerate() {
             for n in [20, 45, 30] {

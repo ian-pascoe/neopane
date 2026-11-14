@@ -1,5 +1,5 @@
 //! Moving and sizing a terminal against its origin: `place_beside` and
-//! `resize`.
+//! `resize` (ADR 0018).
 //!
 //! - `place_beside`: a zoomed tab, the origin's or the terminal's, is
 //!   refused before anything moves, as herdr refuses to move a pane into
@@ -8,10 +8,11 @@
 //!   origin ([`put_beside`]). Within the origin's tab, which herdr refuses
 //!   (`same_tab`), two: out to a new tab of its workspace, `focus:false`,
 //!   then beside the origin. If that second move fails, the terminal is
-//!   left in its tab of its own and it exits 1, with no way back: the
-//!   daemon's next placing moves it. Last, with `SIZE`, the `resize`
-//!   below, since within one tab the room the terminal leaves goes to its
-//!   neighbour.
+//!   left in its tab of its own and it exits 1, with no way back. The
+//!   daemon doesn't ask again until the tab page's windows change, as it
+//!   counts the placing done once asked (SPI-1194): the terminal stays in
+//!   that tab till then. Last, with `SIZE`, the `resize` below, since
+//!   within one tab the room the terminal leaves goes to its neighbour.
 //! - `resize` reads the terminal's tab with `pane.layout`, and its split
 //!   tree from the split ids (`splits.rs`). The lowest split holding the
 //!   terminal and `ORIGIN` gets the ratio that gives the terminal's part
@@ -26,8 +27,8 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::client::{Herdr, UNREADABLE, text};
-use super::panes::{Beside, Side, input, put_beside, ratio, tab_of};
-use super::splits::{Node, tree};
+use super::panes::{Beside, Side, input, move_pane, put_beside, ratio, tab_of};
+use super::splits::{Axis, Node, tree};
 use crate::providers::builtin::Given;
 
 /// What `place_beside` and `resize` have, of their 2 s.
@@ -82,7 +83,15 @@ pub(super) fn place_beside(given: &Given) -> Result<(), String> {
     // within one tab the room it leaves goes to its neighbour, which may
     // be the origin: sized after
     let size_it = |pane: &str| match size {
-        Some(size) => size_against(&herdr, pane, &origin, side.across(), size),
+        Some(size) => size_against(
+            &herdr,
+            &Sizing {
+                terminal: pane,
+                origin: &origin,
+                axis: side.axis,
+                size,
+            },
+        ),
         None => Ok(()),
     };
     if text(from, "tab_id")? != tab {
@@ -90,24 +99,17 @@ pub(super) fn place_beside(given: &Given) -> Result<(), String> {
         return size_it(&pane);
     }
     // herdr moves no pane within its tab: out to a tab of its own first
-    let out = herdr.call(
-        "pane.move",
-        json!({
-            "pane_id": terminal,
-            "focus": false,
-            "destination": { "type": "new_tab", "workspace_id": workspace },
-        }),
+    let out = move_pane(
+        &herdr,
+        &terminal,
+        json!({ "type": "new_tab", "workspace_id": workspace }),
+        false,
+        |reason| format!("herdr didn't move pane {terminal} out of tab {tab}: {reason}"),
     )?;
-    let out = &out["move_result"];
-    if out["changed"] != true {
-        return Err(match out["reason"].as_str() {
-            Some(reason) => format!("herdr didn't move pane {terminal} out of tab {tab}: {reason}"),
-            None => UNREADABLE.into(),
-        });
-    }
     let pane = text(&out["pane"], "pane_id")?;
     let own = text(&out["pane"], "tab_id")?;
-    // no way back: left in its tab, the next placing moves it
+    // no way back: it stays in its tab of its own, until the daemon asks
+    // again once the windows change (SPI-1194)
     let pane = put_beside(&herdr, pane, &beside)
         .map_err(|why| format!("{why}: pane {pane} is left in tab {own}"))?;
     size_it(&pane)
@@ -120,24 +122,41 @@ pub(super) fn resize(given: &Given) -> Result<(), String> {
     let side = Side::of(given)?;
     let size = size(given)?;
     let herdr = Herdr::of(given, MOVE_TIME)?;
-    size_against(&herdr, &terminal, &origin, side.across(), size)
+    let sizing = Sizing {
+        terminal: &terminal,
+        origin: &origin,
+        axis: side.axis,
+        size,
+    };
+    size_against(&herdr, &sizing)
 }
 
-/// Gives `terminal` `size` cells of content in the lowest split holding
-/// it and `origin`, side by side if `across`, else stacked; or says why
-/// it can't.
-fn size_against(
-    herdr: &Herdr,
-    terminal: &str,
-    origin: &str,
-    across: bool,
+/// A sizing of a terminal against the terminal across its split.
+struct Sizing<'a> {
+    terminal: &'a str,
+    origin: &'a str,
+    /// The way they must be split.
+    axis: Axis,
+    /// The cells of content the terminal gets along it.
     size: u16,
-) -> Result<(), String> {
-    let layout = herdr.call("pane.layout", json!({ "pane_id": terminal }))?;
+}
+
+/// A split's new ratio, as `layout.set_split_ratio` takes it.
+#[derive(Debug, PartialEq)]
+struct SplitSetting {
+    /// Its path from the root.
+    path: Vec<bool>,
+    /// Its first part's share.
+    ratio: f64,
+}
+
+/// Sizes the terminal of `sizing` in its tab, or says why it can't.
+fn size_against(herdr: &Herdr, sizing: &Sizing) -> Result<(), String> {
+    let layout = herdr.call("pane.layout", json!({ "pane_id": sizing.terminal }))?;
     let layout = &layout["layout"];
     let tab = text(layout, "tab_id")?;
     let root = tree(layout)?;
-    let (path, ratio) = plan(&root, terminal, origin, across, size)?;
+    let SplitSetting { path, ratio } = plan(&root, sizing)?;
     herdr.call(
         "layout.set_split_ratio",
         json!({ "tab_id": tab, "path": path, "ratio": ratio }),
@@ -145,17 +164,16 @@ fn size_against(
     Ok(())
 }
 
-/// The path of the lowest split of `root` holding `terminal` and `origin`,
-/// which must be split side by side if `across`, else stacked, and the
-/// ratio that gives `terminal`'s part of it `size` cells of content; or
-/// why there's none.
-fn plan(
-    root: &Node,
-    terminal: &str,
-    origin: &str,
-    across: bool,
-    size: u16,
-) -> Result<(Vec<bool>, f64), String> {
+/// The setting of the lowest split of `root` holding the terminal and the
+/// origin of `sizing`, which must be split along its axis, that gives the
+/// terminal's part of it its cells of content; or why there's none.
+fn plan(root: &Node, sizing: &Sizing) -> Result<SplitSetting, String> {
+    let Sizing {
+        terminal,
+        origin,
+        axis,
+        size,
+    } = *sizing;
     let Some(to_origin) = root.path_to(origin) else {
         return Err(format!(
             "herdr panes {terminal} and {origin} aren't in one tab"
@@ -170,8 +188,11 @@ fn plan(
     let Some(Node::Split(split)) = root.at(&to_terminal[..depth]) else {
         return Err(format!("herdr pane {terminal} is {origin}"));
     };
-    if split.across != across {
-        let way = if across { "side by side" } else { "stacked" };
+    if split.axis != axis {
+        let way = match axis {
+            Axis::SideBySide => "side by side",
+            Axis::Stacked => "stacked",
+        };
         return Err(format!("herdr panes {terminal} and {origin} aren't {way}"));
     }
     let terminal_second = to_terminal[depth];
@@ -186,14 +207,17 @@ fn plan(
             "herdr panes {terminal} and {origin} have no room to share"
         ));
     }
-    let wanted = size.saturating_add(FRAME.saturating_mul(part.panes_along(across)));
+    let wanted = size.saturating_add(FRAME.saturating_mul(part.panes_along(axis)));
     let wanted = wanted.clamp(1, total - 1);
     let first = if terminal_second {
         total - wanted
     } else {
         wanted
     };
-    Ok((split.path.clone(), f64::from(first) / f64::from(total)))
+    Ok(SplitSetting {
+        path: split.path.clone(),
+        ratio: f64::from(first) / f64::from(total),
+    })
 }
 
 /// `SIZE`, cells, at least 1.

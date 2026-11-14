@@ -15,6 +15,33 @@ use serde_json::Value;
 
 use super::client::text;
 
+/// Which way a split divides its part. herdr names them by where it puts
+/// a new pane: `right` or `down`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Axis {
+    /// Side by side: herdr's `right`.
+    SideBySide,
+    /// Stacked: herdr's `down`.
+    Stacked,
+}
+
+impl Axis {
+    /// herdr's name for it.
+    pub(super) fn herdr(self) -> &'static str {
+        match self {
+            Axis::SideBySide => "right",
+            Axis::Stacked => "down",
+        }
+    }
+
+    /// The axis herdr names `name`, if any.
+    fn of_herdr(name: &str) -> Option<Axis> {
+        [Axis::SideBySide, Axis::Stacked]
+            .into_iter()
+            .find(|a| a.herdr() == name)
+    }
+}
+
 /// A part of a tab's layout: a pane, or a split of two parts.
 #[derive(Debug, PartialEq)]
 pub(super) enum Node {
@@ -27,8 +54,7 @@ pub(super) enum Node {
 pub(super) struct Split {
     /// Its path from the root, as `layout.set_split_ratio` takes it.
     pub path: Vec<bool>,
-    /// Side by side (herdr's `right`), else stacked (`down`).
-    pub across: bool,
+    pub axis: Axis,
     /// Its cells along its direction: its width side by side, else its
     /// height.
     pub cells: u16,
@@ -66,14 +92,14 @@ impl Node {
         }
     }
 
-    /// How many panes a line across this part, side by side if `across`,
-    /// else top to bottom, goes through at most.
-    pub(super) fn panes_along(&self, across: bool) -> u16 {
+    /// How many panes a line through this part along `axis`, left to
+    /// right side by side, else top to bottom, goes through at most.
+    pub(super) fn panes_along(&self, axis: Axis) -> u16 {
         match self {
             Node::Pane(_) => 1,
             Node::Split(s) => {
-                let (a, b) = (s.first.panes_along(across), s.second.panes_along(across));
-                if s.across == across { a + b } else { a.max(b) }
+                let (a, b) = (s.first.panes_along(axis), s.second.panes_along(axis));
+                if s.axis == axis { a + b } else { a.max(b) }
             }
         }
     }
@@ -100,10 +126,10 @@ impl Rect {
         })
     }
 
-    /// Its two parts, split side by side if `across`, else stacked, the
-    /// first getting `ratio` of it, as herdr 0.9.5 rounds it.
-    fn halves(self, across: bool, ratio: f32) -> (Rect, Rect) {
-        if across {
+    /// Its two parts, split along `axis`, the first getting `ratio` of it,
+    /// as herdr 0.9.5 rounds it.
+    fn halves(self, axis: Axis, ratio: f32) -> (Rect, Rect) {
+        if axis == Axis::SideBySide {
             let first = (f32::from(self.w) * ratio).round() as u16;
             let second = self.w.saturating_sub(first);
             (
@@ -133,7 +159,7 @@ impl Rect {
 struct Listed {
     n: usize,
     path: Vec<bool>,
-    across: bool,
+    axis: Axis,
     ratio: f32,
     rect: Rect,
 }
@@ -149,15 +175,14 @@ pub(super) fn tree(layout: &Value) -> Result<Node, String> {
         let id = text(s, "id")?;
         let (n, path) =
             split_id(id).ok_or_else(|| format!("herdr's split id {id:?} can't be read"))?;
-        let across = match s["direction"].as_str() {
-            Some("right") => true,
-            Some("down") => false,
-            _ => return Err(unread()),
-        };
+        let axis = s["direction"]
+            .as_str()
+            .and_then(Axis::of_herdr)
+            .ok_or_else(unread)?;
         splits.push(Listed {
             n,
             path,
-            across,
+            axis,
             ratio: s["ratio"].as_f64().ok_or_else(unread)? as f32,
             rect: Rect::of(&s["rect"]).ok_or_else(unread)?,
         });
@@ -194,7 +219,7 @@ fn build(
         return None;
     }
     *next += 1;
-    let (a, b) = rect.halves(split.across, split.ratio);
+    let (a, b) = rect.halves(split.axis, split.ratio);
     let mut into = |side: bool, rect: Rect| {
         let mut path = path.clone();
         path.push(side);
@@ -204,8 +229,11 @@ fn build(
     let second = into(true, b)?;
     Some(Node::Split(Split {
         path,
-        across: split.across,
-        cells: if split.across { rect.w } else { rect.h },
+        axis: split.axis,
+        cells: match split.axis {
+            Axis::SideBySide => rect.w,
+            Axis::Stacked => rect.h,
+        },
         first,
         second,
     }))
@@ -267,12 +295,18 @@ mod tests {
         let Some(Node::Split(s)) = root.at(&[false, true]) else {
             panic!("no split at [false, true]");
         };
-        assert_eq!((s.across, s.cells), (true, 44));
+        assert_eq!((s.axis, s.cells), (Axis::SideBySide, 44));
         assert_eq!(root.path_to("w1:p9"), None);
         // across P1 / (P4 | P5), two panes at most; down it, two
         let left = root.at(&[false]).unwrap();
-        assert_eq!((left.panes_along(true), left.panes_along(false)), (2, 2));
-        assert_eq!((root.panes_along(true), root.panes_along(false)), (3, 2));
+        let along = |n: &Node| {
+            (
+                n.panes_along(Axis::SideBySide),
+                n.panes_along(Axis::Stacked),
+            )
+        };
+        assert_eq!(along(left), (2, 2));
+        assert_eq!(along(&root), (3, 2));
     }
 
     #[test]

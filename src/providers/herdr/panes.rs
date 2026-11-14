@@ -23,6 +23,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::client::{Herdr, UNREADABLE, text};
+use super::splits::Axis;
 use crate::providers::builtin::Given;
 
 /// What `open_beside` has, of its 5 s, for opening.
@@ -142,28 +143,17 @@ pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<Strin
     let first = if side.before { ratio } else { 1.0 - ratio };
     let first = first.clamp(0.1, 0.9);
     let had_focus = focused == Some(pane);
-    let moved = herdr.call(
-        "pane.move",
-        json!({
-            "pane_id": pane,
-            "focus": had_focus,
-            "destination": {
-                "type": "tab",
-                "tab_id": tab,
-                "target_pane_id": origin,
-                "split": side.split,
-                "ratio": first,
-            },
-        }),
-    )?;
-    let moved = &moved["move_result"];
-    if moved["changed"] != true {
-        return Err(match moved["reason"].as_str() {
-            Some("zoomed_tab") => format!("herdr tab {tab} is zoomed"),
-            Some(reason) => format!("herdr didn't move pane {pane} beside {origin}: {reason}"),
-            None => UNREADABLE.into(),
-        });
-    }
+    let destination = json!({
+        "type": "tab",
+        "tab_id": tab,
+        "target_pane_id": origin,
+        "split": side.axis.herdr(),
+        "ratio": first,
+    });
+    let moved = move_pane(herdr, pane, destination, had_focus, |reason| match reason {
+        "zoomed_tab" => format!("herdr tab {tab} is zoomed"),
+        reason => format!("herdr didn't move pane {pane} beside {origin}: {reason}"),
+    })?;
     let pane = text(&moved["pane"], "pane_id")?.to_string();
     let mut laid_out = moved["target_layout"].clone();
     if side.before {
@@ -202,6 +192,29 @@ pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<Strin
         );
     }
     Ok(pane)
+}
+
+/// Moves `pane` to `destination`, a `pane.move` destination, focusing it
+/// if `focus`: herdr's `move_result`, or why it didn't move, `refused`
+/// saying why for herdr's reason.
+pub(super) fn move_pane(
+    herdr: &Herdr,
+    pane: &str,
+    destination: Value,
+    focus: bool,
+    refused: impl FnOnce(&str) -> String,
+) -> Result<Value, String> {
+    let moved = herdr.call(
+        "pane.move",
+        json!({ "pane_id": pane, "focus": focus, "destination": destination }),
+    )?;
+    let moved = &moved["move_result"];
+    if moved["changed"] != true {
+        return Err(moved["reason"]
+            .as_str()
+            .map_or_else(|| UNREADABLE.into(), refused));
+    }
+    Ok(moved.clone())
 }
 
 /// Closes the tab labelled `label`, which a `layout.apply` with no answer
@@ -267,9 +280,9 @@ pub(super) fn close(given: &Given) -> Result<(), String> {
 /// The side of its origin a terminal goes or is on, from `DIRECTION`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Side {
-    /// herdr's split: `right`, side by side, or `down`, stacked. herdr
-    /// puts a pane only right of or below another.
-    pub split: &'static str,
+    /// Along which herdr splits them: herdr puts a pane only right of or
+    /// below another.
+    pub axis: Axis,
     /// Left of or above the origin.
     pub before: bool,
 }
@@ -277,11 +290,11 @@ pub(super) struct Side {
 impl Side {
     pub(super) fn of(given: &Given) -> Result<Side, String> {
         let direction = given.var("direction").unwrap_or_default();
-        let (split, before) = match direction.as_slice() {
-            b"left" => ("right", true),
-            b"right" => ("right", false),
-            b"up" => ("down", true),
-            b"down" => ("down", false),
+        let (axis, before) = match direction.as_slice() {
+            b"left" => (Axis::SideBySide, true),
+            b"right" => (Axis::SideBySide, false),
+            b"up" => (Axis::Stacked, true),
+            b"down" => (Axis::Stacked, false),
             other => {
                 return Err(format!(
                     "DIRECTION {:?} isn't left, right, up or down",
@@ -289,12 +302,7 @@ impl Side {
                 ));
             }
         };
-        Ok(Side { split, before })
-    }
-
-    /// Side by side, not stacked.
-    pub(super) fn across(self) -> bool {
-        self.split == "right"
+        Ok(Side { axis, before })
     }
 }
 

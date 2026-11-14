@@ -14,7 +14,9 @@
 //! - A zoomed tab shows its zoomed pane, its focused one, alone, filling
 //!   its area, framed as it is when the tab has a split; herdr gives the
 //!   panes it hides their unzoomed rects, which are reported in an area of
-//!   their own, `<tab id>~hidden`.
+//!   their own, `<tab id>~hidden`. The zoom follows focus: focus moved
+//!   within a zoomed tab, with herdr's keys or its API, leaves it zoomed
+//!   on the pane focused.
 //! - `focus` is the server's focused pane: focus is one per server.
 
 use serde_json::{Value, json};
