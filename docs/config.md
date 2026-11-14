@@ -2,7 +2,7 @@
 
 Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
-chooses: tmux in a tmux pane, zellij in a zellij pane, Rex inside Rex, else
+chooses: tmux, herdr or zellij in a pane of its own, Rex inside Rex, else
 none (see
 [The default](#the-default) and
 [Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md`
@@ -139,11 +139,11 @@ Also `require("neopane")`.
 
 | | |
 |---|---|
-| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's or zellij's table, as `neopane.builtin.tmux()` or `neopane.builtin.zellij()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
+| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's, herdr's or zellij's table, as `neopane.builtin.tmux()`, `neopane.builtin.herdr()` or `neopane.builtin.zellij()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
 | `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
 | `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
-| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`, `zellij`. They take no options, and raise on any |
-| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane: `tmux`, asking tmux within 0.5 s, and `zellij`, from the process table alone. They read `attach.env`, `attach.tty` and `attach.pid`, and never raise |
+| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`, `herdr`, `zellij`. They take no options, and raise on any |
+| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane: `tmux` and `herdr`, asking the multiplexer within 0.5 s, and `zellij`, from the process table alone. They read `attach.env`, `attach.tty` and `attach.pid`, and never raise |
 | `neopane.os` | `"macos"` or `"linux"` |
 | `neopane.version` | The daemon's version |
 | `neopane.config_dir` | The absolute directory of the file that ran |
@@ -154,6 +154,8 @@ Also `require("neopane")`.
 the environment only:
 
 - tmux: `TERM_PROGRAM` is `tmux` and `TMUX` is set and not empty.
+- herdr: `TERM_PROGRAM` is `herdr` and `HERDR_SOCKET_PATH` is set and not
+  empty.
 - zellij: `ZELLIJ` is set, and `ZELLIJ_PANE_ID` is set and not empty.
 - Rex: `REX_SERVER` and `REX_SESSION` are both set, even if empty.
 
@@ -161,10 +163,10 @@ Naming one, it chooses that one and runs nothing. A multiplexer's panes
 inherit the variables of whatever started its server, though: a tmux started
 in a Rex pane gives its panes Rex's variables, and a terminal started from a
 tmux shell has tmux's. Naming several, it asks each multiplexer's `inside`
-in turn, tmux's then zellij's, and takes the first that proves; else Rex if
-named, else none. Rex is never proven there: its `find` proves it. The
-daemon runs the proofs off its loop, and new windows wait for them as they
-do for a config.
+in turn, tmux's, herdr's then zellij's, and takes the first that proves;
+else Rex if named, else none. Rex is never proven there: its `find` proves
+it. The daemon runs the proofs off its loop, and new windows wait for them
+as they do for a config.
 
 `neopane.inside.tmux(attach)` runs tmux's `find`'s whole check: tmux must be
 3.2 or newer, and the attach's tty a pane of the tmux server `TMUX` names.
@@ -182,6 +184,32 @@ needed. Its `why`:
 | `"tmux 3.1c is too old: the built-in tmux needs 3.2 or newer"` | |
 | `"the attach's tty \"/some/file\" isn't one"` | `tty` is set but isn't a terminal's |
 | `"this terminal (/dev/ttys003) isn't a pane of the tmux server at <socket>"` | |
+
+`neopane.inside.herdr(attach)` runs herdr's proof, which its `find` runs
+too: `ping`, refusing a herdr whose protocol is below 22 (herdr 0.9.5's);
+then the pane the attach's `HERDR_PANE_ID` names, whose process's
+controlling terminal must be the attach's tty, compared by device. herdr's
+own `tty` field is always empty, and `HERDR_PANE_ID` alone proves nothing:
+a tmux in a herdr pane passes it on to its own panes. Where it can't be
+proved, as when the pane has no process, `inside.herdr` says no, and `find`
+trusts `HERDR_PANE_ID`, the pane being there. Its `why`:
+
+| | |
+|---|---|
+| `true, "herdr pane w1:p4"` | the pane |
+| `"HERDR_ENV isn't 1"` | |
+| `"HERDR_PANE_ID isn't set"` | |
+| `"HERDR_SOCKET_PATH isn't set"` | |
+| `"the attach has no tty"` | |
+| `"can't reach herdr at <path>: <error>"` | no server listens at the socket, say |
+| `"herdr didn't answer in 0.5 s"` | |
+| `"herdr: <error.message>"` | herdr refused, as for a pane it doesn't have |
+| `"herdr's answer can't be read"` | |
+| `"herdr 0.9.4 speaks protocol 21; the built-in herdr needs 22 or newer"` | |
+| `"herdr pane w1:p4 has no process"` | unprovable |
+| `"can't read the terminal of herdr pane w1:p4's process (pid 32523)"` | unprovable |
+| `"the attach's tty \"/some/file\" isn't one"` | `tty` is set but isn't a terminal's |
+| `"this terminal (/dev/ttys003) isn't herdr pane w1:p4's (/dev/ttys009)"` | |
 
 `neopane.inside.zellij(attach)` runs no zellij command: zellij tells no
 pane's tty or process. It reads the process table instead. Whatever zellij
@@ -409,7 +437,7 @@ or changed in type or meaning; a missing one means unknown.
 ## Built-in pane providers
 
 `neopane provider show` lists the built-ins: `rex`, which has no Lua table
-(return `"rex"` from `provider()` to use it), `tmux` and `zellij`.
+(return `"rex"` from `provider()` to use it), `tmux`, `herdr` and `zellij`.
 `neopane provider show NAME` prints a built-in that has a Lua table as a Lua
 file, to copy into your `init.lua` and change. Its every capability runs
 `{exe} provider builtin NAME CAPABILITY`: neopane itself, speaking the
@@ -455,14 +483,43 @@ return {
 To opt out, run `neopane --provider none` or set `NEOPANE_PROVIDER=none`,
 or have your config return something else in tmux, such as `nil`.
 
+### herdr
+
+On by default: run `neopane` in a herdr pane (herdr 0.9.5 or newer, socket
+protocol 22), with no config, and each Neovim window gets a herdr pane of its
+own, beside the pane it came from, in its herdr tab. The default knows herdr
+by its own variables, `TERM_PROGRAM=herdr` and `HERDR_SOCKET_PATH`; its
+`find` then proves the terminal is the pane `HERDR_PANE_ID` names, by the
+tty of that pane's process, so herdr's variables copied into another
+terminal choose nothing, and say so only in the log. Its reach is the herdr
+server `HERDR_SOCKET_PATH` names, every workspace of it: a herdr workspace is
+no boundary. A config gets the same table from `neopane.builtin.herdr()`,
+and may change any capability of it.
+
+herdr's split can't run a command, so a new pane is made in a tab of its
+own, running the attach with no shell, then moved beside its origin, and
+the tab laid out again (ADR 0017). Its limits:
+
+- The temporary tab flashes in herdr's tab bar for one frame.
+- A pane can't open beside one in a zoomed tab: the open fails, leaving no
+  tab behind, as when herdr can't.
+- Each pane's frame is reported as herdr's default borders draw it: a cell
+  all round in a tab with a split, none for a lone pane. Other border
+  settings (`ui.pane_borders`, `pane_gaps`, `pane_outer_borders`) put the
+  insets off by a cell or two, which no part of herdr's API tells.
+- A pane you move to another workspace gets a new id there, which neopane
+  doesn't follow: its Neovim pane becomes a layout area of its own.
+- For now no focus, tab pages, moves, resizes or floats: a float group is
+  drawn in its pane, and every tab page in the tab it opened in.
+
 ### zellij
 
 On by default: run `neopane` in a zellij pane (zellij 0.46.0 or newer), with
 no config, and each Neovim window gets a zellij pane of its own, split beside
 the pane it came from, named `neopane`. No zellij client's focus moves. The
 default knows zellij by its own variables, `ZELLIJ` and `ZELLIJ_PANE_ID`, and
-where tmux's or Rex's are set too, asks `neopane.inside.zellij` after tmux's
-(see [The default](#the-default)); its `find` checks the same, then that the
+where tmux's, herdr's or Rex's are set too, asks `neopane.inside.zellij`
+after tmux's and herdr's (see [The default](#the-default)); its `find` checks the same, then that the
 session lists the pane. Every zellij call is `zellij --session
 "$ZELLIJ_SESSION_NAME" action …`, in the environment of the terminal that
 chose zellij: zellij finds a session by its socket directory

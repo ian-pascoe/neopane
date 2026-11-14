@@ -18,6 +18,12 @@ isn't needed. With no config, `find` refusing the default's guess goes only
 to the log, and `list` and `status` show `none (find refused)`; a config's
 choice refused still warns, quoting `find`'s first stderr line.
 
+Amended by SPI-1138: herdr joins the naming, by `TERM_PROGRAM=herdr` and
+`HERDR_SOCKET_PATH`, and the proving order after tmux, before zellij. `<name>.inside.herdr`
+runs its `find`'s proof, but where that can't be proved, the pane having no
+process or its terminal being unreadable, `inside` says no while `find`
+trusts `HERDR_PANE_ID`.
+
 Amended by SPI-1142: with no config, every pane provider the default
 guessed that can't start is quiet too, as is one that goes (`Gone`) before
 `find` confirmed it. Examples: Rex unreachable, or refusing the session,

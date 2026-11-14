@@ -317,7 +317,7 @@ A pane provider gives Neovim's windows terminals of their own, and places
 and focuses them: a terminal provider, a layout provider, or both. A daemon
 has at most one at a time, chosen by a self-attach, as `neopane` and
 `neopane attach` are: by your config, or without one, tmux in a tmux pane,
-Rex in a Rex block and none elsewhere.
+herdr in a herdr pane, Rex in a Rex block and none elsewhere.
 
 The daemon keeps its pane provider while a terminal in its reach is attached
 or on its way, and drops it otherwise, as when the last of them closes; one
@@ -402,6 +402,23 @@ panes inherit Rex's variables too, the terminal's tty tells them apart
 `neopane provider show tmux` prints its table, which `neopane.builtin.tmux()`
 returns for your config to change ([docs/config.md](docs/config.md#tmux));
 `--provider none` opts out.
+
+### herdr
+
+herdr's pane provider is built in too, as a table whose capabilities run
+neopane itself, speaking herdr's socket API. An attach chooses it when
+`TERM_PROGRAM` is `herdr` and `HERDR_SOCKET_PATH` is set, as in every herdr
+pane: each window gets a herdr pane of its own beside the one it was opened
+from, in its herdr tab. herdr's split can't run a command, so the pane is
+made in a tab of its own, running the attach with no shell, and moved
+([ADR 0017](docs/adr/0017-herdrs-pane-provider-opens-a-terminal-in-a-new-tab-and-moves-it.md)):
+that tab flashes in herdr's tab bar for a frame. herdr checks the choice:
+the terminal must be the one of the pane `HERDR_PANE_ID` names, so herdr's
+variables inherited by another terminal choose none, which only the log
+tells. It needs herdr 0.9.5 or newer. Focus, tab pages, moves and resizes
+aren't there yet. `neopane provider show herdr` prints its table, which
+`neopane.builtin.herdr()` returns for your config to change
+([docs/config.md](docs/config.md#herdr)).
 
 ### Your own
 

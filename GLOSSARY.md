@@ -282,6 +282,18 @@ _Avoid_: floating pane (on its own), layer (Rex's API word)
 What `REX_SESSION` names: the Rex tabs one Rex server keeps for a session, and the attach context of Rex's pane provider. A terminal in another Rex session is out of its reach.
 _Avoid_: session (on its own)
 
+### herdr's pane provider
+
+Terms used only by the built-in `herdr` pane provider (`src/providers/herdr/`); the core never uses them.
+
+**herdr tab**:
+A tab of a herdr workspace: the layout area of herdr's pane provider, its id the tab's, such as `w1:t2`, and the home of a tab page area.
+_Avoid_: tab (on its own), tab page (that is Neovim's)
+
+**herdr workspace**:
+A group of herdr tabs in one herdr server. Not a boundary of reach: that is the herdr server, which `HERDR_SOCKET_PATH` names, every workspace of it.
+_Avoid_: workspace (on its own), session (herdr's word for its saved state)
+
 ### zellij's pane provider
 
 Terms used only by the built-in `zellij` pane provider (`src/providers/zellij/`); the core never uses them.
