@@ -2,9 +2,10 @@
 //! requested pane's terminal runs, and the launcher's own attach. It checks
 //! the daemon runs as its user, waits for its terminal to have a size if it
 //! has none, puts its terminal in raw mode, sends its hello with the
-//! terminal riding on the first byte, and waits for the answer. Once accepted it sends the terminal's size as it changes, and
-//! keeps the latest undo bytes, until the attach ends; then it undoes what
-//! the daemon wrote and restores its terminal, however the attach ended.
+//! terminal riding on the first byte, and waits for the answer. Once
+//! accepted it sends the terminal's size as it changes, and keeps the latest
+//! undo bytes, until the attach ends; then it undoes what the daemon wrote
+//! and restores its terminal, however the attach ended.
 //! `docs/attach-protocol.md` is the reference.
 
 use std::ffi::{OsStr, OsString};
@@ -38,20 +39,13 @@ pub(crate) const MIN_LIFE: Duration = Duration::from_millis(300);
 /// without a word: CAN ends a half CSI, and `ESC \` a string.
 pub(crate) const CANCEL: &[u8] = b"\x18\x1b\\";
 
-/// How long the helper waits for a terminal with no size, as zellij's panes
-/// can start with on Linux, to get one before its hello. Well within the
-/// daemon's `HELLO_TIMEOUT`, which counts from the connection.
+/// How long the helper waits for a terminal with no size to get one before
+/// its hello: a terminal may start with no size, as some pane providers'
+/// panes do on Linux. Well within the daemon's `HELLO_TIMEOUT`, which counts
+/// from the connection. Still with none by then, the hello says
+/// `Size::STAND_IN`, and the size is sent once the terminal has one.
 pub(crate) const SIZE_WITHIN: Duration = Duration::from_secs(1);
 const _: () = assert!(SIZE_WITHIN.as_millis() * 2 <= HELLO_TIMEOUT.as_millis());
-
-/// What the hello says of a terminal still with no size after
-/// `SIZE_WITHIN`: Neovim takes no size of 0. Its size is sent once it has
-/// one.
-const STAND_IN: Size = Size {
-    cols: 80,
-    rows: 24,
-    px: None,
-};
 
 /// How often the helper looks again at a terminal with no size.
 const SIZE_POLL: Duration = Duration::from_millis(10);
@@ -807,7 +801,7 @@ fn send_size(stream: &mut UnixStream, size: Size) -> io::Result<()> {
 }
 
 /// Terminal `tty`'s size once it has one, waiting up to `within`, and
-/// `STAND_IN` if it has none by then. Err if it can't be read, or a
+/// `Size::STAND_IN` if it has none by then. Err if it can't be read, or a
 /// stopping signal came first: the terminal is untouched yet.
 fn first_size(
     tty: RawFd,
@@ -817,12 +811,12 @@ fn first_size(
     let deadline = Instant::now() + within;
     loop {
         let size = size_of(tty).map_err(|e| Exit::fail(format!("can't read the terminal: {e}")))?;
-        if has_size(&size) {
+        if size.has_room() {
             return Ok(size);
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Ok(STAND_IN);
+            return Ok(Size::STAND_IN);
         }
         // SIGWINCH is drained too: the size is read again all the same
         let mut fds = [libc::pollfd {
@@ -844,15 +838,10 @@ fn first_size(
     }
 }
 
-/// Whether `size` is one: Neovim takes no 0 in either.
-fn has_size(size: &Size) -> bool {
-    size.cols > 0 && size.rows > 0
-}
-
 /// The terminal's size now, if it has one and it differs from `last`, which
 /// it updates.
 fn changed_size(tty: RawFd, last: &mut Size) -> Option<Size> {
-    let now = size_of(tty).ok().filter(has_size)?;
+    let now = size_of(tty).ok().filter(Size::has_room)?;
     if now == *last {
         return None;
     }
@@ -1097,11 +1086,11 @@ mod tests {
         signals: Option<&mut Signals>,
         daemon: impl FnOnce(Fake) + Send + 'static,
     ) -> Run {
-        against_on(open_pty(80, 24), how, signals, daemon)
+        against_pty(open_pty(80, 24), how, signals, daemon)
     }
 
     /// `against_with` over the pty `(master, slave)`, which it closes.
-    fn against_on(
+    fn against_pty(
         (master, slave): (RawFd, RawFd),
         how: Attach,
         signals: Option<&mut Signals>,
@@ -1751,8 +1740,8 @@ mod tests {
         assert_eq!(Exit::ok(), run.exit);
     }
 
-    /// A pane's terminal may start before it has a size, as zellij's do on
-    /// Linux: the hello waits for one.
+    /// A pane's terminal may start before it has a size, as some pane
+    /// providers' do on Linux: the hello waits for one.
     #[test]
     fn the_hello_waits_for_a_terminal_with_no_size_to_get_one() {
         let (master, slave) = open_pty(0, 0);
@@ -1761,7 +1750,7 @@ mod tests {
             resize(master, 100, 30);
         });
         let how = Attach::new(Want::Requested(pane()), Transport::Fd);
-        let run = against_on((master, slave), how, None, |f| {
+        let run = against_pty((master, slave), how, None, |f| {
             let Purpose::Requested { terminal, .. } = &f.hello.purpose else {
                 panic!("{:?}", f.hello)
             };
@@ -1781,7 +1770,7 @@ mod tests {
             size_within: Duration::from_millis(100),
             ..Attach::new(Want::Requested(pane()), Transport::Fd)
         };
-        let run = against_on(open_pty(0, 0), how, None, |f| {
+        let run = against_pty(open_pty(0, 0), how, None, |f| {
             let Purpose::Requested { terminal, .. } = &f.hello.purpose else {
                 panic!("{:?}", f.hello)
             };
