@@ -4,7 +4,8 @@
 //!
 //! 1. A zoomed origin tab is refused: herdr refuses a move into one.
 //! 2. `layout.apply` makes a tab (`focus:false`) in the origin's
-//!    workspace, its one pane running the attach command, with no shell.
+//!    workspace, its one pane running the attach command, with no shell,
+//!    labelled with the pane title (`TITLE`).
 //! 3. `pane.move` puts that pane beside the origin, which empties and
 //!    closes its tab. herdr only puts it right of or below the origin,
 //!    and its `ratio` is the first pane's share.
@@ -17,23 +18,37 @@
 //!    before a client drew it in its new tab is otherwise left a column
 //!    short, herdr keeping its scrollbar's column, until the next layout.
 //!
-//! Any failure after the tab is made closes its pane. The pane keeps its
-//! id through the move, within its workspace: that is what it prints.
+//! Any failure after the tab is made closes its pane, with a deadline of
+//! its own, so a step that ran out of time still cleans up. A
+//! `layout.apply` with no answer, as when it ran out of time, may have made
+//! its tab all the same: the tab with its label is closed, if herdr has it
+//! by then. The pane keeps its id through the move, within its workspace:
+//! that is what it prints.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::client::{Herdr, UNREADABLE, text};
 use crate::providers::builtin::Given;
 
-/// What `open_beside` has, of its 5 s.
-const OPEN_TIME: std::time::Duration = std::time::Duration::from_millis(4500);
+/// What `open_beside` has, of its 5 s, for opening.
+const OPEN_TIME: Duration = Duration::from_millis(4000);
+/// What it has after a failure, for closing what it made.
+const CLEANUP_TIME: Duration = Duration::from_millis(500);
 /// How long after laying the tab out `open_beside` lays it out again.
-const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+const SETTLE: Duration = Duration::from_millis(100);
 /// What `close` has, of its 2 s.
-const CLOSE_TIME: std::time::Duration = std::time::Duration::from_millis(1500);
+const CLOSE_TIME: Duration = Duration::from_millis(1500);
 
 /// The new pane's id, or why there's none.
 pub(super) fn open_beside(given: &Given) -> Result<String, String> {
+    open_beside_within(given, OPEN_TIME, CLEANUP_TIME)
+}
+
+/// `open_beside`, its requests having `time`, and a cleanup after a
+/// failure `cleanup` more.
+fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Result<String, String> {
     let origin = input(given, "origin")?;
     let direction = given.var("direction").unwrap_or_default();
     let (split, before) = match direction.as_slice() {
@@ -54,7 +69,11 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     let first = if before { ratio } else { 1.0 - ratio };
     let first = first.clamp(0.1, 0.9);
     let words = attach_words(given)?;
-    let herdr = Herdr::of(given, OPEN_TIME)?;
+    let label = given
+        .var("title")
+        .filter(|t| !t.is_empty())
+        .and_then(|t| String::from_utf8(t).ok());
+    let herdr = Herdr::of(given, time)?;
 
     let snapshot = herdr.call("session.snapshot", json!({}))?;
     let snapshot = &snapshot["snapshot"];
@@ -65,15 +84,26 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     }
     let workspace = text(layout, "workspace_id")?;
     let focused = snapshot["focused_pane_id"].as_str().map(String::from);
-    let applied = herdr.call(
-        "layout.apply",
-        json!({
-            "workspace_id": workspace,
-            "focus": false,
-            "root": { "type": "pane", "command": words },
-        }),
-    )?;
-    let made = text(&applied["layout"]["root"], "pane_id")?.to_string();
+    let mut apply = json!({
+        "workspace_id": workspace,
+        "focus": false,
+        "root": { "type": "pane", "command": words },
+    });
+    if let Some(label) = &label {
+        apply["tab_label"] = label.as_str().into();
+    }
+    // with herdr's own error, nothing was made; with no answer, or one
+    // that can't be read, its tab may have been
+    let made = match herdr.call("layout.apply", apply) {
+        Ok(applied) => text(&applied["layout"]["root"], "pane_id").map(String::from),
+        Err(refused) if refused.code.is_some() => return Err(refused.why),
+        Err(refused) => Err(refused.why),
+    };
+    let made = made.inspect_err(|_| {
+        if let Some(label) = &label {
+            close_labelled(&herdr.again(cleanup), label);
+        }
+    })?;
     let placed = (|| {
         let moved = herdr.call(
             "pane.move",
@@ -132,9 +162,38 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
         Ok(pane)
     })();
     placed.inspect_err(|_| {
-        // its tab, or wherever it is
-        let _ = herdr.call("pane.close", json!({ "pane_id": made }));
+        // in its tab, or wherever it is
+        let closed = herdr
+            .again(cleanup)
+            .call("pane.close", json!({ "pane_id": made }));
+        if let Err(e) = closed {
+            eprintln!("herdr open_beside: can't close pane {made}: {}", e.why);
+        }
     })
+}
+
+/// Closes the tab labelled `label`, which a `layout.apply` with no answer
+/// may have made. One herdr makes only later closes itself: the daemon
+/// gives up a pane whose open failed, and refuses its attach.
+fn close_labelled(herdr: &Herdr, label: &str) {
+    let closed = herdr
+        .call("session.snapshot", json!({}))
+        .and_then(|snapshot| {
+            let tab = snapshot["snapshot"]["tabs"]
+                .as_array()
+                .and_then(|tabs| tabs.iter().find(|t| t["label"] == label))
+                .and_then(|t| t["tab_id"].as_str());
+            match tab {
+                Some(tab) => herdr.call("tab.close", json!({ "tab_id": tab })).map(Some),
+                None => Ok(None),
+            }
+        });
+    if let Err(e) = closed {
+        eprintln!(
+            "herdr open_beside: can't close the tab labelled {label}: {}",
+            e.why
+        );
+    }
 }
 
 /// The layout, in `snapshot`, of the tab holding pane `pane`, or why
@@ -242,16 +301,31 @@ mod tests {
         ])
     }
 
+    /// The pane title of the open, as the recorded labelled tab has it.
+    const TITLE: &str = "np-2-k3j9x2qpa8";
+
     fn open(fake: &Fake, direction: &str, ratio: &str) -> Result<String, String> {
-        open_beside(&given(
+        open_within(fake, direction, ratio, OPEN_TIME)
+    }
+
+    /// `open`, its requests having `time`.
+    fn open_within(
+        fake: &Fake,
+        direction: &str,
+        ratio: &str,
+        time: Duration,
+    ) -> Result<String, String> {
+        let given = given(
             fake,
             &[
                 ("ORIGIN", "w2:p3"),
                 ("DIRECTION", direction),
                 ("RATIO", ratio),
                 ("ATTACH", ATTACH),
+                ("TITLE", TITLE),
             ],
-        ))
+        );
+        open_beside_within(&given, time, CLEANUP_TIME)
     }
 
     fn close_to(a: &Value, b: f64) -> bool {
@@ -279,6 +353,7 @@ mod tests {
                 "workspace_id": "w2",
                 "focus": false,
                 "root": { "type": "pane", "command": ["/bin/np", "attach", "--address", "/tmp/a b"] },
+                "tab_label": TITLE,
             })
         );
         let moved = &asked[2]["params"];
@@ -415,6 +490,65 @@ mod tests {
             Err("herdr: pane not found".into())
         );
         assert_eq!(fake.methods(), ["session.snapshot", "layout.apply"]);
+    }
+
+    #[test]
+    fn a_step_that_runs_out_of_time_still_closes_the_pane_made() {
+        // the move never answers: the open's time runs out on it
+        let fake = Fake::serve(vec![
+            ("session.snapshot", Reply::Line(recorded("open-snapshot"))),
+            ("layout.apply", Reply::Line(recorded("open-apply"))),
+            ("pane.move", Reply::Silence),
+            ("pane.close", Reply::Line(recorded("pane-close"))),
+        ]);
+        let opened = open_within(&fake, "right", "0.5", Duration::from_millis(300));
+        assert_eq!(opened, Err("herdr didn't answer in 0.3 s".into()));
+        let asked = fake.asked();
+        assert_eq!(asked.last().unwrap()["method"], "pane.close");
+        assert_eq!(
+            asked.last().unwrap()["params"],
+            json!({ "pane_id": "w2:p4" })
+        );
+    }
+
+    #[test]
+    fn an_apply_that_runs_out_of_time_closes_the_tab_it_labelled() {
+        // herdr made the tab, but its answer came too late
+        let fake = Fake::serve(vec![
+            ("session.snapshot", Reply::Line(recorded("open-snapshot"))),
+            (
+                "session.snapshot",
+                Reply::Line(recorded("snapshot-labelled")),
+            ),
+            ("layout.apply", Reply::Silence),
+            ("tab.close", Reply::Line(recorded("tab-close"))),
+        ]);
+        let opened = open_within(&fake, "left", "0.5", Duration::from_millis(300));
+        assert_eq!(opened, Err("herdr didn't answer in 0.3 s".into()));
+        assert_eq!(
+            fake.methods(),
+            [
+                "session.snapshot",
+                "layout.apply",
+                "session.snapshot",
+                "tab.close"
+            ]
+        );
+        let asked = fake.asked();
+        assert_eq!(asked[1]["params"]["tab_label"], TITLE);
+        assert_eq!(asked[3]["params"], json!({ "tab_id": "w1:t2" }));
+
+        // no such tab, as when herdr never made it: nothing is closed
+        let fake = Fake::serve(vec![
+            ("session.snapshot", Reply::Line(recorded("open-snapshot"))),
+            ("layout.apply", Reply::Silence),
+        ]);
+        let opened = open_within(&fake, "left", "0.5", Duration::from_millis(300));
+        assert_eq!(opened, Err("herdr didn't answer in 0.3 s".into()));
+        assert_eq!(
+            fake.methods(),
+            ["session.snapshot", "layout.apply", "session.snapshot"]
+        );
     }
 
     #[test]

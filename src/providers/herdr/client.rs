@@ -66,6 +66,12 @@ impl Herdr {
         }
     }
 
+    /// The same server, its requests having `time` from now, whatever
+    /// this one's have left: for a cleanup after a request ran out.
+    pub(super) fn again(&self, time: Duration) -> Herdr {
+        Herdr::at(&self.socket, time)
+    }
+
     /// The `result` of request `method` with `params`, or why there's
     /// none.
     pub(super) fn call(&self, method: &str, params: Value) -> Result<Value, Refused> {

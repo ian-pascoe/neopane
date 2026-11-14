@@ -30,7 +30,12 @@ ratio it already has. herdr 0.9.5, protocol 22, is the floor.
 - The temporary tab shows in herdr's tab bar for one frame.
 - A zoomed origin tab is refused before the tab is made; a zoom between
   the two requests makes herdr refuse the move, and the pane made is
-  closed. Any failure after the tab is made closes its pane.
+  closed. Any failure after the tab is made closes its pane, with a
+  deadline of its own, so a request that ran out of time still cleans up.
+- The tab is labelled with the pane title, so a `layout.apply` that gets
+  no answer can still close the tab it may have made. One herdr makes
+  only after that closes itself: its attach is refused, the daemon having
+  given its pane up, and ends.
 - `pane.swap` focuses its source: the open passes the origin as the
   source, and puts the server's focus back if it was elsewhere.
 - Setting the root split is done twice, the second 100 ms later: a
