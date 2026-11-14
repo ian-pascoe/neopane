@@ -248,8 +248,8 @@ report says, the line having the daemon run one:
   `report_layout`; before a report has told any focus, a line only says
   where focus starts, and holds nothing. Nor does a line less than 1 s
   after a terminal closed, and a report ending a hold a terminal closed
-  in isn't the user's move: a pane provider may move focus itself as a
-  terminal closes.
+  in, with a `focus` command waiting, isn't the user's move: a pane
+  provider may move focus itself as a terminal closes.
 - While one of the daemon's focus commands lands, a line or a report
   whose `focus` names a terminal the daemon doesn't know is the user's
   move, which that command may undo: the daemon follows it, and focuses
