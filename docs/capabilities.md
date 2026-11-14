@@ -357,6 +357,54 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
 pane unzoom its window, as tmux's own commands do; `open_tab_page` leaves
 a zoom as it is.
 
+### zellij
+
+`<name>.builtin.zellij()`: `find`, `open_beside`, `close` and
+`report_layout`, on the zellij session `ZELLIJ_SESSION_NAME` names. Every
+call is `zellij --session "$ZELLIJ_SESSION_NAME" action …` in the choosing
+attach's environment, whose `ZELLIJ_SOCKET_DIR` and `HOME` find the
+session, less `ZELLIJ_PANE_ID`, which zellij takes as the pane issuing the
+action. Context variables `ZELLIJ_SESSION_NAME` and `ZELLIJ_SOCKET_DIR`;
+find variable `ZELLIJ_PANE_ID`. Terminal ids are `terminal_N`; a foreign
+plugin pane is `plugin_N`.
+
+- `find`: zellij 0.46.0 or newer, else `zellij 0.45.1 is older than
+  0.46.0`. Then a proof from the process table, as zellij tells no pane's
+  tty or pid: `<NAME>_ENV_ZELLIJ_PANE_ID` and `ZELLIJ_SESSION_NAME` set, a
+  `TTY`, and `PID`'s session leader on that tty, a child of a process whose
+  name holds `zellij`, as anything zellij starts in a pane is; a process
+  table it can't read trusts the variables. Then `list-panes` listing the
+  pane, not exited. Prints `terminal_N`, else exits 1.
+  `<name>.inside.zellij` runs the proof alone, running no zellij command.
+- `open_beside`: `new-pane --no-focus --close-on-exit --name <name>
+  --direction right|down -- ATTACH…`, with `ZELLIJ_PANE_ID` the origin's
+  number, which splits the origin, wherever it is, moving no client's
+  focus. zellij splits only right or below, halving the origin: for `left`
+  or `up`, `move-pane --pane-id NEW left|up` then swaps the new pane with
+  the origin, its one neighbour that side; a swap that fails leaves it
+  right or below, says why on stderr, and still prints the id. `SIZE` is
+  ignored. A split fails while the origin's tab shows its floating panes,
+  and may still start its command: so first, `list-panes` and `list-tabs`
+  saying the origin's tab shows them, they are hidden around the split and
+  its swap (`hide-floating-panes` and `show-floating-panes --tab-id`).
+  Prints `terminal_N`.
+- `close`: `close-pane --pane-id`, which is done for a pane already gone.
+- `report_layout`: `list-panes --json` and `list-tabs --json --all`; an
+  area per tab, `tab_N`, by its stable id. Its extent starts at the top
+  left of the tab's tiled selectable panes and is the tab's viewport in
+  size, so the tab and status bars, which can't be selected, are outside
+  it. Every selectable pane is in it; one zellij suppresses, hidden in a
+  stack or replaced in place, isn't. Each rect is the pane's frame; its
+  inset is the frame less the content on each edge, such as `[0, 1, 1, 0]`
+  for a tiled pane's title row and the separator on its right, `[1, 1, 1,
+  1]` for a float, which is `"floating": true` whether its tab shows its
+  floats or not. No `focus`: zellij's `is_focused` is true of a pane any
+  client ever focused.
+
+No `place_beside` or `resize`: zellij moves a pane only by swapping it with
+a neighbour, and resizes only by steps of 5 % of the tab. No `open_float`,
+`open_tab_page`, `focus`, `focus_direction` or `events` yet.
+
 ## Placeholders
 
 Every variable but `<NAME>_ENV_*` is also a placeholder: a whole argv word,

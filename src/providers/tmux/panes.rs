@@ -52,12 +52,11 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
 /// The attach command's words, from `ATTACH`, for tmux to `execvp`: two
 /// or more, or tmux would run it with a shell.
 pub(super) fn attach_words(given: &Given) -> Result<Vec<OsString>, String> {
-    let attach = given.var("attach").unwrap_or_default();
-    let words = unquoted(&attach).ok_or("ATTACH isn't as the daemon writes it")?;
+    let words = given.attach_words()?;
     if words.len() < 2 {
         return Err("the attach command is under two words".into());
     }
-    Ok(words.into_iter().map(OsString::from_vec).collect())
+    Ok(words)
 }
 
 /// The pane id `-P -F '#{pane_id}'` had `command` print, `out`, or why
@@ -97,63 +96,4 @@ pub(super) fn pane_id(given: &Given, name: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&id).into_owned())
-}
-
-/// The words of `line`, as `<NAME>_ATTACH` has them: each bare, or in
-/// single quotes with `'\''` for a `'`, separated by one space. None if it
-/// isn't that.
-fn unquoted(line: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let mut words = Vec::new();
-    let mut word = Vec::new();
-    let mut started = false;
-    let mut rest = line;
-    while let Some((&b, after)) = rest.split_first() {
-        rest = after;
-        match b {
-            b' ' => {
-                if !started {
-                    return None;
-                }
-                words.push(std::mem::take(&mut word));
-                started = false;
-            }
-            b'\'' => {
-                started = true;
-                let end = rest.iter().position(|&c| c == b'\'')?;
-                word.extend_from_slice(&rest[..end]);
-                rest = &rest[end + 1..];
-                if let Some(after) = rest.strip_prefix(b"\\'") {
-                    word.push(b'\'');
-                    rest = after;
-                }
-            }
-            b => {
-                started = true;
-                word.push(b);
-            }
-        }
-    }
-    if started {
-        words.push(word);
-    }
-    Some(words)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::attach::attach_line;
-
-    #[test]
-    fn the_attach_line_reads_back_as_its_words() {
-        let words: Vec<OsString> = [&b"/a b/x"[..], b"attach", b"it's", b"", b"\xff", b"x'"]
-            .iter()
-            .map(|w| OsString::from_vec(w.to_vec()))
-            .collect();
-        let line = attach_line(&words).into_vec();
-        let back: Vec<Vec<u8>> = words.into_iter().map(OsString::into_vec).collect();
-        assert_eq!(unquoted(&line), Some(back));
-        assert_eq!(unquoted(b"a  b"), None);
-        assert_eq!(unquoted(b"'open"), None);
-    }
 }

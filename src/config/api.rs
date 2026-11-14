@@ -123,7 +123,8 @@ fn inside(attach: &Value, table: BuiltinTable) -> (bool, String) {
 }
 
 /// What a proof reads of a Lua `attach`: its `env`'s string names and
-/// values, and its `tty`; anything else, or missing, counts as unset.
+/// values, its `tty` and its `pid`; anything else, or missing, counts as
+/// unset.
 fn attach_of(attach: &Value) -> Attach {
     let Value::Table(t) = attach else {
         return Attach::default();
@@ -144,9 +145,17 @@ fn attach_of(attach: &Value) -> Attach {
         Ok(Value::String(s)) => s.as_bytes().to_vec(),
         _ => Vec::new(),
     };
+    let pid = match t.raw_get::<Value>("pid") {
+        Ok(Value::Integer(n)) => u32::try_from(n).unwrap_or(0),
+        Ok(Value::Number(n)) if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n) => {
+            n as u32
+        }
+        _ => 0,
+    };
     Attach {
         env,
         tty,
+        pid,
         ..Attach::default()
     }
 }

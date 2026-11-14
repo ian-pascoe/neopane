@@ -7,7 +7,7 @@
 //! config, the built-in default may choose one. Rex's is no table: it is
 //! [`Builtin`](super::Builtin).
 
-use super::check::{Capability, Choice, Problems, Provider, check};
+use super::check::{Capability, Choice, Problems, Provider, Setting, check};
 use super::show::{Table, Value};
 use super::tree::{Marker, Tree};
 use super::wire::{Answer, Called, Ran};
@@ -16,10 +16,11 @@ use super::wire::{Answer, Called, Ran};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinTable {
     Tmux,
+    Zellij,
 }
 
 impl BuiltinTable {
-    pub const ALL: [BuiltinTable; 1] = [BuiltinTable::Tmux];
+    pub const ALL: [BuiltinTable; 2] = [BuiltinTable::Tmux, BuiltinTable::Zellij];
 
     pub fn from_name(name: &[u8]) -> Option<BuiltinTable> {
         BuiltinTable::ALL
@@ -32,6 +33,7 @@ impl BuiltinTable {
     pub fn name(self) -> &'static str {
         match self {
             BuiltinTable::Tmux => "tmux",
+            BuiltinTable::Zellij => "zellij",
         }
     }
 
@@ -51,6 +53,25 @@ impl BuiltinTable {
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
             ],
+            BuiltinTable::Zellij => &[
+                Capability::Find,
+                Capability::Close,
+                Capability::ReportLayout,
+                Capability::OpenBeside,
+            ],
+        }
+    }
+
+    /// Its context variables and find variables: none of tmux's, as `TMUX`
+    /// leaks into terminals tmux doesn't run, so its `find` proves a pane
+    /// by its tty alone; zellij's session, and the pane its `find` checks.
+    pub fn vars(self) -> (&'static [&'static str], &'static [&'static str]) {
+        match self {
+            BuiltinTable::Tmux => (&[], &[]),
+            BuiltinTable::Zellij => (
+                &["ZELLIJ_SESSION_NAME", "ZELLIJ_SOCKET_DIR"],
+                &["ZELLIJ_PANE_ID"],
+            ),
         }
     }
 
@@ -74,8 +95,28 @@ impl BuiltinTable {
                 .iter()
                 .map(|&cap| (cap, self.argv(cap)))
                 .collect(),
-            settings: Vec::new(),
+            settings: self.settings(),
         }
+    }
+
+    /// The settings its table sets besides `name`: its variables, if any.
+    fn settings(self) -> Vec<(Setting, Value)> {
+        let list = |vars: &[&str]| {
+            Value::List(
+                vars.iter()
+                    .map(|v| Value::String(v.as_bytes().to_vec()))
+                    .collect(),
+            )
+        };
+        let (context, find) = self.vars();
+        let mut settings = Vec::new();
+        if !context.is_empty() {
+            settings.push((Setting::ContextVars, list(context)));
+        }
+        if !find.is_empty() {
+            settings.push((Setting::FindVars, list(find)));
+        }
+        settings
     }
 
     /// Its table, read by the checker as a config that returned it would
@@ -159,8 +200,55 @@ mod tests {
             let mut want = b.capabilities().to_vec();
             want.sort();
             assert_eq!(given, want, "{b:?}");
-            assert!(provider.context_vars.is_empty() && provider.find_vars.is_empty());
+            let (context, find) = b.vars();
+            assert_eq!(provider.context_vars, context, "{b:?}");
+            assert_eq!(provider.find_vars, find, "{b:?}");
         }
+    }
+
+    #[test]
+    fn zellij_runs_the_binary_for_find_close_report_layout_and_open_beside_in_its_session() {
+        let t = BuiltinTable::Zellij.table();
+        let shown: Vec<(&str, String)> = t
+            .capabilities
+            .iter()
+            .map(|(c, argv)| {
+                let words: Vec<_> = argv.iter().map(|w| String::from_utf8_lossy(w)).collect();
+                (c.name(), words.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("find", "{exe} provider builtin zellij find".to_string()),
+                ("close", "{exe} provider builtin zellij close".to_string()),
+                (
+                    "report_layout",
+                    "{exe} provider builtin zellij report_layout".to_string()
+                ),
+                (
+                    "open_beside",
+                    "{exe} provider builtin zellij open_beside".to_string()
+                ),
+            ]
+        );
+        let string = |s: &str| Value::String(s.as_bytes().to_vec());
+        assert_eq!(
+            t.settings,
+            [
+                (
+                    Setting::ContextVars,
+                    Value::List(vec![
+                        string("ZELLIJ_SESSION_NAME"),
+                        string("ZELLIJ_SOCKET_DIR")
+                    ])
+                ),
+                (
+                    Setting::FindVars,
+                    Value::List(vec![string("ZELLIJ_PANE_ID")])
+                ),
+            ]
+        );
     }
 
     #[test]

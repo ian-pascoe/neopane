@@ -179,7 +179,7 @@ mod tests {
     fn an_unknown_name_lists_the_builtins() {
         assert_eq!(
             show(Some("foo"), "b").unwrap_err(),
-            "no built-in pane provider named foo (built-ins: rex, tmux)"
+            "no built-in pane provider named foo (built-ins: rex, tmux, zellij)"
         );
     }
 
@@ -188,10 +188,21 @@ mod tests {
         assert_eq!(
             show(None, "b").unwrap(),
             format!(
-                "rex   return \"rex\" from provider() (built in; no Lua table)\n\
-                 tmux  {NAME}.builtin.tmux()\n"
+                "rex     return \"rex\" from provider() (built in; no Lua table)\n\
+                 tmux    {NAME}.builtin.tmux()\n\
+                 zellij  {NAME}.builtin.zellij()\n"
             )
         );
+    }
+
+    #[test]
+    fn zellijs_table_shows_its_variables() {
+        let shown = show(Some("zellij"), "B 1").unwrap();
+        let tail = "  open_beside = { \"{exe}\", \"provider\", \"builtin\", \"zellij\", \
+                    \"open_beside\" },\n  \
+                    context_vars = { \"ZELLIJ_SESSION_NAME\", \"ZELLIJ_SOCKET_DIR\" },\n  \
+                    find_vars = { \"ZELLIJ_PANE_ID\" },\n}\n";
+        assert!(shown.ends_with(tail), "{shown}");
     }
 
     #[test]

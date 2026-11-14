@@ -1,7 +1,9 @@
 //! Terminals' devices, for any pane provider's `find` to prove that an
 //! attaching terminal is the one it names: the device of a process's
 //! controlling terminal, and the device of a tty, by path or handed over,
-//! as `st_rdev` has it. Equal is the same terminal.
+//! as `st_rdev` has it. Equal is the same terminal. And what the process
+//! table says of a process, for one that proves a terminal by who runs
+//! it: its session's leader, its parent and its name.
 
 use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -50,6 +52,12 @@ fn device_of(st: &libc::stat) -> Option<u64> {
 const KINFO_PROC_SIZE: usize = 648;
 #[cfg(any(target_os = "macos", test))]
 const E_TDEV: usize = 296 + 276;
+/// `kp_eproc.e_ppid`, 264 into it, and `kp_proc.p_comm`, 17 bytes 243
+/// into `kp_proc`, NUL-terminated.
+#[cfg(target_os = "macos")]
+const E_PPID: usize = 296 + 264;
+#[cfg(target_os = "macos")]
+const P_COMM: usize = 243;
 
 /// The controlling terminal in a `kinfo_proc`, `kinfo`, if it is one whole
 /// and has one: `NODEV` is none.
@@ -68,12 +76,19 @@ fn e_tdev_of(kinfo: &[u8]) -> Option<u64> {
 /// user's process, as `login` is.
 #[cfg(target_os = "macos")]
 pub(crate) fn of_pid(pid: u32) -> Option<u64> {
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_PID,
-        i32::try_from(pid).ok()?,
-    ];
+    e_tdev_of(&kinfo_of(pid).ok()?)
+}
+
+/// Process `pid`'s whole `kinfo_proc`, from `sysctl KERN_PROC_PID`, which
+/// works for another user's process.
+#[cfg(target_os = "macos")]
+fn kinfo_of(pid: u32) -> Result<Vec<u8>, Unread> {
+    let pid = i32::try_from(pid).map_err(|_| Unread::Gone)?;
+    if pid == 0 {
+        // the kernel's own, no process to prove anything by
+        return Err(Unread::Gone);
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
     let mut buf = [0u64; KINFO_PROC_SIZE / 8];
     let mut len = KINFO_PROC_SIZE;
     // SAFETY: `buf` is valid for `len` bytes, and `mib` for its length.
@@ -88,12 +103,22 @@ pub(crate) fn of_pid(pid: u32) -> Option<u64> {
         )
     };
     // a pid with no process answers no bytes
-    if r != 0 {
-        return None;
+    if r != 0 || len == 0 {
+        // SAFETY: signal 0 only asks whether the process is there.
+        let there = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        return Err(if there {
+            Unread::Unreadable
+        } else {
+            Unread::Gone
+        });
+    }
+    if len != KINFO_PROC_SIZE {
+        return Err(Unread::Unreadable);
     }
     // SAFETY: `buf` holds `len` initialized bytes, at most its size.
     let bytes: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), len) };
-    e_tdev_of(bytes)
+    Ok(bytes.to_vec())
 }
 
 /// The device of process `pid`'s controlling terminal, if it has one:
@@ -123,6 +148,128 @@ fn tty_nr_of_stat(stat: &[u8]) -> Option<u32> {
 /// Where neither way is built: unknown.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn of_pid(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// What the process table says of a process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Process {
+    /// Its session's leader, whose pid is the session's id.
+    pub leader: u32,
+    pub parent: u32,
+    /// Its name as the table has it, cut at 16 bytes on macOS, 15 on
+    /// Linux.
+    pub name: String,
+}
+
+/// Why the process table told nothing of a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unread {
+    /// There's no such process.
+    Gone,
+    /// It is there, or may be, but the table can't be read for it.
+    Unreadable,
+}
+
+/// What the process table says of process `pid`.
+#[cfg(target_os = "macos")]
+pub(crate) fn process(pid: u32) -> Result<Process, Unread> {
+    let kinfo = kinfo_of(pid)?;
+    let leader = leader_of(pid)?;
+    let at = |offset: usize| u32::from_ne_bytes(kinfo[offset..offset + 4].try_into().unwrap());
+    let comm = &kinfo[P_COMM..P_COMM + 17];
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    Ok(Process {
+        leader,
+        parent: at(E_PPID),
+        name: String::from_utf8_lossy(&comm[..end]).into_owned(),
+    })
+}
+
+/// What the process table says of process `pid`: from `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+pub(crate) fn process(pid: u32) -> Result<Process, Unread> {
+    if pid == 0 {
+        return Err(Unread::Gone);
+    }
+    match std::fs::read(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat_of(&stat).ok_or(Unread::Unreadable),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Unread::Gone),
+        Err(_) => Err(Unread::Unreadable),
+    }
+}
+
+/// Where neither way is built: unreadable.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn process(_pid: u32) -> Result<Process, Unread> {
+    Err(Unread::Unreadable)
+}
+
+/// Process `pid`'s session's leader: `getsid`.
+#[cfg(target_os = "macos")]
+fn leader_of(pid: u32) -> Result<u32, Unread> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| Unread::Gone)?;
+    if pid == 0 {
+        return Err(Unread::Gone);
+    }
+    // SAFETY: a plain syscall.
+    let sid = unsafe { libc::getsid(pid) };
+    if sid >= 0 {
+        return Ok(sid as u32);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Err(Unread::Gone),
+        _ => Err(Unread::Unreadable),
+    }
+}
+
+/// The name, parent and session of a `/proc/<pid>/stat`, `stat`: its
+/// second field, the name in parentheses, may hold anything; then state,
+/// ppid, pgrp, session.
+#[cfg(any(target_os = "linux", test))]
+fn stat_of(stat: &[u8]) -> Option<Process> {
+    let open = stat.iter().position(|&b| b == b'(')?;
+    let close = stat.iter().rposition(|&b| b == b')')?;
+    let name = String::from_utf8_lossy(stat.get(open + 1..close)?).into_owned();
+    let rest = std::str::from_utf8(&stat[close + 1..]).ok()?;
+    let mut fields = rest.split_ascii_whitespace().skip(1);
+    let parent = fields.next()?.parse().ok()?;
+    let leader = fields.nth(1)?.parse().ok()?;
+    Some(Process {
+        leader,
+        parent,
+        name,
+    })
+}
+
+/// The path of terminal device `dev`, as `/dev/ttys009`: on macOS, the
+/// name the system gives it.
+#[cfg(target_os = "macos")]
+pub(crate) fn path_of_device(dev: u64) -> Option<String> {
+    // SAFETY: devname returns a static buffer or null.
+    let name = unsafe { libc::devname(dev as libc::dev_t, libc::S_IFCHR) };
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, NUL-terminated.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    (!name.is_empty() && !name.contains('?')).then(|| format!("/dev/{name}"))
+}
+
+/// The path of terminal device `dev`, as `/dev/pts/3`: on Linux, only a
+/// pseudo-terminal's (majors 136 to 143) is named.
+#[cfg(target_os = "linux")]
+pub(crate) fn path_of_device(dev: u64) -> Option<String> {
+    let dev = dev as libc::dev_t;
+    let (major, minor) = (libc::major(dev), libc::minor(dev));
+    (136..=143)
+        .contains(&major)
+        .then(|| format!("/dev/pts/{}", (major - 136) * 256 + minor))
+}
+
+/// Elsewhere none is named.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn path_of_device(_dev: u64) -> Option<String> {
     None
 }
 
@@ -227,6 +374,53 @@ mod tests {
         assert_eq!(Some(34823), tty_nr_of_stat(line));
         assert_eq!(None, tty_nr_of_stat(b"123 (sh) S 1 123 123 0 -1"));
         assert_eq!(None, tty_nr_of_stat(b"garbage"));
+    }
+
+    #[test]
+    fn a_process_tells_its_session_leader_parent_and_name() {
+        let me = process(std::process::id()).unwrap();
+        // SAFETY: plain syscalls on this process.
+        let (parent, leader) = unsafe { (libc::getppid(), libc::getsid(0)) };
+        assert_eq!(me.parent, parent as u32);
+        assert_eq!(me.leader, leader as u32);
+        // the table cuts the name short
+        let exe = std::env::current_exe().unwrap();
+        let file = exe.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!me.name.is_empty() && file.starts_with(&me.name), "{me:?}");
+        // a sleep in a session of its own leads it
+        let child = sleeper(None);
+        let theirs = process(child.id());
+        end(child);
+        let theirs = theirs.unwrap();
+        assert_eq!(theirs.name, "sleep");
+        assert_eq!(theirs.parent, std::process::id());
+        assert!(theirs.leader > 0 && theirs.leader != me.leader);
+    }
+
+    #[test]
+    fn a_process_that_isnt_there_has_gone() {
+        assert_eq!(Err(Unread::Gone), process(u32::MAX - 1));
+        assert_eq!(Err(Unread::Gone), process(0));
+    }
+
+    #[test]
+    fn a_stat_line_tells_the_parent_session_and_name_whatever_the_name_holds() {
+        let line = b"123 (a) (b c) S 77 123 99 34823 123 4194560";
+        assert_eq!(
+            Some(("a) (b c".to_string(), 77, 99)),
+            stat_of(line).map(|s| (s.name, s.parent, s.leader))
+        );
+        assert_eq!(None, stat_of(b"123 (sh) S").map(|s| s.parent));
+        assert_eq!(None, stat_of(b"garbage").map(|s| s.parent));
+    }
+
+    #[test]
+    fn a_ttys_path_is_named_from_its_device() {
+        let (_master, slave, path) = pty();
+        let dev = of_fd(slave.as_fd()).unwrap();
+        let named = path_of_device(dev).unwrap();
+        // macOS's ttyname may go by /private/var; the device's name, by /dev
+        assert_eq!(of_path(named.as_bytes()), Some(dev), "{named} for {path:?}");
     }
 
     #[test]

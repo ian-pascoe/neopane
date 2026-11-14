@@ -2,7 +2,8 @@
 
 Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
-chooses: tmux in a tmux pane, Rex inside Rex, else none (see
+chooses: tmux in a tmux pane, zellij in a zellij pane, Rex inside Rex, else
+none (see
 [The default](#the-default) and
 [Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md`
 is the contract of a pane provider's commands.
@@ -138,11 +139,11 @@ Also `require("neopane")`.
 
 | | |
 |---|---|
-| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's table, as `neopane.builtin.tmux()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
+| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's or zellij's table, as `neopane.builtin.tmux()` or `neopane.builtin.zellij()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
 | `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
 | `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
-| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`. They take no options, and raise on any |
-| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane, asking the multiplexer, within 0.5 s: `tmux`. They read `attach.env` and `attach.tty`, and never raise |
+| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`, `zellij`. They take no options, and raise on any |
+| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane: `tmux`, asking tmux within 0.5 s, and `zellij`, from the process table alone. They read `attach.env`, `attach.tty` and `attach.pid`, and never raise |
 | `neopane.os` | `"macos"` or `"linux"` |
 | `neopane.version` | The daemon's version |
 | `neopane.config_dir` | The absolute directory of the file that ran |
@@ -153,13 +154,14 @@ Also `require("neopane")`.
 the environment only:
 
 - tmux: `TERM_PROGRAM` is `tmux` and `TMUX` is set and not empty.
+- zellij: `ZELLIJ` is set, and `ZELLIJ_PANE_ID` is set and not empty.
 - Rex: `REX_SERVER` and `REX_SESSION` are both set, even if empty.
 
 Naming one, it chooses that one and runs nothing. A multiplexer's panes
 inherit the variables of whatever started its server, though: a tmux started
 in a Rex pane gives its panes Rex's variables, and a terminal started from a
 tmux shell has tmux's. Naming several, it asks each multiplexer's `inside`
-in turn (tmux's, for now), and takes the first that proves; else Rex if
+in turn, tmux's then zellij's, and takes the first that proves; else Rex if
 named, else none. Rex is never proven there: its `find` proves it. The
 daemon runs the proofs off its loop, and new windows wait for them as they
 do for a config.
@@ -181,8 +183,30 @@ needed. Its `why`:
 | `"the attach's tty \"/some/file\" isn't one"` | `tty` is set but isn't a terminal's |
 | `"this terminal (/dev/ttys003) isn't a pane of the tmux server at <socket>"` | |
 
-Its `find` still confirms the choice, and refusing it goes only to the log:
-the default guessed. `provider check` shows what it named and each proof's
+`neopane.inside.zellij(attach)` runs no zellij command: zellij tells no
+pane's tty or process. It reads the process table instead. Whatever zellij
+starts in a pane, a shell or a command, leads its own session on the pane's
+tty, a child of the zellij server. So it is true when `ZELLIJ_PANE_ID` and
+`ZELLIJ_SESSION_NAME` are set, the attach has a tty, the attach's process
+(`attach.pid`) has a session leader on that tty, and the leader's parent is a
+process whose name holds `zellij`. A process table it can't read proves
+nothing, and the variables are trusted. Its `why`:
+
+| | |
+|---|---|
+| `true, "zellij pane terminal_3"` | the pane, `ZELLIJ_PANE_ID`'s |
+| `true, "zellij pane terminal_3 (unproven: can't read the process table)"` | |
+| `"ZELLIJ_PANE_ID isn't set"` | |
+| `"ZELLIJ_SESSION_NAME isn't set"` | |
+| `"the attach has no tty"` | |
+| `"the attach's process (pid 4242) has gone"` | |
+| `"this terminal (/dev/ttys003) isn't a zellij pane's: its session leader (zsh, pid 4100) is on /dev/ttys009"` | a process on another terminal, with a pane's variables, such as a tmux pane's started from a zellij pane |
+| `"this terminal (/dev/ttys003) isn't a zellij pane's: its session leader's parent is tmux (pid 812)"` | |
+
+Its `find` adds two checks, asking zellij: zellij must be 0.46.0 or newer,
+and the session must list the pane, not exited. A multiplexer's `find`
+still confirms the choice, and refusing it goes only to the log: the
+default guessed. `provider check` shows what it named and each proof's
 answer.
 
 ## Errors
@@ -385,7 +409,7 @@ or changed in type or meaning; a missing one means unknown.
 ## Built-in pane providers
 
 `neopane provider show` lists the built-ins: `rex`, which has no Lua table
-(return `"rex"` from `provider()` to use it), and `tmux`.
+(return `"rex"` from `provider()` to use it), `tmux` and `zellij`.
 `neopane provider show NAME` prints a built-in that has a Lua table as a Lua
 file, to copy into your `init.lua` and change. Its every capability runs
 `{exe} provider builtin NAME CAPABILITY`: neopane itself, speaking the
@@ -430,6 +454,35 @@ return {
 
 To opt out, run `neopane --provider none` or set `NEOPANE_PROVIDER=none`,
 or have your config return something else in tmux, such as `nil`.
+
+### zellij
+
+On by default: run `neopane` in a zellij pane (zellij 0.46.0 or newer), with
+no config, and each Neovim window gets a zellij pane of its own, split beside
+the pane it came from, named `neopane`. No zellij client's focus moves. The
+default knows zellij by its own variables, `ZELLIJ` and `ZELLIJ_PANE_ID`, and
+where tmux's or Rex's are set too, asks `neopane.inside.zellij` after tmux's
+(see [The default](#the-default)); its `find` checks the same, then that the
+session lists the pane. Every zellij call is `zellij --session
+"$ZELLIJ_SESSION_NAME" action …`, in the environment of the terminal that
+chose zellij: zellij finds a session by its socket directory
+(`ZELLIJ_SOCKET_DIR`) and its cache, under `HOME`. A terminal of another
+zellij session, or with another `ZELLIJ_SOCKET_DIR`, is out of reach: a
+window opened from it is drawn in its pane. A config gets the same table
+from `neopane.builtin.zellij()`.
+
+Its limits, for now:
+
+- zellij splits only to the right or below, halving the pane split: a
+  window opened on the left or above, as `:vsplit` and `:split` open it, is
+  split to the right or below, then swapped with the pane it came from.
+  zellij resizes only in steps of 5 %, so the table has no `place_beside`
+  or `resize`: a pane keeps the size zellij gives it.
+- A split fails while the tab shows its floating panes: they are hidden
+  around each split and shown again, so they may flicker.
+- No `open_float`, `open_tab_page`, `focus` or `focus_direction` yet:
+  floats are drawn in their pane, tab pages in the pane they opened in, and
+  Neovim moves no zellij client's focus.
 
 ## Editor setup
 

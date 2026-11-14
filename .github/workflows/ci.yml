@@ -33,6 +33,10 @@ jobs:
         run: |
           brew install tmux
           tmux -V
+      - name: Install zellij
+        run: |
+          scripts/install-zellij.sh "$HOME/zellij"
+          echo "$HOME/zellij" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -67,6 +71,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tmux
           tmux -V
+      - name: Install zellij
+        run: |
+          scripts/install-zellij.sh "$HOME/zellij"
+          echo "$HOME/zellij" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -81,5 +89,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Neovim and tmux
         run: brew install neovim tmux
+      - name: Install zellij
+        run: |
+          scripts/install-zellij.sh "$HOME/zellij"
+          echo "$HOME/zellij" >> "$GITHUB_PATH"
       - run: cargo check --all-targets
       - run: cargo test

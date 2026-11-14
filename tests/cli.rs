@@ -420,8 +420,9 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(
         text(&out.stdout),
         format!(
-            "rex   return \"rex\" from provider() (built in; no Lua table)\n\
-             tmux  {NAME}.builtin.tmux()\n"
+            "rex     return \"rex\" from provider() (built in; no Lua table)\n\
+             tmux    {NAME}.builtin.tmux()\n\
+             zellij  {NAME}.builtin.zellij()\n"
         )
     );
     assert_eq!(text(&out.stderr), "");
@@ -441,7 +442,7 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        format!("{NAME}: no built-in pane provider named foo (built-ins: rex, tmux)\n")
+        format!("{NAME}: no built-in pane provider named foo (built-ins: rex, tmux, zellij)\n")
     );
 
     let out = run(&["provider", "show", "a", "b"]);
