@@ -61,6 +61,10 @@ impl Home {
             .env_remove("TMUX_PANE")
             .env_remove("TERM_PROGRAM")
             .env_remove("REX_BLOCK")
+            .env_remove("ZELLIJ")
+            .env_remove("ZELLIJ_PANE_ID")
+            .env_remove("ZELLIJ_SESSION_NAME")
+            .env_remove("ZELLIJ_SOCKET_DIR")
             .stdin(Stdio::null());
         c
     }
@@ -293,7 +297,7 @@ fn documented(object: &str) -> BTreeSet<&'static str> {
     let keys: &[&str] = match object {
         "top" => &[
             "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "tmux",
-            "default", "problems", "result",
+            "zellij", "default", "problems", "result",
         ],
         "config" => &["path", "state"],
         "attach" => &["tty", "pid", "cwd", "daemon", "provider"],
@@ -314,6 +318,15 @@ fn documented(object: &str) -> BTreeSet<&'static str> {
         "find" => &["ran", "title", "exit", "seconds", "id", "verdict", "why"],
         "rex" => &["server", "version", "api_revision", "missing", "find"],
         "tmux" => &["path", "version", "socket", "answers", "error", "missing"],
+        "zellij" => &[
+            "path",
+            "version",
+            "session",
+            "socket_dir",
+            "answers",
+            "error",
+            "missing",
+        ],
         "problem" => &["level", "path", "message"],
         "result" => &["state", "message", "refused"],
         "default" => &["named", "inside"],
@@ -378,6 +391,7 @@ fn json_has_the_documented_keys() {
     assert_eq!(false, v["find"]["ran"]);
     assert_eq!(Value::Null, v["rex"]);
     assert_eq!(Value::Null, v["tmux"]);
+    assert_eq!(Value::Null, v["zellij"]);
     let why = "a half's one-step capability is ignored; only a table returned whole gets one";
     assert_eq!(
         serde_json::json!({ "state": "ignored", "why": why }),
@@ -976,4 +990,260 @@ fn a_changed_copy_of_the_tmux_table_gets_the_section_for_what_it_still_runs() {
     assert_eq!(Value::Null, v["tmux"], "{v}");
     let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
     assert!(!stdout(&out).contains("\ntmux  "), "{}", stdout(&out));
+}
+
+/// `provider check` with `args` in a pane of zellij session `session`,
+/// with `env` besides, its `PATH` being `path`: a real session's pane has
+/// its `HOME` and `ZELLIJ_SOCKET_DIR`, which find it.
+fn in_zellij(
+    home: &Home,
+    session: &str,
+    env: &[(String, std::ffi::OsString)],
+    path: &std::ffi::OsStr,
+    args: &[&str],
+) -> Output {
+    home.command(args)
+        .env("ZELLIJ", "0")
+        .env("ZELLIJ_PANE_ID", "0")
+        .env("ZELLIJ_SESSION_NAME", session)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+/// The lines of `out`'s zellij section.
+fn zellij_section(out: &Output) -> Vec<&str> {
+    let mut lines = stdout(out)
+        .lines()
+        .skip_while(|l| !l.starts_with("zellij  "));
+    let head = lines
+        .next()
+        .unwrap_or_else(|| panic!("no zellij section:\n{}", stdout(out)));
+    std::iter::once(head)
+        .chain(lines.take_while(|l| l.starts_with("  ")))
+        .collect()
+}
+
+#[test]
+fn the_default_zellij_tables_report_has_a_zellij_section_naming_zellij_its_session_and_version() {
+    if !support::have_zellij() {
+        return;
+    }
+    let home = Home::new("zellij");
+    let zellij = support::ZellijSession::new("check");
+    zellij.start();
+    zellij.ready();
+    let sockets = std::path::PathBuf::from(
+        &zellij
+            .env
+            .iter()
+            .find(|(k, _)| k == "ZELLIJ_SOCKET_DIR")
+            .unwrap()
+            .1,
+    );
+    let path = std::env::var_os("PATH").unwrap();
+    let out = in_zellij(&home, &zellij.name, &zellij.env, &path, &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let which = Command::new("sh")
+        .args(["-c", "command -v zellij"])
+        .output()
+        .unwrap();
+    let version = Command::new("zellij").arg("--version").output().unwrap();
+    let version = text(&version.stdout)
+        .trim()
+        .trim_start_matches("zellij ")
+        .to_string();
+    assert_eq!(
+        zellij_section(&out),
+        [
+            format!("zellij  {}", text(&which.stdout).trim()),
+            format!("  version  {version}"),
+            format!("  session  {}", zellij.name),
+            format!("  socket dir  {}", sockets.display()),
+            "  server  answers".to_string(),
+        ]
+    );
+
+    let out = in_zellij(&home, &zellij.name, &zellij.env, &path, &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    keys_in(&v["zellij"], "zellij");
+    assert_eq!(v["zellij"]["version"], version.as_str());
+    assert_eq!(v["zellij"]["session"], zellij.name.as_str());
+    assert_eq!(v["zellij"]["socket_dir"], sockets.to_str().unwrap());
+    assert_eq!(v["zellij"]["answers"], true);
+    assert_eq!(v["zellij"]["error"], Value::Null);
+    assert_eq!(v["zellij"]["missing"], serde_json::json!([]));
+    assert_eq!(Value::Null, v["tmux"]);
+
+    // a session that isn't there doesn't answer, and still exits 0
+    let out = in_zellij(&home, "nowhere", &zellij.env, &path, &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let section = zellij_section(&out);
+    assert_eq!(section[2], "  session  nowhere", "{section:?}");
+    assert!(
+        section[4].starts_with("  server  doesn't answer: zellij action list-panes --json failed"),
+        "{section:?}"
+    );
+    let out = in_zellij(&home, "nowhere", &zellij.env, &path, &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["zellij"]["answers"], false);
+    assert!(v["zellij"]["error"].is_string(), "{v}");
+    drop(zellij);
+}
+
+/// A `zellij` in `dir` that says it's `version`, and lists no panes of a
+/// session.
+fn fake_zellij(dir: &std::path::Path, version: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = dir.join("zellij");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --version ] && echo 'zellij {version}' && exit 0\n\
+             echo '[]'\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_zellij_below_the_floor_says_it_misses_every_capability_and_a_missing_one_is_not_on_path() {
+    let home = Home::new("zellij-0.45");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_zellij(&bin, "0.45.1");
+    let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    assert_eq!(
+        zellij_section(&out),
+        [
+            format!("zellij  {}", bin.join("zellij").display()),
+            "  version  0.45.1".to_string(),
+            "  session  work".to_string(),
+            "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set".to_string(),
+            "  server  answers".to_string(),
+            "  missing  every capability (needs zellij 0.46.0, this is 0.45.1)".to_string(),
+        ]
+    );
+    let out = in_zellij(&home, "work", &[], bin.as_os_str(), &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["zellij"]["socket_dir"], Value::Null);
+    assert_eq!(
+        v["zellij"]["missing"],
+        serde_json::json!([{ "capability": null, "needs": "0.46.0" }])
+    );
+
+    // the floor itself, and newer, miss nothing
+    for fine in ["0.46.0", "0.47.1"] {
+        fake_zellij(&bin, fine);
+        let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+        assert!(
+            !stdout(&out).contains("  missing  "),
+            "{fine}: {}",
+            stdout(&out)
+        );
+    }
+
+    // none on PATH
+    let empty = home.dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let out = in_zellij(&home, "work", &[], empty.as_os_str(), &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    let section = zellij_section(&out);
+    assert_eq!(section[0], "zellij  not on PATH", "{section:?}");
+    assert!(
+        section[3].starts_with("  server  doesn't answer: can't run zellij"),
+        "{section:?}"
+    );
+}
+
+#[test]
+fn a_zellij_whose_version_fails_or_prints_nothing_has_no_version_and_isnt_too_old() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new("zellij-noversion");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("zellij");
+    for version in [
+        "echo 'zellij 0.45.1' >&2; exit 1",
+        "echo 'zellij 0.45.1'; exit 1",
+        "exit 0",
+    ] {
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ {version}; }}\necho '[]'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+        assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+        assert_eq!(
+            zellij_section(&out),
+            [
+                format!("zellij  {}", fake.display()),
+                "  session  work".to_string(),
+                "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set".to_string(),
+                "  server  answers".to_string(),
+            ],
+            "{version}"
+        );
+        let out = in_zellij(&home, "work", &[], bin.as_os_str(), &["--json"]);
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["zellij"]["version"], Value::Null, "{version}");
+        assert_eq!(v["zellij"]["missing"], serde_json::json!([]), "{version}");
+    }
+}
+
+#[test]
+fn a_zellij_report_with_no_session_says_which_variable_is_missing() {
+    let home = Home::new("zellij-nosession");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_zellij(&bin, "0.46.0");
+    let out = home
+        .command(&[])
+        .env("ZELLIJ", "0")
+        .env("ZELLIJ_PANE_ID", "0")
+        .env("PATH", bin.as_os_str())
+        .output()
+        .unwrap();
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    assert_eq!(
+        zellij_section(&out)[2..],
+        [
+            "  session  none: ZELLIJ_SESSION_NAME isn't set",
+            "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set",
+            "  server  doesn't answer: ZELLIJ_SESSION_NAME isn't set",
+        ]
+    );
+}
+
+#[test]
+fn a_changed_copy_of_the_zellij_table_gets_the_section_and_a_table_that_runs_none_has_none() {
+    let home = Home::new("zellij-copy").with_config(
+        r#"return { provider = function()
+          local t = {name}.builtin.zellij()
+          t.name = "mine"
+          t.open_float = nil
+          t.open_beside = { "my-split", "{attach}" }
+          return t
+        end }"#,
+    );
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_zellij(&bin, "0.46.0");
+    let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+    assert_eq!(Some(0), out.status.code(), "{}", stdout(&out));
+    assert_eq!(zellij_section(&out)[1], "  version  0.46.0");
+
+    let home = Home::new("zellij-none").with_config(
+        r#"return { provider = function() return { name = "x", open = { "o" } } end }"#,
+    );
+    let out = in_zellij(&home, "work", &[], bin.as_os_str(), &["--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(Value::Null, v["zellij"], "{v}");
+    let out = in_zellij(&home, "work", &[], bin.as_os_str(), &[]);
+    assert!(!stdout(&out).contains("\nzellij  "), "{}", stdout(&out));
 }

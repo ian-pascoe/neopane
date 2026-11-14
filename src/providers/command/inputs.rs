@@ -362,6 +362,20 @@ pub(crate) fn commands_env(attach_env: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, V
         .collect()
 }
 
+/// The executable `program` that a `PATH` of `path`, colon-separated,
+/// finds first, as a path.
+pub(crate) fn on_path(path: &[u8], program: &str) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    path.split(|&b| b == b':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| std::path::Path::new(std::ffi::OsStr::from_bytes(dir)).join(program))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 fn direction(d: Direction) -> &'static str {
     match d {
         Direction::Left => "left",

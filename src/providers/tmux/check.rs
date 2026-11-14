@@ -5,7 +5,6 @@
 //! answer, both runs together.
 
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 use std::time::Instant;
 
 use super::events::FIRST_WITH_EVENTS;
@@ -13,7 +12,7 @@ use super::float::FIRST_WITH_FLOATS;
 use super::server::{OLDEST, Ran, Server, older_than, run_within, version_of};
 use crate::attach::env_value;
 use crate::config::{Attach, Capability, TIME};
-use crate::providers::command::commands_env;
+use crate::providers::command::{commands_env, on_path};
 use crate::util::seconds;
 
 /// The capabilities that need a tmux newer than [`OLDEST`], and the
@@ -40,7 +39,7 @@ pub(crate) fn probe(attach: &Attach, uses: &[Capability]) -> TmuxReport {
             Ran::TimedOut => format!("no answer within {} s", seconds(TIME)),
         })
     };
-    let path = on_path(env_value(&attach.env, "PATH").unwrap_or_default());
+    let path = on_path(env_value(&attach.env, "PATH").unwrap_or_default(), "tmux");
     let version = run(&[b"-V"]).ok().map(|out| version_of(&out));
     let socket =
         Server::named_by(env_value(&attach.env, "TMUX").unwrap_or_default()).map(|s| s.socket());
@@ -76,20 +75,6 @@ fn missing(version: &str, uses: &[Capability]) -> Vec<Missing> {
             needs,
         })
         .collect()
-}
-
-/// The `tmux` a `PATH` of `path` finds, as a path.
-fn on_path(path: &[u8]) -> Option<String> {
-    path.split(|&b| b == b':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| Path::new(std::ffi::OsStr::from_bytes(dir)).join("tmux"))
-        .find(|p| is_executable(p))
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// What `provider check` learned of tmux.

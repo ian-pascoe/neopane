@@ -28,6 +28,7 @@ use std::time::Duration;
 use super::choose::{self, ChooseBy, ConfigFile, HINT_NONE};
 use super::command::commands_env;
 use super::tmux::{self, check::TmuxReport};
+use super::zellij::{self, check::ZellijReport};
 use crate::attach::env_value;
 use crate::config::check::Severity;
 use crate::config::wire::{Called, Ran as LuaRan};
@@ -88,6 +89,8 @@ pub(crate) struct Check {
     pub rex: Option<rex::RexReport>,
     /// For a table whose capabilities run the built-in tmux command.
     pub tmux: Option<TmuxReport>,
+    /// For a table whose capabilities run the built-in zellij command.
+    pub zellij: Option<ZellijReport>,
     /// What `<name>.default` came to, when it chose: what it named and the
     /// `inside` proofs it ran.
     pub default: Option<config::Defaulted>,
@@ -196,6 +199,7 @@ fn gather(o: &Options) -> Check {
         find: Find::NotRun("the config failed".into()),
         rex: None,
         tmux: None,
+        zellij: None,
         default: None,
         result: Verdict::None { warning: None },
     };
@@ -226,9 +230,13 @@ fn gather(o: &Options) -> Check {
     }
     if let Some((choice, how)) = &check.chose {
         let (choice, how) = (choice.clone(), *how);
-        let uses = runs_builtin(&choice, BuiltinTable::Tmux);
-        if !uses.is_empty() {
-            check.tmux = Some(tmux::check::probe(&check.attach, &uses));
+        let tmux_uses = runs_builtin(&choice, BuiltinTable::Tmux);
+        if !tmux_uses.is_empty() {
+            check.tmux = Some(tmux::check::probe(&check.attach, &tmux_uses));
+        }
+        let zellij_uses = runs_builtin(&choice, BuiltinTable::Zellij);
+        if !zellij_uses.is_empty() {
+            check.zellij = Some(zellij::check::probe(&check.attach));
         }
         decide(&mut check, &choice, how, o.no_find, tty.as_ref());
     }

@@ -327,6 +327,7 @@ The report's sections:
 | `whole`, `terminal`, `layout` | each table in use, by its role: its name, Lua path and agreed protocol; each capability it gives, present (its argv on one line, and its timeout), ignored (and why) or absent (and what does without it, such as `open_float  absent: float groups are drawn in panes`). A pair's terminal side lists the one-step capabilities too, absent from a pair, and either side lists any it gave that are ignored. `live layout` (`yes: report_layout and events`, `yes: report_layout (read after each act)` or `no: each pane is its own layout area`), `reach` (its context variables, with this attach's values) and `find vars` show for a table that gives the layout, so not for a terminal side; `attach timeout`, such as `5 s (default)`, for one that opens terminals, so not for a layout side |
 | `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
 | `tmux` | for a table whose capabilities run `{exe} provider builtin tmux`, such as `neopane.builtin.tmux()` or a changed copy of it: the `tmux` on `PATH` (or `not on PATH`), its version, the socket `TMUX` names, whether the server answers (or why not), and each capability in use that this tmux is too old for, such as `open_float  exits 69: needs tmux 3.7, this is 3.4` and `events  exits 69: needs tmux 3.8, this is 3.4`; below 3.2, `missing  every capability (needs tmux 3.2, this is 3.1c)` |
+| `zellij` | for a table whose capabilities run `{exe} provider builtin zellij`, such as `neopane.builtin.zellij()` or a changed copy of it: the `zellij` on `PATH` (or `not on PATH`), its version, the session `ZELLIJ_SESSION_NAME` names (or `none: ZELLIJ_SESSION_NAME isn't set`), the socket directory `ZELLIJ_SOCKET_DIR` names (or `none: ZELLIJ_SOCKET_DIR isn't set`, where zellij looks in its own), and whether the session answers `list-panes`, as `find` asks it (or why not); below 0.46.0, `missing  every capability (needs zellij 0.46.0, this is 0.45.1)`. Every capability's zellij calls need that session, found through the same variables and `HOME` |
 | `rex` | for `"rex"`: the server's URL, version and API revision (`server.version`'s, else the one its welcome agreed), and, for a server older than this build speaks, `missing  every capability (needs Rex API revision N, this server has M)`: Rex doesn't say which revision each method came in, so it isn't told capability by capability |
 | `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)` (the path where the system names it: on macOS, and for a pseudo-terminal on Linux), or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
 | `errors`, `warnings` | every problem, with its path |
@@ -387,6 +388,7 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
  "find":{"ran":true,"title":"neopane-k3j9x2qpa8","exit":0,"seconds":0.412,"id":"31337","verdict":"accepted","why":null},
  "rex":null,
  "tmux":null,
+ "zellij":null,
  "default":null,
  "problems":[],
  "result":{"state":"ok","message":null}}
@@ -420,6 +422,12 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
   this tmux is too old for, or one `{"capability": null, "needs": "3.2"}`
   below the floor. Its `needs` is a tmux version, a string, where `rex`'s
   is an API revision, a number.
+- `zellij`: null unless a table in use runs `{exe} provider builtin zellij`;
+  else `{"path", "version", "session", "socket_dir", "answers", "error",
+  "missing"}`: each of the first four is null when unknown or unset,
+  `error` says why the session didn't answer, and `missing[]` is empty, or
+  holds one `{"capability": null, "needs": "0.46.0"}` below the floor, a
+  zellij version, a string.
 - `default`: null unless `neopane.default` chose with no file; else
   `{"named": ["tmux", "rex"], "inside": [{"name": "tmux", "ok": false,
   "why": "…"}]}`: the built-ins the environment names, in order, and each
@@ -554,8 +562,9 @@ checks the same, then that the session lists the pane. Every zellij call is
 the terminal that chose zellij: zellij finds a session by its socket
 directory (`ZELLIJ_SOCKET_DIR`) and its cache, under `HOME`. A terminal of
 another zellij session, or with another `ZELLIJ_SOCKET_DIR`, is out of
-reach: a window opened from it is drawn in its pane. A config gets the same
-table from `neopane.builtin.zellij()`.
+reach: a window opened from it is drawn in its pane. `neopane provider check`
+shows your zellij, its version and the session it reaches. A config gets the
+same table from `neopane.builtin.zellij()`.
 
 Its limits, for now:
 
