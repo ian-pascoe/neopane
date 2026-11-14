@@ -25,12 +25,16 @@
 //! - `inside.zellij` (`inside.rs`), no capability: the attach's process
 //!   table proves its terminal a pane of a zellij server, running no
 //!   zellij command; `find` runs the same proof.
+//! - `check.rs`, no capability: what `provider check`'s zellij section
+//!   shows: zellij on `PATH`, its version, the session and whether it
+//!   answers.
 //!
 //! Each capability gives the line it prints, or why it failed; `run`
 //! prints it, or the failure as one `zellij CAPABILITY: why` line on
 //! stderr, and gives the exit status. Every terminal id read or given is
 //! `terminal_` and digits.
 
+pub(crate) mod check;
 #[cfg(test)]
 mod fake;
 mod find;

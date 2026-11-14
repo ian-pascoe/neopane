@@ -10,7 +10,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::providers::builtin::Given;
@@ -24,6 +24,9 @@ pub(super) struct Session {
     name: Vec<u8>,
     /// `zellij`, found on `PATH`; a test's fake.
     program: OsString,
+    /// The environment its calls run in alone, `provider check`'s; None:
+    /// this process's.
+    env: Option<Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 /// How a call of zellij failed.
@@ -75,7 +78,18 @@ impl Session {
         Ok(Session {
             name,
             program: "zellij".into(),
+            env: None,
         })
+    }
+
+    /// Session `name`, its calls run in environment `env` alone, `zellij`
+    /// found on its `PATH`.
+    pub(super) fn within(name: &[u8], env: Vec<(Vec<u8>, Vec<u8>)>) -> Session {
+        Session {
+            name: name.to_vec(),
+            program: "zellij".into(),
+            env: Some(env),
+        }
     }
 
     /// Session `name`, its calls run by `program`, a fake zellij.
@@ -84,6 +98,7 @@ impl Session {
         Session {
             name: name.into(),
             program: program.into(),
+            env: None,
         }
     }
 
@@ -128,48 +143,21 @@ impl Session {
             return Err(Ran::TimedOut(format!("{shown}: no time left to run it")));
         }
         let mut cmd = Command::new(&self.program);
+        if let Some(env) = &self.env {
+            cmd.env_clear().envs(
+                env.iter()
+                    .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
+            );
+        }
         cmd.arg("--session")
             .arg(OsStr::from_bytes(&self.name))
             .arg("action")
             .args(args)
-            .env_remove("ZELLIJ_PANE_ID")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env_remove("ZELLIJ_PANE_ID");
         if let Some(pane) = pane {
             cmd.env("ZELLIJ_PANE_ID", pane.to_string());
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Ran::Failed(format!("can't run zellij: {e}")))?;
-        let read = |pipe: Option<Box<dyn Read + Send>>| {
-            std::thread::spawn(move || {
-                let mut out = Vec::new();
-                if let Some(mut p) = pipe {
-                    let _ = p.read_to_end(&mut out);
-                }
-                out
-            })
-        };
-        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if due.is_none_or(|due| Instant::now() < due) => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(None) | Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Ran::TimedOut(format!("{shown}: killed, out of time")));
-                }
-            }
-        };
-        let (out, err) = (
-            stdout.join().unwrap_or_default(),
-            stderr.join().unwrap_or_default(),
-        );
+        let (status, out, err) = exec(cmd, &shown, due)?;
         if status.success() {
             return Ok(out);
         }
@@ -195,6 +183,50 @@ impl Session {
     }
 }
 
+/// Runs `cmd`, `shown` in messages, with stdin `/dev/null`: its status,
+/// stdout and stderr, killed if it hasn't exited by `due`, if given.
+fn exec(
+    mut cmd: Command,
+    shown: &str,
+    due: Option<Instant>,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), Ran> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Ran::Failed(format!("can't run zellij: {e}")))?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if due.is_none_or(|due| Instant::now() < due) => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Ran::TimedOut(format!("{shown}: killed, out of time")));
+            }
+        }
+    };
+    Ok((
+        status,
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default(),
+    ))
+}
+
 /// The installed zellij's version, as `zellij --version` prints it after
 /// `zellij `, such as `0.46.0`.
 pub(super) fn version() -> Result<String, String> {
@@ -203,20 +235,43 @@ pub(super) fn version() -> Result<String, String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("can't run zellij: {e}"))?;
-    let shown = String::from_utf8_lossy(&out.stdout);
+    Ok(version_of(&out.stdout))
+}
+
+/// The installed zellij's version, run in environment `env` alone, `zellij`
+/// found on its `PATH`, killed at `due`.
+pub(super) fn version_within(env: &[(Vec<u8>, Vec<u8>)], due: Instant) -> Result<String, Ran> {
+    let mut cmd = Command::new("zellij");
+    cmd.arg("--version").env_clear().envs(
+        env.iter()
+            .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
+    );
+    let (_, out, _) = exec(cmd, "zellij --version", Some(due))?;
+    Ok(version_of(&out))
+}
+
+/// The version `zellij --version` printed as `out`, after `zellij `, such
+/// as `0.46.0`.
+fn version_of(out: &[u8]) -> String {
+    let shown = String::from_utf8_lossy(out);
     let shown = shown.trim();
-    Ok(shown.strip_prefix("zellij ").unwrap_or(shown).to_string())
+    shown.strip_prefix("zellij ").unwrap_or(shown).to_string()
 }
 
 /// Why zellij `version` is too old for the built-in, if it is: older
 /// than [`OLDEST`]. A version it can't read, such as one built from a
 /// branch, isn't.
 pub(super) fn too_old(version: &str) -> Option<String> {
+    let (a, b, c) = OLDEST;
+    is_too_old(version).then(|| format!("zellij {version} is older than {a}.{b}.{c}"))
+}
+
+/// Whether zellij `version` is older than [`OLDEST`]; one it can't read
+/// isn't.
+pub(super) fn is_too_old(version: &str) -> bool {
     let mut parts = version.split(['.', '-', '+']);
     let mut next = || parts.next().and_then(|p| p.parse::<u32>().ok());
-    let (major, minor, patch) = (next()?, next()?, next()?);
-    let (a, b, c) = OLDEST;
-    ((major, minor, patch) < OLDEST).then(|| format!("zellij {version} is older than {a}.{b}.{c}"))
+    matches!((next(), next(), next()), (Some(a), Some(b), Some(c)) if (a, b, c) < OLDEST)
 }
 
 #[cfg(test)]

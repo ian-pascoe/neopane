@@ -16,6 +16,7 @@ use crate::config::{Builtin, Capability, Choice, Defaulted, Provider};
 use crate::name::NAME;
 use crate::providers::rex::find::{BLOCK_VAR, Verdict as RexVerdict};
 use crate::providers::tmux::check::TmuxReport;
+use crate::providers::zellij::check::ZellijReport;
 use crate::util::seconds;
 
 /// The widest line shown without `--full`, in columns.
@@ -235,6 +236,11 @@ pub(super) fn text(c: &Check, full: bool) -> String {
     }
     if let Some(tmux) = &c.tmux {
         for line in tmux_lines(tmux) {
+            put(line);
+        }
+    }
+    if let Some(zellij) = &c.zellij {
+        for line in zellij_lines(zellij) {
             put(line);
         }
     }
@@ -541,6 +547,61 @@ fn tmux_json(t: &TmuxReport) -> Value {
     })
 }
 
+/// The zellij section's lines.
+fn zellij_lines(z: &ZellijReport) -> Vec<String> {
+    let mut lines = vec![match &z.path {
+        Some(path) => format!("zellij  {path}"),
+        None => "zellij  not on PATH".into(),
+    }];
+    if let Some(v) = &z.version {
+        lines.push(format!("  version  {v}"));
+    }
+    lines.push(match &z.session {
+        Some(session) => format!("  session  {session}"),
+        None => "  session  none: ZELLIJ_SESSION_NAME isn't set".into(),
+    });
+    lines.push(match &z.socket_dir {
+        Some(dir) => format!("  socket dir  {dir}"),
+        None => "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set".into(),
+    });
+    lines.push(match &z.server {
+        Ok(()) => "  server  answers".into(),
+        Err(why) => format!("  server  doesn't answer: {why}"),
+    });
+    let this = z.version.as_deref().unwrap_or("unknown");
+    for m in &z.missing {
+        let (major, minor, patch) = m.needs;
+        lines.push(format!(
+            "  missing  every capability (needs zellij {major}.{minor}.{patch}, this is {this})"
+        ));
+    }
+    lines
+}
+
+/// The zellij section as JSON.
+fn zellij_json(z: &ZellijReport) -> Value {
+    let missing: Vec<Value> = z
+        .missing
+        .iter()
+        .map(|m| {
+            let (major, minor, patch) = m.needs;
+            json!({
+                "capability": null,
+                "needs": format!("{major}.{minor}.{patch}"),
+            })
+        })
+        .collect();
+    json!({
+        "path": z.path,
+        "version": z.version,
+        "session": z.session,
+        "socket_dir": z.socket_dir,
+        "answers": z.server.is_ok(),
+        "error": z.server.as_ref().err(),
+        "missing": missing,
+    })
+}
+
 fn find_text(f: &Find) -> String {
     let after =
         |t: &Duration, title: &str| format!("{}, title {title} written, then restored", took(*t));
@@ -692,6 +753,7 @@ pub(super) fn json(c: &Check) -> String {
         "find": find_json(&c.find),
         "rex": rex,
         "tmux": c.tmux.as_ref().map_or(Value::Null, tmux_json),
+        "zellij": c.zellij.as_ref().map_or(Value::Null, zellij_json),
         "default": c.default.as_ref().map_or(Value::Null, default_json),
         "problems": problems,
         "result": result,
@@ -1024,6 +1086,92 @@ mod tests {
                 "tmux  not on PATH",
                 "  socket  none: TMUX isn't set",
                 "  server  doesn't answer: TMUX isn't set",
+            ]
+        );
+    }
+
+    /// A zellij 0.46.0 whose session answers, `ZELLIJ_SOCKET_DIR` set.
+    fn zellij_0_46() -> ZellijReport {
+        ZellijReport {
+            path: Some("/usr/bin/zellij".into()),
+            version: Some("0.46.0".into()),
+            session: Some("work".into()),
+            socket_dir: Some("/tmp/zj".into()),
+            server: Ok(()),
+            missing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn zellijs_section_names_its_path_version_session_socket_directory_and_server() {
+        assert_eq!(
+            zellij_lines(&zellij_0_46()),
+            [
+                "zellij  /usr/bin/zellij",
+                "  version  0.46.0",
+                "  session  work",
+                "  socket dir  /tmp/zj",
+                "  server  answers",
+            ]
+        );
+        assert_eq!(
+            zellij_json(&zellij_0_46()),
+            json!({
+                "path": "/usr/bin/zellij",
+                "version": "0.46.0",
+                "session": "work",
+                "socket_dir": "/tmp/zj",
+                "answers": true,
+                "error": null,
+                "missing": [],
+            })
+        );
+    }
+
+    #[test]
+    fn a_zellij_below_the_floor_misses_every_capability_and_one_not_found_says_so() {
+        use crate::providers::zellij::check::Missing;
+        let old = ZellijReport {
+            version: Some("0.45.1".into()),
+            socket_dir: None,
+            server: Err("Session 'work' not found".into()),
+            missing: vec![Missing { needs: (0, 46, 0) }],
+            ..zellij_0_46()
+        };
+        assert_eq!(
+            zellij_lines(&old)[1..],
+            [
+                "  version  0.45.1",
+                "  session  work",
+                "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set",
+                "  server  doesn't answer: Session 'work' not found",
+                "  missing  every capability (needs zellij 0.46.0, this is 0.45.1)",
+            ]
+        );
+        let v = zellij_json(&old);
+        assert_eq!(v["socket_dir"], Value::Null);
+        assert_eq!(v["answers"], false);
+        assert_eq!(v["error"], "Session 'work' not found");
+        assert_eq!(
+            v["missing"],
+            json!([{ "capability": null, "needs": "0.46.0" }])
+        );
+
+        let none = ZellijReport {
+            path: None,
+            version: None,
+            session: None,
+            socket_dir: None,
+            server: Err("ZELLIJ_SESSION_NAME isn't set".into()),
+            missing: Vec::new(),
+        };
+        assert_eq!(
+            zellij_lines(&none),
+            [
+                "zellij  not on PATH",
+                "  session  none: ZELLIJ_SESSION_NAME isn't set",
+                "  socket dir  none: ZELLIJ_SOCKET_DIR isn't set",
+                "  server  doesn't answer: ZELLIJ_SESSION_NAME isn't set",
             ]
         );
     }

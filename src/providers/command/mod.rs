@@ -60,7 +60,7 @@ mod inputs;
 mod layout;
 mod run;
 
-pub(crate) use inputs::commands_env;
+pub(crate) use inputs::{commands_env, on_path};
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
