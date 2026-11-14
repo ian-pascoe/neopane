@@ -126,10 +126,10 @@ pub(super) struct Beside<'a> {
 /// elsewhere, as read just before the swap: the user may have moved it
 /// since `focused` was read. Last, the tab's root split is set to the
 /// ratio it has: herdr resizes no pty on a move, and laying the tab out
-/// again resizes every one. It is set again 100 ms later: a terminal that went to the
-/// alternate screen before a client drew it in its new place is otherwise
-/// left a column short, herdr keeping its scrollbar's column, until the
-/// next layout.
+/// again resizes every one. It is set again 100 ms later: a terminal that
+/// went to the alternate screen before a client drew it in its new place
+/// is otherwise left a column short, herdr keeping its scrollbar's column,
+/// until the next layout.
 pub(super) fn put_beside(herdr: &Herdr, pane: &str, at: &Beside) -> Result<String, String> {
     let Beside {
         capability,
