@@ -1125,7 +1125,7 @@ fn vertical_resize_in_the_first_tab_page_gives_the_herdr_pane_that_many_columns(
 /// Passes if any of 3 attempts does, each with a fresh setup: herdr's
 /// `events` reads focus behind the open's other events, and a move made
 /// as the open swaps panes can go unseen until the daemon's focus has
-/// undone it, a race the daemon can't see (follow-up: SPI-TBD). Without
+/// undone it, a race the daemon can't see (follow-up: SPI-1203). Without
 /// SPI-1190's rules every attempt fails.
 #[test]
 fn a_focus_move_while_a_split_opens_stands() {
