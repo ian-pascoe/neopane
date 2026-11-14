@@ -80,6 +80,11 @@ keeps its first value.
 `[width, height]` of the text area in pixels, only when non-zero. The helper
 reads `TIOCGWINSZ` after each batch of SIGWINCH and sends only changes.
 
+A size never has a 0 in `cols` or `rows`: Neovim takes none. A terminal can
+start with no size, as a zellij pane's does on Linux, so the helper waits up
+to 1 s for one before its hello, and says 80 x 24 if it has none by then; it
+sends its size once it has one. A change to a size with a 0 isn't sent.
+
 ## The hello
 
 A missing required field is refused as `hello`, its message naming the

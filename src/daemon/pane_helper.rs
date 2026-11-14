@@ -1,8 +1,8 @@
 //! The helper (ADR 0013): `<name> attach --address A --pane ID`, which each
 //! requested pane's terminal runs, and the launcher's own attach. It checks
-//! the daemon runs as its user, puts its terminal in raw mode, sends its
-//! hello with the terminal riding on the first byte, and waits for the
-//! answer. Once accepted it sends the terminal's size as it changes, and
+//! the daemon runs as its user, waits for its terminal to have a size if it
+//! has none, puts its terminal in raw mode, sends its hello with the
+//! terminal riding on the first byte, and waits for the answer. Once accepted it sends the terminal's size as it changes, and
 //! keeps the latest undo bytes, until the attach ends; then it undoes what
 //! the daemon wrote and restores its terminal, however the attach ended.
 //! `docs/attach-protocol.md` is the reference.
@@ -15,6 +15,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use super::attach_conn::HELLO_TIMEOUT;
 use super::dir::Address;
 use super::fdpass;
 use crate::attach::frame;
@@ -36,6 +37,24 @@ pub(crate) const MIN_LIFE: Duration = Duration::from_millis(300);
 /// Written before the undo bytes when the daemon cut a frame short, or went
 /// without a word: CAN ends a half CSI, and `ESC \` a string.
 pub(crate) const CANCEL: &[u8] = b"\x18\x1b\\";
+
+/// How long the helper waits for a terminal with no size, as zellij's panes
+/// can start with on Linux, to get one before its hello. Well within the
+/// daemon's `HELLO_TIMEOUT`, which counts from the connection.
+pub(crate) const SIZE_WITHIN: Duration = Duration::from_secs(1);
+const _: () = assert!(SIZE_WITHIN.as_millis() * 2 <= HELLO_TIMEOUT.as_millis());
+
+/// What the hello says of a terminal still with no size after
+/// `SIZE_WITHIN`: Neovim takes no size of 0. Its size is sent once it has
+/// one.
+const STAND_IN: Size = Size {
+    cols: 80,
+    rows: 24,
+    px: None,
+};
+
+/// How often the helper looks again at a terminal with no size.
+const SIZE_POLL: Duration = Duration::from_millis(10);
 
 /// The signals that stop the helper. SIGHUP keeps its default action: the
 /// terminal is gone.
@@ -166,6 +185,8 @@ pub(crate) struct Attach {
     pub(crate) transport: Transport,
     /// How long the daemon has to answer.
     pub(crate) answer_within: Duration,
+    /// How long a terminal with no size has to get one before the hello.
+    pub(crate) size_within: Duration,
     /// The user the daemon must run as: ours.
     pub(crate) uid: u32,
     /// When the helper started, and how long it lives at least.
@@ -182,6 +203,7 @@ impl Attach {
             provider: None,
             transport,
             answer_within: ANSWER_TIMEOUT,
+            size_within: SIZE_WITHIN,
             // SAFETY: `geteuid` has no preconditions.
             uid: unsafe { libc::geteuid() },
             started: Instant::now(),
@@ -226,10 +248,11 @@ fn attach_with(
         Ok(_) => return Exit::fail("the daemon runs as another user"),
         Err(e) => return Exit::fail(format!("can't check the daemon's user: {e}")),
     }
-    let terminal = match terminal_of(tty, transport) {
-        Ok(t) => t,
-        Err(e) => return Exit::fail(format!("can't read the terminal: {e}")),
+    let size = match first_size(tty, how.size_within, signals.as_deref_mut()) {
+        Ok(size) => size,
+        Err(exit) => return exit,
     };
+    let terminal = terminal_of(tty, transport, size);
     let mut size = terminal.size;
     let purpose = match want {
         Want::Requested(pane) => Purpose::Requested { pane, terminal },
@@ -783,9 +806,53 @@ fn send_size(stream: &mut UnixStream, size: Size) -> io::Result<()> {
     stream.write_all(&bytes)
 }
 
-/// The terminal's size now, if it differs from `last`, which it updates.
+/// Terminal `tty`'s size once it has one, waiting up to `within`, and
+/// `STAND_IN` if it has none by then. Err if it can't be read, or a
+/// stopping signal came first: the terminal is untouched yet.
+fn first_size(
+    tty: RawFd,
+    within: Duration,
+    mut signals: Option<&mut Signals>,
+) -> Result<Size, Exit> {
+    let deadline = Instant::now() + within;
+    loop {
+        let size = size_of(tty).map_err(|e| Exit::fail(format!("can't read the terminal: {e}")))?;
+        if has_size(&size) {
+            return Ok(size);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(STAND_IN);
+        }
+        // SIGWINCH is drained too: the size is read again all the same
+        let mut fds = [libc::pollfd {
+            fd: -1,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(s) = &signals {
+            fds[0].fd = s.read_fd;
+        }
+        let ms = left.min(SIZE_POLL).as_millis().max(1) as i32;
+        // SAFETY: one pollfd, ignored if its fd is -1.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } > 0
+            && let Some(s) = signals.as_deref_mut()
+            && stopping(s.drain().unwrap_or_default())
+        {
+            return Err(Exit::signalled());
+        }
+    }
+}
+
+/// Whether `size` is one: Neovim takes no 0 in either.
+fn has_size(size: &Size) -> bool {
+    size.cols > 0 && size.rows > 0
+}
+
+/// The terminal's size now, if it has one and it differs from `last`, which
+/// it updates.
 fn changed_size(tty: RawFd, last: &mut Size) -> Option<Size> {
-    let now = size_of(tty).ok()?;
+    let now = size_of(tty).ok().filter(has_size)?;
     if now == *last {
         return None;
     }
@@ -814,20 +881,20 @@ pub(crate) fn size_of(tty: RawFd) -> io::Result<Size> {
     })
 }
 
-/// What the hello says of terminal `tty`: its size and device, and this
+/// What the hello says of terminal `tty`, of `size`: its device, and this
 /// process's pid, environment and working directory.
-fn terminal_of(tty: RawFd, transport: Transport) -> io::Result<Terminal> {
+fn terminal_of(tty: RawFd, transport: Transport, size: Size) -> Terminal {
     let env = environment();
-    Ok(Terminal {
+    Terminal {
         transport,
-        size: size_of(tty)?,
+        size,
         pid: std::process::id(),
         tty: tty_name(tty),
         env,
         cwd: std::env::current_dir()
             .map(|d| d.as_os_str().as_bytes().to_vec())
             .unwrap_or_default(),
-    })
+    }
 }
 
 /// This process's environment, as a hello sends it: raw, each name once.
@@ -1030,7 +1097,16 @@ mod tests {
         signals: Option<&mut Signals>,
         daemon: impl FnOnce(Fake) + Send + 'static,
     ) -> Run {
-        let (master, slave) = open_pty(80, 24);
+        against_on(open_pty(80, 24), how, signals, daemon)
+    }
+
+    /// `against_with` over the pty `(master, slave)`, which it closes.
+    fn against_on(
+        (master, slave): (RawFd, RawFd),
+        how: Attach,
+        signals: Option<&mut Signals>,
+        daemon: impl FnOnce(Fake) + Send + 'static,
+    ) -> Run {
         let before = raw::settings(slave);
         let (ours, theirs) = UnixStream::pair().unwrap();
         let fake = std::thread::spawn(move || {
@@ -1317,6 +1393,39 @@ mod tests {
         sink.join().unwrap();
         assert_eq!(Exit::signalled(), exit);
         assert_eq!(b"\x18\x1b\\<undo>", &drain(master)[..]);
+        assert!(raw::same(&before, &raw::settings(slave)));
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+    }
+
+    /// A signal while the terminal has no size: nothing was sent, and the
+    /// terminal is untouched.
+    #[test]
+    fn a_signal_during_the_size_wait_ends_it_before_the_hello() {
+        let _one = crate::term::signals::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut watched = vec![libc::SIGWINCH];
+        watched.extend(STOPPING);
+        let mut signals = Signals::init(&watched).unwrap();
+        let (master, slave) = open_pty(0, 0);
+        let before = raw::settings(slave);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+        let how = Attach {
+            size_within: Duration::from_secs(30),
+            ..Attach::new(Want::Requested(pane()), Transport::Fd)
+        };
+        let started = Instant::now();
+        let exit = attach_on(ours, slave, &how, Some(&mut signals));
+        signals.deinit();
+        assert_eq!(Exit::signalled(), exit);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        let mut sent = Vec::new();
+        (&theirs).read_to_end(&mut sent).unwrap();
+        assert!(sent.is_empty(), "{sent:?}");
         assert!(raw::same(&before, &raw::settings(slave)));
         unsafe {
             libc::close(master);
@@ -1638,6 +1747,84 @@ mod tests {
             let s = next_size(&f.s);
             assert_eq!((100, 30), (s.cols, s.rows));
             send(&f.s, end(Ending::Closed, "", false));
+        });
+        assert_eq!(Exit::ok(), run.exit);
+    }
+
+    /// A pane's terminal may start before it has a size, as zellij's do on
+    /// Linux: the hello waits for one.
+    #[test]
+    fn the_hello_waits_for_a_terminal_with_no_size_to_get_one() {
+        let (master, slave) = open_pty(0, 0);
+        let resizer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            resize(master, 100, 30);
+        });
+        let how = Attach::new(Want::Requested(pane()), Transport::Fd);
+        let run = against_on((master, slave), how, None, |f| {
+            let Purpose::Requested { terminal, .. } = &f.hello.purpose else {
+                panic!("{:?}", f.hello)
+            };
+            assert_eq!((100, 30), (terminal.size.cols, terminal.size.rows));
+            send(&f.s, accept());
+            send(&f.s, end(Ending::Closed, "", false));
+        });
+        resizer.join().unwrap();
+        assert_eq!(Exit::ok(), run.exit);
+    }
+
+    /// A terminal with no size in time is said to be 80 x 24, and its size
+    /// is sent once it has one.
+    #[test]
+    fn a_terminal_with_no_size_in_time_is_80_by_24_until_it_has_one() {
+        let how = Attach {
+            size_within: Duration::from_millis(100),
+            ..Attach::new(Want::Requested(pane()), Transport::Fd)
+        };
+        let run = against_on(open_pty(0, 0), how, None, |f| {
+            let Purpose::Requested { terminal, .. } = &f.hello.purpose else {
+                panic!("{:?}", f.hello)
+            };
+            assert_eq!((80, 24), (terminal.size.cols, terminal.size.rows));
+            resize(f.master, 100, 30);
+            send(&f.s, accept());
+            let s = next_size(&f.s);
+            assert_eq!((100, 30), (s.cols, s.rows));
+            send(&f.s, end(Ending::Closed, "", false));
+        });
+        assert_eq!(Exit::ok(), run.exit);
+    }
+
+    /// The sizes in what's left on `theirs` until the helper hangs up.
+    fn sizes_left(theirs: &UnixStream) -> Vec<Size> {
+        let mut buf = vec![0u8; 1 << 16];
+        let mut got = Vec::new();
+        loop {
+            let r = fdpass::recv(theirs, &mut buf).unwrap();
+            if r.len == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..r.len]);
+        }
+        let mut sizes = Vec::new();
+        while let Some((f, n)) = Frame::decode(&got).unwrap() {
+            got.drain(..n);
+            if let Some(Message::Size(s)) = Message::decode(&f).unwrap() {
+                sizes.push(s);
+            }
+        }
+        sizes
+    }
+
+    /// A terminal that loses its size, as a pane hidden may, keeps the
+    /// last it had.
+    #[test]
+    fn a_size_of_0_since_the_hello_isnt_sent() {
+        let run = against(Want::Requested(pane()), |f| {
+            resize(f.master, 0, 30);
+            send(&f.s, accept());
+            send(&f.s, end(Ending::Closed, "", false));
+            assert_eq!(Vec::<Size>::new(), sizes_left(&f.s));
         });
         assert_eq!(Exit::ok(), run.exit);
     }
