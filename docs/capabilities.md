@@ -359,13 +359,16 @@ a zoom as it is.
 
 ### herdr
 
-`<name>.builtin.herdr()`: `find`, `close`, `report_layout` and
-`open_beside`, on the herdr server whose socket `HERDR_SOCKET_PATH` names,
-in its socket API: newline-delimited JSON, one request per connection, a
-reply's fields it doesn't read ignored. Context variables
+`<name>.builtin.herdr()`: every capability but `open`, `open_float`,
+`place_beside` and `resize`, on the herdr server whose socket
+`HERDR_SOCKET_PATH` names, in its socket API: newline-delimited JSON, one
+request per connection, a reply's fields it doesn't read ignored; `events`
+holds its one connection open. Context variables
 `HERDR_SOCKET_PATH`, find variables `HERDR_PANE_ID`: a herdr server is the
 reach, its workspaces no boundary. Terminal ids are herdr pane ids, such as
-`w1:p4`, which a live handoff keeps. A herdr tab is a layout area.
+`w1:p4`, which a live handoff keeps. A herdr tab is a layout area, and a
+tab page area. herdr has one focus per server, not per client: `focus`,
+`focus_direction` and herdr's own keys move every client attached.
 
 - `find`: `ping` first, refusing a protocol below 22 (herdr 0.9.5's),
   naming both; a newer one is tried, with a line on stderr. Then
@@ -403,7 +406,36 @@ reach, its workspaces no boundary. Terminal ids are herdr pane ids, such as
   an alternate-screen program's with herdr's default borders: `[1, 1, 1,
   1]` in a tab with a split, none for a lone pane; on the primary screen
   herdr keeps one more column on the right, for its scrollbar. `focus` is
-  the server's focused pane: herdr has one focus per server.
+  the server's focused pane, which a close moves with no focus event: with
+  `events`, a report's focus is the one the daemon follows.
+- `open_tab_page`: `pane.get` for `ORIGIN`'s workspace, then `layout.apply`
+  makes a tab there (`focus:false`), whose one pane runs
+  the attach command from `ATTACH`, with no shell; prints its pane id. The
+  server's focus stays: the daemon focuses the pane when Neovim goes to its
+  tab page. A tab made by an apply that got no answer in its 4 s closes
+  itself: its attach is refused, the daemon having given its pane up, and
+  ends.
+- `focus`: `pane.focus` on the terminal, which goes to its tab and
+  workspace.
+- `focus_direction`: `COUNT` steps of `pane.focus_direction`, the first
+  from the server's focused pane as `session.snapshot` has it, each after
+  from the pane the last landed on, stopping, done, where herdr answers
+  `no_neighbor`, at the tab's edge.
+- `events`: one `events.subscribe`, to `pane.focused`, `pane.exited`,
+  `pane.closed`, `pane.moved`, `pane.created`, `layout.updated`,
+  `tab.focused`, `tab.closed` and `workspace.focused`, held open. Its first
+  line is where focus starts, `{"focus":"w1:p4"}`, if herdr has a focused
+  pane. `pane.exited` and `pane.closed` print `{"closed":"w1:p4"}`. herdr
+  sends events out of causal order, a `pane.focused` before the
+  `pane.created` of its pane, so focus is never read from one: after a
+  focus event, or a close (`pane.exited`, `pane.closed`, `tab.closed`), which
+  moves the server's focus with no focus event, it reads a fresh
+  `session.snapshot` on a connection of its own, and adds `"focus"` to the
+  line only when the focused pane changed from the last it printed. A
+  focus event that moved nothing prints nothing; every other event a bare
+  line. It exits 1, never 69, when herdr ends the subscription: an
+  `events_lost` error, the connection closed, as every connection is at a
+  live handoff, or no herdr to subscribe to; the daemon starts it again.
 
 ### zellij
 

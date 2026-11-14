@@ -514,8 +514,12 @@ the tab laid out again (ADR 0017). Its limits:
   insets off by a cell or two, which no part of herdr's API tells.
 - A pane you move to another workspace gets a new id there, which neopane
   doesn't follow: its Neovim pane becomes a layout area of its own.
-- For now no focus, tab pages, moves, resizes or floats: a float group is
-  drawn in its pane, and every tab page in the tab it opened in.
+- Focus is one per herdr server, not per client: when Neovim's current
+  window moves, every herdr client attached follows, as with herdr's own
+  keys.
+- A tab page gets a herdr tab of its own, in the workspace of the pane it
+  opened from.
+- For now no moves, resizes or floats: a float group is drawn in its pane.
 
 ### zellij
 
