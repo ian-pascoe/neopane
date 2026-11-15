@@ -1,6 +1,31 @@
 # neopane
 
-Panes for Neovim, built in Rust.
+One Neovim, every window a real terminal pane.
+
+![neopane demo](assets/demo.gif)
+
+`:vsplit` in neopane opens a real pane in your terminal multiplexer, a Rex
+block, a tmux, zellij or herdr pane, and closing that pane closes the
+window. Neovim runs once, in the background, so every terminal attached to
+it shares its buffers, registers, undo and language servers.
+
+- **Neovim windows as real panes** in Rex, tmux, zellij or herdr, with no
+  config: pickers open as floating panes where the multiplexer has them.
+- **One editor, many terminals**: `neopane attach` in any terminal shows the
+  same Neovim.
+- **No multiplexer needed**: in a plain terminal, it is Neovim drawn by a
+  daemon you can attach to from other terminals and leave running.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ian-pascoe/neopane/main/install.sh | bash
+# or: brew install spiritledsoftware/tap/neopane
+# or: cargo install --locked neopane
+neopane notes.md
+```
+
+It needs Neovim 0.12 or later, on macOS or Linux. It is
+[very early](#status): bug reports are welcome on
+[GitHub Issues](https://github.com/ian-pascoe/neopane/issues).
 
 Formerly neorex. Not the original neorex by Alex Locke, which this began as
 and continues under that name.
@@ -50,8 +75,6 @@ out to fit
 No pane provider is needed: in a plain terminal, `neopane` is Neovim drawn by
 a daemon, which you can attach to from other terminals, leave running, and
 open files in from its own `:terminal`.
-
-![neopane demo](assets/demo.gif)
 
 ### Status
 
@@ -341,7 +364,8 @@ A pane provider gives Neovim's windows terminals of their own, and places
 and focuses them: a terminal provider, a layout provider, or both. A daemon
 has at most one at a time, chosen by a self-attach, as `neopane` and
 `neopane attach` are: by your config, or without one, tmux in a tmux pane,
-herdr in a herdr pane, Rex in a Rex block and none elsewhere.
+herdr in a herdr pane, zellij in a zellij pane, Rex in a Rex block and none
+elsewhere.
 
 The daemon keeps its pane provider while a terminal in its reach is attached
 or on its way, and drops it otherwise, as when the last of them closes; one
@@ -448,6 +472,19 @@ out to a tab of its own and back
 and a zoomed pane is shown alone. `neopane provider show herdr` prints its
 table, which `neopane.builtin.herdr()` returns for your config to change
 ([docs/config.md](docs/config.md#herdr)).
+
+### zellij
+
+zellij's pane provider is built in too, as a table whose capabilities run
+neopane itself. An attach chooses it when `ZELLIJ` and `ZELLIJ_PANE_ID` are
+set, as in every zellij pane: each window gets a zellij pane of its own,
+split beside the one it was opened from, a group of floats you enter, such
+as a picker, a pinned zellij floating pane, and each tab page a zellij tab.
+`<C-w>h/j/k/l` move zellij's focus. zellij can't size a pane exactly, so a
+pane keeps the size zellij gives it. It needs zellij 0.46.0 or newer.
+`neopane provider show zellij` prints its table, which
+`neopane.builtin.zellij()` returns for your config to change
+([docs/config.md](docs/config.md#zellij)).
 
 ### Your own
 
