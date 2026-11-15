@@ -67,6 +67,33 @@ pub(crate) unsafe fn default_signals() -> io::Result<()> {
 }
 
 /// This thread's number, for names of a test's own: its id's digits.
+/// Fills `buf` with random bytes, from the kernel: `arc4random_buf`, or
+/// `getrandom` on Linux, which musl's `libc` bindings have as well.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(crate) fn random(buf: &mut [u8]) {
+    // SAFETY: `buf` is valid for writes of its length.
+    unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn random(buf: &mut [u8]) {
+    let mut filled = 0;
+    while filled < buf.len() {
+        // SAFETY: `buf[filled..]` is valid for writes, and getrandom writes at most
+        // `buf.len() - filled` bytes starting inside `buf`.
+        let n =
+            unsafe { libc::getrandom(buf[filled..].as_mut_ptr().cast(), buf.len() - filled, 0) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            // only a bad pointer or flags fail, which is a bug here
+            panic!("getrandom failed");
+        }
+        filled += n as usize;
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn thread_number() -> String {
     format!("{:?}", std::thread::current().id())
