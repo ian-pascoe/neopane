@@ -63,7 +63,7 @@ fn token() -> [u8; TOKEN_LEN] {
     let mut filled = 0;
     while filled < TOKEN_LEN {
         let mut bytes = [0u8; 32];
-        random(&mut bytes);
+        crate::util::random(&mut bytes);
         // 252 is the largest multiple of 36 that fits: no letter is likelier
         for b in bytes.into_iter().filter(|&b| b < 252) {
             if filled == TOKEN_LEN {
@@ -74,19 +74,6 @@ fn token() -> [u8; TOKEN_LEN] {
         }
     }
     out
-}
-
-/// Fills `buf`, at most 256 bytes, from `getentropy`.
-fn random(buf: &mut [u8]) {
-    // SAFETY: `buf` is valid for writes of its length, which is at most 256.
-    let r = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    // fails only on a bad pointer or a length over 256: a bug here
-    assert_eq!(
-        0,
-        r,
-        "getentropy failed: {}",
-        std::io::Error::last_os_error()
-    );
 }
 
 /// Where a minted id stands.
