@@ -68,13 +68,27 @@ You need:
 - macOS, or Linux: it builds and passes its tests there, but hasn't been
   tried live yet (#43);
 - Neovim 0.12 or later, as `nvim` on `PATH`;
-- Rust (stable, 2024 edition) to build it;
-- [just](https://github.com/casey/just), or Cargo alone;
 - [Rex](https://www.superlogical.com/rex), only for windows in Rex blocks of
   their own.
 
-To install it, optimized, as `~/.local/bin/neopane`, with `npane` linked to
-it as a shorthand:
+With Homebrew, which also links `npane` to it as a shorthand:
+
+```sh
+brew install spiritledsoftware/tap/neopane
+```
+
+With Cargo (Rust 1.88 or later):
+
+```sh
+cargo install --locked neopane
+```
+
+Either way, a running daemon keeps the binary it started with, so start a
+new one after an upgrade.
+
+From a checkout, with Rust and [just](https://github.com/casey/just), to
+install it, optimized, as `~/.local/bin/neopane`, with `npane` linked to it
+as a shorthand:
 
 ```sh
 just install
