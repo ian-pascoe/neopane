@@ -71,7 +71,17 @@ You need:
 - [Rex](https://www.superlogical.com/rex), only for windows in Rex blocks of
   their own.
 
-With Homebrew, which also links `npane` to it as a shorthand:
+On macOS or Linux, the latest release, as `~/.local/bin/neopane`, with
+`npane` linked to it as a shorthand:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ian-pascoe/neopane/main/install.sh | bash
+```
+
+Piped to `NEOPANE_VERSION=v0.1.0 bash`, it installs that release instead;
+`NEOPANE_INSTALL_DIR=DIR` puts it in `DIR`.
+
+With Homebrew, which also links `npane`:
 
 ```sh
 brew install spiritledsoftware/tap/neopane

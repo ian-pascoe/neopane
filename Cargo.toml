@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["neovim", "terminal", "tmux", "multiplexer", "panes"]
 categories = ["command-line-utilities", "text-editors"]
 # Not needed to build or test it; the README's demo alone is 9 MB
-exclude = ["/assets", "/scripts", "/.github"]
+exclude = ["/assets", "/scripts", "/.github", "/install.sh"]
 
 [dependencies]
 libc = "0.2"
