@@ -159,10 +159,11 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   `created` event even says 200 cols first), whatever the window: a split in
   a never-shown tab gives both panes 120×40 until the tab is shown. Once its
   tab has been shown, a terminal keeps its last real size while the tab is
-  hidden. A split into a hidden tab that had been shown resized its
-  neighbours at once but left the new terminal at 120×40 until a
-  `layout.resize` in that tab [`core/events.subscribe`]: don't trust a hidden
-  tab's cols/rows.
+  hidden. A split into a hidden tab that had been shown resized nothing at
+  once: the new terminal reported 120×40 (seq 193), and neither it nor its
+  neighbours `t5` and `t1c` got another `size` event until a `layout.resize`
+  in that tab a second later (seq 196–199) [`core/events.subscribe`]. Don't
+  trust a hidden tab's cols/rows.
 - **Zoom**: the zoomed pane's terminal takes the whole tab (`t2` 39×24 →
   82×52); the others keep their unzoomed sizes, shown tab or not
   [`core/zoomed-doc-and-list`]. Neither the doc nor `status` shows the zoom;
