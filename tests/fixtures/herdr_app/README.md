@@ -63,7 +63,7 @@ afterwards left `t2` with `size: {weight: 1.0}` (`t3` still none, so the same
 | `doc.get-unwritten.jsonl` | `doc.get` of a document never written: `value: null`, `version: 0`. |
 | `unknown-method.jsonl` | An unknown method: `-32601`, `data.kind: unknown_method`. |
 | `events.subscribe.jsonl` | `events.subscribe`: the snapshot reply, then the notifications from a `pane.split` (`created`, `doc`, `size`, `foreground`, `labels`), a `layout.resize` (`doc`, `size`), a `pane.focus` (nothing), `terminal.keep {keep: false}` (`keep`) and `terminal.kill` (`finished`, `size`, `doc`). |
-| `focus-report-terminal.read.jsonl` | `terminal.read` of two panes running `printf '\e[?1004h'; cat -v`, before and after `herdr-app do pane.focus`: `^[[I` in the focused one, `^[[O` in the other. |
+| `focus-report-terminal.read.jsonl` | Panes `t2` and `t3` run `printf '\e[?1004h'; cat -v`, `t3` focused. `terminal.read` of `t2` before `herdr-app do pane.focus` of `t2` (empty), then twice after (`^[[I`), then of `t3` after only (`^[[O`; it wasn't read before). |
 | `after-core-restart.jsonl` | After `hc server stop` (the app restarts the core at once): a keep-off terminal finished with `reason: server_stop`; keep-on ones are fresh login shells; `doc.get` without the keep-off block. |
 
 `hc-version.json` is `hc --version` (`hc 0.1.21`), kept in the same
