@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "tab.select",
+    "{\"id\": \"tb647b2d25c9734a2636b21f8d1a7c8c1c\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "ok": true
+  },
+  "stderr": ""
+}

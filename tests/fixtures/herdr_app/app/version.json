@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "herdr-app",
+    "--version"
+  ],
+  "exit": 0,
+  "stdout": "herdr-app 0.1.16\n",
+  "stderr": ""
+}

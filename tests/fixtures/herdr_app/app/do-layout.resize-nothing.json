@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "layout.resize",
+    "{\"id\": \"pf7e3d563947903ed7a8c93ee0ac58181\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "ok": true
+  },
+  "stderr": ""
+}

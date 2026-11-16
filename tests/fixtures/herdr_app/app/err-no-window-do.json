@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.focus",
+    "{\"pane\": \"p7b3398d57b6dd529d0f978c04b35c687\"}"
+  ],
+  "exit": 2,
+  "stdout": null,
+  "stderr": "herdr-app: no Herdr window at /tmp/spi1214/apphome/herdr-app.sock: Connection refused (os error 61)\n"
+}

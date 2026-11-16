@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.swap",
+    "{\"pane\": \"pf7e3d563947903ed7a8c93ee0ac58181\", \"direction\": \"left\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "ok": true
+  },
+  "stderr": ""
+}

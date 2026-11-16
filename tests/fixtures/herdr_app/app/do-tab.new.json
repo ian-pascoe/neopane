@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "tab.new",
+    "{\"argv\": [\"sh\", \"-c\", \"printf \\\"\\\\033[?1004h\\\"; exec cat -v\"], \"focus\": false, \"space\": \"sp22637f42bbefeecf910ee187a961334c\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "space": "sp22637f42bbefeecf910ee187a961334c",
+    "tab": "tb647b2d25c9734a2636b21f8d1a7c8c1c",
+    "terminal": "t4"
+  },
+  "stderr": ""
+}

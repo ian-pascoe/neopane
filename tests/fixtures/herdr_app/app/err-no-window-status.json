@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "herdr-app",
+    "status"
+  ],
+  "exit": 2,
+  "stdout": null,
+  "stderr": "herdr-app: no Herdr window at /tmp/spi1214/apphome/herdr-app.sock: Connection refused (os error 61)\n"
+}

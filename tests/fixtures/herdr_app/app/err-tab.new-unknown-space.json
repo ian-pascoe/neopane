@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "tab.new",
+    "{\"argv\": [\"sh\", \"-c\", \"printf \\\"\\\\033[?1004h\\\"; exec cat -v\"], \"focus\": false, \"space\": \"spnope\"}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "no space \"spnope\""
+  },
+  "stderr": ""
+}
