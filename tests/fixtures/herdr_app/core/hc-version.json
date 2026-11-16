@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "hc",
+    "--version"
+  ],
+  "exit": 0,
+  "stdout": "hc 0.1.21\n",
+  "stderr": ""
+}

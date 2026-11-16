@@ -31,6 +31,7 @@ neither with a `size`.
 | File | What |
 | --- | --- |
 | `hello.jsonl` | `hello`: generation, features, methods, version. |
+| `server.status.jsonl` | `server.status`: the core's `version`, `pid`, uptime, holder and terminal counts. |
 | `nested-doc.get.jsonl` | `doc.get {name: "herdr-app"}` of one space with the nested tab. |
 | `nested-terminal.get.jsonl` | `terminal.get` of `t1`, `t2`, `t3` in the nested tab: 39×52, 39×24, 39×24. |
 | `nested-terminal.list.jsonl` | `terminal.list` at the same moment: the same three records. |
@@ -53,7 +54,9 @@ neither with a `size`.
 | `focus-report-terminal.read.jsonl` | `terminal.read` of two panes running `printf '\e[?1004h'; cat -v`, before and after `herdr-app do pane.focus`: `^[[I` in the focused one, `^[[O` in the other. |
 | `after-core-restart.jsonl` | After `hc server stop` (the app restarts the core at once): a keep-off terminal finished with `reason: server_stop`; keep-on ones are fresh login shells; `doc.get` without the keep-off block. |
 
-`hc-schema.json` is `hc schema` (OpenRPC):
+`hc-version.json` is `hc --version` (`hc 0.1.21`), kept in the same
+`{argv, exit, stdout, stderr}` shape as the `app/` files, with `stdout` the
+plain text. `hc-schema.json` is `hc schema` (OpenRPC):
 every method with its params, result and errors.
 
 ## `app/*.json`: `herdr-app` replies
@@ -68,6 +71,7 @@ One run each: `{"argv", "exit", "stdout", "stderr"}`, `stdout` parsed as JSON
 | `status-zoomed.json` | `status` with `t2` zoomed: the same shape; the zoom is not in it. |
 | `ls.json` | `ls` with the nested tab: spaces → tabs → terminals with their pane ids. |
 | `commands.json` | `commands`: every command, its arguments, what it does. |
+| `version.json` | `--version`: plain text, `herdr-app 0.1.16`, kept as a string in `stdout`. |
 | `do-space.new.json` | `space.new`: `{space, tab, terminal}`. |
 | `do-pane.split.json`, `do-pane.split-down.json` | `pane.split` right and down with `argv`: `{pane, terminal}`. |
 | `do-pane.split-zoomed.json` | `pane.split` into a zoomed tab (it unzooms). |
