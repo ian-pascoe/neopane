@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::Instant;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::providers::builtin::Given;
 use crate::providers::command::on_path;
@@ -55,6 +55,32 @@ impl std::fmt::Display for Ran {
 impl From<Ran> for String {
     fn from(ran: Ran) -> String {
         ran.to_string()
+    }
+}
+
+/// How the app's refusal of a command it doesn't know starts:
+/// `unknown command "no.such": see …`.
+const UNKNOWN_COMMAND: &str = "unknown command \"";
+
+/// What follows the command in the app's refusal of an argument it doesn't
+/// know: `pane.split: unknown argument(s): bogus; valid arguments: …`.
+const UNKNOWN_ARGUMENT: &str = ": unknown argument(s): ";
+
+impl Ran {
+    /// What the app lacks, where it refused a command or an argument it
+    /// doesn't know: `herdr-app has no tab.new`, `herdr-app's pane.split
+    /// takes no bogus`.
+    pub(super) fn lacking(&self) -> Option<String> {
+        let Ran::Refused(why) = self else {
+            return None;
+        };
+        if let Some(rest) = why.strip_prefix(UNKNOWN_COMMAND) {
+            let command = rest.split('"').next().unwrap_or_default();
+            return Some(format!("herdr-app has no {command}"));
+        }
+        let (command, rest) = why.split_once(UNKNOWN_ARGUMENT)?;
+        let arguments = rest.split(';').next().unwrap_or_default();
+        Some(format!("herdr-app's {command} takes no {arguments}"))
     }
 }
 
@@ -138,10 +164,30 @@ impl Window {
         }
     }
 
-    /// `herdr-app do COMMAND ARGS`, a window act, its arguments one JSON
-    /// object: its answer, killed at `due`.
-    pub(super) fn act(&self, command: &str, args: &Value, due: Instant) -> Result<Value, Ran> {
-        self.run(&["do", command, &args.to_string()], due)
+    /// `herdr-app do COMMAND PARAMS`, a window act: its one JSON object.
+    pub(super) fn act(&self, command: &str, params: &Value, due: Instant) -> Result<Value, Ran> {
+        self.run(&["do", command, &params.to_string()], due)
+    }
+
+    /// `pane.split` of pane `pane`, the new pane on side `direction`
+    /// (`right` or `down`), running `argv` with no shell: the new pane's
+    /// terminal. It takes the tab's focus, without showing the tab.
+    pub(super) fn split(
+        &self,
+        pane: &str,
+        direction: &str,
+        argv: &[String],
+        due: Instant,
+    ) -> Result<String, Ran> {
+        let params = json!({ "direction": direction, "pane": pane, "argv": argv });
+        let made = self.act("pane.split", &params, due)?;
+        made["terminal"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .ok_or_else(|| {
+                Ran::Unreadable("herdr-app pane.split's answer names no terminal".into())
+            })
     }
 
     /// `herdr-app status`: the window answers, with what it shows.
@@ -240,6 +286,10 @@ mod tests {
             panic!("{refused:?}")
         };
         assert!(why.starts_with("unknown command \"no.such\""), "{why}");
+        assert_eq!(
+            refused.lacking().as_deref(),
+            Some("herdr-app has no no.such")
+        );
         let other = w.run(&["ls"], soon()).unwrap_err();
         assert_eq!(
             other,
@@ -265,6 +315,25 @@ mod tests {
             app.asked(),
             [r#"do pane.swap {"pane":"p4c","direction":"up"}"#]
         );
+    }
+
+    #[test]
+    fn an_unknown_argument_is_lacked_naming_it_and_other_refusals_arent() {
+        let app = FakeApp::new(&[
+            recorded_run("err-unknown-argument"),
+            recorded_run("err-unknown-pane"),
+        ]);
+        let w = Window::faked(&app.program());
+        let split = recorded_run("err-unknown-argument").args;
+        let refused = w.run(&split, soon()).unwrap_err();
+        assert_eq!(
+            refused.lacking().as_deref(),
+            Some("herdr-app's pane.split takes no bogus")
+        );
+        let pane = recorded_run("err-unknown-pane").args;
+        let refused = w.run(&pane, soon()).unwrap_err();
+        assert!(matches!(refused, Ran::Refused(_)), "{refused:?}");
+        assert_eq!(refused.lacking(), None);
     }
 
     #[test]

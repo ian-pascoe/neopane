@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::client::{Herdr, text};
-use super::panes::{attach_words, input};
 use crate::providers::builtin::Given;
 
 /// What `open_tab_page` has, of its 5 s.
@@ -21,8 +20,8 @@ const OPEN_TIME: Duration = Duration::from_millis(4000);
 
 /// The new tab's pane, or why there's none.
 pub(super) fn open_tab_page(given: &Given) -> Result<String, String> {
-    let origin = input(given, "origin")?;
-    let words = attach_words(given)?;
+    let origin = given.text("origin")?;
+    let words = given.attach_strings("herdr")?;
     let herdr = Herdr::of(given, OPEN_TIME)?;
     let pane = herdr.call("pane.get", json!({ "pane_id": origin }))?;
     let workspace = text(&pane["pane"], "workspace_id")?;

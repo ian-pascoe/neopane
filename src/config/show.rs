@@ -225,6 +225,8 @@ mod tests {
                  \"find\" }},\n  \
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"open_beside\" }},\n  \
+                   open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"open_tab_page\" }},\n  \
                    context_vars = {{ \"HC_TERMINAL_SOCKET\", \"HERDR_APP_HOME\" }},\n  \
                    find_vars = {{ \"HC_TERMINAL_ID\" }},\n\
                  }}\n"

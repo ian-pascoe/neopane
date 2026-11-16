@@ -516,10 +516,12 @@ required: a method the core lacks is named, with both versions, and
 `neopane provider check` shows both. Each window gets a Herdr app pane of
 its own, split beside the one it was opened from and running the attach
 with no shell, the hc core's keep off so it closes for good
-([ADR 0020](docs/adr/0020-the-herdr-apps-pane-provider-reads-the-hc-cores-socket-and-changes-the-window-through-herdr-app.md));
-focus, sizes and tab pages come next. `neopane provider show
-herdr-app` prints its table, which `neopane.builtin.herdr_app()` returns
-for your config to change ([docs/config.md](docs/config.md#herdr-app)).
+([ADR 0020](docs/adr/0020-the-herdr-apps-pane-provider-reads-the-hc-cores-socket-and-changes-the-window-through-herdr-app.md)),
+and each Neovim tab page after the first a Herdr app tab of its own, in the
+same space, without showing it. Focus and sizes come next. `neopane provider
+show herdr-app` prints its table, which `neopane.builtin.herdr_app()`
+returns for your config to change
+([docs/config.md](docs/config.md#herdr-app)).
 
 ### Your own
 

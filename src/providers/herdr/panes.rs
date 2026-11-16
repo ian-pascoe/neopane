@@ -43,10 +43,10 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
 /// `open_beside`, its requests having `time`, and a cleanup after a
 /// failure `cleanup` more.
 fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Result<String, String> {
-    let origin = input(given, "origin")?;
+    let origin = given.text("origin")?;
     let side = Side::of(given)?;
     let ratio = ratio(given)?;
-    let words = attach_words(given)?;
+    let words = given.attach_strings("herdr")?;
     let label = given
         .var("title")
         .filter(|t| !t.is_empty())
@@ -275,7 +275,7 @@ fn root_ratio(layout: &Value) -> Option<f64> {
 
 /// Kills the pane, or says why it's still there.
 pub(super) fn close(given: &Given) -> Result<(), String> {
-    let pane = input(given, "terminal")?;
+    let pane = given.text("terminal")?;
     let herdr = Herdr::of(given, CLOSE_TIME)?;
     match herdr.call("pane.close", json!({ "pane_id": pane })) {
         Ok(_) => Ok(()),
@@ -313,14 +313,6 @@ impl Side {
     }
 }
 
-/// Input `name`, which must be set, as text.
-pub(super) fn input(given: &Given, name: &str) -> Result<String, String> {
-    let shown = name.to_ascii_uppercase();
-    let value = given.var(name).filter(|v| !v.is_empty());
-    let value = value.ok_or_else(|| format!("{shown} isn't set"))?;
-    String::from_utf8(value).map_err(|_| format!("{shown} isn't UTF-8"))
-}
-
 /// `RATIO`, the terminal's share, between 0 and 1; 0.5 if unset.
 pub(super) fn ratio(given: &Given) -> Result<f64, String> {
     let Some(ratio) = given.var("ratio").filter(|r| !r.is_empty()) else {
@@ -332,19 +324,6 @@ pub(super) fn ratio(given: &Given) -> Result<f64, String> {
         .ok()
         .filter(|r| *r > 0.0 && *r < 1.0)
         .ok_or_else(|| format!("RATIO {shown:?} isn't between 0 and 1"))
-}
-
-/// The attach command's words, from `ATTACH`, as UTF-8: herdr's JSON
-/// can't carry other bytes.
-pub(super) fn attach_words(given: &Given) -> Result<Vec<String>, String> {
-    given
-        .attach_words()?
-        .into_iter()
-        .map(|w| {
-            w.into_string()
-                .map_err(|_| "the attach command isn't UTF-8, which herdr can't run".into())
-        })
-        .collect()
 }
 
 #[cfg(test)]

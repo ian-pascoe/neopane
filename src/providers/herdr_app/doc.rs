@@ -37,6 +37,24 @@ pub(super) fn pane_of(doc: &Value, terminal: &str) -> Result<String, String> {
     }
 }
 
+/// The ids of the spaces holding a block of `doc` showing terminal
+/// `terminal`, one for each block, in the doc's order.
+pub(super) fn spaces_of(doc: &Value, terminal: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for space in doc["spaces"].as_array().into_iter().flatten() {
+        for tab in space["tabs"].as_array().into_iter().flatten() {
+            walk(&tab["root"], &mut |node| {
+                if node["content"]["terminal"] == terminal
+                    && let Some(id) = space["id"].as_str()
+                {
+                    found.push(id.to_string());
+                }
+            });
+        }
+    }
+    found
+}
+
 /// Calls `f` on every block under `node`, `node` too.
 fn walk(node: &Value, f: &mut impl FnMut(&Value)) {
     if node["type"] == "block" {

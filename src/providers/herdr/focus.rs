@@ -14,7 +14,6 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::client::{Herdr, UNREADABLE};
-use super::panes::input;
 use crate::providers::builtin::Given;
 
 /// What `focus` and `focus_direction` have, of their 2 s.
@@ -22,7 +21,7 @@ const FOCUS_TIME: Duration = Duration::from_millis(1500);
 
 /// Focuses the terminal, or says why not.
 pub(super) fn focus(given: &Given) -> Result<(), String> {
-    let pane = input(given, "terminal")?;
+    let pane = given.text("terminal")?;
     let herdr = Herdr::of(given, FOCUS_TIME)?;
     herdr.call("pane.focus", json!({ "pane_id": pane }))?;
     Ok(())

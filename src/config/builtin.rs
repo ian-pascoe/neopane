@@ -95,9 +95,12 @@ impl BuiltinTable {
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
             ],
-            BuiltinTable::HerdrApp => {
-                &[Capability::Find, Capability::Close, Capability::OpenBeside]
-            }
+            BuiltinTable::HerdrApp => &[
+                Capability::Find,
+                Capability::Close,
+                Capability::OpenBeside,
+                Capability::OpenTabPage,
+            ],
         }
     }
 
@@ -318,6 +321,10 @@ mod tests {
                 (
                     "open_beside",
                     "{exe} provider builtin herdr-app open_beside".to_string()
+                ),
+                (
+                    "open_tab_page",
+                    "{exe} provider builtin herdr-app open_tab_page".to_string()
                 ),
             ]
         );
