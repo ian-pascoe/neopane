@@ -2,12 +2,17 @@
 # shellcheck shell=bash
 PS1='\[\e[36m\]neopane\[\e[0m\] \[\e[35m\]$\[\e[0m\] '
 export BASH_SILENCE_DEPRECATION_WARNING=1
-# session.sh moved XDG_CONFIG_HOME for herdr alone
-case "${DEMO_XDG_CONFIG_HOME-}" in
-"") ;;
-unset) unset XDG_CONFIG_HOME DEMO_XDG_CONFIG_HOME ;;
-*) export XDG_CONFIG_HOME="$DEMO_XDG_CONFIG_HOME" && unset DEMO_XDG_CONFIG_HOME ;;
-esac
+# session.sh moved XDG_CONFIG_HOME and XDG_STATE_HOME for herdr alone
+for demo_var in XDG_CONFIG_HOME XDG_STATE_HOME; do
+  demo_saved="DEMO_$demo_var"
+  case "${!demo_saved-}" in
+  "") ;;
+  unset) unset "$demo_var" ;;
+  *) export "$demo_var=${!demo_saved}" ;;
+  esac
+  unset "$demo_saved"
+done
+unset demo_var demo_saved
 
 # A daemon started here keeps its clipboard in memory (clipboard.vim). The
 # tape still types plain `neopane FILE`; command words pass straight on.

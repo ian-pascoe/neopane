@@ -3,7 +3,8 @@
 # The `# caption:`, `# keys:`, `# focus:`, `# highlight:` and `# speed:`
 # comments drive both cuts, at the times this tape's timing gives them
 # (tape.py): so the shown part uses Sleep, never Wait. Rectangles are
-# fractions of the recording: X Y W H.
+# fractions of the recording: X Y W H, here just outside herdr's own pane
+# borders, below its tab bar and right of its collapsed sidebar.
 
 Require herdr
 Set Shell "bash"
@@ -46,8 +47,11 @@ Type ":vsplit src/name.rs"
 Sleep 300ms
 Enter
 # speed: 1.4
-# highlight: 0.5 0 0.5 0.97
-Sleep 2.5s
+# herdr opens a pane in a tab of its own, then moves it (ADR 0017): the
+# outline waits for it
+Sleep 1s
+# highlight: 0.515 0.052 0.477 0.922
+Sleep 2s
 
 # caption: `:split` too
 # speed: 2
@@ -55,21 +59,22 @@ Type ":split README.md"
 Sleep 300ms
 Enter
 # speed: 1.4
-# highlight: 0.5 0.47 0.5 0.5
-Sleep 2.5s
+Sleep 1s
+# highlight: 0.515 0.539 0.477 0.435
+Sleep 2s
 
 # caption: herdr's own keys move Neovim's focus
 # keys: Ctrl-b h
 Ctrl+B
 Type "h"
-# highlight: 0 0 0.5 0.97
+# highlight: 0.036 0.052 0.477 0.922
 Sleep 2s
 
 # caption: Pickers float over their own pane
 # keys: Space Space
 Space
 Space
-# highlight: 0 0 0.5 0.97
+# highlight: 0.036 0.052 0.477 0.922
 Sleep 1.5s
 # speed: 1.5
 Type "pane_view"
@@ -99,7 +104,7 @@ Sleep 1.5s
 # keys: Ctrl-b -
 Ctrl+B
 Type "-"
-# highlight: 0 0.48 0.5 0.49
+# highlight: 0.036 0.539 0.477 0.435
 Sleep 1.5s
 
 # caption: …and `neopane attach` makes it Neovim's
