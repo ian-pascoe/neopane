@@ -15,6 +15,8 @@ core id is `0123456789abcdef0123456789abcdef`, the machine name `host`, the
 user name `user`. Ids (`sp…` space, `tb…` tab, `s…` split, `p…` pane) are the
 app's own; terminal addresses are the core's (`t1`…`t9`, then `t1a`, `t1b`:
 treat them as opaque strings).
+"Space" and "tab" are the Herdr app's words, not GLOSSARY's **herdr
+workspace** and **herdr tab** (the herdr multiplexer's).
 
 ## `core/*.jsonl`: JSON-RPC exchanges with the core
 
@@ -32,7 +34,7 @@ file by answering each `send` with the `recv` lines that follow it, up to the
 next `send`, with the reply's `id` set to the request's own `id`: echo the
 ids the client sends, don't count them from 1.
 
-The **nested tab** is `[t1 | (t2 / t3)]` (the design's `[t1 | (t9 / t10)]`):
+The **nested tab** is `[t1 | (t2 / t3)]` (SPI-1213's design names it `[t1 | (t9 / t10)]`):
 a row holding `t1` (weight 0.5) and a column (weight 0.5) of `t2` over `t3`,
 neither with a `size`, as `nested-doc.get` reads it. A `layout.resize` test
 afterwards left `t2` with `size: {weight: 1.0}` (`t3` still none, so the same

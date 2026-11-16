@@ -8,6 +8,10 @@ The first round (hc 0.1.17) is in SPI-1213's "Facts found"; where 0.1.21
 differs, it says so. The recorded replies are in
 `tests/fixtures/herdr_app/`, named in brackets below.
 
+Terms: "space", "tab", "pane" and "split" here are the Herdr app's own words
+(its `herdr-app ls` and doc), not GLOSSARY's **herdr workspace** and
+**herdr tab**, which are the herdr terminal multiplexer's.
+
 ## Sandbox
 
 1. Read the install script, then install hc into a scratch folder:
@@ -77,7 +81,7 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   inside one.
 - `tab.new {argv, focus: false, space}` answers `{space, tab, terminal}` (no
   pane id) in ~30 ms and keeps the shown tab [`app/do-tab.new`].
-- **Changed since 0.1.17: `tab.new` and `terminal.open {place: "tab"}` run
+- **Changed since hc 0.1.17 (SPI-1213): `tab.new` and `terminal.open {place: "tab"}` run
   `argv` through the login shell and keep a shell after it:** the terminal's
   argv is `[$SHELL, -lic, "\"$@\"; exec \"$0\" -li", $SHELL, …argv]`. When the
   program exits, the tab stays, now holding an interactive login shell
@@ -108,13 +112,13 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   process, 20 sequential calls): `pane.go` median 9.2 ms, max 10.9 ms, all 20
   in 191 ms; `pane.focus` median 16.2 ms, max 28.5 ms, 331 ms; `status` median
   8.5 ms; `ls` median 8.6 ms. 20 × `pane.go` fits 2 s ten times over, and no
-  call came near 75 ms, so `focus_direction` can be COUNT × `pane.go`. (0.1.17
+  call came near 75 ms, so `focus_direction` can be COUNT × `pane.go`. (SPI-1213, on hc 0.1.17,
   measured ~23–27 ms per call.)
 
 ### The core's `doc.get herdr-app` and the tree shapes
 
 - spaces → tabs → `root` (`row`/`column`) → `block {id, content: {terminal},
-  size?}` [`core/nested-doc.get`]. Unchanged from 0.1.17.
+  size?}` [`core/nested-doc.get`]. Unchanged from SPI-1213 (hc 0.1.17).
 - Where `size` goes after a split, found by splitting in a second tab and
   reading the doc after each [`core/shapes-doc.get`]:
   - Splitting **along** the parent's axis halves the origin's weight between
@@ -151,9 +155,9 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   column gave 38 and 10 rows (outer 42:14); weights 0.5:1.5 gave 17 and 60
   cols (outer 22:65). Cells alone undercount a split by one pane's chrome per
   extra pane along its axis (`t2` + `t3` rows = 48, `t1` = 52; `t8` + `t9`
-  cols = 12, `t7` = 17), so "about one cell off" in the design is about 4 rows
+  cols = 12, `t7` = 17), so "about one cell off" in SPI-1213's design is about 4 rows
   or 5 columns off per pane. The chrome is in pixels, so its size in cells
-  changes with font size and zoom. (0.1.17's 38 / 17 / 17 fits the same
+  changes with font size and zoom. (SPI-1213's 38 / 17 / 17, on hc 0.1.17, fits the same
   4 rows.)
 - A terminal in a tab never shown is **120×40** (the core's default; the
   `created` event even says 200 cols first), whatever the window: a split in
@@ -168,7 +172,7 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   82×52); the others keep their unzoomed sizes, shown tab or not
   [`core/zoomed-doc-and-list`]. Neither the doc nor `status` shows the zoom;
   `$HERDR_APP_HOME/view.json` does, `tabs.<tab>.zoomed: "<pane>"`, written at
-  once (0.1.17 took up to ~3 s). `view.json` also keeps each tab's `focused`
+  once (SPI-1213, on hc 0.1.17, saw up to ~3 s). `view.json` also keeps each tab's `focused`
   pane and `before`, its earlier focused panes.
 - `pane.split` into a zoomed tab unzooms it and focuses the new pane
   [`app/do-pane.split-zoomed`].
@@ -216,7 +220,7 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
 - After `hc server stop`, a keep-off terminal finishes with
   `reason: server_stop` and its block leaves the doc; keep-on terminals come
   back as fresh login shells in place of their programs
-  [`core/after-core-restart`]. Unchanged from 0.1.17. New: a running app
+  [`core/after-core-restart`]. Unchanged from SPI-1213 (hc 0.1.17). New: a running app
   starts its core again within a second (its `hc connect` relaunches it), so
   the core is only down for good once the app has quit.
 
