@@ -23,26 +23,20 @@
 //! No sizing yet: the split halves the origin's room. Prints the new
 //! terminal's address.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
 use super::core::Core;
-use super::doc::{pane_of, panes_of};
-use super::window::{Ran, Window};
-use super::{Failure, input, methods, needs, versions};
+use super::doc::pane_of;
+use super::{
+    BLOCK_TIME, CLEANUP_TIME, Failure, block_of, cleanup_kill, methods, needs, refused, window_of,
+};
 use crate::config::Capability;
 use crate::providers::builtin::Given;
 
 /// What `open_beside` has, of its 5 s, for opening.
 const OPEN_TIME: Duration = Duration::from_millis(4000);
-/// What it has after a failure, for killing what it made.
-const CLEANUP_TIME: Duration = Duration::from_millis(500);
-/// The most it waits for the doc to show a new terminal's block.
-const BLOCK_TIME: Duration = Duration::from_millis(1000);
-/// How often it reads the doc meanwhile.
-const BLOCK_POLL: Duration = Duration::from_millis(50);
-
 /// `open_beside`: the new terminal's address, or why there's none.
 pub(super) fn open_beside(given: &Given) -> Result<String, Failure> {
     open_beside_within(given, OPEN_TIME, CLEANUP_TIME, BLOCK_TIME)
@@ -57,11 +51,11 @@ fn open_beside_within(
     cleanup: Duration,
     block: Duration,
 ) -> Result<String, Failure> {
-    let origin = input(given, "origin")?;
+    let origin = given.text("origin")?;
     let side = Side::of(given)?;
-    let argv = attach_words(given)?;
+    let argv = given.attach_strings("herdr-app")?;
     // found first: no herdr-app costs no request of the core
-    let window = Window::of(given).map_err(Failure::Unsupported)?;
+    let window = window_of(given)?;
     let mut core = Core::of(given, time)?;
     needs(
         &core,
@@ -70,16 +64,10 @@ fn open_beside_within(
     )?;
     let due = core.due();
 
-    let origin_pane = pane_of(&core.doc().map_err(String::from)?, &origin)?;
-    let split = json!({ "direction": side.split, "pane": origin_pane, "argv": argv });
-    let split = window
-        .act("pane.split", &split, due)
-        .map_err(|ran| window_failure(&core, &window, "pane.split", ran))?;
-    let terminal = split["terminal"]
-        .as_str()
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| "herdr-app pane.split's answer names no terminal".to_string())?
-        .to_string();
+    let origin_pane = pane_of(&core.doc()?, &origin)?;
+    let terminal = window
+        .split(&origin_pane, side.split, &argv, due)
+        .map_err(|ran| refused(ran, &core, &window))?;
     if let Err(e) = core.keep(&terminal, false) {
         eprintln!(
             "herdr-app open_beside: can't turn the hc core's keep off for {terminal}: {}",
@@ -88,9 +76,11 @@ fn open_beside_within(
     }
     let pane = match block_of(&mut core, &terminal, block) {
         Ok(pane) => pane,
-        Err(why) => {
-            kill(&core, &terminal, cleanup);
-            return Err(why.into());
+        Err(failure) => {
+            if let Err(why) = cleanup_kill(&core, &terminal, cleanup) {
+                eprintln!("herdr-app open_beside: can't kill {terminal}: {why}");
+            }
+            return Err(failure);
         }
     };
     if let Some(toward) = side.swap {
@@ -100,53 +90,6 @@ fn open_beside_within(
         }
     }
     Ok(terminal)
-}
-
-/// The pane of new terminal `terminal`, once the doc shows it, within
-/// `block` and the core's time; or why not. A doc without it is read
-/// again, as the app may write it after answering the split; one showing
-/// it in several blocks is no better later.
-fn block_of(core: &mut Core, terminal: &str, block: Duration) -> Result<String, String> {
-    let until = core.due().min(Instant::now() + block);
-    loop {
-        let doc = core.doc()?;
-        if !panes_of(&doc, terminal).is_empty() || Instant::now() + BLOCK_POLL >= until {
-            return pane_of(&doc, terminal);
-        }
-        std::thread::sleep(BLOCK_POLL);
-    }
-}
-
-/// Kills terminal `terminal`, on a connection of its own having `time`,
-/// saying on stderr if it can't.
-fn kill(core: &Core, terminal: &str, time: Duration) {
-    let killed = core
-        .again(time)
-        .and_then(|mut c| c.kill(terminal).map(|_| ()).map_err(|refused| refused.why));
-    if let Err(why) = killed {
-        eprintln!("herdr-app open_beside: can't kill {terminal}: {why}");
-    }
-}
-
-/// Why window act `command` failed: unsupported where `herdr-app` lacks
-/// it, or an argument of it, naming both versions; else failed.
-fn window_failure(core: &Core, window: &Window, command: &str, ran: Ran) -> Failure {
-    // the app's unknown command names only what to read; its unknown
-    // argument names the argument and the valid ones, worth keeping
-    let lacks = match &ran {
-        Ran::Refused(why) if why.starts_with("unknown command") => {
-            Some(format!("herdr-app has no {command}"))
-        }
-        Ran::Refused(why) if why.contains("unknown argument") => Some(ran.to_string()),
-        _ => None,
-    };
-    match lacks {
-        Some(why) => Failure::Unsupported(format!(
-            "{why} ({})",
-            versions(&core.hello().version, || Ok(window.clone()), core.due())
-        )),
-        None => Failure::Failed(ran.to_string()),
-    }
 }
 
 /// Where a new pane goes, from `DIRECTION`: the app splits only right or
@@ -178,25 +121,15 @@ impl Side {
     }
 }
 
-/// The attach command's words, from `ATTACH`, as UTF-8: JSON can't carry
-/// other bytes.
-fn attach_words(given: &Given) -> Result<Vec<String>, String> {
-    given
-        .attach_words()?
-        .into_iter()
-        .map(|w| {
-            w.into_string()
-                .map_err(|_| "the attach command isn't UTF-8, which herdr-app can't run".into())
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use serde_json::json;
 
     use super::super::fake::{
-        Exchange, FakeApp, FakeCore, Run, given, recorded, recorded_one, recorded_run,
+        Exchange, FakeApp, FakeCore, Run, given, keep_off, kill_of, recorded, recorded_one,
+        recorded_run,
     };
     use super::*;
 
@@ -225,22 +158,6 @@ mod tests {
     fn split_down() -> Run {
         let args = format!(r#"{{"direction":"down","pane":"{P2}","argv":{ARGV}}}"#);
         answering("do-pane.split-down", "pane.split", &args)
-    }
-
-    /// The core's `terminal.keep {keep: false}` of `terminal`, answered.
-    fn keep_off(terminal: &str) -> Exchange {
-        let mut keep = recorded_one("terminal.keep", "terminal.keep");
-        keep.params = json!({ "terminal": terminal, "keep": false });
-        keep.result_mut()["address"] = json!(terminal);
-        keep
-    }
-
-    /// `terminal.kill` of `terminal`, answered.
-    fn kill_of(terminal: &str) -> Exchange {
-        let mut kill = recorded_one("terminal.kill", "terminal.kill");
-        kill.params = json!({ "terminal": terminal });
-        kill.result_mut()["address"] = json!(terminal);
-        kill
     }
 
     /// The nested tab's doc, `from` shown as `to`.
@@ -538,12 +455,7 @@ mod tests {
             .replace("bogus", "argv");
         for (run, why) in [
             (unknown, "herdr-app has no pane.split".to_string()),
-            (
-                no_argv,
-                "herdr-app: pane.split: unknown argument(s): argv; valid arguments: direction, \
-                 pane, argv, mod, props"
-                    .to_string(),
-            ),
+            (no_argv, "herdr-app's pane.split takes no argv".to_string()),
         ] {
             let core = core();
             let app = FakeApp::new(&[run, recorded_run("version")]);

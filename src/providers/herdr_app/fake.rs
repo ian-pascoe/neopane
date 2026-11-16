@@ -97,6 +97,23 @@ pub(super) fn recorded_one(name: &str, method: &str) -> Exchange {
         .unwrap_or_else(|| panic!("no {method} in {name}"))
 }
 
+/// `terminal.kill` of `terminal`, answering its record, finished.
+pub(super) fn kill_of(terminal: &str) -> Exchange {
+    let mut kill = recorded_one("terminal.kill", "terminal.kill");
+    kill.params = json!({ "terminal": terminal });
+    kill.result_mut()["address"] = json!(terminal);
+    kill
+}
+
+/// The core's `terminal.keep {keep: false}` of `terminal`, answering its
+/// record.
+pub(super) fn keep_off(terminal: &str) -> Exchange {
+    let mut keep = recorded_one("terminal.keep", "terminal.keep");
+    keep.params = json!({ "terminal": terminal, "keep": false });
+    keep.result_mut()["address"] = json!(terminal);
+    keep
+}
+
 /// A fake hc core, removed as it drops.
 pub(super) struct FakeCore {
     dir: PathBuf,

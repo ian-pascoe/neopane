@@ -152,16 +152,6 @@ impl Core {
         self.due
     }
 
-    /// Gives its requests at least `time` from now, past the deadline they
-    /// had: for undoing what a capability made, once it failed.
-    pub(super) fn extend(&mut self, time: Duration) {
-        let due = Instant::now() + time;
-        if due > self.due {
-            self.time = time;
-            self.due = due;
-        }
-    }
-
     /// What its `hello` said.
     pub(super) fn hello(&self) -> &Hello {
         &self.hello

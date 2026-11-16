@@ -13,27 +13,21 @@
 //! killed after a failure, with time of its own. A shell kill or keep that
 //! fails is only warned of: after the failure's own words, if it fails.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
 use super::core::Core;
-use super::doc::{panes_of, spaces_of};
-use super::{Failure, kill, methods, needs, refused, window_of};
+use super::doc::spaces_of;
+use super::{
+    BLOCK_TIME, CLEANUP_TIME, Failure, block_of, cleanup_kill, kill, methods, needs, refused,
+    window_of,
+};
 use crate::config::Capability;
 use crate::providers::builtin::Given;
 
 /// What `open_tab_page` has: its 5 s timeout less 1 s for the daemon.
 const OPEN_TIME: Duration = Duration::from_millis(4000);
-
-/// What it has after a failure, for killing what it made.
-const CLEANUP_TIME: Duration = Duration::from_millis(500);
-
-/// The most a block is waited for in the doc.
-const BLOCK_TIME: Duration = Duration::from_millis(1000);
-
-/// Between two reads of the doc, waiting for a block.
-const BLOCK_POLL: Duration = Duration::from_millis(25);
 
 /// Where the attach is split from the new tab's shell: anywhere, as the
 /// shell is killed, leaving the attach alone.
@@ -93,27 +87,27 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
         .map_err(|ran| refused(ran, &core, &window))?;
     let shell = made["terminal"]
         .as_str()
-        .ok_or_else(|| format!("herdr-app do tab.new answered {made}, no terminal"))?
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "herdr-app tab.new's answer names no terminal".to_string())?
         .to_string();
     let mut warnings = Vec::new();
-    let undo = |core: &mut Core, terminal: &str, failure: Failure, warnings: &[String]| {
-        core.extend(times.cleanup);
+    let undo = |core: &Core, terminal: &str, failure: Failure, warnings: &[String]| {
         let mut notes = Vec::new();
-        if let Err(r) = kill(core, terminal) {
-            notes.push(format!("{terminal} is left: {}", r.why));
+        if let Err(why) = cleanup_kill(core, terminal, times.cleanup) {
+            notes.push(format!("{terminal} is left: {why}"));
         }
         notes.extend_from_slice(warnings);
         noted(failure, &notes)
     };
-    let shell_pane = match pane_of(&mut core, &shell, times.block) {
+    let shell_pane = match block_of(&mut core, &shell, times.block) {
         Ok(pane) => pane,
-        Err(failure) => return Err(undo(&mut core, &shell, failure, &warnings)),
+        Err(failure) => return Err(undo(&core, &shell, failure, &warnings)),
     };
     let terminal = match window.split(&shell_pane, SPLIT_SIDE, &argv, due) {
         Ok(terminal) => terminal,
         Err(ran) => {
             let failure = refused(ran, &core, &window);
-            return Err(undo(&mut core, &shell, failure, &warnings));
+            return Err(undo(&core, &shell, failure, &warnings));
         }
     };
     if let Err(r) = kill(&mut core, &shell) {
@@ -128,27 +122,9 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
             r.why
         ));
     }
-    match pane_of(&mut core, &terminal, times.block) {
+    match block_of(&mut core, &terminal, times.block) {
         Ok(_) => Ok(Opened { terminal, warnings }),
-        Err(failure) => Err(undo(&mut core, &terminal, failure, &warnings)),
-    }
-}
-
-/// The one Herdr app pane showing `terminal`, waited for in the doc for
-/// `wait` at most, within the core's time; or why there's none.
-fn pane_of(core: &mut Core, terminal: &str, wait: Duration) -> Result<String, Failure> {
-    let until = core.due().min(Instant::now() + wait);
-    loop {
-        match panes_of(&core.doc()?, terminal).as_slice() {
-            [one] => return Ok(one.clone()),
-            [] if Instant::now() + BLOCK_POLL < until => std::thread::sleep(BLOCK_POLL),
-            [] => return Err(format!("{terminal} has no Herdr app pane").into()),
-            several => {
-                return Err(
-                    format!("{terminal} shows in {} Herdr app panes", several.len()).into(),
-                );
-            }
-        }
+        Err(failure) => Err(undo(&core, &terminal, failure, &warnings)),
     }
 }
 
@@ -163,9 +139,13 @@ fn noted(failure: Failure, notes: &[String]) -> Failure {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use serde_json::{Value, json};
 
-    use super::super::fake::{Exchange, FakeApp, FakeCore, Run, given, recorded_one, recorded_run};
+    use super::super::fake::{
+        Exchange, FakeApp, FakeCore, Run, given, keep_off, kill_of, recorded_one, recorded_run,
+    };
     use super::*;
 
     /// What a test's open has: well over [`OPEN_TIME`] and
@@ -213,27 +193,11 @@ mod tests {
         doc
     }
 
-    /// `terminal.kill` of `t`, answering its record finished.
-    fn kill(t: &str) -> Exchange {
-        let mut kill = recorded_one("terminal.kill", "terminal.kill");
-        kill.params = json!({ "terminal": t });
-        kill.result_mut()["address"] = json!(t);
-        kill
-    }
-
     /// `terminal.kill` of `t`, answering `not_found`.
     fn kill_not_found(t: &str) -> Exchange {
         let mut kill = recorded_one("terminal.kill-not-found", "terminal.kill");
         kill.params = json!({ "terminal": t });
         kill
-    }
-
-    /// The core's `terminal.keep {keep: false}` of `t`.
-    fn keep_off(t: &str) -> Exchange {
-        let mut keep = recorded_one("terminal.keep", "terminal.keep");
-        keep.params = json!({ "terminal": t, "keep": false });
-        keep.result_mut()["address"] = json!(t);
-        keep
     }
 
     /// A core whose doc reads `docs` in turn, the last again after, that
@@ -242,7 +206,7 @@ mod tests {
     fn core(docs: Vec<Exchange>, kills: &[&str], keeps: &[&str]) -> FakeCore {
         let mut exchanges = vec![recorded_one("hello", "hello")];
         exchanges.extend(docs);
-        exchanges.extend(kills.iter().map(|t| kill(t)));
+        exchanges.extend(kills.iter().map(|t| kill_of(t)));
         exchanges.extend(keeps.iter().map(|t| keep_off(t)));
         FakeCore::serve(exchanges)
     }
@@ -393,7 +357,7 @@ mod tests {
         let mut c = Core::connect(&core.path(), Duration::from_secs(5)).unwrap();
         let started = Instant::now();
         assert_eq!(
-            pane_of(&mut c, "t5", NEVER),
+            block_of(&mut c, "t5", NEVER),
             Err(Failure::Failed("t5 has no Herdr app pane".into()))
         );
         assert!(started.elapsed() < NEVER + Duration::from_millis(500));

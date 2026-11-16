@@ -7,7 +7,8 @@
 //! the only map from a terminal to its Herdr app pane.
 //!
 //! - `core.rs`: the hc core's JSON-RPC socket: `hello`, `terminal.get`,
-//!   `terminal.kill`, `terminal.keep {keep: false}`, `doc.get herdr-app`.
+//!   `terminal.kill`, the core's `terminal.keep`, `doc.get herdr-app`; a
+//!   connection of its own for a cleanup.
 //! - `window.rs`: the `herdr-app` command, for the window: found on `PATH`,
 //!   else at `~/.local/bin/herdr-app`.
 //! - `doc.rs`: the blocks of the core's doc, by terminal.
@@ -45,6 +46,7 @@ pub(crate) use proof::inside;
 use std::time::{Duration, Instant};
 
 use self::core::Core;
+use self::doc::{pane_of, panes_of};
 use self::window::{Ran, Window};
 use super::builtin::{DONE, FAILED, Given, UNSUPPORTED, print_line};
 use crate::config::Capability;
@@ -103,7 +105,7 @@ fn close(given: &Given) -> Result<(), Failure> {
 
 /// `close`, its requests, and a version for a message, having `time`.
 fn close_within(given: &Given, time: Duration) -> Result<(), Failure> {
-    let terminal = input(given, "terminal")?;
+    let terminal = given.text("terminal")?;
     let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Close), || Window::of(given))?;
     kill(&mut core, &terminal).map_err(Failure::from)
@@ -129,12 +131,36 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
     }
 }
 
-/// Input `name`, which must be set, as text.
-fn input(given: &Given, name: &str) -> Result<String, String> {
-    let shown = name.to_ascii_uppercase();
-    let value = given.var(name).filter(|v| !v.is_empty());
-    let value = value.ok_or_else(|| format!("{shown} isn't set"))?;
-    String::from_utf8(value).map_err(|_| format!("{shown} isn't UTF-8"))
+/// What an open has after a failure, for killing what it made.
+const CLEANUP_TIME: Duration = Duration::from_millis(500);
+
+/// Kills terminal `terminal`, which an open made, on a connection of its
+/// own to `core` having `time`: the open's may have run out. Done for one
+/// finished or not found.
+fn cleanup_kill(core: &Core, terminal: &str, time: Duration) -> Result<(), String> {
+    let mut again = core.again(time)?;
+    kill(&mut again, terminal).map_err(String::from)
+}
+
+/// The most an open waits for the doc to show a new terminal's block.
+const BLOCK_TIME: Duration = Duration::from_millis(1000);
+
+/// How often it reads the doc meanwhile.
+const BLOCK_POLL: Duration = Duration::from_millis(25);
+
+/// The pane of new terminal `terminal`, once the doc shows it, within
+/// `wait` and the core's time; or why not. A doc without it is read
+/// again, as the app may write it after answering; one showing it in
+/// several blocks is no better later.
+fn block_of(core: &mut Core, terminal: &str, wait: Duration) -> Result<String, Failure> {
+    let until = core.due().min(Instant::now() + wait);
+    loop {
+        let doc = core.doc()?;
+        if !panes_of(&doc, terminal).is_empty() || Instant::now() + BLOCK_POLL >= until {
+            return Ok(pane_of(&doc, terminal)?);
+        }
+        std::thread::sleep(BLOCK_POLL);
+    }
 }
 
 /// Whether `core` has `methods` in the generation the built-in speaks,

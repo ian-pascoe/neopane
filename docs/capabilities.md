@@ -613,9 +613,8 @@ pane's focus report has the daemon run.
 
 `<name>.builtin.herdr_app()`, its table named `herdr-app` (ADRs 0019 and
 0020): `find`, `close`, `open_beside` and `open_tab_page`, for now, on the
-hc core whose socket
-`HC_TERMINAL_SOCKET` names and the Herdr app window under `HERDR_APP_HOME`
-(else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
+hc core whose socket `HC_TERMINAL_SOCKET` names and the Herdr app window
+under `HERDR_APP_HOME` (else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
 `HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
 home are the reach, a Herdr app space no boundary. Terminal ids are hc
 terminal addresses, such as `t7`, opaque strings; the core's `doc.get
@@ -670,7 +669,7 @@ pane, a block of the doc.
   panes it opens, and a failure warns on stderr. (`herdr-app do
   terminal.keep {terminal, place}` is another thing, never called.) The
   doc must then show the new terminal in one block, read again every
-  50 ms for up to a second while it shows in none; else it kills the
+  25 ms for up to a second while it shows in none; else it kills the
   terminal, on a connection of its own with 0.5 s, and exits 1. For
   `left` and `up`, `herdr-app do pane.swap {pane, direction}` swaps the
   new pane with the origin's, the focus staying with it; a failure warns,
@@ -700,8 +699,8 @@ pane, a block of the doc.
   The shown tab and focused pane stay as they were; the new tab's focused
   pane is the attach. If no block of the doc shows the shell or the attach
   within 1 s, it is killed and the open exits 1; a split that fails kills
-  the shell and exits 1. Killing what it made has 0.5 s more after the 4 s
-  run out. If the shell's kill fails, the tab keeps a login shell and won't
+  the shell and exits 1. Killing what it made has 0.5 s more, on a
+  connection of its own. If the shell's kill fails, the tab keeps a login shell and won't
   close when the attach ends; that, and a keep that fails, is only said on
   stderr, after the failure if the open fails. A command or argument
   `herdr-app` doesn't know exits 69, naming it and both versions, as does

@@ -52,14 +52,17 @@ terminal to its Herdr app pane.
   a core of another generation, exits 69 naming it and both versions; `find`
   refuses instead, as exit 69 would accept the terminal. For `find` and
   `close`, no `herdr-app` is no exit 69 either: `find` refuses, naming both
-  places it looked, and `close` needs only the core. `provider check` prints
-  both versions.
+  places it looked, and `close` needs only the core. The opens act on the
+  window, so for them no `herdr-app` exits 69 (ADR 0020 for
+  `open_beside`). `provider check` prints both versions.
 - `close` is `terminal.kill`, done for a terminal finished or not found.
 - `open_tab_page` is a bare `tab.new {focus: false}` in the origin's space,
   `pane.split` of the attach into it, `terminal.kill` of the tab's shell,
   and the core's `terminal.keep {keep: false}` of the attach: `tab.new`
   with an `argv` would keep a login shell after the attach. It needs the
   app, so no `herdr-app`, or a command or argument it doesn't know, exits
-  69, naming it and both versions.
+  69, naming it and both versions. As `open_beside` does (ADR 0020), it
+  waits up to a second for the attach's block in the doc, and after a
+  failure kills what it made with 0.5 s more, on a connection of its own.
 - The GLOSSARY's herdr section is the multiplexer's; the app's terms (hc
   core, hc terminal, Herdr app pane, tab, space and window) are their own.

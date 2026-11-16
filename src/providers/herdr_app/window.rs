@@ -181,11 +181,13 @@ impl Window {
     ) -> Result<String, Ran> {
         let params = json!({ "direction": direction, "pane": pane, "argv": argv });
         let made = self.act("pane.split", &params, due)?;
-        made["terminal"].as_str().map(String::from).ok_or_else(|| {
-            Ran::Unreadable(format!(
-                "herdr-app do pane.split answered {made}, no terminal"
-            ))
-        })
+        made["terminal"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .ok_or_else(|| {
+                Ran::Unreadable("herdr-app pane.split's answer names no terminal".into())
+            })
     }
 
     /// `herdr-app status`: the window answers, with what it shows.
