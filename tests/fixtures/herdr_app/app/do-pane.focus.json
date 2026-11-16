@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.focus",
+    "{\"pane\": \"p7b3398d57b6dd529d0f978c04b35c687\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "ok": true
+  },
+  "stderr": ""
+}

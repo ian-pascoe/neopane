@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.split",
+    "{\"direction\": \"right\", \"bogus\": 1}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "pane.split: unknown argument(s): bogus; valid arguments: direction, pane, argv, mod, props"
+  },
+  "stderr": ""
+}

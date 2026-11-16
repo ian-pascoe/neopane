@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "herdr-app",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": {
+    "zoom": 1.0,
+    "font_size": 14.0,
+    "ui_font_size": 13.0,
+    "space": "sp22637f42bbefeecf910ee187a961334c",
+    "tab": "tb14c28a7769ba1044103fd9584cc818f0",
+    "focused_pane": "p7b3398d57b6dd529d0f978c04b35c687",
+    "layout": "main",
+    "agent": null,
+    "floats": {},
+    "overlays": [],
+    "errors": []
+  },
+  "stderr": ""
+}

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.split",
+    "{\"direction\": \"right\", \"pane\": 5}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "pane.split: argument pane must be a string (or null to omit it)"
+  },
+  "stderr": ""
+}

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "layout.resize",
+    "{\"id\": \"pnope\", \"weight\": 1}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "no node \"pnope\""
+  },
+  "stderr": ""
+}

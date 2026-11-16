@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "space.new",
+    "{\"name\": \"spike\", \"folder\": \"/tmp/spi1214\", \"focus\": true}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "space": "sp22637f42bbefeecf910ee187a961334c",
+    "tab": "tb14c28a7769ba1044103fd9584cc818f0",
+    "terminal": "t1"
+  },
+  "stderr": ""
+}

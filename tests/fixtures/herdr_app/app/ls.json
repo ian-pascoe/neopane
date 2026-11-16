@@ -1,0 +1,54 @@
+{
+  "argv": [
+    "herdr-app",
+    "ls"
+  ],
+  "exit": 0,
+  "stdout": {
+    "spaces": [
+      {
+        "id": "sp22637f42bbefeecf910ee187a961334c",
+        "name": "spike",
+        "folder": "/tmp/spi1214",
+        "machine": null,
+        "active": true,
+        "tabs": [
+          {
+            "id": "tb14c28a7769ba1044103fd9584cc818f0",
+            "name": "1",
+            "active": true,
+            "settled": false,
+            "terminals": [
+              {
+                "terminal": "t1",
+                "pane": "pf7e3d563947903ed7a8c93ee0ac58181",
+                "status": null,
+                "app": null,
+                "name": null,
+                "sub_agents": []
+              },
+              {
+                "terminal": "t2",
+                "pane": "p7b3398d57b6dd529d0f978c04b35c687",
+                "status": null,
+                "app": null,
+                "name": null,
+                "sub_agents": []
+              },
+              {
+                "terminal": "t3",
+                "pane": "p4c229a9b57964c201d7ab577ccf4a2ea",
+                "status": null,
+                "app": null,
+                "name": null,
+                "sub_agents": []
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "recent": []
+  },
+  "stderr": ""
+}

@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.split",
+    "{\"direction\": \"right\", \"pane\": \"pf7e3d563947903ed7a8c93ee0ac58181\", \"argv\": [\"sh\", \"-c\", \"printf \\\"\\\\033[?1004h\\\"; exec cat -v\"]}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "pane": "p7b3398d57b6dd529d0f978c04b35c687",
+    "terminal": "t2"
+  },
+  "stderr": ""
+}

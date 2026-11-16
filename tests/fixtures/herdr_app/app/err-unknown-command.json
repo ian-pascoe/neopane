@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "no.such",
+    "{}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "unknown command \"no.such\": see `herdr-app commands`; a mod's are <mod>.<command> and need the mod loaded"
+  },
+  "stderr": ""
+}

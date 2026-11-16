@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.go",
+    "{\"direction\": \"right\"}"
+  ],
+  "exit": 0,
+  "stdout": {
+    "ok": true
+  },
+  "stderr": ""
+}

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.go",
+    "{\"direction\": \"diagonal\"}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "pane.go direction is left, right, up or down, not \"diagonal\""
+  },
+  "stderr": ""
+}

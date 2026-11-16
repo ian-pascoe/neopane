@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.split",
+    "{\"direction\": \"sideways\"}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "pane.split direction is \"right\" or \"down\", not Some(\"sideways\")"
+  },
+  "stderr": ""
+}

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "herdr-app",
+    "do",
+    "pane.focus",
+    "{\"pane\": \"pnope\"}"
+  ],
+  "exit": 1,
+  "stdout": {
+    "error": "no such pane"
+  },
+  "stderr": ""
+}
