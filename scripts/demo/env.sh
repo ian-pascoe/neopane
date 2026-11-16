@@ -8,3 +8,7 @@ demo_tmux_socket=neopane-demo
 # zellij finds a session by its socket directory, which must stay short
 demo_zellij_sockets=/tmp/neopane-demo-zs
 demo_zellij_session=neopane-demo
+# herdr's server, by its socket, and its config home: herdr's defaults,
+# not yours, and its session state kept out of your ~/.config/herdr
+demo_herdr_socket=/tmp/neopane-demo-h.sock
+demo_herdr_config="$demo_tmpdir/herdr-config"
