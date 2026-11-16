@@ -7,8 +7,8 @@
 //! the only map from a terminal to its Herdr app pane.
 //!
 //! - `core.rs`: the hc core's JSON-RPC socket: `hello`, `terminal.get`,
-//!   `terminal.kill`, the core's `terminal.keep`, `doc.get herdr-app`; a
-//!   connection of its own for a cleanup.
+//!   `terminal.list`, `terminal.kill`, the core's `terminal.keep`, `doc.get
+//!   herdr-app`; a connection of its own for a cleanup.
 //! - `window.rs`: the `herdr-app` command, for the window: found on `PATH`,
 //!   else at `~/.local/bin/herdr-app`.
 //! - `doc.rs`: the blocks of the core's doc, by terminal.
@@ -22,6 +22,10 @@
 //!   and up.
 //! - `open_tab_page` (`tab_page.rs`): a bare `tab.new` in `ORIGIN`'s space,
 //!   the attach split into it, its shell killed.
+//! - `report_layout` (`layout.rs`): an area per tab, rects from the doc's
+//!   weights, insets the pane chrome, focus from `herdr-app status`.
+//! - `focus` and `focus_direction` (`focus.rs`): `pane.focus` of the
+//!   terminal's pane; `COUNT` times `pane.go`.
 //! - `check.rs`, no capability: what `provider check`'s herdr-app section
 //!   shows: both versions, and whether the core and window answer.
 //!
@@ -37,6 +41,8 @@ mod core;
 mod doc;
 #[cfg(test)]
 mod fake;
+mod focus;
+mod layout;
 mod proof;
 mod tab_page;
 mod window;
@@ -82,6 +88,9 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Close => close(given).map(|()| None),
         Capability::OpenBeside => beside::open_beside(given).map(Some),
         Capability::OpenTabPage => tab_page::open_tab_page(given).map(Some),
+        Capability::ReportLayout => layout::report_layout(given).map(Some),
+        Capability::Focus => focus::focus(given).map(|()| None),
+        Capability::FocusDirection => focus::focus_direction(given).map(|()| None),
         _ => return UNSUPPORTED,
     };
     let (why, code) = match done {
@@ -127,6 +136,8 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
         Capability::Close => &["terminal.kill"],
         Capability::OpenBeside => &["doc.get", "terminal.keep", "terminal.kill"],
         Capability::OpenTabPage => &["doc.get", "terminal.kill", "terminal.keep"],
+        Capability::ReportLayout => &["doc.get", "terminal.list"],
+        Capability::Focus => &["doc.get"],
         _ => &[],
     }
 }
@@ -197,6 +208,19 @@ fn refused(ran: Ran, core: &Core, window: &Window) -> Failure {
 /// unsupported, naming where it looked.
 fn window_of(given: &Given) -> Result<Window, Failure> {
     Window::of(given).map_err(Failure::Unsupported)
+}
+
+/// Window act `command` with `args`, by the core's deadline: the app's
+/// answer, or why not, as [`refused`] tells it.
+fn act(
+    window: &Window,
+    core: &Core,
+    command: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
+    window
+        .act(command, args, core.due())
+        .map_err(|ran| refused(ran, core, window))
 }
 
 /// Both versions, for a message: `hc core 0.1.21, herdr-app 0.1.16`; the

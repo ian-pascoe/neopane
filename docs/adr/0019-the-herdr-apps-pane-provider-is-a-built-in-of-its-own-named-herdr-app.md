@@ -52,9 +52,11 @@ terminal to its Herdr app pane.
   a core of another generation, exits 69 naming it and both versions; `find`
   refuses instead, as exit 69 would accept the terminal. For `find` and
   `close`, no `herdr-app` is no exit 69 either: `find` refuses, naming both
-  places it looked, and `close` needs only the core. The opens act on the
-  window, so for them no `herdr-app` exits 69 (ADR 0020 for
-  `open_beside`). `provider check` prints both versions.
+  places it looked, and `close` needs only the core. The opens, `focus`
+  and `focus_direction` act on the window, so for them no `herdr-app`
+  exits 69 (ADR 0020 for `open_beside`), as does a command or argument it
+  doesn't know; `report_layout` reports without a focus.
+  `provider check` prints both versions.
 - `close` is `terminal.kill`, done for a terminal finished or not found.
 - `open_tab_page` is a bare `tab.new {focus: false}` in the origin's space,
   `pane.split` of the attach into it, `terminal.kill` of the tab's shell,

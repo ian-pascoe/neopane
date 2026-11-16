@@ -20,7 +20,7 @@ use serde_json::json;
 use super::core::Core;
 use super::doc::spaces_of;
 use super::{
-    BLOCK_TIME, CLEANUP_TIME, Failure, block_of, cleanup_kill, kill, methods, needs, refused,
+    BLOCK_TIME, CLEANUP_TIME, Failure, act, block_of, cleanup_kill, kill, methods, needs, refused,
     window_of,
 };
 use crate::config::Capability;
@@ -82,9 +82,12 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
             return Err(format!("{origin} shows in {} Herdr app panes", several.len()).into());
         }
     };
-    let made = window
-        .act("tab.new", &json!({ "focus": false, "space": space }), due)
-        .map_err(|ran| refused(ran, &core, &window))?;
+    let made = act(
+        &window,
+        &core,
+        "tab.new",
+        &json!({ "focus": false, "space": space }),
+    )?;
     let shell = made["terminal"]
         .as_str()
         .filter(|t| !t.is_empty())

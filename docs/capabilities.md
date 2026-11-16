@@ -612,9 +612,10 @@ pane's focus report has the daemon run.
 ### Herdr app
 
 `<name>.builtin.herdr_app()`, its table named `herdr-app` (ADRs 0019 and
-0020): `find`, `close`, `open_beside` and `open_tab_page`, for now, on the
-hc core whose socket `HC_TERMINAL_SOCKET` names and the Herdr app window
-under `HERDR_APP_HOME` (else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
+0020): `find`, `close`, `open_beside`, `open_tab_page`, `report_layout`,
+`focus` and `focus_direction`, for now, on the hc core whose socket
+`HC_TERMINAL_SOCKET` names and the Herdr app window under `HERDR_APP_HOME`
+(else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
 `HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
 home are the reach, a Herdr app space no boundary. Terminal ids are hc
 terminal addresses, such as `t7`, opaque strings; the core's `doc.get
@@ -634,13 +635,16 @@ pane, a block of the doc.
   answering one JSON object, found on `PATH`, else at
   `~/.local/bin/herdr-app`, where an installed Herdr.app keeps it; else
   none, `no herdr-app on PATH, nor at /Users/me/.local/bin/herdr-app`,
-  which `find` refuses with and `open_beside` exits 69 with. `close` never
-  runs it but for a version. With no window under its home, `herdr-app`
-  exits 2, saying so on stderr. A window act is `herdr-app do COMMAND
-  JSON`. Only `open_beside`'s `pane.split` the app lacks, or its `argv`,
-  exits 69, as a method the core lacks does: `herdr-app has no pane.split
-  (hc core 0.1.21, herdr-app 0.1.16)`; a `pane.swap` it lacks only
-  warns.
+  which `find` refuses with and `open_beside`, `open_tab_page`, `focus`
+  and `focus_direction` exit 69 with; `report_layout` reports without a
+  focus.
+  `close` never runs it but for a version. With no window under its home,
+  `herdr-app` exits 2, saying so on stderr. A window act is `herdr-app do
+  COMMAND JSON`. A command a capability acts with that the app lacks, or an
+  argument of it, exits 69, as a method the core lacks does: `herdr-app
+  has no pane.split (hc core 0.1.21, herdr-app 0.1.16)`, `herdr-app's
+  pane.split takes no argv (…)`; only a `pane.swap` `open_beside` lacks
+  warns instead.
 
 - `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
   terminal of this machine: a remote space's, `machine/t7`, is refused.
@@ -706,6 +710,63 @@ pane, a block of the doc.
   `herdr-app` doesn't know exits 69, naming it and both versions, as does
   no `herdr-app`, naming where it looked. Prints the attach's terminal. It
   has 4 s.
+- `report_layout`: `doc.get` and `terminal.list`, then `herdr-app
+  status`. A Herdr app tab is a layout area: an area per tab of every
+  space, its id the tab's (`tb…`). Each rect is the pane's outer share of
+  its tab, from the doc's weights alone (a node with no `size` weighs 1),
+  as the weights share the panes' outer extent, chrome included. A mod's
+  pane is a foreign pane, by its pane id (`p…`). Each inset is the pane
+  chrome in cells, the same for every pane: the measured, 5 columns and 4
+  rows at font size 14 and zoom 1, scaled by `status`'s `font_size` alone
+  (taken as 14 outside 4 to 200), unless the shown tab's cells tell
+  another more than a cell away: the window's `zoom` and `ui_font_size`
+  are left to them. They tell it on each axis by least squares, a pane's cells
+  plus the chrome being its share of the tab's outer extent, from the live
+  terminals with cells along it, when their shares differ by a quarter or
+  more; a solve outside 0 to twice the measured is taken for cells it
+  can't use, as a zoomed pane's. A hidden tab's cells are never read: they
+  may be stale, or the 120x40 of a tab never shown. The app doesn't say
+  where in the chrome the content starts: the inset splits it evenly, the
+  odd cell right and top, `[2, 2, 3, 2]` at font size 14. So the area,
+  cells plus inset over share, is the same from every pane of a tab within
+  rounding: the app rounds each pane to whole cells, which may put it
+  about 1 ÷ its share cells off.
+  - A node sized in pixels takes room its siblings' weights don't share:
+    their rects, and those of every pane under them, are approximate, and
+    their cells tell no chrome. A terminal under such a node, its room
+    unknown in shares, is in a layout area of its own, its id the pane's,
+    at `[0, 0, 1, 1]` with no inset.
+  - So is a terminal two blocks of the doc show, counted over every block
+    as `focus` counts them, its area's id its first block's pane id. Its
+    blocks are foreign panes by their pane ids, but for one sized in
+    pixels, which is none.
+  - A tab whose tree can't be read, such as one with a node of a type it
+    doesn't know, is left out, said on stderr (`herdr-app report_layout:
+    tab tb… left out: unknown node type "stack"`); each terminal whose
+    block there can still be read, by its pane id, is in an area of its
+    own as above. A doc without spaces or tabs, or a tab without an id,
+    fails the report.
+  - `focus` is what status's `focused_pane` shows: its terminal, or its
+    pane id for a mod. With no window answering, there's none, said on
+    stderr.
+  - No zoom: neither the doc nor `status` shows it, so a zoomed tab is
+    reported unzoomed, and Neovim's screen is the whole tab's while one
+    pane fills it.
+- `focus`: the window has one focus, its focused pane. `pane.focus` of the
+  terminal's one pane, which shows its tab; a terminal no block shows, or
+  two, exits 1. Needs `doc.get`.
+- `focus_direction`: `pane.go`, `COUNT` times, about 9 ms each, after the
+  core's `hello`, so a core of another generation exits 69. It goes to the
+  neighbour on that side focused most recently, not the nearest, and at
+  the tab's edge moves nowhere, done.
+
+No `events`, for now: the core sends no focus event. `pane.focus`,
+`pane.go` and a tab's selection send the panes' programs focus reports,
+and a pane's focus report has the daemon run `report_layout`, so a focus
+move made with the app's own keys is learned at that report. Whether a
+mouse click between panes sends focus reports is unchecked; if it
+doesn't, a click is learned only at the next report something else has
+the daemon run.
 
 ## Placeholders
 
