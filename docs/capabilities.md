@@ -717,9 +717,10 @@ pane, a block of the doc.
   as the weights share the panes' outer extent, chrome included. A mod's
   pane is a foreign pane, by its pane id (`p…`). Each inset is the pane
   chrome in cells, the same for every pane: the measured, 5 columns and 4
-  rows at font size 14, scaled to `status`'s `font_size` (taken as 14
-  outside 4 to 200), unless the shown tab's cells tell another more than a
-  cell away. They tell it on each axis by least squares, a pane's cells
+  rows at font size 14 and zoom 1, scaled by `status`'s `font_size` alone
+  (taken as 14 outside 4 to 200), unless the shown tab's cells tell
+  another more than a cell away: the window's `zoom` and `ui_font_size`
+  are left to them. They tell it on each axis by least squares, a pane's cells
   plus the chrome being its share of the tab's outer extent, from the live
   terminals with cells along it, when their shares differ by a quarter or
   more; a solve outside 0 to twice the measured is taken for cells it
@@ -734,12 +735,17 @@ pane, a block of the doc.
     their rects, and those of every pane under them, are approximate, and
     their cells tell no chrome. A terminal under such a node, its room
     unknown in shares, is in a layout area of its own, its id the pane's,
-    at `[0, 0, 1, 1]`, as is a terminal two blocks show, whose blocks are
-    then foreign panes by their pane ids.
+    at `[0, 0, 1, 1]` with no inset.
+  - So is a terminal two blocks of the doc show, counted over every block
+    as `focus` counts them, its area's id its first block's pane id. Its
+    blocks are foreign panes by their pane ids, but for one sized in
+    pixels, which is none.
   - A tab whose tree can't be read, such as one with a node of a type it
     doesn't know, is left out, said on stderr (`herdr-app report_layout:
-    tab tb… left out: unknown node type "stack"`); a doc without spaces or
-    tabs, or a tab without an id, fails the report.
+    tab tb… left out: unknown node type "stack"`); each terminal whose
+    block there can still be read, by its pane id, is in an area of its
+    own as above. A doc without spaces or tabs, or a tab without an id,
+    fails the report.
   - `focus` is what status's `focused_pane` shows: its terminal, or its
     pane id for a mod. With no window answering, there's none, said on
     stderr.
@@ -757,9 +763,10 @@ pane, a block of the doc.
 No `events`, for now: the core sends no focus event. `pane.focus`,
 `pane.go` and a tab's selection send the panes' programs focus reports,
 and a pane's focus report has the daemon run `report_layout`, so a focus
-move made with the app's own keys is learned at that report. Whether a mouse click between panes
-sends focus reports is unchecked; if it doesn't, a click is learned only
-at the next report something else has the daemon run.
+move made with the app's own keys is learned at that report. Whether a
+mouse click between panes sends focus reports is unchecked; if it
+doesn't, a click is learned only at the next report something else has
+the daemon run.
 
 ## Placeholders
 

@@ -74,9 +74,6 @@ fn focus_direction_within(given: &Given, time: Duration) -> Result<(), Failure> 
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::super::Failure;
     use super::super::fake::{
         FakeApp, FakeCore, Run, given, recorded_do, recorded_one, recorded_run,
     };
@@ -272,7 +269,7 @@ mod tests {
     #[test]
     fn focus_direction_on_a_core_of_another_generation_is_unsupported_moving_nothing() {
         let mut hello = recorded_one("hello", "hello");
-        hello.result_mut()["generation"] = serde_json::json!(2);
+        hello.result_mut()["generation"] = json!(2);
         let core = FakeCore::serve(vec![hello]);
         let app = FakeApp::new(&[recorded_run("version"), recorded_do("do-pane.go")]);
         let given = given(&core, &app, &[("DIRECTION", "right"), ("COUNT", "1")]);

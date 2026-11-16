@@ -86,7 +86,10 @@ the current window, and the daemon gives it back when it should.
   naming both places it looked. `find` refuses without `herdr-app`, so
   that happens only if it went after the choice: 69 stops a doomed ask
   until the next choice. This narrows ADR 0019, which refused without
-  `herdr-app` only in `find`. A `pane.swap` the app lacks only warns.
+  `herdr-app` only in `find`; `focus` and `focus_direction`, which act
+  only through the window, exit 69 without it, and on a `pane.focus` or
+  `pane.go` the app lacks, the same way (SPI-1217). `report_layout`
+  reports without a focus instead. A `pane.swap` the app lacks only warns.
 - The new pane halves the origin's room until `resize` sets weights
   (SPI-1218).
 - A split in a never-shown tab gives both panes the core's 120×40 until
