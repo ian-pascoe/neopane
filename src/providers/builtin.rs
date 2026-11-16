@@ -173,6 +173,21 @@ impl Given {
             .filter(|&n: &u32| n >= 1)
             .ok_or_else(|| format!("{} isn't a count of cells", name.to_ascii_uppercase()))
     }
+
+    /// `RATIO`, a share strictly between 0 and 1, if set; or why it isn't
+    /// one.
+    pub(crate) fn ratio(&self) -> Result<Option<f64>, String> {
+        let Some(ratio) = self.var("ratio").filter(|r| !r.is_empty()) else {
+            return Ok(None);
+        };
+        let shown = String::from_utf8_lossy(&ratio);
+        shown
+            .parse::<f64>()
+            .ok()
+            .filter(|r| *r > 0.0 && *r < 1.0)
+            .map(Some)
+            .ok_or_else(|| format!("RATIO {shown:?} isn't between 0 and 1"))
+    }
 }
 
 /// The words of `line`, as `<NAME>_ATTACH` has them: each bare, or in
@@ -252,6 +267,24 @@ mod tests {
                 var(none).cells("x"),
                 Err("X isn't a count of cells".into()),
                 "{none}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ratio_is_strictly_between_0_and_1_if_set() {
+        let ratio = |v: &'static str| {
+            let name = format!("{}_RATIO", upper());
+            Given::from(move |k: &str| (k == name).then(|| v.as_bytes().to_vec())).ratio()
+        };
+        assert_eq!(ratio(""), Ok(None));
+        assert_eq!(Given::from(|_| None).ratio(), Ok(None));
+        assert_eq!(ratio("0.3333"), Ok(Some(0.3333)));
+        for bad in ["0", "1", "1.5", "-0.2", "NaN", "inf", "abc"] {
+            assert_eq!(
+                ratio(bad),
+                Err(format!("RATIO {bad:?} isn't between 0 and 1")),
+                "{bad}"
             );
         }
     }

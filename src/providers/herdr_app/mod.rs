@@ -19,13 +19,16 @@
 //! - `close`: `terminal.kill`, done for a terminal finished or not found.
 //! - `open_beside` (`beside.rs`, ADR 0020): `pane.split` beside the
 //!   origin's pane, running the attach, keep off, and `pane.swap` for left
-//!   and up.
+//!   and up; then `RATIO` in weights.
 //! - `open_tab_page` (`tab_page.rs`): a bare `tab.new` in `ORIGIN`'s space,
 //!   the attach split into it, its shell killed.
 //! - `report_layout` (`layout.rs`): an area per tab, rects from the doc's
 //!   weights, insets the pane chrome, focus from `herdr-app status`.
 //! - `focus` and `focus_direction` (`focus.rs`): `pane.focus` of the
 //!   terminal's pane; `COUNT` times `pane.go`.
+//! - `resize` (`sizes.rs`): weights on the two children of the lowest
+//!   split holding `TERMINAL` and `ORIGIN`, from cells and the panes'
+//!   chrome, by `layout.resize`.
 //! - `check.rs`, no capability: what `provider check`'s herdr-app section
 //!   shows: both versions, and whether the core and window answer.
 //!
@@ -44,6 +47,7 @@ mod fake;
 mod focus;
 mod layout;
 mod proof;
+mod sizes;
 mod tab_page;
 mod window;
 
@@ -91,6 +95,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::ReportLayout => layout::report_layout(given).map(Some),
         Capability::Focus => focus::focus(given).map(|()| None),
         Capability::FocusDirection => focus::focus_direction(given).map(|()| None),
+        Capability::Resize => sizes::resize(given).map(|()| None),
         _ => return UNSUPPORTED,
     };
     let (why, code) = match done {
@@ -138,6 +143,7 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
         Capability::OpenTabPage => &["doc.get", "terminal.kill", "terminal.keep"],
         Capability::ReportLayout => &["doc.get", "terminal.list"],
         Capability::Focus => &["doc.get"],
+        Capability::Resize => &["doc.get", "terminal.list"],
         _ => &[],
     }
 }

@@ -229,6 +229,8 @@ mod tests {
                  \"herdr-app\", \"focus_direction\" }},\n  \
                    report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \
                  \"herdr-app\", \"report_layout\" }},\n  \
+                   resize = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"resize\" }},\n  \
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"open_beside\" }},\n  \
                    open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \

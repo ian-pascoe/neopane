@@ -36,16 +36,34 @@ the current window, and the daemon gives it back when it should.
   with it. A swap failing only
   warns, leaving the pane right or below. They share 4 s of the open's
   5 s; a kill has 0.5 s more, on a connection of its own.
-- **Sizes are weights, set on pane ids** (decided for SPI-1218's
-  `resize`, not built yet). A block's `size` is a weight relative to its
-  siblings, or pixels; `layout.resize {id, weight}` on the pane ids of the
-  doc sets it, on any node, an unshown tab's too. Weights share a pane's outer extent, chrome included, which
-  the core's cols and rows leave out.
+- **Sizes are weights, set on node ids.** A node's `size` is a weight
+  relative to its siblings, or pixels; `layout.resize {id, weight}` on
+  the ids of the doc sets it, on any node, an unshown tab's too. Weights
+  share a pane's outer extent, chrome included, which the core's cols and
+  rows leave out. So `resize` converts cells to weights: the terminal's
+  part of the lowest split holding it and `ORIGIN` is to have `SIZE`
+  cells and each of its panes' chrome along the split, out of what that
+  part and `ORIGIN`'s have together, measured from the core's cells and
+  the chrome. The pair's ratio is what's set: where they are the split's
+  only two, by one `layout.resize` of the terminal's part; else by both,
+  keeping their sum, so the split's other children keep their room. As
+  herdr's frame does (ADR 0018), the chrome goes to the terminal's part,
+  so `ORIGIN`'s comes short of Neovim's by about a chrome per pane along
+  the split. The chrome in cells is measured, about 5 columns and 4 rows
+  at font size 14 and zoom 1, and scaled by 14 ÷ the window's font size,
+  a scaling never measured; it is pixels the app draws, which neither the
+  doc nor `status` gives. Only the shown tab's cells are trusted, and not
+  while it is zoomed: elsewhere `resize` refuses, setting nothing. A part
+  sized in pixels is refused rather than turned to weights, as the app
+  takes pixels off first. `open_beside` gives the new pane `RATIO` of
+  the weight it and the origin's pane have, chrome ignored, as a split
+  only halves.
 - **No zoom.** The app's zoom is in neither the doc nor `status`, only its
   `view.json`, so it will not be reported (decided for SPI-1217's
-  `report_layout` and SPI-1218's `resize`, not built yet): while a tab is
-  zoomed, Neovim's screen is laid out as if it weren't. A split into a
-  zoomed tab unzooms it, as `open_beside` does today.
+  `report_layout`, not built yet): while a tab is zoomed, Neovim's screen
+  is laid out as if it weren't. `resize` reads `view.json` only to refuse
+  a zoomed tab, whose zoomed pane has the whole tab's cells. A split into
+  a zoomed tab unzooms it, as `open_beside` does.
 - **Two `terminal.keep`s.** The core's `terminal.keep {terminal, keep}` is
   the keep above. `herdr-app do terminal.keep {terminal, place}` is
   unrelated: it gives a running terminal with no pane one, a new tab or
@@ -90,7 +108,14 @@ the current window, and the daemon gives it back when it should.
   only through the window, exit 69 without it, and on a `pane.focus` or
   `pane.go` the app lacks, the same way (SPI-1217). `report_layout`
   reports without a focus instead. A `pane.swap` the app lacks only warns.
-- The new pane halves the origin's room until `resize` sets weights
-  (SPI-1218).
-- A split in a never-shown tab gives both panes the core's 120×40 until
-  the tab is shown: a hidden tab's cols and rows are not to be trusted.
+- The new pane gets `RATIO` of the origin's room in weights, so its
+  cells are off from Neovim's by up to a pane's chrome. A failed sizing
+  only warns: the split's halves stand. `resize` gives the terminal its
+  `SIZE` within rounding and the measured chrome's error, and `ORIGIN`'s
+  part comes short of Neovim's by about a chrome per pane along the
+  split.
+- A hidden tab's cols and rows are not to be trusted: a split in a
+  never-shown tab gives both panes the core's 120×40 until the tab is
+  shown, and one in a hidden tab leaves its panes' sizes stale. So
+  `resize` refuses a tab not shown, or zoomed, and the daemon asks again
+  only once Neovim's sizes change: such a tab keeps the weights it had.

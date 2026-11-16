@@ -666,10 +666,23 @@ Each Neovim window gets a Herdr app pane of its own, split beside the pane
 it came from, running its attach with no shell (ADR 0020). Its limits, for
 now:
 
-- The app splits only right or down, halving the pane split: a window
-  opened on the left or above, as `:vsplit` and `:split` open it, is split
-  right or below, then swapped with the pane it came from. Nothing sets
-  sizes yet, so three windows side by side take a half and two quarters.
+- The app splits only right or down: a window opened on the left or
+  above, as `:vsplit` and `:split` open it, is split right or below, then
+  swapped with the pane it came from, and given its share of the room as
+  a weight.
+- Sizes are the app's weights, which take in each pane's border and
+  header: `resize` turns cells into weights with that chrome as measured
+  at font size 14, scaled by the window's font size (unmeasured at other
+  sizes). The window resized gets its size, give or take a cell; the pane
+  beside it comes short of Neovim's by about that chrome, some 5 columns
+  or 4 rows, for each pane along the split.
+- Only the tab the window shows is resized, and not while it is zoomed:
+  another tab's sizes can't be trusted, and it keeps the weights it had
+  until Neovim's sizes change again.
+- The daemon resizes panes as the live layout reports them, which comes
+  with layout reports, next; and a tab page with a Herdr app tab of its
+  own isn't resized, as the daemon resizes those only through a pane
+  provider that can also move panes (`place_beside`).
 - The new pane takes the window's focus, as the new window does in Neovim.
 - The hc core's keep is turned off for each pane it opens, so a pane whose
   attach was killed closes rather than coming back as a shell, and doesn't
@@ -687,7 +700,7 @@ now:
 - No `events`: a focus move made with the app's own keys reaches Neovim at
   the next layout report, which a focus report the app sends the pane has
   the daemon run. Whether a mouse click sends one is unchecked.
-- `close` kills the hc terminal. Resizing is to come.
+- `close` kills the hc terminal.
 - A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup

@@ -613,9 +613,9 @@ pane's focus report has the daemon run.
 
 `<name>.builtin.herdr_app()`, its table named `herdr-app` (ADRs 0019 and
 0020): `find`, `close`, `open_beside`, `open_tab_page`, `report_layout`,
-`focus` and `focus_direction`, for now, on the hc core whose socket
-`HC_TERMINAL_SOCKET` names and the Herdr app window under `HERDR_APP_HOME`
-(else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
+`focus`, `focus_direction` and `resize`, for now, on the hc core whose
+socket `HC_TERMINAL_SOCKET` names and the Herdr app window under
+`HERDR_APP_HOME` (else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
 `HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
 home are the reach, a Herdr app space no boundary. Terminal ids are hc
 terminal addresses, such as `t7`, opaque strings; the core's `doc.get
@@ -643,8 +643,8 @@ pane, a block of the doc.
   COMMAND JSON`. A command a capability acts with that the app lacks, or an
   argument of it, exits 69, as a method the core lacks does: `herdr-app
   has no pane.split (hc core 0.1.21, herdr-app 0.1.16)`, `herdr-app's
-  pane.split takes no argv (…)`; only a `pane.swap` `open_beside` lacks
-  warns instead.
+  pane.split takes no argv (…)`; only a `pane.swap`, or a `layout.resize`,
+  `open_beside` lacks warns instead.
 
 - `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
   terminal of this machine: a remote space's, `machine/t7`, is refused.
@@ -681,7 +681,11 @@ pane, a block of the doc.
   answer names no terminal exits 1, killing nothing: a pane made all the
   same runs an attach whose pane id the daemon has given up, which is
   refused, or hung up if it had attached, and exits, closing the pane.
-  The requests share 4 s. Needs `doc.get`, `terminal.keep` and
+  Last, with `RATIO`, the new pane gets `RATIO` of the weight it and
+  `ORIGIN`'s pane have together, as `resize` below sets weights, chrome
+  ignored, from the doc that showed its block, read again after a swap;
+  a failure warns, leaving the halves the split made. The requests share
+  4 s. Needs `doc.get`, `terminal.keep` and
   `terminal.kill`. Prints the new terminal's address. An attach command
   not UTF-8 exits 1: JSON can't carry it. A split into a zoomed tab
   unzooms it.
@@ -767,6 +771,31 @@ move made with the app's own keys is learned at that report. Whether a
 mouse click between panes sends focus reports is unchecked; if it
 doesn't, a click is learned only at the next report something else has
 the daemon run.
+- `resize`: `doc.get`, the one block of the terminal and of `ORIGIN`, in
+  one tab, and the lowest split holding both, which must be a `row` for
+  `left` and `right`, a `column` for `up` and `down`; else exit 1. Its two
+  children holding them, the terminal's part and `ORIGIN`'s, get the
+  ratio it sets: in a split of two, by one `layout.resize` of the
+  terminal's part against `ORIGIN`'s; in one of three or more, by one of
+  each, keeping their sum so the split's other children keep their room.
+  Either part sized in pixels exits 1, resizing nothing. Then `herdr-app
+  status` must answer, its `tab` the pair's: the cells of a tab not shown
+  can't be trusted, the core's 120×40 in one never shown and stale in one
+  hidden since a split, and it exits 1, setting nothing; so does a tab
+  zoomed, as `tabs.<tab>.zoomed` in the app's `view.json` under its home
+  says (none there, or no `view.json`, is unzoomed; one that can't be read
+  exits 1), whose zoomed pane has the whole tab's cells. The daemon asks
+  again only once Neovim's sizes change. The terminal's part is to have
+  `SIZE` cells and the chrome of each pane along it, held to leave each
+  part its chrome and a cell, out of the outer extent of the two parts:
+  each pane's cols or rows, from `terminal.list`, and its chrome; a
+  split's sum along it, else its widest child; a pane with no live
+  terminal, as a mod's, counts by the weight of its measured siblings. As
+  herdr's `resize` adds its frame, `ORIGIN`'s part takes what is left, so
+  it comes short of Neovim's by about a chrome for each pane along the
+  split, where Neovim has a one-cell separator. Weights keep six
+  decimals; one already so isn't set again. Needs `doc.get` and
+  `terminal.list`. It has 1.5 s.
 
 ## Placeholders
 
