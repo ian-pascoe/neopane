@@ -205,14 +205,20 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   finished terminal gives `-32602 invalid_params` ("only live terminals can be
   kept"); `not_found` as above [`core/terminal.keep*`].
 - **`terminal.kill` of a pane running `neopane attach`** (a daemon started
-  with `--detach` under a private `NEOPANE_TMPDIR`, attached in a split): the
-  kill answered in 17 ms, the block left the doc within 0.6 s, its sibling
-  took its weight, no toast (`status.overlays` stayed empty, and the window
-  showed none) [`core/terminal.kill-attach`, `app/status-after-kill-attach`,
-  re-recorded in an unshown tab with `doc.get` before and 1 s after the kill],
-  and the daemon logged `the last pane went; asking Neovim about
-  unsaved changes` then `kept, staying unattached`: a hang-up, not an error.
-  The attach itself dies of SIGHUP and logs nothing.
+  with `--detach` under a private `NEOPANE_TMPDIR`, attached in a split), run
+  twice:
+  - First session, the attach's tab shown: the kill answered in 17 ms, the
+    block left the doc within 0.6 s (polled every 0.5 s), its sibling took its
+    weight, no toast (`status.overlays` stayed empty, and `herdr-app shot`
+    showed none). Not kept as a fixture.
+  - Second session, the attach's tab unshown, recorded on one connection
+    [`core/terminal.kill-attach`, `app/status-after-kill-attach`]: `doc.get`
+    with the block, `terminal.kill` (`reason: killed`, `signal: 1`), and
+    `doc.get` 1 s later without it, the sibling at weight 1; `status` right
+    after shows no toast. No timings taken.
+  - Both times the daemon logged `the last pane went; asking Neovim about
+    unsaved changes` then `kept, staying unattached`: a hang-up, not an
+    error. The attach itself dies of SIGHUP and logs nothing.
 - A program that exits nonzero within 2 s of starting shows a toast
   ("Terminal failed to start", "Exit code 3"), listed in `status.overlays`
   for 5–13 s. A terminal killed 0.1 s after `pane.split` shows none: a kill

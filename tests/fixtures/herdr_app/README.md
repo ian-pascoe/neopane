@@ -8,7 +8,8 @@ unit tests. The facts they show, how each was found, and the sandbox recipe:
 Recorded on 2026-11-16 with **hc 0.1.21** (`hc --version`; `hello` answers
 `version: "0.1.21"`, `generation: 1`) and **Herdr app 0.1.16**
 (`herdr-app --version`), macOS arm64, window 1016×1110 pt, font size 14,
-zoom 1. CI pins `HC_VERSION` to 0.1.21 to match. `app/version.json`,
+zoom 1. Nothing pins hc yet: SPI-1220's CI should pin `HC_VERSION` to 0.1.21
+to match these fixtures. `app/version.json`,
 `core/hc-version.json`, `core/server.status.jsonl`,
 `core/terminal.kill-attach.jsonl` and `app/status-after-kill-attach.json` come
 from a second session the same day, in the same sandbox after the app and
@@ -38,7 +39,7 @@ file by answering each `send` with the `recv` lines that follow it, up to the
 next `send`, with the reply's `id` set to the request's own `id`: echo the
 ids the client sends, don't count them from 1.
 
-The **nested tab** is `[t1 | (t2 / t3)]` (SPI-1213's design names it `[t1 | (t9 / t10)]`):
+The **nested tab** is `[t1 | (t2 / t3)]` (the tab SPI-1213's "Facts found" measured pane chrome in, `[t1 | (t9 / t10)]` there):
 a row holding `t1` (weight 0.5) and a column (weight 0.5) of `t2` over `t3`,
 neither with a `size`, as `nested-doc.get` reads it. A `layout.resize` test
 afterwards left `t2` with `size: {weight: 1.0}` (`t3` still none, so the same
