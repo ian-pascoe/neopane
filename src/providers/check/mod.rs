@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use super::choose::{self, ChooseBy, ConfigFile, HINT_NONE};
 use super::command::commands_env;
+use super::herdr_app::{self, check::HerdrAppReport};
 use super::tmux::{self, check::TmuxReport};
 use super::zellij::{self, check::ZellijReport};
 use crate::attach::env_value;
@@ -91,6 +92,8 @@ pub(crate) struct Check {
     pub tmux: Option<TmuxReport>,
     /// For a table whose capabilities run the built-in zellij command.
     pub zellij: Option<ZellijReport>,
+    /// For a table whose capabilities run the built-in herdr-app command.
+    pub herdr_app: Option<HerdrAppReport>,
     /// What `<name>.default` came to, when it chose: what it named and the
     /// `inside` proofs it ran.
     pub default: Option<config::Defaulted>,
@@ -200,6 +203,7 @@ fn gather(o: &Options) -> Check {
         rex: None,
         tmux: None,
         zellij: None,
+        herdr_app: None,
         default: None,
         result: Verdict::None { warning: None },
     };
@@ -237,6 +241,10 @@ fn gather(o: &Options) -> Check {
         let zellij_uses = runs_builtin(&choice, BuiltinTable::Zellij);
         if !zellij_uses.is_empty() {
             check.zellij = Some(zellij::check::probe(&check.attach));
+        }
+        let herdr_app_uses = runs_builtin(&choice, BuiltinTable::HerdrApp);
+        if !herdr_app_uses.is_empty() {
+            check.herdr_app = Some(herdr_app::check::probe(&check.attach, &herdr_app_uses));
         }
         decide(&mut check, &choice, how, o.no_find, tty.as_ref());
     }

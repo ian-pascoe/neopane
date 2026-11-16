@@ -86,6 +86,7 @@
 ---@field tmux fun(): __NAME__.Provider tmux's: a pane per window, in the tmux server the choosing attach runs in
 ---@field herdr fun(): __NAME__.Provider herdr's: a pane per window, in the herdr server the choosing attach's HERDR_SOCKET_PATH names
 ---@field zellij fun(): __NAME__.Provider zellij's: a pane per window, in the zellij session the choosing attach runs in
+---@field herdr_app fun(): __NAME__.Provider The Herdr app's, named "herdr-app": the hc core the choosing attach's HC_TERMINAL_SOCKET names, and the Herdr app window under its HERDR_APP_HOME
 
 ---The config's API, also require("__NAME__").
 ---@class __NAME__
@@ -93,19 +94,21 @@
 ---@field version string The daemon's version
 ---@field config_dir string The absolute directory of the file that ran
 ---@field builtin __NAME__.Builtin Functions that each return a fresh built-in pane provider table. "rex" is only a name.
----@field inside table<string, fun(attach: __NAME__.Attach): boolean, string> Functions telling whether the attach's terminal is directly a multiplexer's own pane, and why: tmux and herdr, asking it within 0.5 s, and zellij, from the process table. They read attach.env, attach.tty and attach.pid, and never raise.
+---@field inside table<string, fun(attach: __NAME__.Attach): boolean, string> Functions telling whether the attach's terminal is directly a multiplexer's own pane, and why: tmux, herdr and herdr_app (the Herdr app's), asking it within 0.5 s, and zellij, from the process table. They read attach.env, attach.tty and attach.pid, and never raise.
 __NAME__ = {}
 
 ---What `provider` returns by default, as the daemon chooses with no config: of
 ---the built-ins the environment names (tmux when TERM_PROGRAM is "tmux" and
 ---TMUX is set and not empty, herdr when TERM_PROGRAM is "herdr" and
 ---HERDR_SOCKET_PATH is set and not empty, zellij when ZELLIJ is set and
----ZELLIJ_PANE_ID is set and not empty, "rex" when REX_SERVER and REX_SESSION
----are both set), the one named, running nothing; naming several, the first
----multiplexer whose __NAME__.inside proves, tmux's, herdr's then zellij's,
----else "rex" if named; else nil. tmux's, herdr's and zellij's are their
----tables, as __NAME__.builtin.tmux(), __NAME__.builtin.herdr() and
----__NAME__.builtin.zellij() return them. Never raises.
+---ZELLIJ_PANE_ID is set and not empty, the Herdr app's when HC_TERMINAL_ID and
+---HC_TERMINAL_SOCKET are set and not empty, "rex" when REX_SERVER and
+---REX_SESSION are both set), the one named, running nothing; naming several,
+---the first multiplexer whose __NAME__.inside proves, tmux's, herdr's,
+---zellij's then herdr_app's, else "rex" if named; else nil. The multiplexers'
+---are their tables, as __NAME__.builtin.tmux(), __NAME__.builtin.herdr(),
+---__NAME__.builtin.zellij() and __NAME__.builtin.herdr_app() return them.
+---Never raises.
 ---@param attach __NAME__.Attach
 ---@return "rex"|__NAME__.Provider|nil
 function __NAME__.default(attach) end

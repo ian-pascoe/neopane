@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use neopane::name::NAME;
 use serde_json::Value;
-use support::{TmuxServer, exe, have_tmux, scratch, text};
+use support::{TmuxServer, exe, have_tmux, scratch, text, without_provider_vars};
 
 /// A config that prints what `<name>.inside.tmux` says, then returns
 /// `<name>.default(attach)`.
@@ -55,7 +55,8 @@ impl Drop for Dir {
 fn check(dir: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let upper = NAME.to_ascii_uppercase();
     let mut c = Command::new(exe());
-    c.args(["provider", "check", "--json"])
+    without_provider_vars(&mut c)
+        .args(["provider", "check", "--json"])
         .args(args)
         .current_dir(dir)
         .env("HOME", dir)
@@ -63,12 +64,6 @@ fn check(dir: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
         .env_remove(&upper)
         .env_remove(format!("{upper}_CONFIG"))
         .env_remove(format!("{upper}_PROVIDER"))
-        .env_remove("REX_SERVER")
-        .env_remove("REX_SESSION")
-        .env_remove("REX_BLOCK")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("TERM_PROGRAM")
         .envs(env.iter().copied())
         .stdin(Stdio::null());
     c

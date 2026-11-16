@@ -366,8 +366,8 @@ A pane provider gives Neovim's windows terminals of their own, and places
 and focuses them: a terminal provider, a layout provider, or both. A daemon
 has at most one at a time, chosen by a self-attach, as `neopane` and
 `neopane attach` are: by your config, or without one, tmux in a tmux pane,
-herdr in a herdr pane, zellij in a zellij pane, Rex in a Rex block and none
-elsewhere.
+herdr in a herdr pane, zellij in a zellij pane, the Herdr app in a Herdr app
+pane, Rex in a Rex block and none elsewhere.
 
 The daemon keeps its pane provider while a terminal in its reach is attached
 or on its way, and drops it otherwise, as when the last of them closes; one
@@ -462,7 +462,9 @@ returns for your config to change ([docs/config.md](docs/config.md#tmux));
 https://github.com/user-attachments/assets/bd96990b-90f0-48c8-8965-c16d99225df4
 
 herdr's pane provider is built in too, as a table whose capabilities run
-neopane itself, speaking herdr's socket API. An attach chooses it when
+neopane itself, speaking herdr's socket API. This is herdr the terminal
+multiplexer; the Herdr desktop app has a pane provider of its own
+([Herdr app](#herdr-app)). An attach chooses it when
 `TERM_PROGRAM` is `herdr` and `HERDR_SOCKET_PATH` is set, as in every herdr
 pane: each window gets a herdr pane of its own beside the one it was opened
 from, in its herdr tab. herdr's split can't run a command, so the pane is
@@ -495,6 +497,27 @@ pane keeps the size zellij gives it. It needs zellij 0.46.0 or newer.
 `neopane provider show zellij` prints its table, which
 `neopane.builtin.zellij()` returns for your config to change
 ([docs/config.md](docs/config.md#zellij)).
+
+### Herdr app
+
+The Herdr desktop app has a pane provider of its own, `herdr-app`, apart
+from herdr's
+([ADR 0019](docs/adr/0019-the-herdr-apps-pane-provider-is-a-built-in-of-its-own-named-herdr-app.md)):
+its panes show terminals an hc core runs, which it reads through the core's
+socket, and it acts on the app's window through the `herdr-app` command
+(on `PATH`, else `~/.local/bin/herdr-app`). An attach chooses it when
+`HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` are set, as in every Herdr app
+pane; never by `TERM_PROGRAM`, which says `ghostty` there. The Herdr app
+checks the choice: the terminal must be the live hc terminal
+`HC_TERMINAL_ID` names, on this terminal's tty, shown in a Herdr app pane
+of a window that answers. Its reach is that hc core and the app's home
+(`HERDR_APP_HOME`); terminals of remote spaces are refused. No version is
+required: a method the core lacks is named, with both versions, and
+`neopane provider check` shows both. For now it only finds the terminal and
+closes terminals, so windows are drawn in the pane they came from, as with
+no pane provider; panes of their own come next. `neopane provider show
+herdr-app` prints its table, which `neopane.builtin.herdr_app()` returns
+for your config to change ([docs/config.md](docs/config.md#herdr-app)).
 
 ### Your own
 

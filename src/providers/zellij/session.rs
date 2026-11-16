@@ -8,12 +8,12 @@
 //! the action.
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::providers::builtin::Given;
+use crate::providers::deadline::{Unfinished, output_by};
 
 /// The oldest zellij the built-in works with: on 0.44 a split beside a
 /// given pane printed an id and opened nothing, and 0.45 is untested.
@@ -183,45 +183,15 @@ impl Session {
 /// Runs `cmd`, `shown` in messages, with stdin `/dev/null`: its status,
 /// stdout and stderr, killed if it hasn't exited by `due`, if given.
 fn exec(
-    mut cmd: Command,
+    cmd: Command,
     shown: &str,
     due: Option<Instant>,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), Ran> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Ran::Failed(format!("can't run zellij: {e}")))?;
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut out);
-            }
-            out
-        })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if due.is_none_or(|due| Instant::now() < due) => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Ran::TimedOut(format!("{shown}: killed, out of time")));
-            }
-        }
-    };
-    Ok((
-        status,
-        stdout.join().unwrap_or_default(),
-        stderr.join().unwrap_or_default(),
-    ))
+    match output_by(cmd, due) {
+        Ok(out) => Ok((out.status, out.stdout, out.stderr)),
+        Err(Unfinished::CantStart(e)) => Err(Ran::Failed(format!("can't run zellij: {e}"))),
+        Err(Unfinished::TimedOut) => Err(Ran::TimedOut(format!("{shown}: killed, out of time"))),
+    }
 }
 
 /// The installed zellij's version, as `zellij --version` prints it after

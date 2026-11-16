@@ -5,13 +5,13 @@
 //! sent somewhere by one that leaked.
 
 use std::ffi::OsStr;
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::is_window_id;
 use crate::providers::builtin::Given;
+use crate::providers::deadline::{Unfinished, output_by};
 
 /// The oldest tmux the built-in works with: `list-panes -a` with
 /// `pane_tty`, `split-window -l` and `-P -F`, and `TERM_PROGRAM` in panes.
@@ -134,50 +134,22 @@ pub(super) fn run_within<S: AsRef<OsStr>>(
     env: &[(Vec<u8>, Vec<u8>)],
     time: Duration,
 ) -> Result<Vec<u8>, Ran> {
-    let mut child = Command::new("tmux")
-        .args(args)
+    let mut cmd = Command::new("tmux");
+    cmd.args(args)
         .env_clear()
         .envs(
             env.iter()
                 .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
         )
-        .env_remove("TMUX_PANE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Ran::CantRun(e.to_string()))?;
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut out);
-            }
-            out
-        })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-    let due = Instant::now() + time;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < due => std::thread::sleep(Duration::from_millis(5)),
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Ran::TimedOut);
-            }
-        }
-    };
-    let (out, err) = (
-        stdout.join().unwrap_or_default(),
-        stderr.join().unwrap_or_default(),
-    );
-    if status.success() {
-        return Ok(out);
+        .env_remove("TMUX_PANE");
+    let out = output_by(cmd, Some(Instant::now() + time)).map_err(|u| match u {
+        Unfinished::CantStart(e) => Ran::CantRun(e.to_string()),
+        Unfinished::TimedOut => Ran::TimedOut,
+    })?;
+    if out.status.success() {
+        return Ok(out.stdout);
     }
-    let err = String::from_utf8_lossy(&err);
+    let err = String::from_utf8_lossy(&out.stderr);
     Err(Ran::Failed(
         err.lines().next().unwrap_or_default().to_string(),
     ))

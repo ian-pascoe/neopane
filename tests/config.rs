@@ -422,6 +422,13 @@ fn provider_raises_or_returns_the_wrong_thing() {
         )
     );
     assert_eq!(
+        error_of(&returning("'herdr-app'")),
+        format!(
+            "provider() returned \"herdr-app\"; the only built-in name is \"rex\" (for \
+             herdr-app's table, return {NAME}.builtin.herdr_app())"
+        )
+    );
+    assert_eq!(
         error_of(&returning("print")),
         "provider() returned a function (call it: return f(attach), not f)"
     );
@@ -774,7 +781,8 @@ fn the_global_and_require_give_the_same_table() {
     assert_eq!(
         f.run().printed,
         [format!(
-            "true\t{}\t9.8.7\t{dir}\ttable\ttable\therdr,tmux,zellij\therdr,tmux,zellij",
+            "true\t{}\t9.8.7\t{dir}\ttable\ttable\therdr,herdr_app,tmux,zellij\t\
+             herdr,herdr_app,tmux,zellij",
             std::env::consts::OS
         )]
     );
@@ -1049,9 +1057,23 @@ fn builtin_zellij_is_the_zellij_table_and_passes_the_checker() {
 }
 
 #[test]
+fn builtin_herdr_app_is_the_herdr_app_table_and_passes_the_checker() {
+    let (choice, warnings) = chosen(&returning("{name}.builtin.herdr_app()"));
+    assert_eq!(warnings, Vec::<String>::new());
+    let provider = whole(choice);
+    assert_eq!(provider, config::BuiltinTable::HerdrApp.provider());
+    assert_eq!(provider.name, "herdr-app");
+    assert_eq!(
+        provider.context_vars,
+        ["HC_TERMINAL_SOCKET", "HERDR_APP_HOME"]
+    );
+    assert_eq!(provider.find_vars, ["HC_TERMINAL_ID"]);
+}
+
+#[test]
 fn provider_show_prints_what_builtin_returns() {
     for table in config::BuiltinTable::ALL {
-        let name = table.name();
+        let (name, lua_name) = (table.name(), table.lua_name());
         let shown = std::process::Command::new(exe())
             .args(["provider", "show", name])
             .output()
@@ -1065,7 +1087,7 @@ fn provider_show_prints_what_builtin_returns() {
              end \
              print(same(dofile({name}.config_dir .. '/shown.lua'), {name}.builtin.TABLE())) \
              return {}"
-            .replace("TABLE", name);
+            .replace("TABLE", lua_name);
         let f = Fixture::new(&source);
         std::fs::write(f.dir.join("shown.lua"), &shown.stdout).unwrap();
         assert_eq!(f.run().printed, ["true"], "{name}");
@@ -1078,7 +1100,7 @@ fn provider_show_prints_what_builtin_returns() {
 fn default_agrees_with_the_daemons() {
     let source = "return { provider = function(attach) return {name}.default(attach) end }";
     // set means present, even empty, as the daemon reads its own
-    let envs: [&[(&str, &str)]; 13] = [
+    let envs: [&[(&str, &str)]; 15] = [
         &[],
         &[("REX_SERVER", "ws://x"), ("REX_SESSION", "s")],
         &[("REX_SERVER", "ws://x")],
@@ -1114,30 +1136,43 @@ fn default_agrees_with_the_daemons() {
             ("REX_SERVER", "ws://x"),
             ("REX_SESSION", "s"),
         ],
+        &[
+            ("HC_TERMINAL_ID", "t7"),
+            ("HC_TERMINAL_SOCKET", "/tmp/hc.sock"),
+        ],
+        &[
+            ("HC_TERMINAL_ID", "t7"),
+            ("HC_TERMINAL_SOCKET", "/tmp/hc.sock"),
+            ("REX_SERVER", "ws://x"),
+            ("REX_SESSION", "s"),
+        ],
     ];
+    /// What the default chooses.
+    enum Want {
+        None,
+        Rex,
+        Table(config::BuiltinTable),
+    }
+    use config::BuiltinTable::{Herdr, HerdrApp, Tmux, Zellij};
     // the last of each names both: with no tty, `inside` can't prove it
     let want = [
-        false, true, false, false, true, true, true, false, true, false, true, false, true,
+        Want::None,
+        Want::Rex,
+        Want::None,
+        Want::None,
+        Want::Rex,
+        Want::Rex,
+        Want::Rex,
+        Want::Table(Tmux),
+        Want::Rex,
+        Want::Table(Herdr),
+        Want::Rex,
+        Want::Table(Zellij),
+        Want::Rex,
+        Want::Table(HerdrApp),
+        Want::Rex,
     ];
-    let tmux = Choice::Whole(config::BuiltinTable::Tmux.provider());
-    let wants_tmux = [
-        false, false, false, false, false, false, false, true, false, false, false, false, false,
-    ];
-    let herdr = Choice::Whole(config::BuiltinTable::Herdr.provider());
-    let wants_herdr = [
-        false, false, false, false, false, false, false, false, false, true, false, false, false,
-    ];
-    let zellij = Choice::Whole(config::BuiltinTable::Zellij.provider());
-    let wants_zellij = [
-        false, false, false, false, false, false, false, false, false, false, false, true, false,
-    ];
-    for ((((env, want), wants_tmux), wants_herdr), wants_zellij) in envs
-        .into_iter()
-        .zip(want)
-        .zip(wants_tmux)
-        .zip(wants_herdr)
-        .zip(wants_zellij)
-    {
+    for (env, want) in envs.into_iter().zip(want) {
         let mut f = Fixture::new(source);
         f.attach.env = env
             .iter()
@@ -1145,11 +1180,12 @@ fn default_agrees_with_the_daemons() {
             .collect();
         let daemons = config::default(&f.attach).choice();
         assert_eq!(f.choose().unwrap().choice, daemons, "{env:?}");
-        let rex = Choice::Builtin(Builtin::Rex);
-        assert_eq!(daemons == rex, want, "{env:?}");
-        assert_eq!(daemons == tmux, wants_tmux, "{env:?}");
-        assert_eq!(daemons == herdr, wants_herdr, "{env:?}");
-        assert_eq!(daemons == zellij, wants_zellij, "{env:?}");
+        let chose = match want {
+            Want::None => Choice::None,
+            Want::Rex => Choice::Builtin(Builtin::Rex),
+            Want::Table(table) => Choice::Whole(table.provider()),
+        };
+        assert_eq!(daemons, chose, "{env:?}");
     }
 }
 
@@ -1179,6 +1215,25 @@ fn inside_never_raises() {
              print({name}.inside.zellij({ env = 2, tty = {}, pid = 'x' })) return {}"
         ),
         ["false\tZELLIJ_PANE_ID isn't set"; 3]
+    );
+}
+
+#[test]
+fn inside_herdr_app_never_raises() {
+    assert_eq!(
+        printed(
+            "print({name}.inside.herdr_app()) print({name}.inside.herdr_app(1)) \
+             print({name}.inside.herdr_app({ env = 2, tty = {} })) \
+             print({name}.inside.herdr_app({ env = { HC_TERMINAL_ID = 'mini/t7' } })) \
+             return {}"
+        ),
+        [
+            "false\tHC_TERMINAL_ID isn't set",
+            "false\tHC_TERMINAL_ID isn't set",
+            "false\tHC_TERMINAL_ID isn't set",
+            "false\thc terminal mini/t7 is on machine mini: the built-in herdr-app doesn't \
+             reach remote spaces",
+        ]
     );
 }
 

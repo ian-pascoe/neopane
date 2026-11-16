@@ -1,12 +1,12 @@
 //! The core knows nothing of Rex (#92 decision 7), nor of any other pane
 //! provider: nothing in `src/daemon/`, `src/screen/`, `src/nvim/` or
 //! `src/term/`, tests included, may name `crate::rex`, a provider's module
-//! under `crate::providers` (Rex's, tmux's, zellij's, herdr's), or any
-//! module of `providers` not known to name none, however it gets there:
-//! through `super`, through an alias of `providers`, or through any module
-//! path with a provider's name in it. The core reaches a pane provider only
-//! through `crate::providers`' neutral modules, such as `choose` and `tty`,
-//! and the `PaneProvider` trait.
+//! under `crate::providers` (Rex's, tmux's, zellij's, herdr's, the Herdr
+//! app's), or any module of `providers` not known to name none, however it
+//! gets there: through `super`, through an alias of `providers`, or through
+//! any module path with a provider's name in it. The core reaches a pane
+//! provider only through `crate::providers`' neutral modules, such as
+//! `choose` and `tty`, and the `PaneProvider` trait.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,7 +132,7 @@ fn paths_from(toks: &[String], prefix: &mut Vec<String>, out: &mut Vec<Vec<Strin
 
 /// The pane providers built in, or to come: each a module of its own, under
 /// `providers`, whatever comes between.
-const PROVIDERS: &[&str] = &["rex", "tmux", "zellij", "herdr"];
+const PROVIDERS: &[&str] = &["rex", "tmux", "zellij", "herdr", "herdr_app"];
 
 /// The modules of `providers` that name no pane provider: the core may name
 /// these, and only these.
@@ -225,6 +225,8 @@ fn a_core_file_naming_a_pane_providers_module_fails_the_check() {
         "use super::super::tmux;",
         "let z = b::zellij::panes();",
         "use herdr::socket;",
+        "let c = crate::providers::herdr_app::core::Core::of(g, t);",
+        "use super::super::herdr_app;",
         // any providers module not known to name none
         "use crate::providers::builtin::Builtin;",
         "use crate::providers::check::run;",

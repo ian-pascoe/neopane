@@ -16,13 +16,7 @@ fn var(name: &str) -> String {
 /// `provider builtin` and `words`, with `vars` (`<NAME>_` left out) as
 /// the only `<NAME>_*` variables.
 fn builtin(words: &[&str], vars: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(exe());
-    cmd.args(["provider", "builtin"]).args(words);
-    for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with(&var("")) {
-            cmd.env_remove(k);
-        }
-    }
+    let mut cmd = provider_builtin(words);
     for (k, v) in vars {
         cmd.env(var(k), v);
     }
@@ -39,6 +33,8 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
         &["tmux"],
         &["nope", "find"],
         &["zellij", "place_beside"],
+        &["herdr-app", "open_beside"],
+        &["herdr_app", "find"],
         &["tmux", "open"],
         &["tmux", "nope"],
         &["tmux", "find", "extra"],
@@ -48,6 +44,67 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
         assert!(out.stdout.is_empty(), "{words:?}");
         assert!(!out.stderr.is_empty(), "{words:?}");
     }
+}
+
+#[test]
+fn herdr_apps_close_outside_the_herdr_app_fails_saying_why() {
+    let mut cmd = provider_builtin(&["herdr-app", "close"]);
+    cmd.env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "close")
+        .env(var("TERMINAL"), "t7")
+        .stdin(Stdio::null());
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        text(&out.stderr),
+        "herdr-app close: HC_TERMINAL_SOCKET isn't set: the choosing attach isn't in the \
+         Herdr app\n"
+    );
+}
+
+#[test]
+fn herdr_apps_close_on_a_core_lacking_terminal_kill_is_unsupported_naming_both_versions() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let dir = scratch("herdr-app-69");
+    // an hc core whose hello lists no terminal.kill
+    let socket = dir.join("hc.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&conn).read_line(&mut line).unwrap();
+        let id: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id["id"],
+            "result": { "generation": 1, "version": "0.1.21", "methods": ["hello"] },
+        });
+        (&conn).write_all(format!("{reply}\n").as_bytes()).unwrap();
+        // held open until the command is done with it
+        let _ = BufReader::new(&conn).read_line(&mut line);
+    });
+    let app = dir.join("herdr-app");
+    std::fs::write(&app, "#!/bin/sh\necho 'herdr-app 0.1.16'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = provider_builtin(&["herdr-app", "close"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "close")
+        .env(var("TERMINAL"), "t7")
+        .env("HC_TERMINAL_SOCKET", &socket)
+        .env("PATH", &dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(69));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        text(&out.stderr),
+        "herdr-app close: the hc core has no terminal.kill (hc core 0.1.21, herdr-app 0.1.16)\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -112,14 +169,12 @@ fn other_tty() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd, String) {
 /// `provider builtin tmux find` for an attach with tty `tty`, `TMUX`
 /// being `tmux` and `path` the `PATH`.
 fn find(tty: &str, tmux: &str, path: &std::ffi::OsStr) -> Output {
-    let mut cmd = Command::new(exe());
-    cmd.args(["provider", "builtin", "tmux", "find"])
-        .env(var("PROTOCOL"), "1")
+    let mut cmd = provider_builtin(&["tmux", "find"]);
+    cmd.env(var("PROTOCOL"), "1")
         .env(var("CAPABILITY"), "find")
         .env(var("TTY"), tty)
         .env("TMUX", tmux)
-        .env("PATH", path)
-        .env_remove("TMUX_PANE");
+        .env("PATH", path);
     cmd.stdin(Stdio::null()).output().unwrap()
 }
 
@@ -170,8 +225,7 @@ fn zellijs_find_refuses_a_zellij_older_than_0_46_0_naming_its_version() {
     std::fs::write(&fake, "#!/bin/sh\necho 'zellij 0.45.1'\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(exe())
-        .args(["provider", "builtin", "zellij", "find"])
+    let out = provider_builtin(&["zellij", "find"])
         .env(var("PROTOCOL"), "1")
         .env(var("CAPABILITY"), "find")
         .env(var("ENV_ZELLIJ_PANE_ID"), "3")
@@ -201,8 +255,7 @@ fn open_float_is_unsupported_below_tmux_3_7_naming_its_version() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(exe())
-        .args(["provider", "builtin", "tmux", "open_float"])
+    let out = provider_builtin(&["tmux", "open_float"])
         .env(var("PROTOCOL"), "1")
         .env(var("CAPABILITY"), "open_float")
         .env(var("ATTACH"), "/bin/x attach")
@@ -213,7 +266,6 @@ fn open_float_is_unsupported_below_tmux_3_7_naming_its_version() {
         .env(var("ROWS"), "5")
         .env("TMUX", "/tmp/nowhere,1,0")
         .env("PATH", &dir)
-        .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -236,13 +288,11 @@ fn events_is_unsupported_below_tmux_3_8_naming_its_version() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(exe())
-        .args(["provider", "builtin", "tmux", "events"])
+    let out = provider_builtin(&["tmux", "events"])
         .env(var("PROTOCOL"), "1")
         .env(var("CAPABILITY"), "events")
         .env("TMUX", "/tmp/nowhere,1,0")
         .env("PATH", &dir)
-        .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -273,12 +323,10 @@ fn events_keeps_a_waiter_on_each_of_its_events_past_the_second_a_bad_one_would_f
     }
     let dir = scratch("tmux-waitable");
     let tmux = TmuxServer::start(&dir, &[], &[]);
-    let mut events = Command::new(exe())
-        .args(["provider", "builtin", "tmux", "events"])
+    let mut events = provider_builtin(&["tmux", "events"])
         .env(var("PROTOCOL"), "1")
         .env(var("CAPABILITY"), "events")
         .env("TMUX", tmux.tmux_var())
-        .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

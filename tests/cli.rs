@@ -179,16 +179,12 @@ fn listening_daemon_with(
     env: &[(&str, &std::ffi::OsStr)],
 ) -> (std::process::Child, String) {
     use std::io::BufRead;
-    let mut child = Command::new(exe())
+    let mut cmd = Command::new(exe());
+    let mut child = without_provider_vars(&mut cmd)
         .arg("daemon")
         .args(args)
         .envs(env.iter().copied())
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
-        .env_remove("REX_SERVER")
-        .env_remove("REX_SESSION")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -420,10 +416,11 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(
         text(&out.stdout),
         format!(
-            "rex     return \"rex\" from provider() (built in; no Lua table)\n\
-             tmux    {NAME}.builtin.tmux()\n\
-             herdr   {NAME}.builtin.herdr()\n\
-             zellij  {NAME}.builtin.zellij()\n"
+            "rex        return \"rex\" from provider() (built in; no Lua table)\n\
+             tmux       {NAME}.builtin.tmux()\n\
+             herdr      {NAME}.builtin.herdr()\n\
+             zellij     {NAME}.builtin.zellij()\n\
+             herdr-app  {NAME}.builtin.herdr_app()\n"
         )
     );
     assert_eq!(text(&out.stderr), "");
@@ -444,7 +441,8 @@ fn provider_show_lists_the_builtins_and_refuses_rex() {
     assert_eq!(
         text(&out.stderr),
         format!(
-            "{NAME}: no built-in pane provider named foo (built-ins: rex, tmux, herdr, zellij)\n"
+            "{NAME}: no built-in pane provider named foo (built-ins: rex, tmux, herdr, zellij, \
+             herdr-app)\n"
         )
     );
 
@@ -1248,7 +1246,7 @@ fn detached(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Output {
 fn detached_command(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Command {
     let upper = NAME.to_ascii_uppercase();
     let mut command = Command::new(exe());
-    command
+    without_provider_vars(&mut command)
         .args(args)
         .current_dir(cwd)
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
@@ -1257,11 +1255,6 @@ fn detached_command(tmpdir: &Path, cwd: &Path, args: &[&str]) -> Command {
         .env_remove(&upper)
         .env_remove(format!("{upper}_CONFIG"))
         .env_remove(format!("{upper}_PROVIDER"))
-        .env_remove("REX_SERVER")
-        .env_remove("REX_SESSION")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::null());
     command
 }

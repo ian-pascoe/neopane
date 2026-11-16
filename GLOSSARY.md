@@ -120,7 +120,7 @@ A Neovim window no Neovim pane holds and no pane is on its way for, such as one 
 _Avoid_: hidden window, paneless window, detached window
 
 **Layout area**:
-The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's. Terminals hidden while another is zoomed or full screen are reported in a layout area of their own, such as tmux's `@N~hidden`, herdr's `w1:t1~hidden` or zellij's `tab_N~hidden`: to the daemon an ordinary layout area, though none of it is on screen.
+The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window, a Herdr app tab or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's. Terminals hidden while another is zoomed or full screen are reported in a layout area of their own, such as tmux's `@N~hidden`, herdr's `w1:t1~hidden` or zellij's `tab_N~hidden`: to the daemon an ordinary layout area, though none of it is on screen.
 _Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
 
 **Foreign pane**:
@@ -165,7 +165,7 @@ The tab page a window belongs to: the one it was opened in, or for a split, its 
 _Avoid_: owning tab, the window's tab page
 
 **Tab page area**:
-Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window or a herdr tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
+Where `open_tab_page` puts one tab page's window panes, apart from other tab pages': a tmux window, a herdr tab or a Herdr app tab, each a layout area of its own, or a Rex floating pane over the Rex window. A tab page without one is drawn in the pane it opened in.
 _Avoid_: tab layer, floating tab page, tab (on its own)
 
 ### Pane providers
@@ -191,15 +191,15 @@ A terminal provider and a layout provider used together as one pane provider, ea
 _Avoid_: combination, combo
 
 **Built-in provider**:
-A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex`, `tmux`, `herdr` or `zellij`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
+A terminal provider, layout provider or pane provider that comes with neopane, known by its name, such as `rex`, `tmux`, `herdr`, `zellij` or `herdr-app`. Rex's runs inside neopane and is never paired; the others are tables whose capabilities run neopane itself, as built-in commands, to use as they are or copy and change.
 _Avoid_: default provider, bundled provider
 
 **Built-in default**:
-What chooses the pane provider with no config, and what `<name>.default` returns to one: the one built-in provider the attach's environment names, running nothing; naming several, as in a tmux or herdr server started from a Rex pane, the first multiplexer whose inside proof proves, else Rex if named, else none. Its guess, if its `find` refuses it, is only logged.
+What chooses the pane provider with no config, and what `<name>.default` returns to one: the one built-in provider the attach's environment names, running nothing; naming several, as in a tmux or herdr server started from a Rex pane, or a zellij run in a Herdr app pane, the first multiplexer whose inside proof proves, else Rex if named, else none. Its guess, if its `find` refuses it, is only logged.
 _Avoid_: default provider, fallback
 
 **Inside proof**:
-A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's and herdr's do, or the process table alone, as zellij's does. That built-in's `find` runs it first, though herdr's trusts a pane it can't prove where `inside.herdr` says no, and the built-in default asks it where variables name several built-ins.
+A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's, herdr's and the Herdr app's do, or the process table alone, as zellij's does. That built-in's `find` runs it first, though herdr's and the Herdr app's trust a pane they can't prove where `inside.herdr` and `inside.herdr_app` say no, and the built-in default asks it where variables name several built-ins.
 _Avoid_: detection, nesting check
 
 **Built-in command**:
@@ -223,7 +223,7 @@ A whole word in what a capability runs, such as `{terminal}`, that the daemon re
 _Avoid_: template variable, macro
 
 **Terminal id**:
-A terminal provider's or layout provider's own name for a terminal: a Rex block id, a tmux pane id, an AeroSpace window id. A terminal from a paired pane provider has one from each.
+A terminal provider's or layout provider's own name for a terminal: a Rex block id, a tmux pane id, an hc terminal's address such as `t7`, an AeroSpace window id. A terminal from a paired pane provider has one from each.
 _Avoid_: handle, block, window id, pane id
 
 **Pane title**:
@@ -282,7 +282,7 @@ _Avoid_: floating pane (on its own), layer (Rex's API word)
 What `REX_SESSION` names: the Rex tabs one Rex server keeps for a session, and the attach context of Rex's pane provider. A terminal in another Rex session is out of its reach.
 _Avoid_: session (on its own)
 
-### herdr's pane provider
+### herdr's pane provider (the multiplexer)
 
 Terms used only by the built-in `herdr` pane provider (`src/providers/herdr/`); the core never uses them.
 
@@ -305,3 +305,34 @@ _Avoid_: session (on its own, outside zellij's own code and docs), server (a zel
 **Zellij tab**:
 A tab of a zellij session: the space its tiled panes share, bars excluded, is a layout area, with zellij's floating panes over it. `open_tab_page` makes one as a tab page area. Within zellij's own code and docs, "tab" alone means this.
 _Avoid_: tab (on its own, outside zellij's own code and docs), tab page (that is Neovim's)
+
+### The Herdr app's pane provider
+
+Terms used only by the built-in `herdr-app` pane provider (`src/providers/herdr_app/`); the core never uses them.
+
+**Herdr app**:
+The Herdr desktop app, whose panes show terminals an hc core runs.
+_Avoid_: herdr (the multiplexer), Herdr alone
+
+**hc core**:
+The background program that runs a Herdr app's terminals and keeps its spaces, tabs and splits; with the app's home, the pane provider's reach. The product calls itself herdr-core.
+_Avoid_: herdr-core, server
+
+**hc terminal**:
+A terminal an hc core runs; its address, such as `t7`, is its terminal id. A terminal is kept when the core gives it a shell again after it's lost.
+
+**Herdr app pane**:
+A pane of a Herdr app tab, showing an hc terminal or a mod.
+_Avoid_: block
+
+**Herdr app tab**:
+A tab of a Herdr app space; a layout area, and a tab page area's home.
+_Avoid_: tab, tab page
+
+**Herdr app space**:
+A group of Herdr app tabs; no boundary of reach.
+_Avoid_: workspace
+
+**Herdr app window**:
+One running Herdr app's view of an hc core, which alone has its focus and zoom; always qualified.
+_Avoid_: screen

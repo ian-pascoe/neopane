@@ -67,17 +67,17 @@ pub(super) fn install(lua: &Lua, request: &Request, deadline: Instant) -> mlua::
                 Ok(()) => (built_in(lua, table)?, None),
                 Err(why) => (
                     Value::Nil,
-                    Some(format!("{NAME}.builtin.{}: {why}", table.name())),
+                    Some(format!("{NAME}.builtin.{}: {why}", table.lua_name())),
                 ),
             })
         })?;
-        builtin.raw_set(table.name(), f)?;
+        builtin.raw_set(table.lua_name(), f)?;
     }
     api.raw_set("builtin", builtin)?;
     let inside_fns = lua.create_table()?;
     for table in BuiltinTable::ALL {
         let f = lua.create_function(move |_, attach: Value| Ok(inside(&attach, table)))?;
-        inside_fns.raw_set(table.name(), f)?;
+        inside_fns.raw_set(table.lua_name(), f)?;
     }
     api.raw_set("inside", inside_fns)?;
     let time = request.time;

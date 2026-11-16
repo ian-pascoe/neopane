@@ -14,6 +14,7 @@ use super::{Check, ConfigState, How, Verdict};
 use crate::config::check::{Problem, Severity};
 use crate::config::{Builtin, Capability, Choice, Defaulted, Provider};
 use crate::name::NAME;
+use crate::providers::herdr_app::check::HerdrAppReport;
 use crate::providers::rex::find::{BLOCK_VAR, Verdict as RexVerdict};
 use crate::providers::tmux::check::TmuxReport;
 use crate::providers::zellij::check::ZellijReport;
@@ -241,6 +242,11 @@ pub(super) fn text(c: &Check, full: bool) -> String {
     }
     if let Some(zellij) = &c.zellij {
         for line in zellij_lines(zellij) {
+            put(line);
+        }
+    }
+    if let Some(herdr_app) = &c.herdr_app {
+        for line in herdr_app_lines(herdr_app) {
             put(line);
         }
     }
@@ -604,6 +610,77 @@ fn zellij_json(z: &ZellijReport) -> Value {
     })
 }
 
+/// The herdr-app section's lines: the app, then its hc core.
+fn herdr_app_lines(h: &HerdrAppReport) -> Vec<String> {
+    let mut lines = vec![match &h.path {
+        Ok(path) => format!("herdr-app  {path}"),
+        Err(why) => format!("herdr-app  none: {why}"),
+    }];
+    if let Some(v) = &h.version {
+        lines.push(format!("  version  {v}"));
+    }
+    lines.push(match &h.home {
+        Some(home) => format!("  home  {home}"),
+        None => "  home  ~/.config/herdr-app: HERDR_APP_HOME isn't set".into(),
+    });
+    if h.path.is_ok() {
+        lines.push(match &h.window {
+            Ok(()) => "  window  answers".into(),
+            Err(why) => format!("  window  doesn't answer: {why}"),
+        });
+    }
+    lines.push(match &h.socket {
+        Some(socket) => format!("hc core  {socket}"),
+        None => "hc core  none: HC_TERMINAL_SOCKET isn't set".into(),
+    });
+    if let Some(v) = &h.core_version {
+        lines.push(format!("  version  {v}"));
+    }
+    if let Some(g) = h.generation {
+        lines.push(format!("  generation  {g}"));
+    }
+    if h.socket.is_some() {
+        lines.push(match &h.core {
+            Ok(()) => "  server  answers".into(),
+            Err(why) => format!("  server  doesn't answer: {why}"),
+        });
+    }
+    for m in &h.missing {
+        let does = match m.capability {
+            Capability::Find => "refuses",
+            _ => "exits 69",
+        };
+        lines.push(format!("  {}  {does}: {}", m.capability.name(), m.why));
+    }
+    lines
+}
+
+/// The herdr-app section as JSON.
+fn herdr_app_json(h: &HerdrAppReport) -> Value {
+    let missing: Vec<Value> = h
+        .missing
+        .iter()
+        .map(|m| json!({ "capability": m.capability.name(), "why": m.why }))
+        .collect();
+    json!({
+        "app": {
+            "path": h.path.as_ref().ok(),
+            "version": h.version,
+            "home": h.home,
+            "answers": h.window.is_ok(),
+            "error": h.window.as_ref().err(),
+        },
+        "core": {
+            "socket": h.socket,
+            "version": h.core_version,
+            "generation": h.generation,
+            "answers": h.core.is_ok(),
+            "error": h.core.as_ref().err(),
+        },
+        "missing": missing,
+    })
+}
+
 fn find_text(f: &Find) -> String {
     let after =
         |t: &Duration, title: &str| format!("{}, title {title} written, then restored", took(*t));
@@ -756,6 +833,7 @@ pub(super) fn json(c: &Check) -> String {
         "rex": rex,
         "tmux": c.tmux.as_ref().map_or(Value::Null, tmux_json),
         "zellij": c.zellij.as_ref().map_or(Value::Null, zellij_json),
+        "herdr_app": c.herdr_app.as_ref().map_or(Value::Null, herdr_app_json),
         "default": c.default.as_ref().map_or(Value::Null, default_json),
         "problems": problems,
         "result": result,
@@ -1128,6 +1206,107 @@ mod tests {
                 "missing": [],
             })
         );
+    }
+
+    /// Herdr app 0.1.16 on hc core 0.1.21, both answering.
+    fn herdr_app_0_1_16() -> HerdrAppReport {
+        HerdrAppReport {
+            path: Ok("/Users/u/.local/bin/herdr-app".into()),
+            version: Some("0.1.16".into()),
+            home: None,
+            window: Ok(()),
+            socket: Some("/tmp/hc/default.sock".into()),
+            core_version: Some("0.1.21".into()),
+            generation: Some(1),
+            core: Ok(()),
+            missing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_herdr_app_section_names_both_versions_and_whether_each_answers() {
+        assert_eq!(
+            herdr_app_lines(&herdr_app_0_1_16()),
+            [
+                "herdr-app  /Users/u/.local/bin/herdr-app",
+                "  version  0.1.16",
+                "  home  ~/.config/herdr-app: HERDR_APP_HOME isn't set",
+                "  window  answers",
+                "hc core  /tmp/hc/default.sock",
+                "  version  0.1.21",
+                "  generation  1",
+                "  server  answers",
+            ]
+        );
+        assert_eq!(
+            herdr_app_json(&herdr_app_0_1_16()),
+            json!({
+                "app": {
+                    "path": "/Users/u/.local/bin/herdr-app",
+                    "version": "0.1.16",
+                    "home": null,
+                    "answers": true,
+                    "error": null,
+                },
+                "core": {
+                    "socket": "/tmp/hc/default.sock",
+                    "version": "0.1.21",
+                    "generation": 1,
+                    "answers": true,
+                    "error": null,
+                },
+                "missing": [],
+            })
+        );
+    }
+
+    #[test]
+    fn a_herdr_app_section_says_what_is_missing_and_why_nothing_answers() {
+        use crate::providers::herdr_app::check::Missing;
+        let lacking = HerdrAppReport {
+            home: Some("/tmp/apphome".into()),
+            window: Err("herdr-app: no Herdr window at /tmp/apphome/herdr-app.sock".into()),
+            missing: vec![Missing {
+                capability: Capability::Close,
+                why: "the hc core has no terminal.kill".into(),
+            }],
+            ..herdr_app_0_1_16()
+        };
+        let lines = herdr_app_lines(&lacking);
+        assert_eq!(lines[2], "  home  /tmp/apphome");
+        assert_eq!(
+            lines[3],
+            "  window  doesn't answer: herdr-app: no Herdr window at /tmp/apphome/herdr-app.sock"
+        );
+        assert_eq!(
+            lines.last().unwrap(),
+            "  close  exits 69: the hc core has no terminal.kill"
+        );
+        assert_eq!(
+            herdr_app_json(&lacking)["missing"],
+            json!([{ "capability": "close", "why": "the hc core has no terminal.kill" }])
+        );
+
+        let none = HerdrAppReport {
+            path: Err("no herdr-app on PATH, nor at /h/.local/bin/herdr-app".into()),
+            version: None,
+            home: None,
+            window: Err("no herdr-app on PATH, nor at /h/.local/bin/herdr-app".into()),
+            socket: None,
+            core_version: None,
+            generation: None,
+            core: Err("HC_TERMINAL_SOCKET isn't set".into()),
+            missing: Vec::new(),
+        };
+        assert_eq!(
+            herdr_app_lines(&none),
+            [
+                "herdr-app  none: no herdr-app on PATH, nor at /h/.local/bin/herdr-app",
+                "  home  ~/.config/herdr-app: HERDR_APP_HOME isn't set",
+                "hc core  none: HC_TERMINAL_SOCKET isn't set",
+            ]
+        );
+        assert_eq!(herdr_app_json(&none)["core"]["answers"], false);
     }
 
     #[test]
