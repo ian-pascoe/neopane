@@ -100,6 +100,9 @@ impl BuiltinTable {
                 Capability::Close,
                 Capability::OpenBeside,
                 Capability::OpenTabPage,
+                Capability::ReportLayout,
+                Capability::Focus,
+                Capability::FocusDirection,
             ],
         }
     }
@@ -310,24 +313,19 @@ mod tests {
                 (c.name(), words.join(" "))
             })
             .collect();
-        assert_eq!(
-            shown,
-            [
-                ("find", "{exe} provider builtin herdr-app find".to_string()),
-                (
-                    "close",
-                    "{exe} provider builtin herdr-app close".to_string()
-                ),
-                (
-                    "open_beside",
-                    "{exe} provider builtin herdr-app open_beside".to_string()
-                ),
-                (
-                    "open_tab_page",
-                    "{exe} provider builtin herdr-app open_tab_page".to_string()
-                ),
-            ]
-        );
+        let want: Vec<(&str, String)> = [
+            "find",
+            "close",
+            "open_beside",
+            "open_tab_page",
+            "report_layout",
+            "focus",
+            "focus_direction",
+        ]
+        .into_iter()
+        .map(|cap| (cap, format!("{{exe}} provider builtin herdr-app {cap}")))
+        .collect();
+        assert_eq!(shown, want);
         let string = |s: &str| Value::String(s.as_bytes().to_vec());
         assert_eq!(
             t.settings,

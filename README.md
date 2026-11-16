@@ -518,10 +518,11 @@ its own, split beside the one it was opened from and running the attach
 with no shell, the hc core's keep off so it closes for good
 ([ADR 0020](docs/adr/0020-the-herdr-apps-pane-provider-reads-the-hc-cores-socket-and-changes-the-window-through-herdr-app.md)),
 and each Neovim tab page after the first a Herdr app tab of its own, in the
-same space, without showing it. Focus and sizes come next. `neopane provider
-show herdr-app` prints its table, which `neopane.builtin.herdr_app()`
-returns for your config to change
-([docs/config.md](docs/config.md#herdr-app)).
+same space, without showing it. `<C-w>h/j/k/l` move the app's focus across
+its panes. A zoomed pane isn't seen: Neovim lays out as if its tab were
+unzoomed. Sizes come next. `neopane provider show herdr-app` prints its
+table, which `neopane.builtin.herdr_app()` returns for your config to
+change ([docs/config.md](docs/config.md#herdr-app)).
 
 ### Your own
 

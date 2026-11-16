@@ -280,6 +280,16 @@ pub(super) fn recorded_run(name: &str) -> Run {
     }
 }
 
+/// The `herdr-app do COMMAND JSON` run recorded in `app/NAME.json`, its
+/// JSON as the built-in writes it, compact: the recorder spaced it.
+pub(super) fn recorded_do(name: &str) -> Run {
+    let mut run = recorded_run(name);
+    assert_eq!(run.args[0], "do", "{name}");
+    let params: Value = serde_json::from_str(&run.args[2]).unwrap();
+    run.args[2] = params.to_string();
+    run
+}
+
 /// A fake `herdr-app`, removed as it drops.
 pub(super) struct FakeApp {
     dir: PathBuf,

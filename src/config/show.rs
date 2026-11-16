@@ -223,6 +223,12 @@ mod tests {
                  \"close\" }},\n  \
                    find = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"find\" }},\n  \
+                   focus = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"focus\" }},\n  \
+                   focus_direction = {{ \"{{exe}}\", \"provider\", \"builtin\", \
+                 \"herdr-app\", \"focus_direction\" }},\n  \
+                   report_layout = {{ \"{{exe}}\", \"provider\", \"builtin\", \
+                 \"herdr-app\", \"report_layout\" }},\n  \
                    open_beside = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"open_beside\" }},\n  \
                    open_tab_page = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \

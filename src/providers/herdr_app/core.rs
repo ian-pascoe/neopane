@@ -85,6 +85,8 @@ pub(super) struct Terminal {
     pub live: bool,
     /// The process it runs; None if it has none.
     pub pid: Option<u32>,
+    /// Its `cols` and `rows`, the cells it has; None if it didn't say.
+    pub size: Option<[u32; 2]>,
 }
 
 impl Terminal {
@@ -95,6 +97,9 @@ impl Terminal {
             address: address.into(),
             live: state == "live",
             pid: record["pid"].as_u64().and_then(|p| u32::try_from(p).ok()),
+            size: cells(&record["cols"])
+                .zip(cells(&record["rows"]))
+                .map(|(c, r)| [c, r]),
         })
     }
 }
@@ -208,6 +213,15 @@ impl Core {
         Terminal::of(&self.call("terminal.get", json!({ "terminal": id }))?)
     }
 
+    /// `terminal.list`: every live terminal.
+    pub(super) fn list(&mut self) -> Result<Vec<Terminal>, Refused> {
+        let listed = self.call("terminal.list", json!({}))?;
+        let terminals = listed["terminals"]
+            .as_array()
+            .ok_or(UNREADABLE.to_string())?;
+        terminals.iter().map(Terminal::of).collect()
+    }
+
     /// `terminal.kill` of terminal `id`: its record, finished.
     pub(super) fn kill(&mut self, id: &str) -> Result<Terminal, Refused> {
         Terminal::of(&self.call("terminal.kill", json!({ "terminal": id }))?)
@@ -269,6 +283,11 @@ impl Core {
             String::from_utf8_lossy(&self.socket)
         )
     }
+}
+
+/// A count of cells, `v`, if it is one.
+fn cells(v: &Value) -> Option<u32> {
+    v.as_u64().and_then(|n| u32::try_from(n).ok())
 }
 
 /// The `result` of `reply`, or why there's none: the core's own error,
@@ -352,12 +371,40 @@ mod tests {
                 address: "t1".into(),
                 live: true,
                 pid: Some(9087),
+                size: Some([39, 52]),
             }
         );
         assert_eq!(core.terminal("t3").unwrap().pid, Some(9932));
         let ids: Vec<Value> = fake.asked().iter().map(|r| r["id"].clone()).collect();
         assert_eq!(ids, [json!(1), json!(2), json!(3)]);
         assert_eq!(fake.asked()[2]["params"], json!({ "terminal": "t3" }));
+    }
+
+    #[test]
+    fn the_list_is_every_live_terminal_with_its_cols_and_rows() {
+        let fake = FakeCore::replaying(&["shapes-doc-and-list"]);
+        let mut core = Core::connect(&fake.path(), TIME).unwrap();
+        let listed = core.list().unwrap();
+        let sizes: Vec<(&str, Option<[u32; 2]>)> = listed
+            .iter()
+            .map(|t| (t.address.as_str(), t.size))
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                ("t1", Some([39, 52])),
+                ("t2", Some([39, 24])),
+                ("t3", Some([39, 24])),
+                ("t4", Some([38, 52])),
+                ("t5", Some([17, 52])),
+                ("t6", Some([17, 24])),
+                ("t7", Some([17, 10])),
+                ("t8", Some([6, 10])),
+                ("t9", Some([6, 10])),
+            ]
+        );
+        assert_eq!(fake.methods(), ["hello", "terminal.list"]);
+        assert_eq!(fake.asked()[1]["params"], json!({}));
     }
 
     #[test]

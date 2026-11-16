@@ -64,6 +64,36 @@ fn herdr_apps_close_outside_the_herdr_app_fails_saying_why() {
 }
 
 #[test]
+fn herdr_apps_layout_and_focus_outside_the_herdr_app_say_why() {
+    let outside = "HC_TERMINAL_SOCKET isn't set: the choosing attach isn't in the Herdr app";
+    let no_app = "no herdr-app on PATH, nor at /nowhere/.local/bin/herdr-app";
+    for (cap, vars, code, why) in [
+        ("report_layout", &[][..], 1, outside),
+        ("focus", &[("TERMINAL", "t7")][..], 69, no_app),
+        (
+            "focus_direction",
+            &[("DIRECTION", "left"), ("COUNT", "2")][..],
+            69,
+            no_app,
+        ),
+    ] {
+        let mut cmd = provider_builtin(&["herdr-app", cap]);
+        cmd.env(var("PROTOCOL"), "1")
+            .env(var("CAPABILITY"), cap)
+            .env("PATH", "/nowhere")
+            .env("HOME", "/nowhere")
+            .stdin(Stdio::null());
+        for (k, v) in vars {
+            cmd.env(var(k), v);
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(code), "{cap}");
+        assert!(out.stdout.is_empty(), "{cap}");
+        assert_eq!(text(&out.stderr), format!("herdr-app {cap}: {why}\n"));
+    }
+}
+
+#[test]
 fn herdr_apps_close_on_a_core_lacking_terminal_kill_is_unsupported_naming_both_versions() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;

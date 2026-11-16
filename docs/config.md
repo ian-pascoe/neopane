@@ -678,8 +678,16 @@ now:
 - Each Neovim tab page after the first opens in a Herdr app tab of its
   own, in the space of the pane it came from, without showing it or moving
   focus.
-- `close` kills the hc terminal. Focus, layout reports and resizing are to
-  come.
+- Each Herdr app tab is a layout area, laid out by its weights, each pane's
+  chrome (its border and header) taken as its inset. A zoomed pane isn't
+  seen: Neovim lays out as if its tab were unzoomed.
+- `<C-w>h/j/k/l` past a pane's edge move the window's focus with the app's
+  `pane.go`, which goes to the neighbour on that side focused last, not the
+  nearest.
+- No `events`: a focus move made with the app's own keys reaches Neovim at
+  the next layout report, which a focus report the app sends the pane has
+  the daemon run. Whether a mouse click sends one is unchecked.
+- `close` kills the hc terminal. Resizing is to come.
 - A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup
