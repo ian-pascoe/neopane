@@ -1,0 +1,4 @@
+// Near zellij's defaults, so the demo shows what a new user gets, without
+// the first-run tips and release notes
+show_startup_tips false
+show_release_notes false

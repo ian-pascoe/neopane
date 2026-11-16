@@ -2,7 +2,9 @@
 
 One Neovim, every window a real terminal pane.
 
-![neopane demo](assets/demo.gif)
+https://github.com/user-attachments/assets/5787c351-8683-4d67-a079-1d6cbb42e196
+
+The same demo in [Rex](#rex), [zellij](#zellij) and [herdr](#herdr).
 
 `:vsplit` in neopane opens a real pane in your terminal multiplexer, a Rex
 block, a tmux, zellij or herdr pane, and closing that pane closes the
@@ -391,6 +393,8 @@ own, and Neovim's screen is the current pane's size.
 
 ### Rex
 
+https://github.com/user-attachments/assets/78514eef-facf-47f8-b9fb-c2eadadda627
+
 Rex's pane provider is built in. An attach chooses Rex when `REX_SERVER` and
 `REX_SESSION` are set in its environment, as Rex sets them in every Rex block: the
 daemon connects to that Rex server and Rex session, as the client `neopane`, and
@@ -431,6 +435,8 @@ own, made with `rex new`.
 
 ### tmux
 
+https://github.com/user-attachments/assets/5787c351-8683-4d67-a079-1d6cbb42e196
+
 tmux's pane provider is built in, as a table of capabilities that each run
 neopane itself
 ([ADR 0016](docs/adr/0016-built-in-pane-providers-other-than-rex-are-tables-that-run-neopane-itself.md)).
@@ -453,6 +459,8 @@ returns for your config to change ([docs/config.md](docs/config.md#tmux));
 
 ### herdr
 
+https://github.com/user-attachments/assets/bd96990b-90f0-48c8-8965-c16d99225df4
+
 herdr's pane provider is built in too, as a table whose capabilities run
 neopane itself, speaking herdr's socket API. An attach chooses it when
 `TERM_PROGRAM` is `herdr` and `HERDR_SOCKET_PATH` is set, as in every herdr
@@ -474,6 +482,8 @@ table, which `neopane.builtin.herdr()` returns for your config to change
 ([docs/config.md](docs/config.md#herdr)).
 
 ### zellij
+
+https://github.com/user-attachments/assets/ad17ad45-6bf4-4321-b7f8-404fd7d12896
 
 zellij's pane provider is built in too, as a table whose capabilities run
 neopane itself. An attach chooses it when `ZELLIJ` and `ZELLIJ_PANE_ID` are
@@ -1052,6 +1062,18 @@ check every frame neopane draws against
 pinned to one commit; they need Zig 0.17, and are behind the `golden`
 feature, so a plain build never builds Ghostty.
 [docs/latency.md](docs/latency.md) is how to check a change for latency.
+
+The demo videos are scripted: `scripts/demo/record.sh tmux-core` records
+`scripts/demo/tmux-core.tape` in a tmux of its own, editing a throwaway
+worktree, and writes the captioned cut to `target/demo/tmux-core.mp4` and
+the social cut, set to music with
+[Remotion](https://www.remotion.dev), to
+`target/demo/tmux-core.social.mp4`. `zellij-core` and `herdr-core` are
+recorded the same way, with [VHS](https://github.com/charmbracelet/vhs);
+`rex-core` plays its tape in Rex.app through the `rex` CLI, and records its
+window on an [AeroSpace](https://github.com/nikitabobko/AeroSpace)
+workspace of its own, so it needs macOS and AeroSpace, and quits Rex.app
+while it runs.
 
 ## Renamed from neorex
 
