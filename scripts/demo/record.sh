@@ -39,7 +39,11 @@ fi
 cleanup
 trap cleanup EXIT
 
-(cd "$demo_repo" && vhs "$tape" -o "$out/$name.raw.mp4")
+case "$name" in
+# VHS can't record Rex, a GUI app: take.sh plays the tape in Rex.app
+rex-*) "$here/rex/take.sh" "$tape" "$out/$name.raw.mp4" ;;
+*) (cd "$demo_repo" && vhs "$tape" -o "$out/$name.raw.mp4") ;;
+esac
 python3 "$here/overlay.py" "$tape" "$out/$name.raw.mp4" "$out/$name.mp4"
 echo "$out/$name.mp4"
 "$here/social.sh" "$name"

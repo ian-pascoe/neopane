@@ -67,6 +67,27 @@ export const RemotionRoot: React.FC = () => {
           timeline: null,
         }}
       />
+      <Composition
+        id="rex-core"
+        component={Demo}
+        width={1920}
+        height={1080}
+        fps={30}
+        durationInFrames={1200}
+        calculateMetadata={calculateDemoMetadata}
+        defaultProps={{
+          name: "rex-core",
+          windowTitle: "Rex — neopane",
+          headline: "One Neovim.",
+          subline: "Every window a real Rex block.",
+          alsoIn: "also tmux, zellij and herdr",
+          music: null,
+          musicVolume: 0.8,
+          musicDrop: 12.05,
+          bpm: 160,
+          timeline: null,
+        }}
+      />
     </Folder>
   );
 };
