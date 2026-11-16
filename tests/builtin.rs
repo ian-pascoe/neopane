@@ -39,6 +39,8 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
         &["tmux"],
         &["nope", "find"],
         &["zellij", "place_beside"],
+        &["herdr-app", "open_beside"],
+        &["herdr_app", "find"],
         &["tmux", "open"],
         &["tmux", "nope"],
         &["tmux", "find", "extra"],
@@ -48,6 +50,25 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
         assert!(out.stdout.is_empty(), "{words:?}");
         assert!(!out.stderr.is_empty(), "{words:?}");
     }
+}
+
+#[test]
+fn herdr_apps_close_outside_the_herdr_app_fails_saying_why() {
+    let mut cmd = Command::new(exe());
+    cmd.args(["provider", "builtin", "herdr-app", "close"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "close")
+        .env(var("TERMINAL"), "t7")
+        .env_remove("HC_TERMINAL_SOCKET")
+        .stdin(Stdio::null());
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        text(&out.stderr),
+        "herdr-app close: HC_TERMINAL_SOCKET isn't set: the choosing attach isn't in the \
+         Herdr app\n"
+    );
 }
 
 #[test]

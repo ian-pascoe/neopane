@@ -123,6 +123,9 @@ pub fn in_pty_typed(
         .env_remove("ZELLIJ")
         .env_remove("ZELLIJ_PANE_ID")
         .env_remove("ZELLIJ_SESSION_NAME")
+        .env_remove("HC_TERMINAL_ID")
+        .env_remove("HC_TERMINAL_SOCKET")
+        .env_remove("HERDR_APP_HOME")
         .envs(env.iter().copied())
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
@@ -299,6 +302,9 @@ impl TmuxServer {
             .env_remove("ZELLIJ")
             .env_remove("ZELLIJ_PANE_ID")
             .env_remove("ZELLIJ_SESSION_NAME")
+            .env_remove("HC_TERMINAL_ID")
+            .env_remove("HC_TERMINAL_SOCKET")
+            .env_remove("HERDR_APP_HOME")
             .envs(env.iter().copied());
         let status = cmd.status().unwrap();
         assert!(status.success(), "tmux didn't start");
@@ -516,13 +522,17 @@ impl ZellijSession {
     }
 
     /// `zellij` with this session's private environment, and without the
-    /// user's `ZELLIJ*`, `TMUX*` or `<NAME>*` variables, or Rex's.
+    /// user's `ZELLIJ*`, `TMUX*` or `<NAME>*` variables, or Rex's or the
+    /// Herdr app's.
     pub fn command(&self) -> Command {
         let upper = NAME.to_ascii_uppercase();
         let mut cmd = Command::new("zellij");
         cmd.env_remove("ZELLIJ")
             .env_remove("ZELLIJ_PANE_ID")
             .env_remove("ZELLIJ_SESSION_NAME")
+            .env_remove("HC_TERMINAL_ID")
+            .env_remove("HC_TERMINAL_SOCKET")
+            .env_remove("HERDR_APP_HOME")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("TERM_PROGRAM")

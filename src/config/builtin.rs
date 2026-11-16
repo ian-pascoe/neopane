@@ -18,14 +18,17 @@ pub enum BuiltinTable {
     Tmux,
     Herdr,
     Zellij,
+    /// The Herdr app's, of its own (ADR 0019): not herdr's.
+    HerdrApp,
 }
 
 impl BuiltinTable {
     /// In proving order: the built-in default proves them in this order.
-    pub const ALL: [BuiltinTable; 3] = [
+    pub const ALL: [BuiltinTable; 4] = [
         BuiltinTable::Tmux,
         BuiltinTable::Herdr,
         BuiltinTable::Zellij,
+        BuiltinTable::HerdrApp,
     ];
 
     pub fn from_name(name: &[u8]) -> Option<BuiltinTable> {
@@ -41,6 +44,16 @@ impl BuiltinTable {
             BuiltinTable::Tmux => "tmux",
             BuiltinTable::Herdr => "herdr",
             BuiltinTable::Zellij => "zellij",
+            BuiltinTable::HerdrApp => "herdr-app",
+        }
+    }
+
+    /// Its name as a Lua identifier: `<name>.builtin.NAME` and
+    /// `<name>.inside.NAME`, such as `herdr_app`.
+    pub fn lua_name(self) -> &'static str {
+        match self {
+            BuiltinTable::HerdrApp => "herdr_app",
+            other => other.name(),
         }
     }
 
@@ -82,13 +95,15 @@ impl BuiltinTable {
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
             ],
+            BuiltinTable::HerdrApp => &[Capability::Find, Capability::Close],
         }
     }
 
     /// Its context variables and find variables: none of tmux's, as `TMUX`
     /// leaks into terminals tmux doesn't run, so its `find` proves a pane
-    /// by its tty alone; herdr's server, by its socket, and zellij's
-    /// session; and the pane each one's `find` checks.
+    /// by its tty alone; herdr's server, by its socket, zellij's session,
+    /// and the Herdr app's hc core, by its socket, with the app's home; and
+    /// the pane or terminal each one's `find` checks.
     pub fn vars(self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
             BuiltinTable::Tmux => (&[], &[]),
@@ -96,6 +111,10 @@ impl BuiltinTable {
             BuiltinTable::Zellij => (
                 &["ZELLIJ_SESSION_NAME", "ZELLIJ_SOCKET_DIR"],
                 &["ZELLIJ_PANE_ID"],
+            ),
+            BuiltinTable::HerdrApp => (
+                &["HC_TERMINAL_SOCKET", "HERDR_APP_HOME"],
+                &["HC_TERMINAL_ID"],
             ),
         }
     }
@@ -264,6 +283,50 @@ mod tests {
             [
                 (Setting::ContextVars, list("HERDR_SOCKET_PATH")),
                 (Setting::FindVars, list("HERDR_PANE_ID")),
+            ]
+        );
+    }
+
+    #[test]
+    fn herdr_app_runs_the_binary_for_find_and_close_and_reaches_by_its_core_and_home() {
+        let t = BuiltinTable::HerdrApp.table();
+        assert_eq!(t.name, "herdr-app");
+        assert_eq!(BuiltinTable::HerdrApp.lua_name(), "herdr_app");
+        assert_eq!(
+            BuiltinTable::from_name(b"herdr-app"),
+            Some(BuiltinTable::HerdrApp)
+        );
+        assert_eq!(BuiltinTable::from_name(b"herdr_app"), None);
+        let shown: Vec<(&str, String)> = t
+            .capabilities
+            .iter()
+            .map(|(c, argv)| {
+                let words: Vec<_> = argv.iter().map(|w| String::from_utf8_lossy(w)).collect();
+                (c.name(), words.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("find", "{exe} provider builtin herdr-app find".to_string()),
+                (
+                    "close",
+                    "{exe} provider builtin herdr-app close".to_string()
+                ),
+            ]
+        );
+        let string = |s: &str| Value::String(s.as_bytes().to_vec());
+        assert_eq!(
+            t.settings,
+            [
+                (
+                    Setting::ContextVars,
+                    Value::List(vec![string("HC_TERMINAL_SOCKET"), string("HERDR_APP_HOME")])
+                ),
+                (
+                    Setting::FindVars,
+                    Value::List(vec![string("HC_TERMINAL_ID")])
+                ),
             ]
         );
     }

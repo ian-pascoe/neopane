@@ -139,11 +139,11 @@ Also `require("neopane")`.
 
 | | |
 |---|---|
-| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's, herdr's or zellij's table, as `neopane.builtin.tmux()`, `neopane.builtin.herdr()` or `neopane.builtin.zellij()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
+| `neopane.default(attach)` | What the daemon chooses with no file (see [The default](#the-default)): tmux's, herdr's, zellij's or the Herdr app's table, as `neopane.builtin.tmux()`, `neopane.builtin.herdr()`, `neopane.builtin.zellij()` or `neopane.builtin.herdr_app()` returns it, `"rex"`, or nil. Ignores the hint, never raises |
 | `neopane.run(argv, opts)` | Runs a command without a shell and waits for it, at most `opts.timeout` seconds (1 by default, cut to the config's time left less 0.25 s). Returns `{ ok, code, stdout, stderr, error }`; raises only on bad arguments. `opts` also takes `cwd`, `env` (a string sets a variable, `false` removes it) and `stdin` |
 | `neopane.which(program)` | The absolute path of the first executable `program` on `PATH`, or nil; with a `/`, that path if it is executable. Runs nothing |
-| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`, `herdr`, `zellij`. They take no options, and raise on any |
-| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane: `tmux` and `herdr`, asking the multiplexer within 0.5 s, and `zellij`, from the process table alone. They read `attach.env`, `attach.tty` and `attach.pid`, and never raise |
+| `neopane.builtin` | Functions that each return a fresh built-in table, to return as it is or copy and change: `tmux`, `herdr`, `zellij`, `herdr_app` (the Herdr app's, its table named `herdr-app`). They take no options, and raise on any |
+| `neopane.inside` | Functions `(attach) -> ok, why` that prove the attach's terminal is directly a multiplexer's own pane: `tmux`, `herdr` and `herdr_app`, asking the multiplexer within 0.5 s, and `zellij`, from the process table alone. They read `attach.env`, `attach.tty` and `attach.pid`, and never raise |
 | `neopane.os` | `"macos"` or `"linux"` |
 | `neopane.version` | The daemon's version |
 | `neopane.config_dir` | The absolute directory of the file that ran |
@@ -157,13 +157,17 @@ the environment only:
 - herdr: `TERM_PROGRAM` is `herdr` and `HERDR_SOCKET_PATH` is set and not
   empty.
 - zellij: `ZELLIJ` is set, and `ZELLIJ_PANE_ID` is set and not empty.
+- the Herdr app: `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` are both set and
+  not empty. Never `TERM_PROGRAM`: the app's terminals say `ghostty`, as
+  plain Ghostty's do.
 - Rex: `REX_SERVER` and `REX_SESSION` are both set, even if empty.
 
 Naming one, it chooses that one and runs nothing. A multiplexer's panes
 inherit the variables of whatever started its server, though: a tmux started
 in a Rex pane gives its panes Rex's variables, and a terminal started from a
 tmux shell has tmux's. Naming several, it asks each multiplexer's `inside`
-in turn, tmux's, herdr's then zellij's, and takes the first that proves;
+in turn, tmux's, herdr's, zellij's then the Herdr app's, and takes the
+first that proves;
 else Rex if named, else none. Rex is never proven there: its `find` proves
 it. The daemon runs the proofs off its loop, and new windows wait for them
 as they do for a config.
@@ -232,7 +236,42 @@ nothing, and the variables are trusted. Its `why`:
 | `"this terminal (/dev/ttys003) isn't a zellij pane's: its session leader's parent is tmux (pid 812)"` | |
 
 Its `find` adds two checks, asking zellij: zellij must be 0.46.0 or newer,
-and the session must list the pane, not exited. A multiplexer's `find`
+and the session must list the pane, not exited.
+
+`neopane.inside.herdr_app(attach)` runs the Herdr app's proof, which its
+`find` runs too. `HC_TERMINAL_ID` must name a terminal of this machine: a
+remote space's, such as `mini/t7`, is refused. The hc core at
+`HC_TERMINAL_SOCKET` must answer `hello` in protocol generation 1, with the
+methods the proof calls; `terminal.get` must find the terminal live, and
+its process's controlling terminal must be the attach's tty, compared by
+device, as `HC_TERMINAL_ID` passes on to the panes of a multiplexer run in
+the pane; one block of the core's `herdr-app` doc must show the terminal,
+its Herdr app pane; and `herdr-app status` must answer, a Herdr app window
+showing it under the attach's `HERDR_APP_HOME`. `herdr-app` is found on the
+attach's `PATH`, else at `~/.local/bin/herdr-app`. Where the terminal's
+process or its tty can't be read, `inside.herdr_app` says no, and `find`
+trusts `HC_TERMINAL_ID`, its pane being there. Its `why`:
+
+| | |
+|---|---|
+| `true, "hc terminal t7, Herdr app pane p4c22…"` | the terminal and its pane |
+| `"HC_TERMINAL_ID isn't set"` | |
+| `"hc terminal mini/t7 is on machine mini: the built-in herdr-app doesn't reach remote spaces"` | |
+| `"HC_TERMINAL_SOCKET isn't set"` | |
+| `"the attach has no tty"` | |
+| `"no herdr-app on PATH, nor at /Users/me/.local/bin/herdr-app"` | |
+| `"can't reach the hc core at <path>: <error>"` | no core listens at the socket, say |
+| `"the hc core didn't answer in 0.5 s"` | |
+| `"the hc core speaks generation 2; the built-in herdr-app speaks 1 (hc core 0.2.0, herdr-app 0.1.16)"` | a core of another generation, or one lacking a method (`the hc core has no doc.get`), naming both versions |
+| `"hc core: <error.message>"` | the core refused, as for a terminal it doesn't have |
+| `"hc terminal t7 has finished"` | |
+| `"this terminal (/dev/ttys003) isn't hc terminal t7's (/dev/ttys009)"` | |
+| `"t7 has no Herdr app pane"`, `"t7 shows in 2 Herdr app panes"` | the doc shows it in no block, or in several |
+| `"herdr-app: no Herdr window at <home>/herdr-app.sock: …"` | no window under the attach's `HERDR_APP_HOME` |
+| `"hc terminal t7 has no process"` | unprovable |
+| `"can't read the terminal of hc terminal t7's process (pid 32523)"` | unprovable |
+
+A multiplexer's `find`
 still confirms the choice, and refusing it goes only to the log: the
 default guessed. `provider check` shows what it named and each proof's
 answer.
@@ -328,6 +367,7 @@ The report's sections:
 | `one-step` | the one-step capabilities, or `none: a pair opens, then places` |
 | `tmux` | for a table whose capabilities run `{exe} provider builtin tmux`, such as `neopane.builtin.tmux()` or a changed copy of it: the `tmux` on `PATH` (or `not on PATH`), its version, the socket `TMUX` names, whether the server answers (or why not), and each capability in use that this tmux is too old for, such as `open_float  exits 69: needs tmux 3.7, this is 3.4` and `events  exits 69: needs tmux 3.8, this is 3.4`; below 3.2, `missing  every capability (needs tmux 3.2, this is 3.1c)` |
 | `zellij` | for a table whose capabilities run `{exe} provider builtin zellij`, such as `neopane.builtin.zellij()` or a changed copy of it: the `zellij` on `PATH` (or `not on PATH`), its version, the session `ZELLIJ_SESSION_NAME` names (or `none: ZELLIJ_SESSION_NAME isn't set`), the socket directory `ZELLIJ_SOCKET_DIR` names (or `none: ZELLIJ_SOCKET_DIR isn't set`, where zellij looks in its own), and whether the session answers `list-panes`, as `find` asks it (or why not); below 0.46.0, `missing  every capability (needs zellij 0.46.0, this is 0.45.1)`. Every capability's zellij calls need that session, found through the same variables and `HOME` |
+| `herdr-app` | for a table whose capabilities run `{exe} provider builtin herdr-app`, such as `neopane.builtin.herdr_app()` or a changed copy of it: the `herdr-app` found (on `PATH`, else `~/.local/bin/herdr-app`, or `none: <why>`), its version, the app's home (`HERDR_APP_HOME`, or `~/.config/herdr-app: HERDR_APP_HOME isn't set`) and whether a window there answers `status` (or why not); then `hc core` and the socket `HC_TERMINAL_SOCKET` names (or `none: HC_TERMINAL_SOCKET isn't set`), the core's version and protocol generation from its `hello`, and whether it answers (or why not); and each capability in use whose methods the core lacks, such as `close  exits 69: the hc core has no terminal.kill`, or `find  refuses: …` |
 | `rex` | for `"rex"`: the server's URL, version and API revision (`server.version`'s, else the one its welcome agreed), and, for a server older than this build speaks, `missing  every capability (needs Rex API revision N, this server has M)`: Rex doesn't say which revision each method came in, so it isn't told capability by capability |
 | `find` | the title written and put back, `find`'s exit status, time and id, and whether the choice is accepted or refused; for Rex, `proven: block:… is this terminal's`, `disproved: REX_BLOCK names another terminal (/dev/ttys009)` (the path where the system names it: on macOS, and for a pseudo-terminal on Linux), or `unprovable: <why>; trusted REX_BLOCK`; or `not run: <why>` |
 | `errors`, `warnings` | every problem, with its path |
@@ -389,6 +429,7 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
  "rex":null,
  "tmux":null,
  "zellij":null,
+ "herdr_app":null,
  "default":null,
  "problems":[],
  "result":{"state":"ok","message":null}}
@@ -428,6 +469,13 @@ refusing a config's choice; 2 for a usage error. Warnings don't change it.
   `error` says why the session didn't answer, and `missing[]` is empty, or
   holds one `{"capability": null, "needs": "0.46.0"}` below the floor, a
   zellij version, a string.
+- `herdr_app`: null unless a table in use runs `{exe} provider builtin
+  herdr-app`; else `{"app": {"path", "version", "home", "answers", "error"},
+  "core": {"socket", "version", "generation", "answers", "error"},
+  "missing"}`: each is null when unknown or unset, `error` says why the
+  window or core didn't answer, and `missing[]` holds `{"capability":
+  "close", "why": "the hc core has no terminal.kill"}` for each capability
+  in use whose methods the core lacks.
 - `default`: null unless `neopane.default` chose with no file; else
   `{"named": ["tmux", "rex"], "inside": [{"name": "tmux", "ok": false,
   "why": "…"}]}`: the built-ins the environment names, in order, and each
@@ -445,7 +493,9 @@ or changed in type or meaning; a missing one means unknown.
 ## Built-in pane providers
 
 `neopane provider show` lists the built-ins: `rex`, which has no Lua table
-(return `"rex"` from `provider()` to use it), `tmux`, `herdr` and `zellij`.
+(return `"rex"` from `provider()` to use it), `tmux`, `herdr`, `zellij` and
+`herdr-app`, the Herdr app's, which a config gets from
+`neopane.builtin.herdr_app()`.
 `neopane provider show NAME` prints a built-in that has a Lua table as a Lua
 file, to copy into your `init.lua` and change. Its every capability runs
 `{exe} provider builtin NAME CAPABILITY`: neopane itself, speaking the
@@ -587,6 +637,34 @@ Its limits, for now:
   a focus move made with zellij's own keys isn't followed by Neovim, and
   with one, it is followed only at the next report, such as when the pane
   you went to reports focus: zellij can't tell neopane unasked.
+
+### Herdr app
+
+The Herdr desktop app's panes show terminals an hc core runs, not herdr's:
+it is a built-in of its own, `herdr-app` (ADR 0019), apart from herdr, the
+terminal multiplexer above. The default knows it by the variables each of
+its terminals has, `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`, never by
+`TERM_PROGRAM`, which says `ghostty`; where another built-in's variables
+are set too, it asks `neopane.inside.herdr_app` last of the multiplexers
+(see [The default](#the-default)). Its `find` runs the same proof: the
+terminal live in the hc core at `HC_TERMINAL_SOCKET`, on this terminal's
+tty, shown in one Herdr app pane, and a Herdr app window answering. Its
+reach is that hc core and the app's home, `HERDR_APP_HOME` (else
+`~/.config/herdr-app`): a Herdr app space is no boundary, and a terminal of
+another core or home is out of reach. A config gets the same table from
+`neopane.builtin.herdr_app()`; `neopane provider check` shows both the
+app's and the core's versions.
+
+It reads the hc core through its socket and acts on the window through the
+`herdr-app` command, found on `PATH`, else at `~/.local/bin/herdr-app`,
+where an installed Herdr.app keeps it. No version is required: what a
+capability needs and the core or app lacks, it names, with both versions,
+and does without (exit 69).
+
+For now its table has only `find`, and `close`, which kills the hc
+terminal: each Neovim window is drawn in the pane it came from, as with no
+pane provider. Panes of their own, focus, resizing and tab pages are to
+come. A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup
 

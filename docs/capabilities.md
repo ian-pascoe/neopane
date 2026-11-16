@@ -609,6 +609,48 @@ zellij's command line streams no layout or focus change, so a focus move
 made with zellij's keys is learned at the next report, such as the one a
 pane's focus report has the daemon run.
 
+### Herdr app
+
+`<name>.builtin.herdr_app()`, its table named `herdr-app` (ADR 0019): `find`
+and `close`, for now, on the hc core whose socket `HC_TERMINAL_SOCKET`
+names and the Herdr app window under `HERDR_APP_HOME` (else
+`~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
+`HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
+home are the reach, a Herdr app space no boundary. Terminal ids are hc
+terminal addresses, such as `t7`, opaque strings; the core's `doc.get
+{name: "herdr-app"}` is the only map from a terminal to its Herdr app pane,
+a block of the doc.
+
+- **The core:** JSON-RPC 2.0, one JSON value a line, on one connection held
+  for every request of a capability, `hello` first. It speaks protocol
+  generation 1 and needs only the methods a capability calls, as `hello`'s
+  `methods` lists them; a core of another generation, or lacking one,
+  exits 69, naming it and both versions, the core's from `hello` and the
+  app's from `herdr-app --version`: `the hc core has no terminal.kill (hc
+  core 0.1.21, herdr-app 0.1.16)`. Lines that answer no request of its own,
+  such as event notifications, are skipped.
+- **The window:** `herdr-app ARGS…`, in the choosing attach's environment,
+  answering one JSON object, found on `PATH`, else at
+  `~/.local/bin/herdr-app`, where an installed Herdr.app keeps it; else
+  exit 69, `no herdr-app on PATH, nor at /Users/me/.local/bin/herdr-app`.
+  With no window under its home, `herdr-app` exits 2, saying so on stderr.
+
+- `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
+  terminal of this machine: a remote space's, `machine/t7`, is refused.
+  Then `hello`, as above, with `terminal.get` and `doc.get`; `terminal.get`
+  finds the terminal `live`, and the controlling terminal of its `pid` is
+  `TTY`, compared by device, as `HC_TERMINAL_ID` passes on to the panes of
+  a multiplexer run in the pane; exactly one block of the doc shows it, in
+  any space; and `herdr-app status` answers. Where its process or its tty
+  can't be read, it trusts `HC_TERMINAL_ID`, the terminal being live in a
+  pane. Every other failure refuses (exit 1), a missing method or
+  `herdr-app` too, as exit 69 would accept the terminal. Prints the
+  address. It has 0.5 s. `<name>.inside.herdr_app` runs the same proof,
+  unprovable being no.
+- `close`: `terminal.kill`; done when the core answers the terminal's
+  record, finished, or `not_found`; any other error exits 1. Killing a
+  terminal closes its pane, and a terminal running an attach hangs up.
+
 ## Placeholders
 
 Every variable but `<NAME>_ENV_*` is also a placeholder: a whole argv word,

@@ -287,6 +287,6 @@ fn the_meta_file_keeps_in_step_with_the_api() {
     assert_eq!(fields(&meta, "Builtin"), keys(&builtin));
     assert_eq!(
         keys(&builtin),
-        set(crate::config::BuiltinTable::ALL.map(|b| b.name()))
+        set(crate::config::BuiltinTable::ALL.map(|b| b.lua_name()))
     );
 }

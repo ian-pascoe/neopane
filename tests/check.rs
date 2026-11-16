@@ -65,6 +65,9 @@ impl Home {
             .env_remove("ZELLIJ_PANE_ID")
             .env_remove("ZELLIJ_SESSION_NAME")
             .env_remove("ZELLIJ_SOCKET_DIR")
+            .env_remove("HC_TERMINAL_ID")
+            .env_remove("HC_TERMINAL_SOCKET")
+            .env_remove("HERDR_APP_HOME")
             .stdin(Stdio::null());
         c
     }
@@ -296,8 +299,20 @@ fn full_cuts_nothing() {
 fn documented(object: &str) -> BTreeSet<&'static str> {
     let keys: &[&str] = match object {
         "top" => &[
-            "config", "attach", "ran", "chose", "tables", "one_step", "find", "rex", "tmux",
-            "zellij", "default", "problems", "result",
+            "config",
+            "attach",
+            "ran",
+            "chose",
+            "tables",
+            "one_step",
+            "find",
+            "rex",
+            "tmux",
+            "zellij",
+            "herdr_app",
+            "default",
+            "problems",
+            "result",
         ],
         "config" => &["path", "state"],
         "attach" => &["tty", "pid", "cwd", "daemon", "provider"],
@@ -327,6 +342,9 @@ fn documented(object: &str) -> BTreeSet<&'static str> {
             "error",
             "missing",
         ],
+        "herdr_app" => &["app", "core", "missing"],
+        "herdr_app.app" => &["path", "version", "home", "answers", "error"],
+        "herdr_app.core" => &["socket", "version", "generation", "answers", "error"],
         "problem" => &["level", "path", "message"],
         "result" => &["state", "message", "refused"],
         "default" => &["named", "inside"],
@@ -392,6 +410,7 @@ fn json_has_the_documented_keys() {
     assert_eq!(Value::Null, v["rex"]);
     assert_eq!(Value::Null, v["tmux"]);
     assert_eq!(Value::Null, v["zellij"]);
+    assert_eq!(Value::Null, v["herdr_app"]);
     let why = "a half's one-step capability is ignored; only a table returned whole gets one";
     assert_eq!(
         serde_json::json!({ "state": "ignored", "why": why }),
@@ -990,6 +1009,51 @@ fn a_changed_copy_of_the_tmux_table_gets_the_section_for_what_it_still_runs() {
     assert_eq!(Value::Null, v["tmux"], "{v}");
     let out = in_tmux(&home, "/tmp/nowhere,1,0", bin.as_os_str(), &[]);
     assert!(!stdout(&out).contains("\ntmux  "), "{}", stdout(&out));
+}
+
+#[test]
+fn the_default_herdr_app_tables_report_names_the_app_and_the_core_each_as_found() {
+    let home = Home::new("herdr-app");
+    // a herdr-app that knows its version, and no window
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("herdr-app");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ncase \"$1\" in\n--version) echo 'herdr-app 0.1.16' ;;\n\
+         *) echo \"herdr-app: no Herdr window at $HERDR_APP_HOME/herdr-app.sock: refused\" >&2; \
+         exit 2 ;;\nesac\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let socket = home.dir.join("nowhere.sock");
+    let out = home
+        .command(&["--json"])
+        .env("HC_TERMINAL_ID", "t7")
+        .env("HC_TERMINAL_SOCKET", &socket)
+        .env("HERDR_APP_HOME", "/tmp/apphome")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!("herdr-app", v["chose"]["name"], "{v}");
+    let h = &v["herdr_app"];
+    keys_in(h, "herdr_app");
+    keys_in(&h["app"], "herdr_app.app");
+    keys_in(&h["core"], "herdr_app.core");
+    assert_eq!(fake.to_str(), h["app"]["path"].as_str());
+    assert_eq!("0.1.16", h["app"]["version"]);
+    assert_eq!("/tmp/apphome", h["app"]["home"]);
+    assert_eq!(false, h["app"]["answers"]);
+    assert_eq!(
+        "herdr-app: no Herdr window at /tmp/apphome/herdr-app.sock: refused",
+        h["app"]["error"]
+    );
+    assert_eq!(socket.to_str(), h["core"]["socket"].as_str());
+    assert_eq!(false, h["core"]["answers"]);
+    let error = h["core"]["error"].as_str().unwrap();
+    assert!(error.starts_with("can't reach the hc core at "), "{error}");
 }
 
 /// `provider check` with `args` in a pane of zellij session `session`,

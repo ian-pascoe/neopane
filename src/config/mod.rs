@@ -94,7 +94,9 @@ impl Defaulted {
 /// multiplexers in proving order, then Rex: tmux when `TERM_PROGRAM` is
 /// `tmux` and `TMUX` is set and not empty, herdr when `TERM_PROGRAM` is
 /// `herdr` and `HERDR_SOCKET_PATH` is set and not empty, zellij when
-/// `ZELLIJ` is set and `ZELLIJ_PANE_ID` set and not empty, Rex when
+/// `ZELLIJ` is set and `ZELLIJ_PANE_ID` set and not empty, the Herdr app
+/// when `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET` are set and not empty
+/// (never by `TERM_PROGRAM`, which its terminals set to `ghostty`), Rex when
 /// `REX_SERVER` and `REX_SESSION` are both set, even if empty. A
 /// multiplexer's panes inherit whatever started its server, so several
 /// may be named.
@@ -111,6 +113,10 @@ pub fn named(var: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<DefaultName> {
     }
     if var("ZELLIJ").is_some() && var("ZELLIJ_PANE_ID").is_some_and(|p| !p.is_empty()) {
         named.push(DefaultName::Table(BuiltinTable::Zellij));
+    }
+    let set = |name: &str| var(name).is_some_and(|v| !v.is_empty());
+    if set("HC_TERMINAL_ID") && set("HC_TERMINAL_SOCKET") {
+        named.push(DefaultName::Table(BuiltinTable::HerdrApp));
     }
     if var("REX_SERVER").is_some() && var("REX_SESSION").is_some() {
         named.push(DefaultName::Rex);
@@ -356,6 +362,51 @@ mod default_tests {
         assert_eq!(d.chose, Some(DefaultName::Rex));
         let d = default_of(var(&both), |_| proof(false, ""));
         assert_eq!(d.chose, None);
+    }
+
+    const HERDR_APP: DefaultName = DefaultName::Table(BuiltinTable::HerdrApp);
+    const IN_HERDR_APP: [(&str, &str); 3] = [
+        ("HC_TERMINAL_ID", "t7"),
+        ("HC_TERMINAL_SOCKET", "/tmp/hc/default.sock"),
+        ("TERM_PROGRAM", "ghostty"),
+    ];
+
+    #[test]
+    fn the_environment_names_the_herdr_app_by_its_hc_variables_after_zellij_and_before_rex() {
+        assert_eq!(named(var(&IN_HERDR_APP)), [HERDR_APP]);
+        assert_eq!(named(var(&IN_HERDR_APP[..2])), [HERDR_APP]);
+        assert_eq!(
+            named(var(
+                &[&IN_REX[..], &IN_ZELLIJ, &IN_TMUX, &IN_HERDR_APP].concat()
+            )),
+            [TMUX, ZELLIJ, HERDR_APP, DefaultName::Rex]
+        );
+        // either alone, or empty, names none; never TERM_PROGRAM
+        assert_eq!(named(var(&IN_HERDR_APP[..1])), []);
+        assert_eq!(named(var(&IN_HERDR_APP[1..])), []);
+        assert_eq!(named(var(&[("HC_TERMINAL_ID", ""), IN_HERDR_APP[1]])), []);
+        assert_eq!(
+            named(var(&[IN_HERDR_APP[0], ("HC_TERMINAL_SOCKET", "")])),
+            []
+        );
+        assert_eq!(named(var(&[("TERM_PROGRAM", "herdr-app")])), []);
+        let d = default_of(var(&IN_HERDR_APP), never);
+        assert_eq!(d.chose, Some(HERDR_APP));
+    }
+
+    #[test]
+    fn the_herdr_app_is_proved_last_of_the_multiplexers() {
+        // a zellij run in a Herdr app pane: the app's variables leak into it
+        let both = [&IN_ZELLIJ[..], &IN_HERDR_APP].concat();
+        let mut asked = Vec::new();
+        let d = default_of(var(&both), |t| {
+            asked.push(t);
+            proof(t == BuiltinTable::HerdrApp, "")
+        });
+        assert_eq!(asked, [BuiltinTable::Zellij, BuiltinTable::HerdrApp]);
+        assert_eq!(d.chose, Some(HERDR_APP));
+        let d = default_of(var(&both), |t| proof(t == BuiltinTable::Zellij, ""));
+        assert_eq!(d.chose, Some(ZELLIJ));
     }
 
     #[test]

@@ -537,7 +537,11 @@ impl Checker {
                 None => {
                     let table = match super::BuiltinTable::from_name(s) {
                         Some(t) => {
-                            format!(" (for {0}'s table, return {NAME}.builtin.{0}())", t.name())
+                            format!(
+                                " (for {}'s table, return {NAME}.builtin.{}())",
+                                t.name(),
+                                t.lua_name()
+                            )
                         }
                         None => String::new(),
                     };

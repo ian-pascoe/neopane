@@ -60,7 +60,7 @@ fn listed() -> Vec<(&'static str, String)> {
     });
     let tables = BuiltinTable::ALL
         .iter()
-        .map(|t| (t.name(), format!("{NAME}.builtin.{}()", t.name())));
+        .map(|t| (t.name(), format!("{NAME}.builtin.{}()", t.lua_name())));
     rex.chain(tables).collect()
 }
 
@@ -76,11 +76,14 @@ fn listing() -> String {
 
 /// `table` as a Lua file: two header lines, then `return { … }`.
 pub fn lua_file(table: &Table, build: &str) -> String {
+    let lua_name = match BuiltinTable::from_name(table.name.as_bytes()) {
+        Some(builtin) => builtin.lua_name(),
+        None => &table.name,
+    };
     let mut out = format!(
-        "-- {NAME}.builtin.{}() in {build}.\n\
+        "-- {NAME}.builtin.{lua_name}() in {build}.\n\
          -- To change it, copy it into your init.lua and return it from provider().\n\
-         return {{\n",
-        table.name
+         return {{\n"
     );
     let mut line = |key: &str, value: &Value| {
         let _ = writeln!(out, "  {} = {},", lua_key(key), lua_value(value));
@@ -179,7 +182,7 @@ mod tests {
     fn an_unknown_name_lists_the_builtins() {
         assert_eq!(
             show(Some("foo"), "b").unwrap_err(),
-            "no built-in pane provider named foo (built-ins: rex, tmux, herdr, zellij)"
+            "no built-in pane provider named foo (built-ins: rex, tmux, herdr, zellij, herdr-app)"
         );
     }
 
@@ -188,10 +191,11 @@ mod tests {
         assert_eq!(
             show(None, "b").unwrap(),
             format!(
-                "rex     return \"rex\" from provider() (built in; no Lua table)\n\
-                 tmux    {NAME}.builtin.tmux()\n\
-                 herdr   {NAME}.builtin.herdr()\n\
-                 zellij  {NAME}.builtin.zellij()\n"
+                "rex        return \"rex\" from provider() (built in; no Lua table)\n\
+                 tmux       {NAME}.builtin.tmux()\n\
+                 herdr      {NAME}.builtin.herdr()\n\
+                 zellij     {NAME}.builtin.zellij()\n\
+                 herdr-app  {NAME}.builtin.herdr_app()\n"
             )
         );
     }
@@ -204,6 +208,26 @@ mod tests {
                     context_vars = { \"ZELLIJ_SESSION_NAME\", \"ZELLIJ_SOCKET_DIR\" },\n  \
                     find_vars = { \"ZELLIJ_PANE_ID\" },\n}\n";
         assert!(shown.ends_with(tail), "{shown}");
+    }
+
+    #[test]
+    fn the_herdr_apps_table_is_named_herdr_app_and_got_as_herdr_app() {
+        assert_eq!(
+            show(Some("herdr-app"), "B 1").unwrap(),
+            format!(
+                "-- {NAME}.builtin.herdr_app() in B 1.\n\
+                 -- To change it, copy it into your init.lua and return it from provider().\n\
+                 return {{\n  \
+                   name = \"herdr-app\",\n  \
+                   close = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"close\" }},\n  \
+                   find = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"find\" }},\n  \
+                   context_vars = {{ \"HC_TERMINAL_SOCKET\", \"HERDR_APP_HOME\" }},\n  \
+                   find_vars = {{ \"HC_TERMINAL_ID\" }},\n\
+                 }}\n"
+            )
+        );
     }
 
     #[test]
