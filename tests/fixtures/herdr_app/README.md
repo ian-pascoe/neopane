@@ -8,12 +8,13 @@ unit tests. The facts they show, how each was found, and the sandbox recipe:
 Recorded on 2026-11-16 with **hc 0.1.21** (`hc --version`; `hello` answers
 `version: "0.1.21"`, `generation: 1`) and **Herdr app 0.1.16**
 (`herdr-app --version`), macOS arm64, window 1016×1110 pt, font size 14,
-zoom 1. CI installs this hc, pinned in `scripts/install-hc.sh`, for the live
-core tests (`tests/herdr_app.rs`): move the pin and the fixtures together. `app/version.json`,
-`core/hc-version.json`, `core/server.status.jsonl`,
-`core/terminal.kill-attach.jsonl` and `app/status-after-kill-attach.json` come
-from a second session the same day, in the same sandbox after the app and
-core were restarted; the rest from the first.
+zoom 1. CI installs this hc, pinned in `scripts/install-hc.sh`, for the
+live core tests (`tests/herdr_app.rs`): move the pin and the fixtures
+together. `app/version.json`, `core/hc-version.json`,
+`core/server.status.jsonl`, `core/terminal.kill-attach.jsonl` and
+`app/status-after-kill-attach.json` come from a second session the same
+day, in the same sandbox after the app and core were restarted; the rest
+from the first.
 
 Every value is as the core or app sent it, except three scrubbed strings: the
 core id is `0123456789abcdef0123456789abcdef`, the machine name `host`, the

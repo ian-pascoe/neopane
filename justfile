@@ -20,7 +20,7 @@ run *args:
 test:
     cargo test
 
-# Run the Herdr app tests against a real, private Herdr app window (macOS, Herdr.app, hc; hidden with AeroSpace when it runs)
+# Run the Herdr app tests against a private Herdr app window (macOS)
 test-herdr-app:
     cargo test --test herdr_app -- --ignored --test-threads=1
 

@@ -41,26 +41,42 @@ const IDLE: &[&str] = &["/bin/sleep", "100000"];
 const APP_VERSION: &str = "0.1.16";
 
 /// A fake Herdr app window over a live hc core: a `herdr-app` script in a
-/// directory of its own, for a `PATH`. `status` and `--version` it answers
-/// itself, as a window that's there; with [`FakeWindow::close`], it says
-/// there's none, as `herdr-app` does. Each `do` is handed to a thread of
-/// the test's, which acts on the core as the app does: a split or a tab
-/// is a new terminal, `terminal.run` with the core's keep on, and a block
+/// directory of its own, for a `PATH`. `--version` it answers itself, and
+/// `status` from a file the test keeps, as fast as the app answers, for
+/// the inside proof's 0.5 s; with [`FakeWindow::close`], it says there's
+/// no window, as `herdr-app` does. Each `do` is handed to a thread of the
+/// test's, which acts on the core as the app does: a split or a tab is a
+/// new terminal, `terminal.run` with the core's keep on, and a block
 /// written into the core's doc, shaped as the app shapes it
-/// (`docs/research/herdr-app.md`). Any other `do` it refuses, as the app
-/// refuses an unknown command: a capability that needs another, such as
-/// `pane.focus` or `layout.resize`, adds it to [`act`]. Unlike the app, it
-/// leaves a finished terminal's block in the doc. Stopped as it drops.
+/// (`docs/research/herdr-app.md`); `pane.split` and `pane.focus` move the
+/// focus as the app does. Any other `do` it refuses, as the app refuses an
+/// unknown command: `pane.go` and `layout.resize`, which `focus_direction`
+/// and `resize` ask, are deliberately unexercised, for a test of either to
+/// add to [`act`]. Unlike the app, it leaves a finished terminal's block
+/// in the doc. Stopped as it drops.
 struct FakeWindow {
     dir: PathBuf,
+    socket: PathBuf,
     asked: Arc<Mutex<Vec<(String, Value)>>>,
+    focus: Arc<Mutex<Focus>>,
     stop: Arc<AtomicBool>,
+    serving: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Where a fake window's focus is: the tab it shows, and each tab's
+/// focused pane, by tab id.
+#[derive(Default)]
+struct Focus {
+    shown: Option<String>,
+    of_tab: std::collections::HashMap<String, String>,
 }
 
 /// What a fake window's terminals run with: their working directory, and
 /// variables over the core's own.
 #[derive(Clone)]
 struct Spawn {
+    /// The window's own directory, its `status` there.
+    dir: PathBuf,
     socket: PathBuf,
     cwd: PathBuf,
     env: serde_json::Map<String, Value>,
@@ -86,7 +102,7 @@ if [ -e "$d/closed" ]; then
   exit 2
 fi
 case "$1" in
-status) echo '{{"zoom":1.0,"font_size":14.0,"overlays":[],"errors":[]}}'; exit 0 ;;
+status) /bin/cat "$d/status.json"; exit 0 ;;
 do) ;;
 *) echo "fake herdr-app: no $1" >&2; exit 64 ;;
 esac
@@ -106,6 +122,7 @@ exit "$code"
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let spawn = Spawn {
+            dir: dir.clone(),
             socket: core.socket.clone(),
             cwd: cwd.to_path_buf(),
             env: env
@@ -114,10 +131,40 @@ exit "$code"
                 .collect(),
         };
         let asked = Arc::new(Mutex::new(Vec::new()));
+        let focus = Arc::new(Mutex::new(Focus::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (its_dir, its_asked, its_stop) = (dir.clone(), asked.clone(), stop.clone());
-        std::thread::spawn(move || serve(&its_dir, &spawn, &its_asked, &its_stop));
-        FakeWindow { dir, asked, stop }
+        write_status(&dir, &Value::Null, &focus.lock().unwrap());
+        let serving = {
+            let (dir, asked, focus, stop) =
+                (dir.clone(), asked.clone(), focus.clone(), stop.clone());
+            std::thread::spawn(move || serve(&dir, &spawn, &asked, &focus, &stop))
+        };
+        FakeWindow {
+            dir,
+            socket: core.socket.clone(),
+            asked,
+            focus,
+            stop,
+            serving: Some(serving),
+        }
+    }
+
+    /// Writes `doc` into the core as the window's, showing its first tab,
+    /// its first pane focused.
+    fn show(&self, doc: &Value) {
+        let version =
+            hc_call(&self.socket, "doc.get", json!({ "name": "herdr-app" })).unwrap()["version"]
+                .as_u64()
+                .unwrap();
+        let set = json!({ "name": "herdr-app", "value": doc, "version": version });
+        hc_call(&self.socket, "doc.set", set).unwrap();
+        let mut focus = self.focus.lock().unwrap();
+        *focus = Focus::default();
+        if let Some((tab, pane)) = tabs_and_panes(doc).into_iter().next() {
+            focus.shown = Some(tab.clone());
+            focus.of_tab.insert(tab, pane);
+        }
+        write_status(&self.dir, doc, &focus);
     }
 
     /// The directory its `herdr-app` is in, for a `PATH`.
@@ -139,12 +186,65 @@ exit "$code"
 impl Drop for FakeWindow {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(serving) = self.serving.take() {
+            let _ = serving.join();
+        }
     }
+}
+
+/// Each tab of `doc` and its first pane, in the doc's order.
+fn tabs_and_panes(doc: &Value) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for space in doc["spaces"].as_array().into_iter().flatten() {
+        for tab in space["tabs"].as_array().into_iter().flatten() {
+            let first = nodes(&json!({ "spaces": [{ "tabs": [tab] }] }))
+                .into_iter()
+                .find(|(_, n)| n["type"] == "block");
+            if let (Some(id), Some((_, block))) = (tab["id"].as_str(), first) {
+                found.push((id.to_string(), block["id"].as_str().unwrap().to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// The space and tab of `doc` that hold pane `pane`.
+fn home_of(doc: &Value, pane: &str) -> Option<(String, String)> {
+    let path = find_block(doc, pane)?;
+    let space = &doc["spaces"][path[0]];
+    let tab = &space["tabs"][path[1]];
+    Some((
+        space["id"].as_str()?.to_string(),
+        tab["id"].as_str()?.to_string(),
+    ))
+}
+
+/// Writes what a fake window's `status` prints, into `dir`, as the app's
+/// is recorded: the shown tab, its space, and its focused pane, from
+/// `doc` and `focus`.
+fn write_status(dir: &Path, doc: &Value, focus: &Focus) {
+    let shown = focus.shown.as_deref();
+    let pane = shown.and_then(|t| focus.of_tab.get(t));
+    let space = pane.and_then(|p| home_of(doc, p)).map(|(space, _)| space);
+    let status = json!({
+        "zoom": 1.0, "font_size": 14.0, "ui_font_size": 13.0,
+        "space": space, "tab": shown, "focused_pane": pane,
+        "layout": "main", "agent": null, "floats": {}, "overlays": [], "errors": [],
+    });
+    let tmp = dir.join("status.json.tmp");
+    std::fs::write(&tmp, format!("{status}\n")).unwrap();
+    std::fs::rename(&tmp, dir.join("status.json")).unwrap();
 }
 
 /// Answers each `do` request a fake window's script leaves in `dir`, on a
 /// thread of its own, until `stop`.
-fn serve(dir: &Path, spawn: &Spawn, asked: &Mutex<Vec<(String, Value)>>, stop: &AtomicBool) {
+fn serve(
+    dir: &Path,
+    spawn: &Spawn,
+    asked: &Mutex<Vec<(String, Value)>>,
+    focus: &Mutex<Focus>,
+    stop: &AtomicBool,
+) {
     // one at a time, as the app's acts change one doc
     while !stop.load(Ordering::SeqCst) {
         let requests: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -167,7 +267,7 @@ fn serve(dir: &Path, spawn: &Spawn, asked: &Mutex<Vec<(String, Value)>>, stop: &
             let args: Value =
                 serde_json::from_str(words.next().unwrap_or_default()).unwrap_or(Value::Null);
             asked.lock().unwrap().push((command.clone(), args.clone()));
-            let (code, out) = match act(spawn, &command, &args) {
+            let (code, out) = match act(spawn, &mut focus.lock().unwrap(), &command, &args) {
                 Ok(reply) => (0, reply),
                 Err(why) => (1, json!({ "error": why })),
             };
@@ -195,9 +295,9 @@ fn answer(fifo: &Path, code: i32, out: &str) {
     }
 }
 
-/// What the app answers `do COMMAND ARGS`, acting on the core; or its
-/// `error`.
-fn act(spawn: &Spawn, command: &str, args: &Value) -> Result<Value, String> {
+/// What the app answers `do COMMAND ARGS`, acting on the core and moving
+/// `focus`; or its `error`.
+fn act(spawn: &Spawn, focus: &mut Focus, command: &str, args: &Value) -> Result<Value, String> {
     let call = |method: &str, params: Value| hc_call(&spawn.socket, method, params);
     let (mut doc, version) = {
         let got = call("doc.get", json!({ "name": "herdr-app" }))?;
@@ -227,7 +327,18 @@ fn act(spawn: &Spawn, command: &str, args: &Value) -> Result<Value, String> {
             let terminal = run(&args["argv"])?;
             let new = fresh_id(&doc, "p");
             split(&mut doc, pane, axis, block(&new, &terminal));
+            // it takes its tab's focus, without showing its tab
+            let (_, tab) = home_of(&doc, &new).unwrap();
+            focus.of_tab.insert(tab, new.clone());
             json!({ "pane": new, "terminal": terminal })
+        }
+        "pane.focus" => {
+            let pane = args["pane"].as_str().ok_or("no pane")?;
+            let (_, tab) = home_of(&doc, pane).ok_or(format!("no pane \"{pane}\""))?;
+            // its tab shown, if it wasn't
+            focus.shown = Some(tab.clone());
+            focus.of_tab.insert(tab, pane.to_string());
+            json!({ "ok": true })
         }
         "pane.swap" => {
             let pane = args["pane"].as_str().ok_or("no pane")?;
@@ -252,6 +363,8 @@ fn act(spawn: &Spawn, command: &str, args: &Value) -> Result<Value, String> {
                 .as_array_mut()
                 .unwrap()
                 .push(json!({ "id": tab, "name": "", "root": root }));
+            // `focus: false`: the shown tab stays
+            focus.of_tab.insert(tab.clone(), pane);
             json!({ "space": space, "tab": tab, "terminal": terminal })
         }
         other => {
@@ -264,6 +377,7 @@ fn act(spawn: &Spawn, command: &str, args: &Value) -> Result<Value, String> {
         "doc.set",
         json!({ "name": "herdr-app", "value": doc, "version": version }),
     )?;
+    write_status(&spawn.dir, &doc, focus);
     Ok(reply)
 }
 
@@ -515,7 +629,7 @@ fn open_beside_splits_the_origins_pane_running_the_attach_its_keep_off() {
         ("up", true),
     ] {
         let origin = core.run(IDLE, &core.dir, &[]);
-        core.set_doc(&doc_of(&origin), core.doc().1);
+        window.show(&doc_of(&origin));
         let out = capability(&core, &window, "open_beside")
             .env(format!("{up}_ORIGIN"), &origin)
             .env(format!("{up}_DIRECTION"), direction)
@@ -571,7 +685,7 @@ fn open_tab_page_makes_a_tab_in_the_origins_space_of_the_attach_alone_its_keep_o
     let core = HcCore::start("tabpage");
     let window = FakeWindow::start(&core, &core.dir, &[]);
     let origin = core.run(IDLE, &core.dir, &[]);
-    core.set_doc(&doc_of(&origin), core.doc().1);
+    window.show(&doc_of(&origin));
     let up = NAME.to_ascii_uppercase();
     let out = capability(&core, &window, "open_tab_page")
         .env(format!("{up}_ORIGIN"), &origin)
@@ -604,9 +718,9 @@ fn open_tab_page_makes_a_tab_in_the_origins_space_of_the_attach_alone_its_keep_o
 
 /// What `neopane ARGS…` printed, stdout and stderr together, run in a new
 /// terminal of `core` with `env` over the core's own, once it ends: a
-/// Herdr app pane's, as the doc shows it in a tab of its own before it
+/// Herdr app pane's, as `window` shows it in a tab of its own before it
 /// starts.
-fn in_pane(core: &HcCore, args: &[&str], env: &[(&str, &OsStr)]) -> String {
+fn in_pane(core: &HcCore, window: &FakeWindow, args: &[&str], env: &[(&str, &OsStr)]) -> String {
     let (out, go) = (core.dir.join("printed"), core.dir.join("go"));
     let exe = exe();
     let mut argv = vec![
@@ -619,7 +733,7 @@ fn in_pane(core: &HcCore, args: &[&str], env: &[(&str, &OsStr)]) -> String {
     ];
     argv.extend(args);
     let t = core.run(&argv, &core.dir, env);
-    core.set_doc(&doc_of(&t), core.doc().1);
+    window.show(&doc_of(&t));
     std::fs::write(&go, "").unwrap();
     let record = until(|r: &Value| r["state"] == "finished", || core.terminal(&t));
     assert_eq!(record["state"], "finished", "{record}");
@@ -650,7 +764,7 @@ fn provider_check_in_a_pane_with_a_stale_zellijs_variables_proves_it_inside_the_
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_os_str()))
         .collect();
-    let printed = in_pane(&core, &["provider", "check", "--json"], &env);
+    let printed = in_pane(&core, &window, &["provider", "check", "--json"], &env);
     let v: Value = serde_json::from_str(&printed).unwrap_or_else(|e| panic!("{e}: {printed}"));
     assert_eq!(v["default"]["named"], json!(["zellij", "herdr-app"]), "{v}");
     let proofs = v["default"]["inside"].as_array().unwrap();
@@ -674,10 +788,6 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
     let tmp = core.dir.join("d");
     std::fs::create_dir(&tmp).unwrap();
     let bin = core.dir.join("app");
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let path =
-        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
-            .unwrap();
     let env = [
         (
             neopane::daemon::dir::tmpdir_var(),
@@ -685,7 +795,7 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
         ),
         ("XDG_CONFIG_HOME".into(), tmp.as_os_str().to_owned()),
         ("XDG_STATE_HOME".into(), tmp.as_os_str().to_owned()),
-        ("PATH".into(), path),
+        ("PATH".into(), path_with(&bin)),
     ];
     let env: Vec<(&str, &OsStr)> = env
         .iter()
@@ -695,9 +805,10 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
     assert_eq!(window.bin(), bin);
     let exe = exe();
     let origin = core.run(&[exe.to_str().unwrap(), "--name", "work"], &tmp, &env);
-    core.set_doc(&doc_of(&origin), core.doc().1);
+    window.show(&doc_of(&origin));
     let sock = base_of(&tmp).join("work/nvim.sock");
-    let ending = Ending {
+    // ends the daemon as it drops, before the window and the core
+    let _ending = Ending {
         sock: sock.clone(),
         helpers: Vec::new(),
         tmp: tmp.clone(),
@@ -713,7 +824,9 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
     let s = until(|s: &Value| s["panes"] == 2, status);
     assert_eq!(s["panes"], 2, "its attach never came: {}", log());
     // swapped to the origin's left, maybe after the attach came
-    let left = |t: &Vec<(String, Vec<String>)>| t.len() == 1 && t[0].1.get(1) == Some(&origin);
+    let left = |t: &Vec<(String, Vec<String>)>| {
+        t.len() == 1 && t.first().and_then(|(_, shown)| shown.get(1)) == Some(&origin)
+    };
     let tabs = until(left, || tabs_of(&core.doc().0));
     let [(_, shown)] = tabs.as_slice() else {
         panic!("{tabs:?}");
@@ -733,10 +846,6 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
     assert_eq!(s["panes"], 1, "{}", log());
     let record = until(|r: &Value| r["state"] == "finished", || core.terminal(&new));
     assert_eq!(record["state"], "finished", "{record}");
-
-    drop(ending);
-    drop(window);
-    drop(core);
 }
 
 /// Against a real Herdr app window, opt-in: `just test-herdr-app`, never
@@ -767,6 +876,8 @@ mod window {
         /// Opens one for test `test`, and waits for its first tab's
         /// terminal: panics without macOS, Herdr.app or `hc`.
         pub(super) fn open(test: &str) -> AppWindow {
+            // panics rather than skips, deliberately: these run only when
+            // asked for, and a skip would pass with nothing tested
             assert!(
                 cfg!(target_os = "macos") && Path::new(APP).exists(),
                 "the window tests need Herdr.app installed in /Applications"
@@ -796,8 +907,7 @@ mod window {
             let shown = Shown::now();
             let log = std::fs::File::create(core.dir.join("app.log")).unwrap();
             let mut cmd = std::process::Command::new(APP);
-            let app = without_provider_vars(&mut cmd)
-                .env_remove("HC_SCOPE")
+            let app = HcCore::isolate(&mut cmd)
                 .envs(core.env())
                 .env("HERDR_APP_HOME", &home)
                 .env("PATH", path_with(&bin))
@@ -899,13 +1009,6 @@ mod window {
         }
     }
 
-    /// `PATH` with `bin` first.
-    fn path_with(bin: &Path) -> std::ffi::OsString {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path)))
-            .unwrap()
-    }
-
     /// Where `program` is on `PATH`.
     fn which(program: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
@@ -987,7 +1090,7 @@ mod window {
     fn in_a_window_find_open_beside_open_tab_page_and_close_act_on_its_panes() {
         let window = AppWindow::open("window");
         let core = &window.core;
-        let origin = window.terminals()[0].clone();
+        let origin = window.terminals().first().cloned().expect("its first pane");
         let up = NAME.to_ascii_uppercase();
 
         // find proves its first pane's terminal
@@ -1017,14 +1120,15 @@ mod window {
         let record = core.terminal(&beside);
         assert_eq!(record["argv"], json!(["/bin/sleep", "100000"]), "{record}");
         assert_eq!(record["keep"], false, "{record}");
+        let both = [beside.clone(), origin.clone()];
         let tabs = until(
-            |t: &Vec<(String, Vec<String>)>| t[0].1 == [beside.clone(), origin.clone()],
+            |t: &Vec<(String, Vec<String>)>| shown(t, 0) == Some(&both[..]),
             || tabs_of(&core.doc().0),
         );
-        assert_eq!(tabs[0].1, [beside.clone(), origin.clone()], "{tabs:?}");
+        assert_eq!(shown(&tabs, 0), Some(&both[..]), "{tabs:?}");
 
         // a tab of the attach alone, not shown
-        let shown = window.app(&["status"])["tab"].clone();
+        let shown_tab = window.app(&["status"])["tab"].clone();
         let out = window
             .capability("open_tab_page")
             .env(format!("{up}_ORIGIN"), &origin)
@@ -1036,13 +1140,14 @@ mod window {
         assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
         let paged = text(&out.stdout).trim().to_string();
         assert_eq!(core.terminal(&paged)["keep"], false);
+        let alone = std::slice::from_ref(&paged);
         let tabs = until(
-            |t: &Vec<(String, Vec<String>)>| t.len() == 2 && t[1].1 == [paged.clone()],
+            |t: &Vec<(String, Vec<String>)>| t.len() == 2 && shown(t, 1) == Some(alone),
             || tabs_of(&core.doc().0),
         );
         assert_eq!(tabs.len(), 2, "{tabs:?}");
-        assert_eq!(tabs[1].1, std::slice::from_ref(&paged), "{tabs:?}");
-        assert_eq!(window.app(&["status"])["tab"], shown);
+        assert_eq!(shown(&tabs, 1), Some(alone), "{tabs:?}");
+        assert_eq!(window.app(&["status"])["tab"], shown_tab);
 
         // close kills each; its pane, and the tab, go
         for t in [&beside, &paged] {
@@ -1053,10 +1158,17 @@ mod window {
                 .unwrap();
             assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         }
+        let only = std::slice::from_ref(&origin);
         let tabs = until(
-            |t: &Vec<(String, Vec<String>)>| t.len() == 1 && t[0].1 == [origin.clone()],
+            |t: &Vec<(String, Vec<String>)>| t.len() == 1 && shown(t, 0) == Some(only),
             || tabs_of(&core.doc().0),
         );
-        assert_eq!(tabs, [(tabs[0].0.clone(), vec![origin.clone()])]);
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert_eq!(shown(&tabs, 0), Some(only), "{tabs:?}");
+    }
+
+    /// The terminals tab `i` of `tabs` shows; None if there's no such tab.
+    fn shown(tabs: &[(String, Vec<String>)], i: usize) -> Option<&[String]> {
+        tabs.get(i).map(|(_, shown)| shown.as_slice())
     }
 }
