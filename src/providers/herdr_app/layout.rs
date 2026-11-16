@@ -10,7 +10,13 @@
 //!   two blocks, in an area of its own; `focus` from `status`.
 //! - [`chrome`] is the pane chrome in cells: the measured, scaled to the
 //!   window's font size, unless the shown tab's cells, by [`solve`], tell
-//!   another more than a cell away.
+//!   another more than a cell away. The area, cells and inset over share,
+//!   is then the same from every pane of a tab within rounding: the app
+//!   gives each pane whole cells, about 1 ÷ its share cells off.
+//!
+//! There are no `events`, so the report is how the daemon learns a focus
+//! move made with the app's keys. That rests on a question still
+//! unchecked: whether a mouse click between panes sends focus reports.
 
 use std::time::Duration;
 
