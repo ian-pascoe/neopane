@@ -32,18 +32,20 @@ the current window, and the daemon gives it back when it should.
   killed and the open fails. A split refused, run out of time, or whose
   answer names no terminal fails with nothing to kill: a pane it made all
   the same runs an attach whose pane id the daemon gave up, which is
-  refused and exits, and the pane closes with it. A swap failing only
+  refused, or hung up if it had attached, and exits, and the pane closes
+  with it. A swap failing only
   warns, leaving the pane right or below. They share 4 s of the open's
   5 s; a kill has 0.5 s more, on a connection of its own.
-- **Sizes are weights, set on pane ids.** A block's `size` is a weight
-  relative to its siblings, or pixels; `layout.resize {id, weight}` on the
-  pane ids of the doc sets it, on any node, an unshown tab's too
-  (SPI-1218). Weights share a pane's outer extent, chrome included, which
+- **Sizes are weights, set on pane ids** (decided for SPI-1218's
+  `resize`, not built yet). A block's `size` is a weight relative to its
+  siblings, or pixels; `layout.resize {id, weight}` on the pane ids of the
+  doc sets it, on any node, an unshown tab's too. Weights share a pane's outer extent, chrome included, which
   the core's cols and rows leave out.
 - **No zoom.** The app's zoom is in neither the doc nor `status`, only its
-  `view.json`, so it is not reported: while a tab is zoomed, Neovim's
-  screen is laid out as if it weren't. A split into a zoomed tab unzooms
-  it.
+  `view.json`, so it will not be reported (decided for SPI-1217's
+  `report_layout` and SPI-1218's `resize`, not built yet): while a tab is
+  zoomed, Neovim's screen is laid out as if it weren't. A split into a
+  zoomed tab unzooms it, as `open_beside` does today.
 - **Two `terminal.keep`s.** The core's `terminal.keep {terminal, keep}` is
   the keep above. `herdr-app do terminal.keep {terminal, place}` is
   unrelated: it gives a running terminal with no pane one, a new tab or
@@ -68,15 +70,23 @@ the current window, and the daemon gives it back when it should.
   restart.
 - **`pane.swap {target}`** with the origin's pane, rather than
   `{direction}`. Only `direction` was recorded, with the focus staying on
-  the pane swapped; right after a split the origin's pane is the one
-  neighbour that side either way.
+  the pane swapped. It assumes that right after a split the origin's pane
+  is the new pane's neighbour that side: the split puts the new pane
+  directly right of or below it, sharing that whole edge. Whether
+  `pane.swap {direction}` picks the origin's pane where the new one had
+  several neighbours that side, as `pane.go` picks the one focused last,
+  wasn't checked live; after a split it has only the one.
 
 ## Consequences
 
 - `open_beside` needs `doc.get`, the core's `terminal.keep` and
-  `terminal.kill`; lacking one, or `herdr-app` lacking `pane.split` or its
-  `argv`, it exits 69 naming it and both versions, as `close` does. No
-  `herdr-app` exits 69 too, naming both places it looked.
+  `terminal.kill`; lacking one, it exits 69 naming it and both versions,
+  as `close` does. It exits 69 too where `herdr-app` lacks `pane.split` or
+  its `argv`, naming both versions, and where there is no `herdr-app`,
+  naming both places it looked. `find` refuses without `herdr-app`, so
+  that happens only if it went after the choice: 69 stops a doomed ask
+  until the next choice. This narrows ADR 0019, which refused without
+  `herdr-app` only in `find`. A `pane.swap` the app lacks only warns.
 - The new pane halves the origin's room until `resize` sets weights
   (SPI-1218).
 - A split in a never-shown tab gives both panes the core's 120×40 until

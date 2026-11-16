@@ -637,9 +637,10 @@ pane, a block of the doc.
   which `find` refuses with and `open_beside` exits 69 with. `close` never
   runs it but for a version. With no window under its home, `herdr-app`
   exits 2, saying so on stderr. A window act is `herdr-app do COMMAND
-  JSON`; one the app lacks, or an argument of it, exits 69 as a method the
-  core lacks does: `herdr-app has no pane.split (hc core 0.1.21,
-  herdr-app 0.1.16)`.
+  JSON`. Only `open_beside`'s `pane.split` the app lacks, or its `argv`,
+  exits 69, as a method the core lacks does: `herdr-app has no pane.split
+  (hc core 0.1.21, herdr-app 0.1.16)`; a `pane.swap` it lacks only
+  warns.
 
 - `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
   terminal of this machine: a remote space's, `machine/t7`, is refused.
@@ -668,14 +669,15 @@ pane, a block of the doc.
   panes it opens, and a failure warns on stderr. (`herdr-app do
   terminal.keep {terminal, place}` is another thing, never called.) The
   doc must then show the new terminal in one block, read again every
-  50 ms for up to a second; else it kills the terminal, on a connection
-  of its own with 0.5 s, and exits 1. For `left` and `up`, `herdr-app do
-  pane.swap {pane, direction}` swaps the new pane with the origin's, the
-  focus staying with it; a failure warns, leaving it right or below. A
-  split refused, past its time, or whose answer names no terminal exits
-  1, killing nothing: a pane made all the same runs an attach whose pane
-  id the daemon has given up, which is refused and exits, closing the
-  pane. The requests share 4 s. Needs `doc.get`, `terminal.keep` and
+  50 ms for up to a second while it shows in none; else it kills the
+  terminal, on a connection of its own with 0.5 s, and exits 1. For
+  `left` and `up`, `herdr-app do pane.swap {pane, direction}` swaps the
+  new pane with the origin's, the focus staying with it; a failure warns,
+  leaving it right or below. A split refused, past its time, or whose
+  answer names no terminal exits 1, killing nothing: a pane made all the
+  same runs an attach whose pane id the daemon has given up, which is
+  refused, or hung up if it had attached, and exits, closing the pane.
+  The requests share 4 s. Needs `doc.get`, `terminal.keep` and
   `terminal.kill`. Prints the new terminal's address. An attach command
   not UTF-8 exits 1: JSON can't carry it. A split into a zoomed tab
   unzooms it.

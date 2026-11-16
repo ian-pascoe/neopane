@@ -26,8 +26,8 @@
 //! Each capability gives the line it prints, or why it failed or is
 //! unsupported; `run` prints it, or the failure as one `herdr-app
 //! CAPABILITY: why` line on stderr, and gives the exit status: 1, or 69
-//! for a core lacking what the capability needs, naming it and both
-//! versions.
+//! where the core or `herdr-app` lacks what the capability needs, naming
+//! it and both versions, or there is no `herdr-app`.
 
 mod beside;
 pub(crate) mod check;
@@ -52,7 +52,8 @@ use crate::config::Capability;
 pub(super) enum Failure {
     /// It failed: exit 1.
     Failed(String),
-    /// The core lacks what it needs: exit 69.
+    /// The core or `herdr-app` lacks what it needs, or there is no
+    /// `herdr-app`: exit 69.
     Unsupported(String),
 }
 
@@ -93,11 +94,7 @@ fn close(given: &Given) -> Result<(), Failure> {
 
 /// `close`, its requests, and a version for a message, having `time`.
 fn close_within(given: &Given, time: Duration) -> Result<(), Failure> {
-    let terminal = given.var("terminal").unwrap_or_default();
-    if terminal.is_empty() {
-        return Err(Failure::Failed("TERMINAL isn't set".into()));
-    }
-    let terminal = String::from_utf8_lossy(&terminal).into_owned();
+    let terminal = input(given, "terminal")?;
     let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Close), || Window::of(given))?;
     match core.kill(&terminal) {

@@ -7,13 +7,15 @@
 //!    the attach command with no shell. The new pane takes the focus,
 //!    which stands. A split refused, run out of time, or whose answer
 //!    names no terminal exits 1: a pane it made all the same runs an
-//!    attach whose pane id the daemon has given up, which is refused and
-//!    exits, closing the pane.
+//!    attach whose pane id the daemon has given up, which is refused, or
+//!    hung up if it had attached, and exits, closing the pane.
 //! 3. The core's `terminal.keep {keep: false}` of the new terminal at once,
 //!    so the core gives it no shell again once it's lost, as an attach
 //!    killed by a signal is: failing, it warns.
-//! 4. The doc must show the new terminal in one block, its pane; else the
-//!    terminal is killed, on a connection of its own, and it exits 1.
+//! 4. The doc must show the new terminal in one block, its pane, read
+//!    again for a while in case the app writes it late; in none, or in
+//!    several, the terminal is killed, on a connection of its own, and it
+//!    exits 1.
 //! 5. For `left` and `up`, `herdr-app do pane.swap` swaps the new pane
 //!    with the origin's, its neighbour that side, the focus staying with
 //!    the new pane; failing, it warns, leaving it right or below.
@@ -26,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::core::Core;
-use super::doc::pane_of;
+use super::doc::{pane_of, panes_of};
 use super::window::{Ran, Window};
 use super::{Failure, input, methods, needs, versions};
 use crate::config::Capability;
@@ -43,17 +45,24 @@ const BLOCK_POLL: Duration = Duration::from_millis(50);
 
 /// `open_beside`: the new terminal's address, or why there's none.
 pub(super) fn open_beside(given: &Given) -> Result<String, Failure> {
-    open_beside_within(given, OPEN_TIME, CLEANUP_TIME)
+    open_beside_within(given, OPEN_TIME, CLEANUP_TIME, BLOCK_TIME)
 }
 
-/// `open_beside`, its requests having `time`, and a cleanup after a
-/// failure `cleanup` more.
-fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Result<String, Failure> {
+/// `open_beside`, its requests having `time`, waiting at most `block` of
+/// it for the new terminal's block, and a cleanup after a failure
+/// `cleanup` more.
+fn open_beside_within(
+    given: &Given,
+    time: Duration,
+    cleanup: Duration,
+    block: Duration,
+) -> Result<String, Failure> {
     let origin = input(given, "origin")?;
     let side = Side::of(given)?;
     let argv = attach_words(given)?;
-    let mut core = Core::of(given, time)?;
+    // found first: no herdr-app costs no request of the core
     let window = Window::of(given).map_err(Failure::Unsupported)?;
+    let mut core = Core::of(given, time)?;
     needs(
         &core,
         methods(Capability::OpenBeside),
@@ -65,7 +74,7 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
     let split = json!({ "direction": side.split, "pane": origin_pane, "argv": argv });
     let split = window
         .act("pane.split", &split, due)
-        .map_err(|ran| refused(&core, &window, "pane.split", ran))?;
+        .map_err(|ran| window_failure(&core, &window, "pane.split", ran))?;
     let terminal = split["terminal"]
         .as_str()
         .filter(|t| !t.is_empty())
@@ -77,7 +86,7 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
             e.why
         );
     }
-    let pane = match block_of(&mut core, &terminal) {
+    let pane = match block_of(&mut core, &terminal, block) {
         Ok(pane) => pane,
         Err(why) => {
             kill(&core, &terminal, cleanup);
@@ -94,13 +103,15 @@ fn open_beside_within(given: &Given, time: Duration, cleanup: Duration) -> Resul
 }
 
 /// The pane of new terminal `terminal`, once the doc shows it, within
-/// [`BLOCK_TIME`] and the core's time; or why not.
-fn block_of(core: &mut Core, terminal: &str) -> Result<String, String> {
-    let until = core.due().min(Instant::now() + BLOCK_TIME);
+/// `block` and the core's time; or why not. A doc without it is read
+/// again, as the app may write it after answering the split; one showing
+/// it in several blocks is no better later.
+fn block_of(core: &mut Core, terminal: &str, block: Duration) -> Result<String, String> {
+    let until = core.due().min(Instant::now() + block);
     loop {
-        let found = pane_of(&core.doc()?, terminal);
-        if found.is_ok() || Instant::now() + BLOCK_POLL >= until {
-            return found;
+        let doc = core.doc()?;
+        if !panes_of(&doc, terminal).is_empty() || Instant::now() + BLOCK_POLL >= until {
+            return pane_of(&doc, terminal);
         }
         std::thread::sleep(BLOCK_POLL);
     }
@@ -119,7 +130,9 @@ fn kill(core: &Core, terminal: &str, time: Duration) {
 
 /// Why window act `command` failed: unsupported where `herdr-app` lacks
 /// it, or an argument of it, naming both versions; else failed.
-fn refused(core: &Core, window: &Window, command: &str, ran: Ran) -> Failure {
+fn window_failure(core: &Core, window: &Window, command: &str, ran: Ran) -> Failure {
+    // the app's unknown command names only what to read; its unknown
+    // argument names the argument and the valid ones, worth keeping
     let lacks = match &ran {
         Ran::Refused(why) if why.starts_with("unknown command") => {
             Some(format!("herdr-app has no {command}"))
@@ -138,16 +151,16 @@ fn refused(core: &Core, window: &Window, command: &str, ran: Ran) -> Failure {
 
 /// Where a new pane goes, from `DIRECTION`: the app splits only right or
 /// down, so left and up are a split and a swap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Side {
+#[derive(Debug, Clone, Copy)]
+struct Side {
     /// `pane.split`'s `direction`.
-    pub split: &'static str,
+    split: &'static str,
     /// `pane.swap`'s `direction` after, if any.
-    pub swap: Option<&'static str>,
+    swap: Option<&'static str>,
 }
 
 impl Side {
-    pub(super) fn of(given: &Given) -> Result<Side, String> {
+    fn of(given: &Given) -> Result<Side, String> {
         let direction = given.var("direction").unwrap_or_default();
         let (split, swap) = match direction.as_slice() {
             b"left" => ("right", Some("left")),
@@ -257,7 +270,7 @@ mod tests {
                 ("ATTACH", ATTACH),
             ],
         );
-        open_beside_within(&given, TIME, TIME)
+        open_beside_within(&given, TIME, TIME, BLOCK_TIME)
     }
 
     #[test]
@@ -307,7 +320,7 @@ mod tests {
         let args = format!(r#"{{"direction":"right","pane":"{P1}","argv":{ARGV}}}"#);
         let split = answering("do-pane.split", "pane.split", &args);
         let swap = answering(
-            "do-pane.swap-edge",
+            "do-pane.swap",
             "pane.swap",
             &format!(r#"{{"pane":"{P2}","direction":"left"}}"#),
         );
@@ -324,11 +337,11 @@ mod tests {
             )
         };
         assert_eq!(
-            open_beside_within(&given("right"), TIME, TIME),
+            open_beside_within(&given("right"), TIME, TIME, BLOCK_TIME),
             Ok("t2".into())
         );
         assert_eq!(
-            open_beside_within(&given("left"), TIME, TIME),
+            open_beside_within(&given("left"), TIME, TIME, BLOCK_TIME),
             Ok("t2".into())
         );
         let asked = app.asked();
@@ -362,9 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn a_split_that_runs_out_of_time_fails() {
+    fn a_split_that_runs_out_of_time_fails_turning_nothing_off_and_killing_nothing() {
+        // exec'd, so killing it ends the sleep
         let mut slow = split_down();
-        slow.sleep = Some(5.0);
+        slow.sleep = Some(30.0);
         let (core, app) = (core(), FakeApp::new(&[slow]));
         let given = given(
             &core,
@@ -372,12 +386,13 @@ mod tests {
             &[("ORIGIN", "t2"), ("DIRECTION", "down"), ("ATTACH", ATTACH)],
         );
         let started = Instant::now();
-        let opened = open_beside_within(&given, Duration::from_millis(500), TIME);
+        let opened = open_beside_within(&given, Duration::from_secs(2), TIME, BLOCK_TIME);
         let Err(Failure::Failed(why)) = opened else {
             panic!("{opened:?}");
         };
         assert!(why.contains("killed, out of time"), "{why}");
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert_eq!(core.methods(), ["hello", "doc.get"]);
     }
 
     #[test]
@@ -390,8 +405,13 @@ mod tests {
             kill_of("t3"),
         ]);
         let app = FakeApp::new(&[split_down()]);
+        let given = given(
+            &core,
+            &app,
+            &[("ORIGIN", "t2"), ("DIRECTION", "up"), ("ATTACH", ATTACH)],
+        );
         assert_eq!(
-            open(&core, &app, "up"),
+            open_beside_within(&given, TIME, TIME, Duration::from_millis(200)),
             Err(Failure::Failed("t3 has no Herdr app pane".into()))
         );
         let methods = core.methods();
@@ -404,6 +424,34 @@ mod tests {
         );
         // no swap
         assert_eq!(app.asked().len(), 1);
+    }
+
+    #[test]
+    fn a_new_terminal_in_several_blocks_is_killed_at_once() {
+        // t1's block shows t3 too
+        let core = FakeCore::serve(vec![
+            recorded_one("hello", "hello"),
+            doc_with("t1", "t3"),
+            keep_off("t3"),
+            kill_of("t3"),
+        ]);
+        let app = FakeApp::new(&[split_down()]);
+        assert_eq!(
+            open(&core, &app, "down"),
+            Err(Failure::Failed("t3 shows in 2 Herdr app panes".into()))
+        );
+        // the origin's read and one of t3's: no waiting
+        assert_eq!(
+            core.methods(),
+            [
+                "hello",
+                "doc.get",
+                "terminal.keep",
+                "doc.get",
+                "hello",
+                "terminal.kill"
+            ]
+        );
     }
 
     #[test]
@@ -524,7 +572,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            open_beside_within(&given, TIME, TIME),
+            open_beside_within(&given, TIME, TIME, BLOCK_TIME),
             Err(Failure::Unsupported(
                 "no herdr-app on PATH, nor at /no/home/.local/bin/herdr-app".into()
             ))
@@ -546,7 +594,7 @@ mod tests {
                 "ATTACH is empty",
             ),
         ] {
-            let opened = open_beside_within(&given(&core, &app, &vars), TIME, TIME);
+            let opened = open_beside_within(&given(&core, &app, &vars), TIME, TIME, BLOCK_TIME);
             assert_eq!(opened, Err(Failure::Failed(why.into())), "{vars:?}");
         }
         let up = crate::name::upper();
@@ -557,7 +605,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            open_beside_within(&not_utf8, TIME, TIME),
+            open_beside_within(&not_utf8, TIME, TIME, BLOCK_TIME),
             Err(Failure::Failed(
                 "the attach command isn't UTF-8, which herdr-app can't run".into()
             ))
