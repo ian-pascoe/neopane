@@ -613,11 +613,11 @@ pane's focus report has the daemon run.
 
 `<name>.builtin.herdr_app()`, its table named `herdr-app` (ADRs 0019 and
 0020): `find`, `close`, `open_beside`, `open_tab_page`, `report_layout`,
-`focus` and `focus_direction`, for now, on the hc core whose socket
-`HC_TERMINAL_SOCKET` names and the Herdr app window under `HERDR_APP_HOME`
-(else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
-`HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
-home are the reach, a Herdr app space no boundary. Terminal ids are hc
+`focus`, `focus_direction` and `resize`, for now, on the hc core whose
+socket `HC_TERMINAL_SOCKET` names and the Herdr app window under
+`HERDR_APP_HOME` (else `~/.config/herdr-app`). Context variables
+`HC_TERMINAL_SOCKET` and `HERDR_APP_HOME`, find variable
+`HC_TERMINAL_ID`: the core and the app's home are the reach, a Herdr app space no boundary. Terminal ids are hc
 terminal addresses, such as `t7`, opaque strings; the core's `doc.get
 {name: "herdr-app"}` is the only map from a terminal to its Herdr app
 pane, a block of the doc.
@@ -643,8 +643,8 @@ pane, a block of the doc.
   COMMAND JSON`. A command a capability acts with that the app lacks, or an
   argument of it, exits 69, as a method the core lacks does: `herdr-app
   has no pane.split (hc core 0.1.21, herdr-app 0.1.16)`, `herdr-app's
-  pane.split takes no argv (…)`; only a `pane.swap` `open_beside` lacks
-  warns instead.
+  pane.split takes no argv (…)`; only a `pane.swap`, or a `layout.resize`,
+  `open_beside` lacks warns instead.
 
 - `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
   terminal of this machine: a remote space's, `machine/t7`, is refused.
@@ -666,11 +666,11 @@ pane, a block of the doc.
   `herdr-app do pane.split {direction, pane, argv}` of that pane, `right`
   for `left` and `right`, `down` for `up` and `down`, its `argv` the
   attach command from `ATTACH`, run with no shell; the new pane takes the
-  window's focus, which stands, and halves the origin's room: `SIZE` and
-  `RATIO` are ignored for now. Right after, the core's `terminal.keep
-  {terminal, keep: false}` of the new terminal, so the core gives it no
-  shell again once lost, as when a signal kills the attach; only the
-  panes it opens, and a failure warns on stderr. (`herdr-app do
+  window's focus, which stands, and halves the origin's room. Right
+  after, the core's `terminal.keep {terminal, keep: false}` of the new
+  terminal, so the core gives it no shell again once lost, as when a
+  signal kills the attach; only the panes it opens, and a failure warns
+  on stderr. (`herdr-app do
   terminal.keep {terminal, place}` is another thing, never called.) The
   doc must then show the new terminal in one block, read again every
   25 ms for up to a second while it shows in none; else it kills the
@@ -681,7 +681,12 @@ pane, a block of the doc.
   answer names no terminal exits 1, killing nothing: a pane made all the
   same runs an attach whose pane id the daemon has given up, which is
   refused, or hung up if it had attached, and exits, closing the pane.
-  The requests share 4 s. Needs `doc.get`, `terminal.keep` and
+  Last, with `RATIO`, the new pane gets `RATIO` of the weight it and
+  `ORIGIN`'s pane have together, set as `resize` below sets them; `SIZE`
+  and the chrome are ignored. From the doc that showed its block, read again
+  after a swap that worked; a failure warns, leaving the halves the split
+  made. What it warns of goes on stderr, after the failure's own words if
+  it fails. The requests share 4 s. Needs `doc.get`, `terminal.keep` and
   `terminal.kill`. Prints the new terminal's address. An attach command
   not UTF-8 exits 1: JSON can't carry it. A split into a zoomed tab
   unzooms it.
@@ -759,6 +764,51 @@ pane, a block of the doc.
   core's `hello`, so a core of another generation exits 69. It goes to the
   neighbour on that side focused most recently, not the nearest, and at
   the tab's edge moves nowhere, done.
+- `resize`, in `report_layout`'s model, which it needs, as the daemon
+  sizes only the panes a layout report places: a pane's outer extent is
+  its share of its tab, from the weights, times the tab's, and its cells
+  that less the chrome. `doc.get`, the one block of the terminal and of
+  `ORIGIN`, in one tab, and the lowest split holding both, which must be
+  a `row` for `left` and `right`, a `column` for `up` and `down`; else
+  exit 1. Its two children holding them, the terminal's part and
+  `ORIGIN`'s, get the ratio that gives the terminal's part `SIZE` cells
+  and the chrome of each pane along it, held to leave each part its
+  chrome and a cell, out of the pair's outer extent: their share of the
+  tab, by the weights of every split along the axis over them, times the
+  tab's extent. A node with a weight it can't read, or sized in pixels,
+  among the pair or in a split along the axis over them, exits 1,
+  resizing nothing: their share can't be told; one sized in pixels in a
+  split across the axis is no matter. Then `herdr-app status`, which must
+  name the shown tab (a `status` the app lacks exits 69), and
+  `terminal.list` measure the window. Every tab has the same room, so
+  the shown tab's cells measure any tab, a hidden one's too, whose own
+  cells may be stale. The tab's extent along the axis is the cells plus
+  chrome of the panes a line across the shown tab crosses, through the
+  middle of one of them: such a line crosses the whole tab however its
+  panes are split, so cells laid out by the weights before a
+  `layout.resize` just sent, which the app may not have applied, tell it
+  as well. Of the lines whose panes are all measured (live cells, not
+  under or beside a node in pixels, not shown twice), it takes the one
+  crossing the fewest; with none, it exits 1.
+  - The chrome is `report_layout`'s, but while the shown tab is zoomed,
+    which `report_layout` doesn't know: then, as `tabs.<tab>.zoomed` in
+    the app's `view.json` under its home says, the zoomed pane fills the
+    tab and the others' cells are stale, so it alone measures the window,
+    its cells plus chrome the tab's extent, and the chrome is the
+    measured, scaled by the font size, one pane being too few to solve
+    it. No `view.json`, or no zoom there, is none; one that can't be read
+    exits 1.
+  - In a split of two, one `layout.resize` of the terminal's part against
+    `ORIGIN`'s sets the ratio; in one of three or more, one of each, the
+    terminal's part first, keeping their sum so the split's other
+    children keep their room, unless the second fails, which exits 1 and
+    leaves the first set, the sum not kept. Weights keep six decimals;
+    one already so isn't set again.
+  - As herdr's `resize` adds its frame, `ORIGIN`'s part takes what is
+    left, so it comes short of Neovim's by about a chrome for each pane
+    along the split, where Neovim has a one-cell separator.
+  - A `layout.resize` the app lacks, or its `weight`, exits 69. Needs
+    `doc.get` and `terminal.list`. It has 1.5 s.
 
 No `events`, for now: the core sends no focus event. `pane.focus`,
 `pane.go` and a tab's selection send the panes' programs focus reports,

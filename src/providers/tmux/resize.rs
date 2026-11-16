@@ -80,12 +80,7 @@ impl Asked {
                 ));
             }
         };
-        let size = given.var("size").unwrap_or_default();
-        let size = std::str::from_utf8(&size)
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .filter(|&n| n > 0)
-            .ok_or_else(|| format!("SIZE {:?} isn't cells", String::from_utf8_lossy(&size)))?;
+        let size = given.cells("size")?;
         Ok(Asked {
             terminal,
             origin,

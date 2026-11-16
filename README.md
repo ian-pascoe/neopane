@@ -520,9 +520,10 @@ with no shell, the hc core's keep off so it closes for good
 and each Neovim tab page after the first a Herdr app tab of its own, in the
 same space, without showing it. `<C-w>h/j/k/l` move the app's focus across
 its panes. A zoomed pane isn't seen: Neovim lays out as if its tab were
-unzoomed. Sizes come next. `neopane provider show herdr-app` prints its
-table, which `neopane.builtin.herdr_app()` returns for your config to
-change ([docs/config.md](docs/config.md#herdr-app)).
+unzoomed. Sizes are set as the app's weights, in the first tab page.
+`neopane provider show herdr-app` prints its table, which
+`neopane.builtin.herdr_app()` returns for your config to change
+([docs/config.md](docs/config.md#herdr-app)).
 
 ### Your own
 

@@ -69,6 +69,17 @@ fn herdr_apps_layout_and_focus_outside_the_herdr_app_say_why() {
     let no_app = "no herdr-app on PATH, nor at /nowhere/.local/bin/herdr-app";
     for (cap, vars, code, why) in [
         ("report_layout", &[][..], 1, outside),
+        (
+            "resize",
+            &[
+                ("TERMINAL", "t7"),
+                ("ORIGIN", "t3"),
+                ("DIRECTION", "left"),
+                ("SIZE", "30"),
+            ][..],
+            69,
+            no_app,
+        ),
         ("focus", &[("TERMINAL", "t7")][..], 69, no_app),
         (
             "focus_direction",

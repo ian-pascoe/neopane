@@ -19,13 +19,16 @@
 //! - `close`: `terminal.kill`, done for a terminal finished or not found.
 //! - `open_beside` (`beside.rs`, ADR 0020): `pane.split` beside the
 //!   origin's pane, running the attach, keep off, and `pane.swap` for left
-//!   and up.
+//!   and up; then `RATIO` in weights.
 //! - `open_tab_page` (`tab_page.rs`): a bare `tab.new` in `ORIGIN`'s space,
 //!   the attach split into it, its shell killed.
 //! - `report_layout` (`layout.rs`): an area per tab, rects from the doc's
 //!   weights, insets the pane chrome, focus from `herdr-app status`.
 //! - `focus` and `focus_direction` (`focus.rs`): `pane.focus` of the
 //!   terminal's pane; `COUNT` times `pane.go`.
+//! - `resize` (`sizes.rs`): weights on the two children of the lowest
+//!   split holding `TERMINAL` and `ORIGIN`, by `layout.resize`, in
+//!   `report_layout`'s model and with its measure of the window.
 //! - `check.rs`, no capability: what `provider check`'s herdr-app section
 //!   shows: both versions, and whether the core and window answer.
 //!
@@ -44,6 +47,7 @@ mod fake;
 mod focus;
 mod layout;
 mod proof;
+mod sizes;
 mod tab_page;
 mod window;
 
@@ -91,6 +95,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::ReportLayout => layout::report_layout(given).map(Some),
         Capability::Focus => focus::focus(given).map(|()| None),
         Capability::FocusDirection => focus::focus_direction(given).map(|()| None),
+        Capability::Resize => sizes::resize(given).map(|()| None),
         _ => return UNSUPPORTED,
     };
     let (why, code) = match done {
@@ -138,6 +143,7 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
         Capability::OpenTabPage => &["doc.get", "terminal.kill", "terminal.keep"],
         Capability::ReportLayout => &["doc.get", "terminal.list"],
         Capability::Focus => &["doc.get"],
+        Capability::Resize => &["doc.get", "terminal.list"],
         _ => &[],
     }
 }
@@ -159,18 +165,38 @@ const BLOCK_TIME: Duration = Duration::from_millis(1000);
 /// How often it reads the doc meanwhile.
 const BLOCK_POLL: Duration = Duration::from_millis(25);
 
-/// The pane of new terminal `terminal`, once the doc shows it, within
-/// `wait` and the core's time; or why not. A doc without it is read
-/// again, as the app may write it after answering; one showing it in
-/// several blocks is no better later.
-fn block_of(core: &mut Core, terminal: &str, wait: Duration) -> Result<String, Failure> {
+/// The pane of new terminal `terminal`, and the doc that showed it, once
+/// the doc shows it, within `wait` and the core's time; or why not. A doc
+/// without it is read again, as the app may write it after answering; one
+/// showing it in several blocks is no better later.
+fn block_of(
+    core: &mut Core,
+    terminal: &str,
+    wait: Duration,
+) -> Result<(String, serde_json::Value), Failure> {
     let until = core.due().min(Instant::now() + wait);
     loop {
         let doc = core.doc()?;
         if !panes_of(&doc, terminal).is_empty() || Instant::now() + BLOCK_POLL >= until {
-            return Ok(pane_of(&doc, terminal)?);
+            return Ok((pane_of(&doc, terminal)?, doc));
         }
         std::thread::sleep(BLOCK_POLL);
+    }
+}
+
+/// An open done: the terminal it made, and what to warn of on stderr.
+#[derive(Debug, PartialEq, Eq)]
+struct Opened {
+    terminal: String,
+    warnings: Vec<String>,
+}
+
+/// `failure`, `notes` after its own words.
+fn noted(failure: Failure, notes: &[String]) -> Failure {
+    let note = |why: String| notes.iter().fold(why, |why, note| format!("{why}; {note}"));
+    match failure {
+        Failure::Failed(why) => Failure::Failed(note(why)),
+        Failure::Unsupported(why) => Failure::Unsupported(note(why)),
     }
 }
 

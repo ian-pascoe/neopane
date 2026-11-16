@@ -19,9 +19,13 @@
 //! 5. For `left` and `up`, `herdr-app do pane.swap` swaps the new pane
 //!    with the origin's, its neighbour that side, the focus staying with
 //!    the new pane; failing, it warns, leaving it right or below.
+//! 6. With `RATIO`, the new pane gets that share of the weight it and the
+//!    origin's pane have together (`sizes.rs`), as the doc shows them,
+//!    read again after a swap; failing, it warns, leaving the halves the
+//!    split made.
 //!
-//! No sizing yet: the split halves the origin's room. Prints the new
-//! terminal's address.
+//! What it warns of goes on stderr, after the failure's own words if it
+//! fails. Prints the new terminal's address.
 
 use std::time::Duration;
 
@@ -30,7 +34,8 @@ use serde_json::json;
 use super::core::Core;
 use super::doc::pane_of;
 use super::{
-    BLOCK_TIME, CLEANUP_TIME, Failure, block_of, cleanup_kill, methods, needs, refused, window_of,
+    BLOCK_TIME, CLEANUP_TIME, Failure, Opened, block_of, cleanup_kill, methods, needs, noted,
+    refused, sizes, window_of,
 };
 use crate::config::Capability;
 use crate::providers::builtin::Given;
@@ -39,7 +44,11 @@ use crate::providers::builtin::Given;
 const OPEN_TIME: Duration = Duration::from_millis(4000);
 /// `open_beside`: the new terminal's address, or why there's none.
 pub(super) fn open_beside(given: &Given) -> Result<String, Failure> {
-    open_beside_within(given, OPEN_TIME, CLEANUP_TIME, BLOCK_TIME)
+    let opened = open_beside_within(given, OPEN_TIME, CLEANUP_TIME, BLOCK_TIME)?;
+    for why in &opened.warnings {
+        eprintln!("herdr-app open_beside: {why}");
+    }
+    Ok(opened.terminal)
 }
 
 /// `open_beside`, its requests having `time`, waiting at most `block` of
@@ -50,10 +59,11 @@ fn open_beside_within(
     time: Duration,
     cleanup: Duration,
     block: Duration,
-) -> Result<String, Failure> {
+) -> Result<Opened, Failure> {
     let origin = given.text("origin")?;
     let side = Side::of(given)?;
     let argv = given.attach_strings("herdr-app")?;
+    let ratio = given.ratio()?;
     // found first: no herdr-app costs no request of the core
     let window = window_of(given)?;
     let mut core = Core::of(given, time)?;
@@ -68,28 +78,42 @@ fn open_beside_within(
     let terminal = window
         .split(&origin_pane, side.split, &argv, due)
         .map_err(|ran| refused(ran, &core, &window))?;
+    let mut warnings = Vec::new();
     if let Err(e) = core.keep(&terminal, false) {
-        eprintln!(
-            "herdr-app open_beside: can't turn the hc core's keep off for {terminal}: {}",
+        warnings.push(format!(
+            "can't turn the hc core's keep off for {terminal}: {}",
             e.why
-        );
+        ));
     }
-    let pane = match block_of(&mut core, &terminal, block) {
-        Ok(pane) => pane,
+    let (pane, doc) = match block_of(&mut core, &terminal, block) {
+        Ok(found) => found,
         Err(failure) => {
             if let Err(why) = cleanup_kill(&core, &terminal, cleanup) {
-                eprintln!("herdr-app open_beside: can't kill {terminal}: {why}");
+                warnings.insert(0, format!("{terminal} is left: {why}"));
             }
-            return Err(failure);
+            return Err(noted(failure, &warnings));
         }
     };
+    let mut doc = Some(doc);
     if let Some(toward) = side.swap {
         let swap = json!({ "pane": pane, "direction": toward });
-        if let Err(ran) = window.act("pane.swap", &swap, due) {
-            eprintln!("herdr-app open_beside: can't swap {terminal}'s pane {toward}: {ran}");
+        match window.act("pane.swap", &swap, due) {
+            // the doc has changed
+            Ok(_) => doc = None,
+            Err(ran) => warnings.push(format!("can't swap {terminal}'s pane {toward}: {ran}")),
         }
     }
-    Ok(terminal)
+    if let Some(ratio) = ratio {
+        let sized = match doc {
+            Some(doc) => Ok(doc),
+            None => core.doc().map_err(String::from),
+        }
+        .and_then(|doc| sizes::share_by(&window, &doc, &terminal, &origin, ratio, due));
+        if let Err(why) = sized {
+            warnings.push(format!("can't size {terminal}'s pane: {why}"));
+        }
+    }
+    Ok(Opened { terminal, warnings })
 }
 
 /// Where a new pane goes, from `DIRECTION`: the app splits only right or
@@ -125,7 +149,7 @@ impl Side {
 mod tests {
     use std::time::Instant;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::super::fake::{
         Exchange, FakeApp, FakeCore, Run, given, keep_off, kill_of, recorded, recorded_one,
@@ -177,7 +201,15 @@ mod tests {
         FakeCore::serve(exchanges)
     }
 
-    fn open(core: &FakeCore, app: &FakeApp, direction: &str) -> Result<String, Failure> {
+    /// An open done, of `terminal`, warning of `warnings`.
+    fn opened(terminal: &str, warnings: &[&str]) -> Result<Opened, Failure> {
+        Ok(Opened {
+            terminal: terminal.into(),
+            warnings: warnings.iter().map(|w| w.to_string()).collect(),
+        })
+    }
+
+    fn open(core: &FakeCore, app: &FakeApp, direction: &str) -> Result<Opened, Failure> {
         let given = given(
             core,
             app,
@@ -193,7 +225,7 @@ mod tests {
     #[test]
     fn down_splits_the_origins_pane_running_the_attach_and_turns_keep_off() {
         let (core, app) = (core(), FakeApp::new(&[split_down()]));
-        assert_eq!(open(&core, &app, "down"), Ok("t3".into()));
+        assert_eq!(open(&core, &app, "down"), opened("t3", &[]));
         assert_eq!(
             app.asked(),
             [format!(
@@ -218,7 +250,7 @@ mod tests {
             &format!(r#"{{"pane":"{P3}","direction":"up"}}"#),
         );
         let (core, app) = (core(), FakeApp::new(&[split_down(), swap]));
-        assert_eq!(open(&core, &app, "up"), Ok("t3".into()));
+        assert_eq!(open(&core, &app, "up"), opened("t3", &[]));
         let asked = app.asked();
         assert_eq!(asked.len(), 2);
         assert!(asked[0].starts_with(r#"do pane.split {"direction":"down""#));
@@ -255,11 +287,11 @@ mod tests {
         };
         assert_eq!(
             open_beside_within(&given("right"), TIME, TIME, BLOCK_TIME),
-            Ok("t2".into())
+            opened("t2", &[])
         );
         assert_eq!(
             open_beside_within(&given("left"), TIME, TIME, BLOCK_TIME),
-            Ok("t2".into())
+            opened("t2", &[])
         );
         let asked = app.asked();
         assert_eq!(asked.len(), 3);
@@ -382,10 +414,196 @@ mod tests {
             keep_off("t3"),
         ]);
         let app = FakeApp::new(&[split_down()]);
-        assert_eq!(open(&core, &app, "down"), Ok("t3".into()));
+        assert_eq!(open(&core, &app, "down"), opened("t3", &[]));
         assert_eq!(
             core.methods(),
             ["hello", "doc.get", "terminal.keep", "doc.get", "doc.get"]
+        );
+    }
+
+    /// Why the core refused `terminal.keep-not-found`, as a warning.
+    const KEEP_REFUSED: &str =
+        "can't turn the hc core's keep off for t3: hc core: no terminal \"t99\"";
+
+    fn open_by(
+        core: &FakeCore,
+        app: &FakeApp,
+        direction: &str,
+        ratio: &str,
+    ) -> Result<Opened, Failure> {
+        let given = given(
+            core,
+            app,
+            &[
+                ("ORIGIN", "t2"),
+                ("DIRECTION", direction),
+                ("ATTACH", ATTACH),
+                ("RATIO", ratio),
+            ],
+        );
+        open_beside_within(&given, TIME, TIME, BLOCK_TIME)
+    }
+
+    /// `layout.resize` of `t3`'s pane to `weight`, answered.
+    fn resize_p3(weight: &str) -> Run {
+        let args = format!(r#"{{"id":"{P3}","weight":{weight}}}"#);
+        answering("do-layout.resize", "layout.resize", &args)
+    }
+
+    /// The nested tab's core, keep answered for `t3`, the block showing
+    /// `terminal` sized `size`.
+    fn core_sized(terminal: &str, size: Value) -> FakeCore {
+        fn set(node: &mut Value, terminal: &str, size: &Value) {
+            if node["content"]["terminal"] == terminal {
+                node["size"] = size.clone();
+            }
+            if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+                children.iter_mut().for_each(|c| set(c, terminal, size));
+            }
+        }
+        let mut exchanges = recorded("nested-doc.get");
+        exchanges.push(keep_off("t3"));
+        let doc = exchanges
+            .iter_mut()
+            .find(|e| e.method == "doc.get")
+            .unwrap();
+        for space in doc.result_mut()["value"]["spaces"].as_array_mut().unwrap() {
+            for tab in space["tabs"].as_array_mut().unwrap() {
+                set(&mut tab["root"], terminal, &size);
+            }
+        }
+        FakeCore::serve(exchanges)
+    }
+
+    #[test]
+    fn the_new_pane_gets_ratio_of_the_weight_it_shares_with_the_origins() {
+        // t2 / t3, neither sized: 0.3 is t2's weight 1 × 0.3 / 0.7
+        let (core, app) = (core(), FakeApp::new(&[split_down(), resize_p3("0.428571")]));
+        assert_eq!(open_by(&core, &app, "down", "0.3"), opened("t3", &[]));
+        assert_eq!(
+            app.asked()[1],
+            format!(r#"do layout.resize {{"id":"{P3}","weight":0.428571}}"#)
+        );
+        // the doc that showed its block
+        assert_eq!(
+            core.methods(),
+            ["hello", "doc.get", "terminal.keep", "doc.get"]
+        );
+    }
+
+    #[test]
+    fn after_a_swap_the_doc_is_read_again_for_sizing() {
+        let swap = answering(
+            "do-pane.swap",
+            "pane.swap",
+            &format!(r#"{{"pane":"{P3}","direction":"up"}}"#),
+        );
+        let app = FakeApp::new(&[split_down(), swap, resize_p3("0.428571")]);
+        let core = core();
+        assert_eq!(open_by(&core, &app, "up", "0.3"), opened("t3", &[]));
+        let asked = app.asked();
+        assert_eq!(asked.len(), 3);
+        assert!(asked[1].starts_with("do pane.swap"));
+        assert!(asked[2].starts_with("do layout.resize"));
+        assert_eq!(
+            core.methods(),
+            ["hello", "doc.get", "terminal.keep", "doc.get", "doc.get"]
+        );
+    }
+
+    #[test]
+    fn a_failed_swap_sizes_by_the_doc_already_read() {
+        let mut swap = answering(
+            "do-pane.swap",
+            "pane.swap",
+            &format!(r#"{{"pane":"{P3}","direction":"up"}}"#),
+        );
+        swap.exit = 1;
+        swap.stdout = "{\"error\": \"no such pane\"}\n".into();
+        let app = FakeApp::new(&[split_down(), swap, resize_p3("0.428571")]);
+        let core = core();
+        assert_eq!(
+            open_by(&core, &app, "up", "0.3"),
+            opened("t3", &["can't swap t3's pane up: herdr-app: no such pane"])
+        );
+        assert_eq!(app.asked().len(), 3);
+        assert_eq!(
+            core.methods(),
+            ["hello", "doc.get", "terminal.keep", "doc.get"]
+        );
+    }
+
+    #[test]
+    fn half_is_what_the_split_gave_so_nothing_is_resized() {
+        let (core, app) = (core(), FakeApp::new(&[split_down()]));
+        assert_eq!(open_by(&core, &app, "down", "0.5"), opened("t3", &[]));
+        assert_eq!(app.asked().len(), 1);
+    }
+
+    #[test]
+    fn half_is_set_against_the_origins_own_weight() {
+        // t2 at weight 2: half of the pair is t3 at 2 too, not the 1 it has
+        let core = core_sized("t2", json!({ "weight": 2.0 }));
+        let app = FakeApp::new(&[split_down(), resize_p3("2.0")]);
+        assert_eq!(open_by(&core, &app, "down", "0.5"), opened("t3", &[]));
+        assert_eq!(
+            app.asked()[1],
+            format!(r#"do layout.resize {{"id":"{P3}","weight":2.0}}"#)
+        );
+    }
+
+    #[test]
+    fn a_sizing_the_app_refuses_warns_and_opens_all_the_same() {
+        let mut refused = resize_p3("0.428571");
+        refused.exit = 1;
+        refused.stdout = recorded_run("err-unknown-command")
+            .stdout
+            .replace("no.such", "layout.resize");
+        let (core, app) = (core(), FakeApp::new(&[split_down(), refused]));
+        let Ok(Opened { terminal, warnings }) = open_by(&core, &app, "down", "0.3") else {
+            panic!("not opened");
+        };
+        assert_eq!(terminal, "t3");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0]
+                .starts_with("can't size t3's pane: herdr-app: unknown command \"layout.resize\""),
+            "{warnings:?}"
+        );
+        assert_eq!(app.asked().len(), 2);
+    }
+
+    #[test]
+    fn an_origin_sized_in_pixels_warns_and_sets_nothing() {
+        let core = core_sized("t2", json!({ "px": 300 }));
+        let app = FakeApp::new(&[split_down()]);
+        let why = format!("can't size t3's pane: Herdr app node {P2} is sized in pixels");
+        assert_eq!(open_by(&core, &app, "down", "0.3"), opened("t3", &[&why]));
+        assert_eq!(app.asked().len(), 1);
+    }
+
+    #[test]
+    fn a_failure_says_what_it_warned_of_after_its_own_words() {
+        // the core refuses keep; the doc never shows t3
+        let mut keep = recorded_one("terminal.keep-not-found", "terminal.keep");
+        keep.params = json!({ "terminal": "t3", "keep": false });
+        let core = FakeCore::serve(vec![
+            recorded_one("hello", "hello"),
+            doc_with("t3", "t9"),
+            keep,
+            kill_of("t3"),
+        ]);
+        let app = FakeApp::new(&[split_down()]);
+        let given = given(
+            &core,
+            &app,
+            &[("ORIGIN", "t2"), ("DIRECTION", "down"), ("ATTACH", ATTACH)],
+        );
+        assert_eq!(
+            open_beside_within(&given, TIME, TIME, Duration::from_millis(200)),
+            Err(Failure::Failed(format!(
+                "t3 has no Herdr app pane; {KEEP_REFUSED}"
+            )))
         );
     }
 
@@ -405,7 +623,16 @@ mod tests {
         swap.exit = 1;
         swap.stdout = "{\"error\": \"no such pane\"}\n".into();
         let app = FakeApp::new(&[split_down(), swap]);
-        assert_eq!(open(&core, &app, "up"), Ok("t3".into()));
+        assert_eq!(
+            open(&core, &app, "up"),
+            opened(
+                "t3",
+                &[
+                    KEEP_REFUSED,
+                    "can't swap t3's pane up: herdr-app: no such pane"
+                ]
+            )
+        );
         assert_eq!(app.asked().len(), 2);
     }
 
@@ -504,6 +731,15 @@ mod tests {
             (
                 vec![("ORIGIN", "t2"), ("DIRECTION", "left")],
                 "ATTACH is empty",
+            ),
+            (
+                vec![
+                    ("ORIGIN", "t2"),
+                    ("DIRECTION", "left"),
+                    ("ATTACH", ATTACH),
+                    ("RATIO", "1.5"),
+                ],
+                "RATIO \"1.5\" isn't between 0 and 1",
             ),
         ] {
             let opened = open_beside_within(&given(&core, &app, &vars), TIME, TIME, BLOCK_TIME);

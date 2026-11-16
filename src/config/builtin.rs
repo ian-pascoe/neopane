@@ -103,6 +103,7 @@ impl BuiltinTable {
                 Capability::ReportLayout,
                 Capability::Focus,
                 Capability::FocusDirection,
+                Capability::Resize,
             ],
         }
     }
@@ -321,6 +322,7 @@ mod tests {
             "report_layout",
             "focus",
             "focus_direction",
+            "resize",
         ]
         .into_iter()
         .map(|cap| (cap, format!("{{exe}} provider builtin herdr-app {cap}")))

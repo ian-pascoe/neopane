@@ -220,14 +220,10 @@ fn plan(root: &Node, sizing: &Sizing) -> Result<SplitSetting, String> {
     })
 }
 
-/// `SIZE`, cells, at least 1.
+/// `SIZE`, cells, at least 1; past herdr's most, its most, as a size
+/// past the room is held inside it.
 fn size(given: &Given) -> Result<u16, String> {
-    let size = given.var("size").unwrap_or_default();
-    std::str::from_utf8(&size)
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .filter(|&n| n > 0)
-        .ok_or_else(|| format!("SIZE {:?} isn't cells", String::from_utf8_lossy(&size)))
+    Ok(u16::try_from(given.cells("size")?).unwrap_or(u16::MAX))
 }
 
 #[cfg(test)]
@@ -321,6 +317,11 @@ mod tests {
         );
         assert_eq!(
             resized("w1:p4", "w1:p5", "right", "500").0,
+            set(&[false, true], 43, 44)
+        );
+        // past herdr's most cells: its most
+        assert_eq!(
+            resized("w1:p4", "w1:p5", "right", "70000").0,
             set(&[false, true], 43, 44)
         );
     }
@@ -702,9 +703,9 @@ mod tests {
             ("DIRECTION", "right"),
         ];
         for (more, why) in [
-            (vec![], "SIZE \"\" isn't cells"),
-            (vec![("SIZE", "0")], "SIZE \"0\" isn't cells"),
-            (vec![("SIZE", "1.5")], "SIZE \"1.5\" isn't cells"),
+            (vec![], "SIZE \"\" isn't an integer"),
+            (vec![("SIZE", "0")], "SIZE isn't a count of cells"),
+            (vec![("SIZE", "1.5")], "SIZE \"1.5\" isn't an integer"),
             (
                 vec![("SIZE", "9"), ("DIRECTION", "over")],
                 "DIRECTION \"over\" isn't left, right, up or down",

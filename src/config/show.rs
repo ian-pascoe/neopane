@@ -223,6 +223,8 @@ mod tests {
                  \"close\" }},\n  \
                    find = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"find\" }},\n  \
+                   resize = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
+                 \"resize\" }},\n  \
                    focus = {{ \"{{exe}}\", \"provider\", \"builtin\", \"herdr-app\", \
                  \"focus\" }},\n  \
                    focus_direction = {{ \"{{exe}}\", \"provider\", \"builtin\", \

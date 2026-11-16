@@ -657,7 +657,8 @@ app's and the core's versions.
 
 It reads the hc core through its socket and acts on the window through the
 `herdr-app` command, found on `PATH`, else at `~/.local/bin/herdr-app`,
-where an installed Herdr.app keeps it. No version is required: a method a
+where an installed Herdr.app keeps it. `resize` also reads the app's
+`view.json` under its home, which alone says which pane is zoomed. No version is required: a method a
 capability needs and the core lacks, or a command `herdr-app` lacks, or no
 `herdr-app` at all, it names, with both versions, and does without (exit
 69); `find` refuses instead.
@@ -666,10 +667,25 @@ Each Neovim window gets a Herdr app pane of its own, split beside the pane
 it came from, running its attach with no shell (ADR 0020). Its limits, for
 now:
 
-- The app splits only right or down, halving the pane split: a window
-  opened on the left or above, as `:vsplit` and `:split` open it, is split
-  right or below, then swapped with the pane it came from. Nothing sets
-  sizes yet, so three windows side by side take a half and two quarters.
+- The app splits only right or down: a window opened on the left or
+  above, as `:vsplit` and `:split` open it, is split right or below, then
+  swapped with the pane it came from, and given its share of the room as
+  a weight.
+- Sizes are the app's weights, which take in each pane's border and
+  header: `resize` turns cells into weights with the chrome the layout
+  report takes as each pane's inset, and the tab's size the shown tab's
+  cells tell, which every tab of the window shares. The window resized
+  gets its size, give or take a cell; the pane beside it comes short of
+  Neovim's by about that chrome, some 5 columns or 4 rows at font size
+  14, for each pane along the split.
+- Only the first tab page, which shares its Herdr app tab with your other
+  panes, is resized: the daemon resizes a tab page with a Herdr app tab of
+  its own only through a pane provider that can also move panes
+  (`place_beside`), which this one doesn't have.
+- Panes beside one sized in pixels, along the same split or one over
+  them, aren't resized: their share of the tab can't be told.
+- While the shown tab is zoomed, the zoomed pane alone measures the
+  window, as the others' cells are stale.
 - The new pane takes the window's focus, as the new window does in Neovim.
 - The hc core's keep is turned off for each pane it opens, so a pane whose
   attach was killed closes rather than coming back as a shell, and doesn't
@@ -687,7 +703,7 @@ now:
 - No `events`: a focus move made with the app's own keys reaches Neovim at
   the next layout report, which a focus report the app sends the pane has
   the daemon run. Whether a mouse click sends one is unchecked.
-- `close` kills the hc terminal. Resizing is to come.
+- `close` kills the hc terminal.
 - A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup
