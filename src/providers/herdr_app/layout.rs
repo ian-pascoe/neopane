@@ -1,33 +1,16 @@
-//! `report_layout`: the live layout of every tab of every space, from the
-//! core's doc and `terminal.list`, and the window's `herdr-app status`.
+//! `report_layout`, as `docs/capabilities.md`'s Herdr app section gives
+//! it: the core's doc and `terminal.list`, then `herdr-app status`.
 //!
-//! - One layout area per tab, its id the tab's (`tb…`). Foreign panes are
-//!   in it too: a mod's block, by its pane id (`p…`).
-//! - Each rect is the pane's **outer** share of its tab, from the doc's
-//!   weights alone: a node with no `size` weighs 1, weights are relative
-//!   among siblings, and a split shares its rect along its axis, a `row`
-//!   across, a `column` down. Weights share the panes' outer extent,
-//!   chrome included (SPI-1214). A node sized in pixels, `{px}`, is left
-//!   out with all it holds: its room can't be told in shares.
-//! - Each inset is the pane's chrome (its border, two-row header, padding
-//!   and gap) in cells: the same for every pane, as it is fixed in
-//!   pixels. It is solved from the shown tab's cells and shares, on each
-//!   axis: a pane's cells plus the chrome are its share of the tab's
-//!   outer extent, so, fitted over its panes, the chrome is where that
-//!   line crosses no share. A tab whose shares along an axis don't differ
-//!   enough, a lone pane's both, can't tell it; nor can stale cells, a
-//!   solve outside 0 to twice the measured: then it is the measured, 5
-//!   columns and 4 rows at font size 14, scaled to the window's
-//!   `font_size`. Only the shown tab's cells are read, as a hidden tab's
-//!   may be stale, or the 120x40 of a tab never shown. The window doesn't
-//!   tell where in its chrome the content starts: the chrome is split
-//!   evenly, the odd cell right and top.
-//! - A terminal two blocks show is left out, as is one none shows.
-//! - No zoom: neither the doc nor `status` tells it, so a zoomed pane is
-//!   reported where it is unzoomed, and Neovim's screen is too large for
-//!   it while its tab is zoomed.
-//! - `focus` is the terminal of the window's `focused_pane`, as `status`
-//!   says; none without a window to ask.
+//! - [`tabs_of`] walks the doc: each tab's panes, at the rects their
+//!   weights give them, as fractions of the tab. A pane under a node sized
+//!   in pixels is marked so, and the panes beside such a node, which
+//!   share a room it takes part of, approximate.
+//! - [`layout`] makes the report: an area per tab, each pane inset by
+//!   [`chrome`]; a terminal it can't place, under a pixel-sized node or in
+//!   two blocks, in an area of its own; `focus` from `status`.
+//! - [`chrome`] is the pane chrome in cells: the measured, scaled to the
+//!   window's font size, unless the shown tab's cells, by [`solve`], tell
+//!   another more than a cell away.
 
 use std::time::Duration;
 
@@ -51,12 +34,11 @@ pub(super) fn report_layout(given: &Given) -> Result<String, Failure> {
 /// Without a window to ask, the report has no focus, said on stderr.
 fn report_layout_within(given: &Given, time: Duration) -> Result<String, Failure> {
     let mut core = Core::of(given, time)?;
-    needs(&core, methods(Capability::ReportLayout), || {
-        Window::of(given)
-    })?;
+    let window = Window::of(given);
+    needs(&core, methods(Capability::ReportLayout), || window.clone())?;
     let doc = core.doc().map_err(String::from)?;
     let listed = core.list().map_err(String::from)?;
-    let status = Window::of(given)
+    let status = window
         .and_then(|w| w.status(core.due()).map_err(String::from))
         .map_err(|why| eprintln!("herdr-app report_layout: no focus: {why}"))
         .ok();
@@ -69,11 +51,19 @@ const MEASURED_CHROME: [f64; 2] = [5.0, 4.0];
 /// The font size the chrome was measured at.
 const MEASURED_FONT: f64 = 14.0;
 
+/// The font sizes taken as the window's: outside them, `status` is taken
+/// to be wrong, and the measured font size is used.
+const FONTS: std::ops::RangeInclusive<f64> = 4.0..=200.0;
+
 /// How much the shown tab's shares along an axis must differ, the
 /// largest less the smallest, for its cells to tell the chrome: at a
 /// quarter, a cell's rounding in each pane moves the solve by a cell or
 /// two at most.
 const SPREAD: f64 = 0.25;
+
+/// How far, in cells, a solve must be from the measured chrome to be
+/// taken instead: rounding alone moves it about a cell.
+const TRUSTED: f64 = 1.0;
 
 /// A pane of a tab, where its weights put it.
 #[derive(Clone, Copy)]
@@ -83,6 +73,11 @@ struct Pane<'a> {
     terminal: Option<&'a str>,
     /// x, y, w, h, as fractions of its tab.
     rect: [f64; 4],
+    /// Under a node sized in pixels: its rect can't be told.
+    px: bool,
+    /// Under a split that has a node sized in pixels, which takes room its
+    /// weights don't share: its rect is approximate.
+    approx: bool,
 }
 
 impl Pane<'_> {
@@ -92,85 +87,116 @@ impl Pane<'_> {
     }
 }
 
+/// A tab of the doc, and its panes.
+struct Tab<'a> {
+    id: &'a str,
+    panes: Vec<Pane<'a>>,
+}
+
 /// The report `report_layout` prints, from the core's `doc`, its
-/// terminals `listed`, and the window's `status`, if it answered.
+/// terminals `listed`, and the window's `status`, if it answered. A tab
+/// it can't read is left out, said on stderr.
 pub(super) fn layout(
     doc: &Value,
     listed: &[Terminal],
     status: Option<&Value>,
 ) -> Result<Value, String> {
     let tabs = tabs_of(doc)?;
-    let doubled = |terminal: &str| {
-        let shows = tabs.iter().flat_map(|(_, panes)| panes);
-        shows.filter(|p| p.terminal == Some(terminal)).count() > 1
-    };
-    let tabs: Vec<(&str, Vec<Pane>)> = tabs
-        .iter()
-        .map(|(id, panes)| {
-            let kept = panes.iter().filter(|p| !p.terminal.is_some_and(doubled));
-            (*id, kept.copied().collect())
-        })
-        .collect();
+    let every = || tabs.iter().flat_map(|t| &t.panes);
+    let blocks_of = |terminal: &str| every().filter(|p| p.terminal == Some(terminal)).count();
+    let doubled = |p: &Pane| p.terminal.is_some_and(|t| blocks_of(t) > 1);
     let shown = status.and_then(|s| s["tab"].as_str());
-    let shown = tabs.iter().find(|(id, _)| Some(*id) == shown);
+    let shown: Vec<Pane> = tabs
+        .iter()
+        .filter(|t| Some(t.id) == shown)
+        .flat_map(|t| &t.panes)
+        .filter(|p| !p.px && !p.approx && !doubled(p))
+        .copied()
+        .collect();
     let font = status
         .and_then(|s| s["font_size"].as_f64())
-        .filter(|f| f.is_finite() && *f > 0.0)
+        .filter(|f| FONTS.contains(f))
         .unwrap_or(MEASURED_FONT);
-    let [cols, rows] = chrome(shown.map_or(&[][..], |(_, p)| p), listed, font);
+    let [cols, rows] = chrome(&shown, listed, font);
     let inset = [cols / 2, rows - rows / 2, cols - cols / 2, rows / 2];
-    let areas: Vec<Value> = tabs
-        .iter()
-        .filter(|(_, panes)| !panes.is_empty())
-        .map(|(id, panes)| {
-            let terminals: Vec<Value> = panes
-                .iter()
-                .map(|p| json!({ "terminal": p.reported(), "rect": p.rect, "inset": inset }))
-                .collect();
-            json!({ "id": id, "terminals": terminals })
-        })
-        .collect();
+    let mut areas = Vec::new();
+    // terminals it can't place in their tab: each alone, so the daemon
+    // keeps no stale place for one
+    let mut alone: Vec<Value> = Vec::new();
+    let mut alone_terminals: Vec<&str> = Vec::new();
+    let own_area = |id: &str, terminal: &str| json!({ "id": id, "terminals": [{ "terminal": terminal, "rect": [0.0, 0.0, 1.0, 1.0] }] });
+    for tab in &tabs {
+        let mut terminals = Vec::new();
+        for p in &tab.panes {
+            if doubled(p) {
+                let t = p.terminal.unwrap_or_default();
+                if !alone_terminals.contains(&t) {
+                    alone_terminals.push(t);
+                    alone.push(own_area(p.id, t));
+                }
+                if !p.px {
+                    // its block takes room all the same, as a foreign pane
+                    terminals.push(json!({ "terminal": p.id, "rect": p.rect, "inset": inset }));
+                }
+            } else if p.px {
+                if let Some(t) = p.terminal {
+                    alone.push(own_area(p.id, t));
+                }
+            } else {
+                terminals.push(json!({ "terminal": p.reported(), "rect": p.rect, "inset": inset }));
+            }
+        }
+        if !terminals.is_empty() {
+            areas.push(json!({ "id": tab.id, "terminals": terminals }));
+        }
+    }
+    areas.extend(alone);
     let mut report = json!({ "areas": areas });
     let focused = status.and_then(|s| s["focused_pane"].as_str());
-    let focus = tabs
-        .iter()
-        .flat_map(|(_, panes)| panes)
-        .find(|p| Some(p.id) == focused);
-    if let Some(focus) = focus {
+    if let Some(focus) = every().find(|p| Some(p.id) == focused) {
         report["focus"] = focus.reported().into();
     }
     Ok(report)
 }
 
-/// The chrome in cells, columns and rows: solved from `shown`, the shown
-/// tab's panes, with their sizes as `listed` has them; where it can't be,
-/// the measured, at font size `font`.
+/// The chrome in cells, columns and rows: the measured, at font size
+/// `font`, unless `shown`, the shown tab's panes its cells can tell it
+/// from, with their sizes as `listed` has them, solve it more than
+/// [`TRUSTED`] away, and within 0 and twice the measured.
 fn chrome(shown: &[Pane], listed: &[Terminal], font: f64) -> [u32; 2] {
     let size = |p: &Pane| {
         let t = listed
             .iter()
             .find(|t| Some(t.address.as_str()) == p.terminal)?;
-        t.size
+        t.size.filter(|_| t.live)
     };
     [0, 1].map(|axis| {
         let measured = (MEASURED_CHROME[axis] * MEASURED_FONT / font).round();
         let points: Vec<(f64, f64)> = shown
             .iter()
-            .filter_map(|p| Some((p.rect[2 + axis], f64::from(size(p)?[axis]))))
+            .filter_map(|p| Some((p.rect[2 + axis], size(p)?[axis])))
+            .filter(|&(_, cells)| cells > 0)
+            .map(|(share, cells)| (share, f64::from(cells)))
             .collect();
-        let solved = solve(&points).filter(|k| (0.0..=2.0 * measured).contains(k));
+        let solved = solve(&points)
+            .filter(|k| (k - measured).abs() > TRUSTED)
+            .map(f64::round)
+            .filter(|k| (0.0..=2.0 * measured).contains(k));
         solved.unwrap_or(measured) as u32
     })
 }
 
 /// The chrome, in cells, that `points`, each pane's share of its tab and
-/// its cells along one axis, tell, rounded: fitting cells = share × outer
-/// − chrome by least squares. None if their shares don't differ by
-/// [`SPREAD`].
+/// its cells along one axis, tell, unrounded: fitting cells = share ×
+/// outer − chrome by least squares. None for fewer than two, or shares
+/// that don't differ by [`SPREAD`].
 fn solve(points: &[(f64, f64)]) -> Option<f64> {
+    if points.len() < 2 {
+        return None;
+    }
     let shares = points.iter().map(|(s, _)| *s);
     let spread = shares.clone().fold(f64::MIN, f64::max) - shares.fold(f64::MAX, f64::min);
-    if points.len() < 2 || spread < SPREAD {
+    if spread < SPREAD {
         return None;
     }
     let n = points.len() as f64;
@@ -182,12 +208,14 @@ fn solve(points: &[(f64, f64)]) -> Option<f64> {
         variance += (s - mean_share).powi(2);
     }
     let outer = covariance / variance;
-    Some((outer * mean_share - mean_cells).round())
+    Some(outer * mean_share - mean_cells)
 }
 
-/// Every tab of `doc`, in the doc's order, its id and its panes; none for
-/// a doc never written.
-fn tabs_of(doc: &Value) -> Result<Vec<(&str, Vec<Pane<'_>>)>, String> {
+/// Every tab of `doc` it can read, in the doc's order; none for a doc
+/// never written. A doc without spaces or tabs, or a tab without an id,
+/// can't be read; a tab whose tree can't be, such as one with a node of a
+/// type it doesn't know, is left out, said on stderr.
+fn tabs_of(doc: &Value) -> Result<Vec<Tab<'_>>, String> {
     if doc.is_null() {
         return Ok(Vec::new());
     }
@@ -196,43 +224,78 @@ fn tabs_of(doc: &Value) -> Result<Vec<(&str, Vec<Pane<'_>>)>, String> {
         for tab in space["tabs"].as_array().ok_or(UNREADABLE)? {
             let id = tab["id"].as_str().ok_or(UNREADABLE)?;
             let mut panes = Vec::new();
-            walk(&tab["root"], [0.0, 0.0, 1.0, 1.0], &mut panes)?;
-            tabs.push((id, panes));
+            match walk(
+                &tab["root"],
+                [0.0, 0.0, 1.0, 1.0],
+                Under::default(),
+                &mut panes,
+            ) {
+                Ok(()) => tabs.push(Tab { id, panes }),
+                Err(why) => eprintln!("herdr-app report_layout: tab {id} left out: {why}"),
+            }
         }
     }
     Ok(tabs)
 }
 
+/// What a node is under.
+#[derive(Clone, Copy, Default)]
+struct Under {
+    /// A node sized in pixels.
+    px: bool,
+    /// A split with a node sized in pixels.
+    approx: bool,
+}
+
 /// Adds the panes under `node`, `node` itself if it is one, at `rect`, to
-/// `panes`.
-fn walk<'a>(node: &'a Value, rect: [f64; 4], panes: &mut Vec<Pane<'a>>) -> Result<(), String> {
+/// `panes`; or why its tree can't be read.
+fn walk<'a>(
+    node: &'a Value,
+    rect: [f64; 4],
+    under: Under,
+    panes: &mut Vec<Pane<'a>>,
+) -> Result<(), String> {
     let axis = match node["type"].as_str() {
         Some("block") => {
             panes.push(Pane {
-                id: node["id"].as_str().ok_or(UNREADABLE)?,
+                id: node["id"].as_str().ok_or("a block has no id")?,
                 terminal: node["content"]["terminal"].as_str(),
                 rect,
+                px: under.px,
+                approx: under.approx,
             });
             return Ok(());
         }
         Some("row") => 0,
         Some("column") => 1,
-        _ => return Err(UNREADABLE.into()),
+        Some(other) => return Err(format!("unknown node type {other:?}")),
+        None => return Err("a node has no type".into()),
     };
-    let mut weighed = Vec::new();
-    for child in node["children"].as_array().ok_or(UNREADABLE)? {
-        if let Some(weight) = weight(&child["size"])? {
-            weighed.push((child, weight));
-        }
-    }
-    let total: f64 = weighed.iter().map(|(_, w)| w).sum();
+    let children = node["children"]
+        .as_array()
+        .ok_or("a split has no children")?;
+    let weights = children
+        .iter()
+        .map(|child| weight(&child["size"]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let beside_px = weights.iter().any(Option::is_none);
+    let total: f64 = weights.iter().flatten().sum();
     let mut at = rect[axis];
-    for (child, weight) in weighed {
+    for (child, weight) in children.iter().zip(weights) {
+        let Some(weight) = weight else {
+            let px = Under { px: true, ..under };
+            walk(child, rect, px, panes)?;
+            continue;
+        };
         let mut part = rect;
         part[axis] = at;
         part[2 + axis] = rect[2 + axis] * weight / total;
         at += part[2 + axis];
-        walk(child, part, panes)?;
+        let approx = Under {
+            approx: under.approx || beside_px,
+            ..under
+        };
+        walk(child, part, approx, panes)?;
     }
     Ok(())
 }
@@ -248,7 +311,7 @@ fn weight(size: &Value) -> Result<Option<f64>, String> {
     }
     match size["weight"].as_f64() {
         Some(w) if w.is_finite() && w > 0.0 => Ok(Some(w)),
-        _ => Err(UNREADABLE.into()),
+        _ => Err(format!("a size of {size}")),
     }
 }
 
@@ -290,6 +353,16 @@ mod tests {
             })
             .collect();
         (reply("doc.get")["value"].clone(), listed)
+    }
+
+    /// A live terminal of `size`.
+    fn term(address: &str, size: [u32; 2]) -> Terminal {
+        Terminal {
+            address: address.into(),
+            live: true,
+            pid: None,
+            size: Some(size),
+        }
     }
 
     /// `herdr-app status` as recorded: the nested tab shown, `t3`'s pane
@@ -365,24 +438,130 @@ mod tests {
         assert_eq!(areas, [[88.0, 56.0]; 3]);
     }
 
-    /// The chrome its cells tell wins over the measured: at font size 20
-    /// the measured would be 4 columns and 3 rows, and the areas from
-    /// `t1` and `t2` would differ by a row.
+    /// The chrome its cells tell wins over the measured when more than a
+    /// cell away: at font size 28 the measured would be 3 columns and 2
+    /// rows, and the areas from `t1` and `t2` would differ by 2 rows.
     #[test]
-    fn chrome_solved_wins_over_the_measured() {
+    fn chrome_solved_more_than_a_cell_away_wins_over_the_measured() {
         let (doc, listed) = shapes();
         let mut status = status();
-        status["font_size"] = json!(20.0);
+        status["font_size"] = json!(28.0);
         let report = layout(&doc, &listed, Some(&status)).unwrap();
-        // the columns can't be solved: every share across is a half
+        let inset = &report["areas"][0]["terminals"][0]["inset"];
+        // the rows solved, 4, not the measured 2
+        assert_eq!((&inset[1], &inset[3]), (&json!(2), &json!(2)));
+        // the columns can't be solved, every share across being a half:
+        // the measured 3
+        assert_eq!((&inset[0], &inset[2]), (&json!(1), &json!(2)));
+        assert_eq!(report["areas"][1]["terminals"][0]["inset"], *inset);
+    }
+
+    /// With the shapes tab shown and its real cells, the columns solve to
+    /// 4.5, on a rounding tie, and the rows to 4: each within a cell of the
+    /// measured, which stands, so rounding doesn't flip the inset.
+    #[test]
+    fn a_solve_within_a_cell_of_the_measured_keeps_the_measured() {
+        let (doc, mut listed) = shapes();
+        let mut status = status();
+        status["tab"] = json!(SHAPES);
+        let insets = |listed: &[Terminal]| {
+            let report = layout(&doc, listed, Some(&status)).unwrap();
+            let areas = report["areas"].as_array().unwrap().clone();
+            let terminals = areas
+                .iter()
+                .flat_map(|a| a["terminals"].as_array().unwrap().clone());
+            terminals.map(|t| t["inset"].clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(insets(&listed), vec![json!(CHROME); 9]);
+        // a cell less in t4, as rounding may give: the columns solve to 4
+        listed[3].size = Some([37, 52]);
+        assert_eq!(insets(&listed), vec![json!(CHROME); 9]);
+    }
+
+    /// `t2` zoomed in the nested tab: its terminal takes the whole tab,
+    /// 82x52, which the doc doesn't show. The solve its cells give is far
+    /// below 0, taken for cells it can't use: the measured stands, and the
+    /// tab is reported unzoomed.
+    #[test]
+    fn a_zoomed_pane_is_reported_unzoomed_with_the_measured_chrome() {
+        let exchanges = recorded("zoomed-doc-and-list");
+        let reply = |method: &str| {
+            let e = exchanges.iter().rev().find(|e| e.method == method).unwrap();
+            e.replies[0]["result"].clone()
+        };
+        let doc = reply("doc.get")["value"].clone();
+        let listed: Vec<Terminal> = reply("terminal.list")["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                term(
+                    t["address"].as_str().unwrap(),
+                    [
+                        t["cols"].as_u64().unwrap() as u32,
+                        t["rows"].as_u64().unwrap() as u32,
+                    ],
+                )
+            })
+            .collect();
+        assert_eq!(listed[1].size, Some([82, 52]));
+        let status: Value = serde_json::from_str(&recorded_run("status-zoomed").stdout).unwrap();
+        let report = layout(&doc, &listed, Some(&status)).unwrap();
         assert_eq!(
-            report["areas"][0]["terminals"][0]["inset"],
-            json!([2, 2, 2, 2])
+            report["areas"][0],
+            json!({"id": NESTED, "terminals": [
+                t("t1", [0.0, 0.0, 0.5, 1.0], CHROME),
+                t("t2", [0.5, 0.0, 0.5, 0.5], CHROME),
+                t("t3", [0.5, 0.5, 0.5, 0.5], CHROME),
+            ]})
         );
-        assert_eq!(
-            report["areas"][1]["terminals"][0]["inset"],
-            json!([2, 2, 2, 2])
-        );
+        assert_eq!(report["focus"], "t2");
+    }
+
+    /// A terminal that isn't live, or has no cells along an axis, tells
+    /// nothing: at font size 28, the measured 2 rows stand.
+    #[test]
+    fn terminals_not_live_or_with_no_cells_are_left_out_of_the_solve() {
+        let (doc, listed) = shapes();
+        let mut status = status();
+        status["font_size"] = json!(28.0);
+        let rows = |listed: &[Terminal]| {
+            let report = layout(&doc, listed, Some(&status)).unwrap();
+            report["areas"][0]["terminals"][0]["inset"][1].clone()
+        };
+        assert_eq!(rows(&listed), json!(2 /* of 4, solved */));
+        let mut finished = listed.clone();
+        finished[0].live = false;
+        assert_eq!(rows(&finished), json!(1 /* of 2, measured */));
+        let mut no_rows = listed.clone();
+        no_rows[0].size = Some([39, 0]);
+        assert_eq!(rows(&no_rows), json!(1));
+    }
+
+    /// A font size outside 4 to 200 is taken for a wrong one: 14.
+    #[test]
+    fn a_font_size_out_of_range_is_taken_as_the_measured() {
+        let (doc, listed) = shapes();
+        for font in [0.5, 1000.0, -14.0] {
+            let mut status = status();
+            status["font_size"] = json!(font);
+            let report = layout(&doc, &listed, Some(&status)).unwrap();
+            assert_eq!(report["areas"][0]["terminals"][0]["inset"], json!(CHROME));
+        }
+    }
+
+    #[test]
+    fn solve_fits_the_chrome_by_least_squares_given_shares_that_differ() {
+        let near = |got: Option<f64>, want: f64| got.is_some_and(|k| (k - want).abs() < 1e-9);
+        assert!(near(solve(&[(1.0, 52.0), (0.5, 24.0)]), 4.0));
+        // three on one line
+        assert!(near(solve(&[(1.0, 52.0), (0.5, 24.0), (0.25, 10.0)]), 4.0));
+        // off the line: the fit
+        assert!(near(solve(&[(1.0, 52.0), (0.5, 25.0), (0.5, 23.0)]), 4.0));
+        // shares differing by just under a quarter tell nothing
+        assert_eq!(solve(&[(0.5, 24.0), (0.26, 10.0)]), None);
+        assert_eq!(solve(&[(1.0, 52.0)]), None);
+        assert_eq!(solve(&[]), None);
     }
 
     /// Where the shown tab's shares don't differ along an axis, a lone
@@ -441,12 +620,17 @@ mod tests {
         assert_eq!(report["areas"][1]["terminals"][0]["inset"], json!(CHROME));
     }
 
-    /// A mod's pane is a foreign pane, by its pane id; a node sized in
-    /// pixels is left out, with all it holds, its room unknown in shares;
-    /// so is a terminal two blocks show.
+    fn block(id: &str, content: Value, size: Value) -> Value {
+        json!({"type": "block", "id": id, "content": content, "size": size})
+    }
+
+    /// A mod's pane is a foreign pane, by its pane id. A terminal under a
+    /// node sized in pixels, its room unknown in shares, is in an area of
+    /// its own, as is one two blocks show, whose blocks are foreign panes;
+    /// so the daemon keeps no stale place for either. Focus is told over
+    /// every block.
     #[test]
-    fn mods_are_foreign_panes_and_px_nodes_and_doubled_terminals_are_left_out() {
-        let block = |id: &str, content: Value, size: Value| json!({"type": "block", "id": id, "content": content, "size": size});
+    fn mods_are_foreign_panes_and_terminals_it_cant_place_have_areas_of_their_own() {
         let doc = json!({"spaces": [{"tabs": [{"id": "tb1", "root": {
         "type": "row", "id": "tb1", "children": [
             block("pmod", json!({"mod": "files"}), json!({"weight": 1})),
@@ -454,6 +638,7 @@ mod tests {
             block("p2", json!({"terminal": "t2"}), json!({"px": 200})),
             {"type": "column", "id": "s1", "size": {"px": 100}, "children": [
                 block("p3", json!({"terminal": "t3"}), Value::Null),
+                block("pmod2", json!({"mod": "x"}), Value::Null),
             ]},
         ]}}]}, {"tabs": [{"id": "tb2", "root": {
         "type": "column", "id": "tb2", "children": [
@@ -464,13 +649,88 @@ mod tests {
         status["tab"] = json!("tb1");
         status["focused_pane"] = json!("pmod");
         let report = layout(&doc, &[], Some(&status)).unwrap();
+        let alone = |id: &str, t: &str| json!({"id": id, "terminals": [{"terminal": t, "rect": [0.0, 0.0, 1.0, 1.0]}]});
         assert_eq!(
             report,
-            json!({"areas": [{"id": "tb1", "terminals": [
-                t("pmod", [0.0, 0.0, 0.25, 1.0], CHROME),
-                t("t1", [0.25, 0.0, 0.75, 1.0], CHROME),
-            ]}], "focus": "pmod"})
+            json!({"areas": [
+                {"id": "tb1", "terminals": [
+                    t("pmod", [0.0, 0.0, 0.25, 1.0], CHROME),
+                    t("t1", [0.25, 0.0, 0.75, 1.0], CHROME),
+                ]},
+                {"id": "tb2", "terminals": [
+                    t("p4", [0.0, 0.0, 1.0, 0.5], CHROME),
+                    t("p5", [0.0, 0.5, 1.0, 0.5], CHROME),
+                ]},
+                alone("p2", "t2"),
+                alone("p3", "t3"),
+                alone("p4", "t4"),
+            ], "focus": "pmod"})
         );
+        // focus on a block it couldn't place is its terminal all the same
+        for (pane, terminal) in [("p3", "t3"), ("p5", "t4"), ("pmod2", "pmod2")] {
+            status["focused_pane"] = json!(pane);
+            let report = layout(&doc, &[], Some(&status)).unwrap();
+            assert_eq!(report["focus"], terminal, "{pane}");
+        }
+    }
+
+    /// `[t1 | (t2 / t3 / t5@px)]`: the pixels `t5` takes come off the
+    /// column before its weights share it, so `t2` and `t3` are smaller
+    /// than their rects: their cells are kept out of the solve, which they
+    /// would make 8 rows.
+    #[test]
+    fn panes_beside_a_px_node_are_approximate_and_tell_no_chrome() {
+        let doc = json!({"spaces": [{"tabs": [{"id": "tb1", "root": {
+        "type": "row", "id": "tb1", "children": [
+            block("p1", json!({"terminal": "t1"}), Value::Null),
+            {"type": "column", "id": "s1", "children": [
+                block("p2", json!({"terminal": "t2"}), Value::Null),
+                block("p3", json!({"terminal": "t3"}), Value::Null),
+                block("p5", json!({"terminal": "t5"}), json!({"px": 300})),
+            ]},
+        ]}}]}]});
+        let listed = [
+            term("t1", [39, 52]),
+            term("t2", [39, 22]),
+            term("t3", [39, 22]),
+            term("t5", [39, 4]),
+        ];
+        let mut status = status();
+        status["tab"] = json!("tb1");
+        let report = layout(&doc, &listed, Some(&status)).unwrap();
+        assert_eq!(
+            report["areas"][0],
+            json!({"id": "tb1", "terminals": [
+                t("t1", [0.0, 0.0, 0.5, 1.0], CHROME),
+                t("t2", [0.5, 0.0, 0.5, 0.5], CHROME),
+                t("t3", [0.5, 0.5, 0.5, 0.5], CHROME),
+            ]})
+        );
+        assert_eq!(report["areas"][1]["id"], "p5");
+    }
+
+    /// A tab with a node of a type it doesn't know, or a tree it can't
+    /// read, is left out; the others are reported.
+    #[test]
+    fn a_tab_it_cant_read_is_left_out() {
+        let tab = |id: &str, child: Value| json!({"id": id, "root": {"type": "row", "id": id, "children": [child]}});
+        let ok = tab("tb0", block("p0", json!({"terminal": "t0"}), Value::Null));
+        for bad in [
+            json!({"type": "stack", "id": "s9", "children": []}),
+            block("p1", json!({"terminal": "t1"}), json!({"weight": -1})),
+            json!({"type": "block", "content": {"terminal": "t1"}}),
+            json!({"type": "row", "id": "s9"}),
+        ] {
+            let doc = json!({"spaces": [{"tabs": [ok.clone(), tab("tb1", bad.clone())]}]});
+            let report = layout(&doc, &[], None).unwrap();
+            let ids: Vec<&Value> = report["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| &a["id"])
+                .collect();
+            assert_eq!(ids, [&json!("tb0")], "{bad}");
+        }
     }
 
     /// Well over [`LAYOUT_TIME`], as the fakes run shell scripts.
@@ -519,17 +779,10 @@ mod tests {
     }
 
     #[test]
-    fn a_doc_it_cant_read_fails_the_report() {
-        let tab = |root: Value| json!({"spaces": [{"tabs": [{"id": "tb1", "root": root}]}]});
+    fn a_doc_without_spaces_or_tabs_or_a_tab_without_an_id_fails_the_report() {
         for bad in [
             json!({"spaces": 3}),
-            tab(json!({"type": "row", "children": [
-                {"type": "block", "id": "p1", "content": {"terminal": "t1"},
-                 "size": {"weight": -1}},
-            ]})),
-            tab(json!({"type": "row", "children": [
-                {"type": "block", "content": {"terminal": "t1"}},
-            ]})),
+            json!({"spaces": [{"tabs": {}}]}),
             json!({"spaces": [{"tabs": [{"root": {"type": "row", "children": []}}]}]}),
         ] {
             assert!(layout(&bad, &[], None).is_err(), "{bad}");
