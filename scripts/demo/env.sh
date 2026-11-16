@@ -12,3 +12,8 @@ demo_zellij_session=neopane-demo
 # not yours, and its session state kept out of your ~/.config/herdr
 demo_herdr_socket=/tmp/neopane-demo-h.sock
 demo_herdr_config="$demo_tmpdir/herdr-config"
+# The Herdr app's take: its hc core, by its session, and a box holding the
+# core's state, config, runtime directory and home, and the app's home,
+# none of them yours. Under /tmp: the core's socket path must stay short
+demo_herdr_app_box=/tmp/neopane-demo-ha
+demo_herdr_app_session=neopane-demo

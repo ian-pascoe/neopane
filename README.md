@@ -500,6 +500,9 @@ pane keeps the size zellij gives it. It needs zellij 0.46.0 or newer.
 
 ### Herdr app
 
+<!-- TODO(SPI-1221): embed the herdr-app-core README cut here once it is
+uploaded, as the other sections do. -->
+
 The Herdr desktop app has a pane provider of its own, `herdr-app`, apart
 from herdr's
 ([ADR 0019](docs/adr/0019-the-herdr-apps-pane-provider-is-a-built-in-of-its-own-named-herdr-app.md)):
@@ -1102,7 +1105,12 @@ recorded the same way, with [VHS](https://github.com/charmbracelet/vhs);
 `rex-core` plays its tape in Rex.app through the `rex` CLI, and records its
 window on an [AeroSpace](https://github.com/nikitabobko/AeroSpace)
 workspace of its own, so it needs macOS and AeroSpace, and quits Rex.app
-while it runs.
+while it runs. `herdr-app-core` plays its tape in a private Herdr app
+window, its own `HERDR_APP_HOME`, on a private hc core, its own
+`HC_SESSION`, typing through the core and acting through `herdr-app`, and
+records that window hidden on an AeroSpace workspace no monitor shows: it
+needs macOS, AeroSpace, Herdr.app and `hc`, and leaves your own Herdr app
+window and hc core alone.
 
 ## Renamed from neorex
 

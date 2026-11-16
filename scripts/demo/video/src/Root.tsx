@@ -88,6 +88,27 @@ export const RemotionRoot: React.FC = () => {
           timeline: null,
         }}
       />
+      <Composition
+        id="herdr-app-core"
+        component={Demo}
+        width={1920}
+        height={1080}
+        fps={30}
+        durationInFrames={1200}
+        calculateMetadata={calculateDemoMetadata}
+        defaultProps={{
+          name: "herdr-app-core",
+          windowTitle: "Herdr — neopane",
+          headline: "One Neovim.",
+          subline: "Every window a real Herdr app pane.",
+          alsoIn: "also tmux, zellij, herdr and Rex",
+          music: null,
+          musicVolume: 0.8,
+          musicDrop: 12.05,
+          bpm: 160,
+          timeline: null,
+        }}
+      />
     </Folder>
   );
 };
