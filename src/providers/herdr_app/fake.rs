@@ -234,7 +234,8 @@ pub(super) struct Run {
     pub exit: i32,
     pub stdout: String,
     pub stderr: String,
-    /// Seconds it waits before answering, for a test of its deadline.
+    /// Seconds it sleeps instead of answering, for a test of its
+    /// deadline.
     pub sleep: Option<f64>,
 }
 
@@ -283,17 +284,17 @@ impl FakeApp {
             let (out, err) = (dir.join(format!("{i}.out")), dir.join(format!("{i}.err")));
             std::fs::write(&out, &run.stdout).unwrap();
             std::fs::write(&err, &run.stderr).unwrap();
-            let sleep = run
-                .sleep
-                .map(|s| format!("/bin/sleep {s}; "))
-                .unwrap_or_default();
-            script.push_str(&format!(
-                "{}) {sleep}/bin/cat {}; /bin/cat {} >&2; exit {} ;;\n",
-                quoted(&run.args.join(" ")),
-                quoted(&out.to_string_lossy()),
-                quoted(&err.to_string_lossy()),
-                run.exit
-            ));
+            let answer = match run.sleep {
+                // as its own process, so killing it ends the sleep
+                Some(s) => format!("exec /bin/sleep {s}"),
+                None => format!(
+                    "/bin/cat {}; /bin/cat {} >&2; exit {}",
+                    quoted(&out.to_string_lossy()),
+                    quoted(&err.to_string_lossy()),
+                    run.exit
+                ),
+            };
+            script.push_str(&format!("{}) {answer} ;;\n", quoted(&run.args.join(" "))));
         }
         script.push_str("esac\necho \"fake herdr-app: no run for: $*\" >&2\nexit 64\n");
         let program = dir.join("herdr-app");

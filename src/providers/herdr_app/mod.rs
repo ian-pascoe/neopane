@@ -82,12 +82,17 @@ const CLOSE_TIME: Duration = Duration::from_millis(1500);
 /// `close`: `terminal.kill` of `TERMINAL`; done for one already finished
 /// or not found.
 fn close(given: &Given) -> Result<(), Failure> {
+    close_within(given, CLOSE_TIME)
+}
+
+/// `close`, its requests, and a version for a message, having `time`.
+fn close_within(given: &Given, time: Duration) -> Result<(), Failure> {
     let terminal = given.var("terminal").unwrap_or_default();
     if terminal.is_empty() {
         return Err(Failure::Failed("TERMINAL isn't set".into()));
     }
     let terminal = String::from_utf8_lossy(&terminal).into_owned();
-    let mut core = Core::of(given, CLOSE_TIME)?;
+    let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Close), || Window::of(given))?;
     match core.kill(&terminal) {
         Ok(_) => Ok(()),
@@ -139,12 +144,16 @@ mod tests {
     use super::fake::{FakeApp, FakeCore, given, recorded_one, recorded_run};
     use super::*;
 
+    /// The time a test's close has: well over [`CLOSE_TIME`], as the fakes
+    /// run shell scripts on a loaded machine.
+    const TIME: Duration = Duration::from_secs(5);
+
     #[test]
     fn close_kills_the_terminal() {
         let core = FakeCore::replaying(&["terminal.kill"]);
         let app = FakeApp::new(&[]);
         let given = given(&core, &app, &[("TERMINAL", "t10")]);
-        assert_eq!(close(&given), Ok(()));
+        assert_eq!(close_within(&given, TIME), Ok(()));
         assert_eq!(core.methods(), ["hello", "terminal.kill"]);
         assert_eq!(core.asked()[1]["params"], json!({ "terminal": "t10" }));
         // the window isn't asked
@@ -157,12 +166,12 @@ mod tests {
         let core = FakeCore::replaying(&["terminal.kill"]);
         let app = FakeApp::new(&[]);
         let given = given(&core, &app, &[("TERMINAL", "t10")]);
-        assert_eq!(close(&given), Ok(()));
-        assert_eq!(close(&given), Ok(()));
+        assert_eq!(close_within(&given, TIME), Ok(()));
+        assert_eq!(close_within(&given, TIME), Ok(()));
 
         let core = FakeCore::replaying(&["terminal.kill-not-found"]);
         let given = super::fake::given(&core, &app, &[("TERMINAL", "t99")]);
-        assert_eq!(close(&given), Ok(()));
+        assert_eq!(close_within(&given, TIME), Ok(()));
     }
 
     #[test]
@@ -174,7 +183,7 @@ mod tests {
         let app = FakeApp::new(&[]);
         let given = given(&core, &app, &[("TERMINAL", "t99")]);
         assert_eq!(
-            close(&given),
+            close_within(&given, TIME),
             Err(Failure::Failed("hc core: it broke".into()))
         );
 
@@ -183,7 +192,7 @@ mod tests {
             n if n.ends_with("_TERMINAL") => Some(b"t1".to_vec()),
             _ => None,
         });
-        let Err(Failure::Failed(why)) = close(&gone) else {
+        let Err(Failure::Failed(why)) = close_within(&gone, TIME) else {
             panic!("closed with no core");
         };
         assert!(why.starts_with("can't reach the hc core at "), "{why}");
@@ -198,7 +207,7 @@ mod tests {
         let app = FakeApp::new(&[recorded_run("version")]);
         let given = given(&core, &app, &[("TERMINAL", "t10")]);
         assert_eq!(
-            close(&given),
+            close_within(&given, TIME),
             Err(Failure::Unsupported(
                 "the hc core has no terminal.kill (hc core 0.1.21, herdr-app 0.1.16)".into()
             ))

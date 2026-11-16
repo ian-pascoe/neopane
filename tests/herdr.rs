@@ -3,7 +3,7 @@
 //! each Neovim window a herdr pane of its own. A herdr client in a pty of
 //! fixed size gives the server its size, as a user's would.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use neopane::name::NAME;
@@ -216,8 +216,7 @@ fn open_beside_gives_the_new_pane_its_ratio_on_every_side() {
         ("up", 0, "y", "height"),
         ("down", 1, "y", "height"),
     ] {
-        let out = Command::new(exe())
-            .args(["provider", "builtin", "herdr", "open_beside"])
+        let out = provider_builtin(&["herdr", "open_beside"])
             .env(format!("{up}_PROTOCOL"), "1")
             .env(format!("{up}_CAPABILITY"), "open_beside")
             .env(format!("{up}_ORIGIN"), &origin)
@@ -319,8 +318,7 @@ fn open_beside_a_zoomed_pane_exits_1_and_leaves_no_tab_behind() {
     let before = snapshot();
 
     let up = NAME.to_ascii_uppercase();
-    let out = Command::new(exe())
-        .args(["provider", "builtin", "herdr", "open_beside"])
+    let out = provider_builtin(&["herdr", "open_beside"])
         .env(format!("{up}_PROTOCOL"), "1")
         .env(format!("{up}_CAPABILITY"), "open_beside")
         .env(format!("{up}_ORIGIN"), &origin)
@@ -671,13 +669,7 @@ fn events_comes_back_after_a_live_handoff() {
 /// protocol's.
 fn act(herdr: &HerdrServer, cap: &str, vars: &[(&str, &str)]) -> std::process::Output {
     let up = NAME.to_ascii_uppercase();
-    let mut cmd = Command::new(exe());
-    cmd.args(["provider", "builtin", "herdr", cap]);
-    for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with(&format!("{up}_")) {
-            cmd.env_remove(k);
-        }
-    }
+    let mut cmd = provider_builtin(&["herdr", cap]);
     cmd.env(format!("{up}_PROTOCOL"), "1")
         .env(format!("{up}_CAPABILITY"), cap)
         .env("HERDR_SOCKET_PATH", &herdr.socket);
@@ -866,8 +858,7 @@ fn zooming_and_unzooming_with_herdrs_keys_has_the_layout_read_again() {
     let tab = tab_of(&herdr, &p1)["tab_id"].as_str().unwrap().to_string();
 
     let up = NAME.to_ascii_uppercase();
-    let mut events = Command::new(exe())
-        .args(["provider", "builtin", "herdr", "events"])
+    let mut events = provider_builtin(&["herdr", "events"])
         .env(format!("{up}_PROTOCOL"), "1")
         .env(format!("{up}_CAPABILITY"), "events")
         .env("HERDR_SOCKET_PATH", &herdr.socket)

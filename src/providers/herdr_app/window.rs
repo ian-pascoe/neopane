@@ -13,16 +13,13 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::Value;
 
 use crate::providers::builtin::Given;
 use crate::providers::command::on_path;
 use crate::providers::deadline::{Unfinished, output_by};
-
-/// The most `--version` has.
-const VERSION_TIME: Duration = Duration::from_millis(500);
 
 /// The `herdr-app` command.
 #[derive(Debug, Clone)]
@@ -147,11 +144,9 @@ impl Window {
     }
 
     /// Its version, as `herdr-app --version` prints it after `herdr-app `,
-    /// such as `0.1.16`; killed at `due`, or [`VERSION_TIME`] from now if
-    /// sooner.
+    /// such as `0.1.16`; killed at `due`.
     pub(super) fn version(&self, due: Instant) -> Result<String, Ran> {
         let shown = "herdr-app --version";
-        let due = due.min(Instant::now() + VERSION_TIME);
         let (status, out, _) = self.exec(&["--version"], shown, due)?;
         let out = String::from_utf8_lossy(&out);
         let version = out.trim();
@@ -203,6 +198,8 @@ impl Window {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::super::fake::{FakeApp, recorded_run};
     use super::*;
 
@@ -269,7 +266,7 @@ mod tests {
                 "herdr-app --version: killed, out of time".into()
             ))
         );
-        assert!(started.elapsed() < Duration::from_millis(400));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

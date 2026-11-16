@@ -5,7 +5,7 @@
 //! generation from `hello`; and what the table's capabilities need that
 //! the core lacks, which exits 69. Both have the choice's 3 s, together.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::core::Core;
 use super::methods;
@@ -17,13 +17,28 @@ use crate::providers::command::commands_env;
 /// What the Herdr app is, for an attach with `attach`'s environment, whose
 /// table runs the built-in for capabilities `uses`.
 pub(crate) fn probe(attach: &Attach, uses: &[Capability]) -> HerdrAppReport {
-    let due = Instant::now() + TIME;
+    probe_within(attach, uses, TIME, VERSION_TIME)
+}
+
+/// The most of the probe's time `herdr-app --version` has: a hung one
+/// leaves the window and core the rest.
+const VERSION_TIME: Duration = Duration::from_millis(500);
+
+/// `probe`, all of it having `time`, and `herdr-app --version` at most
+/// `version_time` of it.
+fn probe_within(
+    attach: &Attach,
+    uses: &[Capability],
+    time: Duration,
+    version_time: Duration,
+) -> HerdrAppReport {
+    let due = Instant::now() + time;
     let shown = |v: &[u8]| String::from_utf8_lossy(v).into_owned();
     let window = Window::within(commands_env(&attach.env));
     let (path, version, answers) = match &window {
         Ok(w) => (
             Ok(w.path().display().to_string()),
-            w.version(due).ok(),
+            w.version(due.min(Instant::now() + version_time)).ok(),
             w.status(due).map(|_| ()).map_err(String::from),
         ),
         Err(why) => (Err(why.clone()), None, Err(why.clone())),
@@ -111,6 +126,9 @@ mod tests {
     use super::super::fake::{FakeApp, FakeCore, recorded_one, recorded_run};
     use super::*;
 
+    /// Well over the real times, as the fakes run shell scripts.
+    const LONG: Duration = Duration::from_secs(5);
+
     /// An attach whose `PATH` finds `app` and whose `HC_TERMINAL_SOCKET`
     /// names `core`.
     fn attach(core: &FakeCore, app: &FakeApp) -> Attach {
@@ -131,7 +149,12 @@ mod tests {
     fn both_versions_the_generation_and_what_the_core_lacks_are_found() {
         let app = FakeApp::new(&[recorded_run("status"), recorded_run("version")]);
         let core = FakeCore::replaying(&["hello"]);
-        let r = probe(&attach(&core, &app), &[Capability::Find, Capability::Close]);
+        let r = probe_within(
+            &attach(&core, &app),
+            &[Capability::Find, Capability::Close],
+            LONG,
+            LONG,
+        );
         assert_eq!(r.path, Ok(app.program().display().to_string()));
         assert_eq!(r.version.as_deref(), Some("0.1.16"));
         assert_eq!(r.window, Ok(()));
@@ -144,7 +167,12 @@ mod tests {
         let methods = hello.result_mut()["methods"].as_array_mut().unwrap();
         methods.retain(|m| m != &json!("terminal.kill"));
         let core = FakeCore::serve(vec![hello]);
-        let r = probe(&attach(&core, &app), &[Capability::Find, Capability::Close]);
+        let r = probe_within(
+            &attach(&core, &app),
+            &[Capability::Find, Capability::Close],
+            LONG,
+            LONG,
+        );
         assert_eq!(
             r.missing,
             [Missing {

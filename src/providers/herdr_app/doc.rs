@@ -55,7 +55,7 @@ mod tests {
             panes_of(&nested, "t1"),
             ["pf7e3d563947903ed7a8c93ee0ac58181"]
         );
-        assert_eq!(panes_of(&nested, "t9"), Vec::<String>::new());
-        assert_eq!(panes_of(&Value::Null, "t1"), Vec::<String>::new());
+        assert!(panes_of(&nested, "t9").is_empty());
+        assert!(panes_of(&Value::Null, "t1").is_empty());
     }
 }

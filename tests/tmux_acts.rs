@@ -1,7 +1,7 @@
 //! The built-in tmux's acts (ADR 0016), each run as `provider builtin tmux
 //! CAPABILITY` against a private tmux server: what it does to the server.
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use neopane::name::NAME;
 
@@ -12,17 +12,10 @@ use support::*;
 /// left out) as its only `<NAME>_*` variables besides the protocol's.
 fn act(tmux: &TmuxServer, cap: &str, vars: &[(&str, &str)]) -> Output {
     let upper = NAME.to_ascii_uppercase();
-    let mut cmd = Command::new(exe());
-    cmd.args(["provider", "builtin", "tmux", cap]);
-    for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with(&format!("{upper}_")) {
-            cmd.env_remove(k);
-        }
-    }
+    let mut cmd = provider_builtin(&["tmux", cap]);
     cmd.env(format!("{upper}_PROTOCOL"), "1")
         .env(format!("{upper}_CAPABILITY"), cap)
-        .env("TMUX", tmux.tmux_var())
-        .env_remove("TMUX_PANE");
+        .env("TMUX", tmux.tmux_var());
     for (k, v) in vars {
         cmd.env(format!("{upper}_{k}"), v);
     }
