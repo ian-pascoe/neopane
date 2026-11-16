@@ -1,8 +1,10 @@
-// The social cut of a demo tape: its VHS recording in a window on an animated
-// background, zooming and outlining where the tape's marks say, with big
-// captions, key caps, a title, an end card and music. The marks and their
-// times come from public/<name>.json, which scripts/demo/tape.py writes, so
-// they are data, not editable in Studio; the text and look are props.
+// The social cut of a demo tape: its VHS recording in a neon window on an
+// animated background, cut to the music: the title builds on the track's
+// rising hits and the window slams in on its drop, the camera punches onto
+// where the tape's marks say, with shakes, flashes, glitching captions, key
+// caps and an end card. The marks and their times come from
+// public/<name>.json, which scripts/demo/tape.py writes, so they are data,
+// not editable in Studio; the text, look and music are props.
 import { Audio, Video } from "@remotion/media";
 import { loadFont as loadGeist } from "@remotion/google-fonts/Geist";
 import { loadFont as loadGeistMono } from "@remotion/google-fonts/GeistMono";
@@ -20,7 +22,7 @@ import {
 } from "remotion";
 
 const { fontFamily: SANS } = loadGeist("normal", {
-  weights: ["500", "700", "800"],
+  weights: ["500", "700", "800", "900"],
   subsets: ["latin"],
 });
 const { fontFamily: MONO } = loadGeistMono("normal", {
@@ -54,11 +56,15 @@ export type DemoProps = {
   alsoIn: string;
   music: string | null;
   musicVolume: number;
+  // Seconds into the track of its drop, which the window slams in on, and
+  // its tempo, which the background and window pulse to
+  musicDrop: number;
+  bpm: number;
   timeline: Timeline | null;
 };
 
-const TITLE = 2.2; // seconds before the recording starts
-const END = 3.4; // seconds of end card after it
+const TITLE = 2.2; // seconds of title, ending on the drop
+const END = 3.6; // seconds of end card after the recording
 const REC_W = 1920;
 const REC_H = 996;
 const WIN_W = 1600;
@@ -71,7 +77,14 @@ export const calculateDemoMetadata: CalculateMetadataFunction<
   DemoProps
 > = async ({ props }) => {
   const res = await fetch(staticFile(`${props.name}.json`));
-  const timeline = (await res.json()) as Timeline;
+  const recorded = (await res.json()) as Timeline;
+  // The end card lands on a downbeat: the recording's part is held on its
+  // last frame up to the next bar
+  const bar = (4 * 60) / props.bpm;
+  const timeline = {
+    ...recorded,
+    duration: Math.ceil(recorded.duration / bar - 0.1) * bar,
+  };
   const fps = 30;
   return {
     fps,
@@ -79,6 +92,24 @@ export const calculateDemoMetadata: CalculateMetadataFunction<
     props: { ...props, timeline },
   };
 };
+
+// How hard the beat hits at a frame: 1 on each beat, decaying before the
+// next; `every` beats apart for bars
+function kick(frame: number, fps: number, bpm: number, every = 1): number {
+  const len = (60 / bpm) * every;
+  const t = frame / fps - TITLE; // the drop is a downbeat
+  const phase = (((t / len) % 1) + 1) % 1;
+  return Math.exp(-phase * 7);
+}
+
+// A decaying shake, `since` seconds after it started
+function shake(since: number, amp: number): [number, number] {
+  if (since < 0 || since > 0.4) return [0, 0];
+  const a = amp * (1 - since / 0.4);
+  return [a * Math.sin(since * 95), a * Math.cos(since * 77)];
+}
+
+const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
 export const Demo: React.FC<DemoProps> = (props) => {
   const { fps } = useVideoConfig();
@@ -88,18 +119,22 @@ export const Demo: React.FC<DemoProps> = (props) => {
   const contentFrames = Math.round(timeline.duration * fps);
   return (
     <AbsoluteFill style={{ backgroundColor: BG, fontFamily: SANS }}>
-      <Background />
-      <Sequence from={start - Math.round(0.5 * fps)} name="Window">
+      <Background bpm={props.bpm} />
+      <Sequence from={start} name="Window">
         <Stage
           timeline={timeline}
           name={props.name}
           windowTitle={props.windowTitle}
-          lead={Math.round(0.5 * fps)}
           contentFrames={contentFrames}
+          bpm={props.bpm}
         />
       </Sequence>
-      <Sequence durationInFrames={start + Math.round(0.3 * fps)} name="Title">
-        <TitleCard headline={props.headline} subline={props.subline} />
+      <Sequence durationInFrames={start} name="Title">
+        <TitleCard
+          headline={props.headline}
+          subline={props.subline}
+          bpm={props.bpm}
+        />
       </Sequence>
       <Sequence from={start} durationInFrames={contentFrames} name="Captions">
         <Captions captions={timeline.captions} />
@@ -108,37 +143,81 @@ export const Demo: React.FC<DemoProps> = (props) => {
       <Sequence from={start + contentFrames} name="End card">
         <EndCard alsoIn={props.alsoIn} />
       </Sequence>
+      <Sequence from={start} durationInFrames={10} name="Drop flash">
+        <Flash strength={0.75} />
+      </Sequence>
+      <Sequence
+        from={start + contentFrames}
+        durationInFrames={10}
+        name="End flash"
+      >
+        <Flash strength={0.45} />
+      </Sequence>
+      <Scanlines />
       {props.music ? (
-        <MusicTrack src={props.music} volume={props.musicVolume} />
+        <MusicTrack
+          src={props.music}
+          volume={props.musicVolume}
+          from={props.musicDrop - TITLE}
+        />
       ) : null}
     </AbsoluteFill>
   );
 };
 
-const MusicTrack: React.FC<{ src: string; volume: number }> = ({
+const MusicTrack: React.FC<{ src: string; volume: number; from: number }> = ({
   src,
   volume,
+  from,
 }) => {
   const { fps, durationInFrames } = useVideoConfig();
   return (
     <Audio
       src={staticFile(src)}
+      trimBefore={Math.round(from * fps)}
       volume={(f) =>
         volume *
         interpolate(
           f,
-          [0, fps, durationInFrames - 2 * fps, durationInFrames],
+          [0, 0.3 * fps, durationInFrames - 2.5 * fps, durationInFrames],
           [0, 1, 1, 0],
-          { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+          clamp,
         )
       }
     />
   );
 };
 
-// Three slow, blurred blobs of the theme's colours
-const Background: React.FC = () => {
+const Flash: React.FC<{ strength: number }> = ({ strength }) => {
   const frame = useCurrentFrame();
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: "white",
+        opacity: interpolate(frame, [0, 9], [strength, 0], clamp),
+        mixBlendMode: "screen",
+      }}
+    />
+  );
+};
+
+const Scanlines: React.FC = () => (
+  <AbsoluteFill
+    style={{
+      pointerEvents: "none",
+      backgroundImage:
+        "repeating-linear-gradient(0deg, rgba(0,0,0,0.10) 0px, rgba(0,0,0,0.10) 1px, transparent 1px, transparent 4px)",
+      boxShadow: "inset 0 0 220px rgba(0,0,0,0.65)",
+    }}
+  />
+);
+
+// Three blurred blobs of the theme's colours, drifting, brightening on the
+// beat, over a neon grid
+const Background: React.FC<{ bpm: number }> = ({ bpm }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const k = kick(frame, fps, bpm);
   const blob = (color: string, x: number, y: number, phase: number) => (
     <div
       style={{
@@ -147,7 +226,7 @@ const Background: React.FC = () => {
         height: 1100,
         borderRadius: "50%",
         background: `radial-gradient(circle, ${color} 0%, transparent 65%)`,
-        opacity: 0.32,
+        opacity: 0.26 + 0.16 * k,
         left: x + Math.sin(frame / 90 + phase) * 160,
         top: y + Math.cos(frame / 110 + phase) * 120,
         filter: "blur(40px)",
@@ -156,6 +235,14 @@ const Background: React.FC = () => {
   );
   return (
     <AbsoluteFill style={{ overflow: "hidden" }}>
+      <AbsoluteFill
+        style={{
+          backgroundImage: `linear-gradient(${PINK}22 1px, transparent 1px), linear-gradient(90deg, ${PINK}22 1px, transparent 1px)`,
+          backgroundSize: "80px 80px",
+          backgroundPosition: `0px ${(frame * 2) % 80}px`,
+          opacity: 0.5 + 0.5 * k,
+        }}
+      />
       {blob(PINK, -300, -400, 0)}
       {blob(CYAN, 1200, 100, 2)}
       {blob(ORANGE, 300, 500, 4)}
@@ -163,66 +250,84 @@ const Background: React.FC = () => {
   );
 };
 
-const TitleCard: React.FC<{ headline: string; subline: string }> = ({
-  headline,
-  subline,
-}) => {
+// Text split into red and cyan copies that snap together over `frames`
+function glitch(since: number, frames: number, amp: number) {
+  const d = since < 0 ? amp : amp * Math.max(0, 1 - since / frames);
+  const jitter = since < frames ? Math.sin(since * 13) * d * 0.6 : 0;
+  return {
+    textShadow: d
+      ? `${d}px 0 ${PINK}, ${-d}px 0 ${CYAN}`
+      : "0 0 30px rgba(0,0,0,0.4)",
+    translate: `${jitter}px 0px`,
+  };
+}
+
+// The title's lines land on the build's hits: the label four beats before
+// the drop, the headline two, the subline one
+const TitleCard: React.FC<{
+  headline: string;
+  subline: string;
+  bpm: number;
+}> = ({ headline, subline, bpm }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
-  const pop = (delay: number) =>
-    spring({ frame: frame - delay, fps, config: { damping: 14, mass: 0.6 } });
-  const out = interpolate(
-    frame,
-    [durationInFrames - 0.6 * fps, durationInFrames],
-    [0, 1],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-  );
+  const { fps } = useVideoConfig();
+  const beat = (60 / bpm) * fps;
+  const at = (beats: number) => TITLE * fps - beats * beat;
+  const slam = (from: number) =>
+    spring({
+      frame: frame - from,
+      fps,
+      config: { damping: 13, stiffness: 320, mass: 0.6 },
+    });
+  const label = at(4);
+  const head = at(2);
+  const sub = at(1);
   return (
     <AbsoluteFill
       style={{
         justifyContent: "center",
         alignItems: "center",
         flexDirection: "column",
-        gap: 28,
-        opacity: 1 - out,
-        translate: `0px ${-80 * out}px`,
-        backgroundColor: `rgba(28,30,38,${0.85 * (1 - out)})`,
+        gap: 24,
+        backgroundColor: "rgba(16,17,22,0.55)",
       }}
     >
       <div
         style={{
           fontFamily: MONO,
-          fontSize: 40,
+          fontSize: 42,
           color: ORANGE,
-          letterSpacing: 2,
-          opacity: pop(0),
+          letterSpacing: 8,
+          opacity: frame >= label ? 1 : 0,
+          ...glitch(frame - label, 6, 10),
         }}
       >
-        neopane
+        NEOPANE
       </div>
       <div
         style={{
-          fontSize: 132,
-          fontWeight: 800,
+          fontSize: 150,
+          fontWeight: 900,
           color: "white",
-          letterSpacing: -3,
-          scale: String(0.8 + 0.2 * pop(4)),
-          opacity: pop(4),
+          letterSpacing: -4,
+          opacity: frame >= head ? 1 : 0,
+          scale: String(1.7 - 0.7 * slam(head)),
+          ...glitch(frame - head, 7, 14),
         }}
       >
         {headline}
       </div>
       <div
         style={{
-          fontSize: 76,
-          fontWeight: 700,
+          fontSize: 80,
+          fontWeight: 800,
           letterSpacing: -1.5,
           backgroundImage: `linear-gradient(90deg, ${PINK}, ${ORANGE})`,
           backgroundClip: "text",
           WebkitBackgroundClip: "text",
           color: "transparent",
-          translate: `0px ${40 * (1 - pop(14))}px`,
-          opacity: pop(14),
+          opacity: frame >= sub ? 1 : 0,
+          scale: String(1.4 - 0.4 * slam(sub)),
         }}
       >
         {subline}
@@ -231,25 +336,43 @@ const TitleCard: React.FC<{ headline: string; subline: string }> = ({
   );
 };
 
-// The window with the recording, its camera and its highlights. Its frame
-// 0 is `lead` frames before the recording starts, for its entrance.
+// The window with the recording, its camera and its highlights. It slams
+// in on the drop, shakes as panes appear and the camera moves, and its
+// neon edge pulses with the beat.
 const Stage: React.FC<{
   timeline: Timeline;
   name: string;
   windowTitle: string;
-  lead: number;
   contentFrames: number;
-}> = ({ timeline, name, windowTitle, lead, contentFrames }) => {
+  bpm: number;
+}> = ({ timeline, name, windowTitle, contentFrames, bpm }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const enter = spring({ frame, fps, config: { damping: 18, mass: 0.8 } });
-  const exit = spring({
-    frame: frame - lead - contentFrames,
+  const enter = spring({
+    frame,
     fps,
-    config: { damping: 20 },
+    config: { damping: 14, stiffness: 260, mass: 0.7 },
   });
-  const t = (frame - lead) / fps;
+  const exit = spring({
+    frame: frame - contentFrames,
+    fps,
+    config: { damping: 16, stiffness: 200 },
+  });
+  const t = frame / fps;
   const cam = camera(timeline.focus, t, fps);
+  const k = kick(frame + TITLE * fps, fps, bpm);
+  const hits = [
+    0,
+    ...timeline.highlights.map((h) => h.at + 0.35),
+    ...timeline.focus.map((f) => f.at),
+  ];
+  let sx = 0;
+  let sy = 0;
+  for (const h of hits) {
+    const [x, y] = shake(t - h, h === 0 ? 14 : 6);
+    sx += x;
+    sy += y;
+  }
   const last = timeline.segments[timeline.segments.length - 1];
   return (
     <AbsoluteFill>
@@ -263,15 +386,11 @@ const Stage: React.FC<{
           borderRadius: 16,
           overflow: "hidden",
           backgroundColor: BG,
-          border: "1px solid rgba(255,255,255,0.12)",
-          boxShadow:
-            "0 50px 140px rgba(0,0,0,0.65), 0 0 0 1px rgba(0,0,0,0.4)",
-          translate: `0px ${interpolate(enter, [0, 1], [700, 0]) - 330 * exit}px`,
-          scale: String(
-            interpolate(enter, [0, 1], [0.85, 1]) -
-              0.42 * exit,
-          ),
-          opacity: 1 - 0.25 * exit,
+          border: `1.5px solid rgba(233,86,120,${0.35 + 0.45 * k})`,
+          boxShadow: `0 50px 140px rgba(0,0,0,0.7), 0 0 ${30 + 50 * k}px rgba(233,86,120,${0.25 + 0.35 * k})`,
+          translate: `${sx}px ${sy - 330 * exit}px`,
+          scale: String(1.18 - 0.18 * enter - 0.42 * exit),
+          opacity: Math.min(1, frame / 3) * (1 - 0.25 * exit),
         }}
       >
         <TitleBar title={windowTitle} />
@@ -296,7 +415,7 @@ const Stage: React.FC<{
             {timeline.segments.map((s, i) => (
               <Sequence
                 key={i}
-                from={lead + Math.round(s.at * fps)}
+                from={Math.round(s.at * fps)}
                 durationInFrames={Math.max(
                   1,
                   Math.round(((s.to - s.from) / s.rate) * fps),
@@ -313,7 +432,9 @@ const Stage: React.FC<{
               </Sequence>
             ))}
             <Sequence
-              from={lead + contentFrames}
+              from={Math.round(
+                (last.at + (last.to - last.from) / last.rate) * fps,
+              )}
               name="Last frame, held"
             >
               <Freeze frame={0}>
@@ -325,19 +446,10 @@ const Stage: React.FC<{
                 />
               </Freeze>
             </Sequence>
-            <Sequence durationInFrames={lead} name="First frame, held">
-              <Freeze frame={0}>
-                <Video
-                  src={staticFile(`${name}.mp4`)}
-                  muted
-                  style={{ width: WIN_W, height: WIN_H }}
-                />
-              </Freeze>
-            </Sequence>
             {timeline.highlights.map((h, i) => (
               <Sequence
                 key={i}
-                from={lead + Math.round((h.at + 0.35) * fps)}
+                from={Math.round((h.at + 0.35) * fps)}
                 durationInFrames={Math.round(1.8 * fps)}
                 name={`Highlight ${i + 1}`}
               >
@@ -351,9 +463,9 @@ const Stage: React.FC<{
   );
 };
 
-// Where the camera is at t seconds into the recording: a spring from the
-// last focus to the current one, each scaled to fill the window with its
-// rectangle, at most 1.9 times, and kept inside the recording.
+// Where the camera is at t seconds into the recording: a punchy spring
+// from the last focus to the current one, each scaled to fill the window
+// with its rectangle, at most 1.9 times, and kept inside the recording.
 function camera(
   focus: Timeline["focus"],
   t: number,
@@ -380,18 +492,17 @@ function camera(
       : spring({
           frame: since * fps,
           fps,
-          config: { damping: 200 },
-          durationInFrames: Math.round(0.9 * fps),
+          config: { damping: 16, stiffness: 190, mass: 0.7 },
         });
   const s = prev.s + (cur.s - prev.s) * p;
   const cx = prev.cx + (cur.cx - prev.cx) * p;
   const cy = prev.cy + (cur.cy - prev.cy) * p;
-  const clamp = (v: number, lo: number, hi: number) =>
+  const lim = (v: number, lo: number, hi: number) =>
     Math.min(hi, Math.max(lo, v));
   return {
     s,
-    x: clamp(WIN_W / 2 - cx * WIN_W * s, WIN_W - WIN_W * s, 0),
-    y: clamp(WIN_H / 2 - cy * WIN_H * s, WIN_H - WIN_H * s, 0),
+    x: lim(WIN_W / 2 - cx * WIN_W * s, WIN_W - WIN_W * s, 0),
+    y: lim(WIN_H / 2 - cy * WIN_H * s, WIN_H - WIN_H * s, 0),
   };
 }
 
@@ -432,11 +543,16 @@ const Highlight: React.FC<{ rect: Rect }> = ({ rect }) => {
   const [x, y, w, h] = rect;
   const opacity = interpolate(
     frame,
-    [0, 0.25 * fps, durationInFrames - 0.4 * fps, durationInFrames],
+    [0, 3, durationInFrames - 0.4 * fps, durationInFrames],
     [0, 1, 1, 0],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+    clamp,
   );
-  const grow = spring({ frame, fps, config: { damping: 12 } });
+  const burst = interpolate(frame, [0, 10], [1, 0], clamp);
+  const grow = spring({
+    frame,
+    fps,
+    config: { damping: 11, stiffness: 260 },
+  });
   return (
     <div
       style={{
@@ -447,9 +563,10 @@ const Highlight: React.FC<{ rect: Rect }> = ({ rect }) => {
         height: h * WIN_H,
         borderRadius: 12,
         border: `4px solid ${ORANGE}`,
-        boxShadow: `0 0 36px ${ORANGE}99, inset 0 0 36px ${ORANGE}33`,
+        boxShadow: `0 0 ${36 + 60 * burst}px ${ORANGE}aa, inset 0 0 ${36 + 80 * burst}px ${ORANGE}${burst > 0.5 ? "66" : "33"}`,
+        backgroundColor: `rgba(250,183,149,${0.12 * burst})`,
         opacity,
-        scale: String(1.04 - 0.04 * grow),
+        scale: String(1.08 - 0.08 * grow),
       }}
     />
   );
@@ -482,29 +599,29 @@ const Captions: React.FC<{ captions: Timeline["captions"] }> = ({
   });
   if (i < 0 || !captions[i].text) return null;
   const since = (t - captions[i].at) * fps;
-  const pop = spring({ frame: since, fps, config: { damping: 15, mass: 0.5 } });
+  const pop = spring({
+    frame: since,
+    fps,
+    config: { damping: 13, stiffness: 300, mass: 0.5 },
+  });
   return (
-    <AbsoluteFill
-      style={{ justifyContent: "flex-end", alignItems: "center" }}
-    >
+    <AbsoluteFill style={{ justifyContent: "flex-end", alignItems: "center" }}>
       <div
         style={{
           marginBottom: 34,
           padding: "16px 36px",
-          borderRadius: 24,
-          backgroundColor: "rgba(20,21,28,0.82)",
-          border: "1px solid rgba(255,255,255,0.1)",
-          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+          borderRadius: 20,
+          backgroundColor: "rgba(14,15,20,0.88)",
+          border: `1px solid ${PINK}66`,
+          boxShadow: `0 20px 60px rgba(0,0,0,0.6), 0 0 30px ${PINK}33`,
           fontSize: 48,
-          fontWeight: 700,
+          fontWeight: 800,
           color: "white",
           letterSpacing: -0.5,
           whiteSpace: "nowrap",
-          maxWidth: 1700,
-          textAlign: "center",
-          opacity: pop,
-          scale: String(0.9 + 0.1 * pop),
-          translate: `0px ${24 * (1 - pop)}px`,
+          opacity: Math.min(1, pop * 2),
+          scale: String(1.15 - 0.15 * pop),
+          ...glitch(since, 6, 9),
         }}
       >
         <Rich text={captions[i].text} />
@@ -521,10 +638,7 @@ const Keys: React.FC<{ keys: Timeline["keys"] }> = ({ keys }) => {
   if (!shown.length) return null;
   const k = shown[shown.length - 1];
   const since = (t - k.at) * fps;
-  const out = interpolate(since, [1.6 * fps, 1.9 * fps], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const out = interpolate(since, [1.6 * fps, 1.9 * fps], [1, 0], clamp);
   return (
     <div
       style={{
@@ -538,10 +652,11 @@ const Keys: React.FC<{ keys: Timeline["keys"] }> = ({ keys }) => {
     >
       {k.text.split(" ").map((key, i) => {
         const pop = spring({
-          frame: since - i * 4,
+          frame: since - i * 3,
           fps,
-          config: { damping: 9, mass: 0.5 },
+          config: { damping: 9, stiffness: 300, mass: 0.5 },
         });
+        const pressed = interpolate(since - i * 3, [3, 5, 8], [0, 1, 0], clamp);
         return (
           <div
             key={i}
@@ -550,9 +665,9 @@ const Keys: React.FC<{ keys: Timeline["keys"] }> = ({ keys }) => {
               padding: "12px 22px",
               borderRadius: 14,
               background: "linear-gradient(180deg, #343747, #262833)",
-              border: "1px solid #50546a",
+              border: `1px solid ${pressed > 0.3 ? CYAN : "#50546a"}`,
               borderBottom: "6px solid #14151b",
-              boxShadow: `0 16px 40px rgba(0,0,0,0.55), 0 0 30px ${PINK}44`,
+              boxShadow: `0 16px 40px rgba(0,0,0,0.55), 0 0 ${30 + 40 * pressed}px ${CYAN}${pressed > 0.3 ? "99" : "44"}`,
               fontFamily: MONO,
               fontSize: 40,
               fontWeight: 700,
@@ -560,7 +675,7 @@ const Keys: React.FC<{ keys: Timeline["keys"] }> = ({ keys }) => {
               textAlign: "center",
               opacity: Math.min(1, pop * 1.5),
               scale: String(0.5 + 0.5 * pop),
-              translate: `0px ${30 * (1 - pop)}px`,
+              translate: `0px ${30 * (1 - pop) + 5 * pressed}px`,
             }}
           >
             {key}
@@ -574,11 +689,11 @@ const Keys: React.FC<{ keys: Timeline["keys"] }> = ({ keys }) => {
 const EndCard: React.FC<{ alsoIn: string }> = ({ alsoIn }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const pop = (delay: number) =>
+  const slam = (delay: number) =>
     spring({
-      frame: frame - delay - 0.3 * fps,
+      frame: frame - delay,
       fps,
-      config: { damping: 14, mass: 0.6 },
+      config: { damping: 13, stiffness: 300, mass: 0.6 },
     });
   return (
     <AbsoluteFill
@@ -593,15 +708,16 @@ const EndCard: React.FC<{ alsoIn: string }> = ({ alsoIn }) => {
       <div
         style={{
           fontFamily: MONO,
-          fontSize: 120,
+          fontSize: 130,
           fontWeight: 700,
           letterSpacing: -4,
           backgroundImage: `linear-gradient(90deg, ${PINK}, ${ORANGE})`,
           backgroundClip: "text",
           WebkitBackgroundClip: "text",
           color: "transparent",
-          opacity: pop(0),
-          scale: String(0.85 + 0.15 * pop(0)),
+          scale: String(1.6 - 0.6 * slam(2)),
+          opacity: frame >= 2 ? 1 : 0,
+          filter: `drop-shadow(0 0 30px ${PINK}88)`,
         }}
       >
         neopane
@@ -613,10 +729,11 @@ const EndCard: React.FC<{ alsoIn: string }> = ({ alsoIn }) => {
           color: "white",
           padding: "16px 32px",
           borderRadius: 16,
-          backgroundColor: "rgba(20,21,28,0.85)",
-          border: "1px solid rgba(255,255,255,0.12)",
-          opacity: pop(6),
-          translate: `0px ${30 * (1 - pop(6))}px`,
+          backgroundColor: "rgba(14,15,20,0.88)",
+          border: `1px solid ${CYAN}66`,
+          boxShadow: `0 0 30px ${CYAN}33`,
+          opacity: frame >= 8 ? 1 : 0,
+          scale: String(1.25 - 0.25 * slam(8)),
         }}
       >
         <span style={{ color: CYAN }}>$</span> brew install
@@ -627,15 +744,12 @@ const EndCard: React.FC<{ alsoIn: string }> = ({ alsoIn }) => {
           fontSize: 36,
           fontWeight: 500,
           color: TEXT,
-          opacity: pop(12),
+          opacity: interpolate(frame, [14, 22], [0, 1], clamp),
         }}
       >
         github.com/ian-pascoe/neopane
-        {alsoIn ? (
-          <span style={{ color: "#8a8d99" }}> · {alsoIn}</span>
-        ) : null}
+        {alsoIn ? <span style={{ color: "#8a8d99" }}> · {alsoIn}</span> : null}
       </div>
     </AbsoluteFill>
   );
 };
-

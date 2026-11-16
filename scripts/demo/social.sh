@@ -27,9 +27,11 @@ else
 fi
 cd "$here/video"
 [ -d node_modules ] || npm ci --silent
-npx remotion render "$name" "$out/$name.social.mp4" --props="$props" --log=error
+# Under Discord's 10 MB for a cut of 30-40 s
+npx remotion render "$name" "$out/$name.social.mp4" --props="$props" \
+  --video-bitrate=2000k --audio-bitrate=160k --log=error
 size=$(wc -c <"$out/$name.social.mp4")
 echo "$out/$name.social.mp4 ($((size / 1024 / 1024)) MB)"
 if [ "$size" -gt $((10 * 1024 * 1024)) ]; then
-  echo "over Discord's 10 MB: render again with a higher --crf" >&2
+  echo "over Discord's 10 MB: lower --video-bitrate in social.sh" >&2
 fi

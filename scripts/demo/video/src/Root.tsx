@@ -19,7 +19,9 @@ export const RemotionRoot: React.FC = () => {
           subline: "Every window a real tmux pane.",
           alsoIn: "also zellij, herdr and Rex",
           music: null,
-          musicVolume: 0.6,
+          musicVolume: 0.8,
+          musicDrop: 12.05,
+          bpm: 160,
           timeline: null,
         }}
       />

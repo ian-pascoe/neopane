@@ -28,6 +28,7 @@ Show
 # speed: 2.5
 Sleep 1s
 Type "neopane src/main.rs"
+# start:
 Sleep 400ms
 Enter
 Sleep 3s

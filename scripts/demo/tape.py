@@ -10,6 +10,7 @@ A tape marks what the edits show with comments, which VHS ignores:
     # focus: all           and back out to all of it
     # highlight: X Y W H   the social cut outlines this part for a moment
     # speed: 2             the social cut plays from here at this speed
+    # start:               the social cut starts here, skipping what's before
 
 Their times come from replaying the tape's timing: VHS records only while
 shown, a Type takes its TypingSpeed per character, a key its TypingSpeed per
@@ -26,7 +27,7 @@ KEY_RE = re.compile(
     r"^(Enter|Escape|Space|Backspace|Delete|Tab|Up|Down|Left|Right|PageUp|PageDown"
     r"|Home|End|Insert|(?:Ctrl|Alt|Shift)\+\S+)(@\S+)?(?:\s+(\d+))?$"
 )
-MARK_RE = re.compile(r"#\s*(caption|keys|focus|highlight|speed):\s*(.*)$")
+MARK_RE = re.compile(r"#\s*(caption|keys|focus|highlight|speed|start):\s*(.*)$")
 
 
 def seconds(text):
@@ -128,16 +129,19 @@ def timeline(tape, video):
     """What the social cut needs: the recording's segments, each with its
     speed, and every mark at its time in the cut."""
     marks, real = marks_in(tape, video)
+    begin = max([t for t, k, _ in marks if k == "start"], default=0.0)
     changes = [(0.0, 1.0)] + [(t, v) for t, k, v in marks if k == "speed"]
     segments = []
     out = 0.0
     for i, (start, rate) in enumerate(changes):
         end = changes[i + 1][0] if i + 1 < len(changes) else real
+        start = max(start, begin)
         if end > start:
             segments.append({"from": start, "to": end, "rate": rate, "at": out})
             out += (end - start) / rate
 
     def cut_time(t):
+        t = max(t, begin)
         for s in segments:
             if s["from"] <= t <= s["to"]:
                 return s["at"] + (t - s["from"]) / s["rate"]
@@ -145,7 +149,7 @@ def timeline(tape, video):
 
     events = {"caption": [], "keys": [], "focus": [], "highlight": []}
     for t, kind, value in marks:
-        if kind == "speed":
+        if kind in ("speed", "start"):
             continue
         key = "text" if kind in ("caption", "keys") else "rect"
         events[kind].append({"at": round(cut_time(t), 3), key: value})
