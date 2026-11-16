@@ -8,6 +8,37 @@ use std::process::{Command, Output, Stdio};
 
 use neopane::name::NAME;
 
+/// Every variable a built-in pane provider's choosing reads, Rex's, tmux's,
+/// herdr's, zellij's and the Herdr app's: a test's neopane, or a
+/// multiplexer whose panes run one, must not inherit them from the
+/// developer's own terminal, or it reaches their own pane provider.
+pub const PROVIDER_VARS: &[&str] = &[
+    "REX_SERVER",
+    "REX_SESSION",
+    "REX_BLOCK",
+    "TMUX",
+    "TMUX_PANE",
+    "TERM_PROGRAM",
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_SOCKET_DIR",
+    "HC_TERMINAL_ID",
+    "HC_TERMINAL_SOCKET",
+    "HERDR_APP_HOME",
+];
+
+/// `cmd` without any of [`PROVIDER_VARS`].
+pub fn without_provider_vars(cmd: &mut Command) -> &mut Command {
+    for var in PROVIDER_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 /// The binary Cargo built for this test. Cargo names it, as Rust 1.100's
 /// build directory no longer has it beside the test's own binary.
 pub fn exe() -> PathBuf {
@@ -103,7 +134,8 @@ pub fn in_pty_typed(
     // SAFETY: openpty made both, and they are ours alone.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let upper = NAME.to_ascii_uppercase();
-    let child = Command::new(exe())
+    let mut cmd = Command::new(exe());
+    let child = without_provider_vars(&mut cmd)
         .args(args)
         .current_dir(cwd)
         .env(neopane::daemon::dir::tmpdir_var(), tmpdir)
@@ -112,20 +144,6 @@ pub fn in_pty_typed(
         .env_remove(&upper)
         .env_remove(format!("{upper}_CONFIG"))
         .env_remove(format!("{upper}_PROVIDER"))
-        .env_remove("REX_SERVER")
-        .env_remove("REX_SESSION")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("TERM_PROGRAM")
-        .env_remove("HERDR_ENV")
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("ZELLIJ")
-        .env_remove("ZELLIJ_PANE_ID")
-        .env_remove("ZELLIJ_SESSION_NAME")
-        .env_remove("HC_TERMINAL_ID")
-        .env_remove("HC_TERMINAL_SOCKET")
-        .env_remove("HERDR_APP_HOME")
         .envs(env.iter().copied())
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
@@ -291,20 +309,12 @@ impl TmuxServer {
         let mut server = TmuxServer { socket, pid: None };
         let upper = NAME.to_ascii_uppercase();
         let mut cmd = server.command();
-        cmd.args(["new-session", "-d", "-x", "80", "-y", "24"])
+        without_provider_vars(&mut cmd)
+            .args(["new-session", "-d", "-x", "80", "-y", "24"])
             .args(command)
             .env_remove(&upper)
             .env_remove(format!("{upper}_CONFIG"))
             .env_remove(format!("{upper}_PROVIDER"))
-            .env_remove("REX_SERVER")
-            .env_remove("REX_SESSION")
-            .env_remove("REX_BLOCK")
-            .env_remove("ZELLIJ")
-            .env_remove("ZELLIJ_PANE_ID")
-            .env_remove("ZELLIJ_SESSION_NAME")
-            .env_remove("HC_TERMINAL_ID")
-            .env_remove("HC_TERMINAL_SOCKET")
-            .env_remove("HERDR_APP_HOME")
             .envs(env.iter().copied());
         let status = cmd.status().unwrap();
         assert!(status.success(), "tmux didn't start");
@@ -522,26 +532,14 @@ impl ZellijSession {
     }
 
     /// `zellij` with this session's private environment, and without the
-    /// user's `ZELLIJ*`, `TMUX*` or `<NAME>*` variables, or Rex's or the
-    /// Herdr app's.
+    /// user's pane provider variables or `<NAME>*` ones.
     pub fn command(&self) -> Command {
         let upper = NAME.to_ascii_uppercase();
         let mut cmd = Command::new("zellij");
-        cmd.env_remove("ZELLIJ")
-            .env_remove("ZELLIJ_PANE_ID")
-            .env_remove("ZELLIJ_SESSION_NAME")
-            .env_remove("HC_TERMINAL_ID")
-            .env_remove("HC_TERMINAL_SOCKET")
-            .env_remove("HERDR_APP_HOME")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("TERM_PROGRAM")
+        without_provider_vars(&mut cmd)
             .env_remove(&upper)
             .env_remove(format!("{upper}_CONFIG"))
             .env_remove(format!("{upper}_PROVIDER"))
-            .env_remove("REX_SERVER")
-            .env_remove("REX_SESSION")
-            .env_remove("REX_BLOCK")
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         cmd
@@ -771,7 +769,8 @@ impl HerdrServer {
         std::fs::write(config.join("config.toml"), "onboarding = false\n").unwrap();
         let socket = dir.join("h.sock");
         let mut cmd = Command::new("herdr");
-        cmd.arg("server");
+        // before isolate, which sets herdr's own
+        without_provider_vars(&mut cmd).arg("server");
         HerdrServer::isolate(&mut cmd, dir);
         let upper = NAME.to_ascii_uppercase();
         let log = File::create(dir.join("herdr.log")).unwrap();
@@ -779,11 +778,6 @@ impl HerdrServer {
             .env_remove(&upper)
             .env_remove(format!("{upper}_CONFIG"))
             .env_remove(format!("{upper}_PROVIDER"))
-            .env_remove("REX_SERVER")
-            .env_remove("REX_SESSION")
-            .env_remove("REX_BLOCK")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
             .env("SHELL", "/bin/sh")
             .envs(env.iter().copied())
             .stdin(Stdio::null())

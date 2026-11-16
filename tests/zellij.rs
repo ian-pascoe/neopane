@@ -216,16 +216,12 @@ fn a_terminal_of_no_pane_with_a_panes_variables_copied_in_is_disproved() {
     let check = |config: Option<&std::path::Path>| {
         let upper = NAME.to_ascii_uppercase();
         let mut c = Command::new(exe());
-        c.args(["provider", "check", "--json"])
+        without_provider_vars(&mut c)
+            .args(["provider", "check", "--json"])
             .current_dir(&tmp)
             .env_remove(&upper)
             .env_remove(format!("{upper}_CONFIG"))
             .env_remove(format!("{upper}_PROVIDER"))
-            .env_remove("REX_SERVER")
-            .env_remove("REX_SESSION")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("TERM_PROGRAM")
             .envs(copied.iter().map(|(k, v)| (k, v)))
             .env("XDG_CONFIG_HOME", &tmp)
             .stdin(slave.try_clone().unwrap())

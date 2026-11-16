@@ -199,7 +199,7 @@ What chooses the pane provider with no config, and what `<name>.default` returns
 _Avoid_: default provider, fallback
 
 **Inside proof**:
-A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's and herdr's do, or the process table alone, as zellij's does. That built-in's `find` runs it first, though herdr's trusts a pane it can't prove where `inside.herdr` says no, and the built-in default asks it where variables name several built-ins.
+A multiplexer's `<name>.inside` function, such as `inside.tmux`: whether an attach's terminal is directly one of that multiplexer's panes, and why, asking the multiplexer within 0.5 s, as tmux's, herdr's and the Herdr app's do, or the process table alone, as zellij's does. That built-in's `find` runs it first, though herdr's and the Herdr app's trust a pane they can't prove where `inside.herdr` and `inside.herdr_app` say no, and the built-in default asks it where variables name several built-ins.
 _Avoid_: detection, nesting check
 
 **Built-in command**:

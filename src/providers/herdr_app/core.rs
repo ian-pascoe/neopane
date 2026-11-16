@@ -6,14 +6,9 @@
 //! needs only the methods it calls. A reply's fields the built-in doesn't
 //! read are ignored, as are lines that answer no request of its own, such
 //! as event notifications.
-//!
-//! Methods besides those here are a [`Core::call`] each: `terminal.list`,
-//! and the core's `terminal.keep {keep}`, unrelated to the app's
-//! `terminal.keep`.
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -21,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::providers::builtin::Given;
+use crate::providers::deadline::readable_by;
 use crate::util::seconds;
 
 /// The protocol generation the built-in speaks.
@@ -150,6 +146,11 @@ impl Core {
         }
     }
 
+    /// When its requests' time runs out.
+    pub(super) fn due(&self) -> Instant {
+        self.due
+    }
+
     /// What its `hello` said.
     pub(super) fn hello(&self) -> &Hello {
         &self.hello
@@ -253,34 +254,6 @@ impl Core {
             "can't reach the hc core at {}: {e}",
             String::from_utf8_lossy(&self.socket)
         )
-    }
-}
-
-/// Whether `conn` has something to read, or has ended, before `due`.
-fn readable_by(conn: &UnixStream, due: Instant) -> std::io::Result<bool> {
-    loop {
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(false);
-        }
-        let mut fds = [libc::pollfd {
-            fd: conn.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        // rounded up, so it never wakes early and spins
-        let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as libc::c_int;
-        // SAFETY: one valid pollfd, for the call only.
-        match unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } {
-            n if n > 0 => return Ok(true),
-            0 => {}
-            _ => {
-                let e = std::io::Error::last_os_error();
-                if e.kind() != ErrorKind::Interrupted {
-                    return Err(e);
-                }
-            }
-        }
     }
 }
 

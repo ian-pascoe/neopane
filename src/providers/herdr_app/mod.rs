@@ -22,8 +22,8 @@
 //! Each capability gives the line it prints, or why it failed or is
 //! unsupported; `run` prints it, or the failure as one `herdr-app
 //! CAPABILITY: why` line on stderr, and gives the exit status: 1, or 69
-//! for a core or app lacking what the capability needs, naming it and
-//! both versions.
+//! for a core lacking what the capability needs, naming it and both
+//! versions.
 
 pub(crate) mod check;
 mod core;
@@ -35,7 +35,7 @@ mod window;
 
 pub(crate) use proof::inside;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use self::core::Core;
 use self::window::Window;
@@ -47,7 +47,7 @@ use crate::config::Capability;
 pub(super) enum Failure {
     /// It failed: exit 1.
     Failed(String),
-    /// The core or app lacks what it needs: exit 69.
+    /// The core lacks what it needs: exit 69.
     Unsupported(String),
 }
 
@@ -66,18 +66,14 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Close => close(given).map(|()| None),
         _ => return UNSUPPORTED,
     };
-    match done {
-        Ok(Some(line)) => print_line(line.as_bytes()),
-        Ok(None) => DONE,
-        Err(Failure::Failed(why)) => {
-            eprintln!("herdr-app {}: {why}", cap.name());
-            FAILED
-        }
-        Err(Failure::Unsupported(why)) => {
-            eprintln!("herdr-app {}: {why}", cap.name());
-            UNSUPPORTED
-        }
-    }
+    let (why, code) = match done {
+        Ok(Some(line)) => return print_line(line.as_bytes()),
+        Ok(None) => return DONE,
+        Err(Failure::Failed(why)) => (why, FAILED),
+        Err(Failure::Unsupported(why)) => (why, UNSUPPORTED),
+    };
+    eprintln!("herdr-app {}: {why}", cap.name());
+    code
 }
 
 /// What `close` has, of its 2 s.
@@ -111,7 +107,8 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
 
 /// Whether `core` has `methods` in the generation the built-in speaks,
 /// else unsupported, naming what it lacks and both versions: the core's,
-/// and the app's, from the `herdr-app` `window` finds.
+/// and the app's, from the `herdr-app` `window` finds, within the core's
+/// deadline.
 fn needs(
     core: &Core,
     methods: &[&str],
@@ -121,16 +118,16 @@ fn needs(
         None => Ok(()),
         Some(why) => Err(Failure::Unsupported(format!(
             "{why} ({})",
-            versions(&core.hello().version, window)
+            versions(&core.hello().version, window, core.due())
         ))),
     }
 }
 
 /// Both versions, for a message: `hc core 0.1.21, herdr-app 0.1.16`; the
-/// app's `unknown` if it can't be told.
-fn versions(core: &str, window: impl FnOnce() -> Result<Window, String>) -> String {
+/// app's `unknown` if it can't be told by `due`.
+fn versions(core: &str, window: impl FnOnce() -> Result<Window, String>, due: Instant) -> String {
     let app = window()
-        .and_then(|w| w.version().map_err(String::from))
+        .and_then(|w| w.version(due).map_err(String::from))
         .unwrap_or_else(|_| "unknown".into());
     format!("hc core {core}, herdr-app {app}")
 }

@@ -9,6 +9,8 @@
 //! - `choose`: choosing a pane provider for a self-attach.
 //! - `check`: `provider check`, which chooses as a self-attach here would,
 //!   and reports it.
+//! - `deadline`: waiting on a socket or a command with a deadline, for
+//!   the built-in commands.
 //! - `tty`: a terminal's device, and what the process table says of a
 //!   process, for any `find` to prove a terminal.
 //!
@@ -19,6 +21,7 @@ pub mod builtin;
 pub mod check;
 pub(crate) mod choose;
 pub(crate) mod command;
+pub(crate) mod deadline;
 pub(crate) mod herdr;
 pub(crate) mod herdr_app;
 pub(crate) mod rex;

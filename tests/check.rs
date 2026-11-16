@@ -15,7 +15,7 @@ use std::process::{Child, Command, Output, Stdio};
 
 use neopane::name::NAME;
 use serde_json::Value;
-use support::{exe, scratch, text};
+use support::{exe, scratch, text, without_provider_vars};
 
 /// A home of its own for one test, with `work/` to run in and the config,
 /// if any, at `~/.config/<name>/init.lua`.
@@ -47,7 +47,8 @@ impl Home {
     fn command(&self, args: &[&str]) -> Command {
         let upper = NAME.to_ascii_uppercase();
         let mut c = Command::new(exe());
-        c.args(["provider", "check"])
+        without_provider_vars(&mut c)
+            .args(["provider", "check"])
             .args(args)
             .current_dir(self.dir.join("work"))
             .env("HOME", &self.dir)
@@ -55,19 +56,6 @@ impl Home {
             .env_remove(&upper)
             .env_remove(format!("{upper}_CONFIG"))
             .env_remove(format!("{upper}_PROVIDER"))
-            .env_remove("REX_SERVER")
-            .env_remove("REX_SESSION")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("TERM_PROGRAM")
-            .env_remove("REX_BLOCK")
-            .env_remove("ZELLIJ")
-            .env_remove("ZELLIJ_PANE_ID")
-            .env_remove("ZELLIJ_SESSION_NAME")
-            .env_remove("ZELLIJ_SOCKET_DIR")
-            .env_remove("HC_TERMINAL_ID")
-            .env_remove("HC_TERMINAL_SOCKET")
-            .env_remove("HERDR_APP_HOME")
             .stdin(Stdio::null());
         c
     }

@@ -512,7 +512,7 @@ checks the choice: the terminal must be the live hc terminal
 `HC_TERMINAL_ID` names, on this terminal's tty, shown in a Herdr app pane
 of a window that answers. Its reach is that hc core and the app's home
 (`HERDR_APP_HOME`); terminals of remote spaces are refused. No version is
-required: what the core or app lacks is named, with both versions, and
+required: a method the core lacks is named, with both versions, and
 `neopane provider check` shows both. For now it only finds the terminal and
 closes terminals, so windows are drawn in the pane they came from, as with
 no pane provider; panes of their own come next. `neopane provider show

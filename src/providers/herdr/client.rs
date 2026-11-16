@@ -6,7 +6,6 @@
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -15,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::name::NAME;
 use crate::providers::builtin::Given;
+use crate::providers::deadline::readable_by;
 use crate::util::seconds;
 
 /// The oldest protocol the built-in speaks: herdr 0.9.5's. An older herdr
@@ -224,34 +224,6 @@ fn read_line(conn: &UnixStream, due: Instant) -> std::io::Result<Option<(Vec<u8>
     let rest = reply.get(end + 1..).unwrap_or_default().to_vec();
     reply.truncate(end);
     Ok(Some((reply, rest)))
-}
-
-/// Whether `conn` has something to read, or has ended, before `due`.
-fn readable_by(conn: &UnixStream, due: Instant) -> std::io::Result<bool> {
-    loop {
-        let left = due.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(false);
-        }
-        let mut fds = [libc::pollfd {
-            fd: conn.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        // rounded up, so it never wakes early and spins
-        let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as libc::c_int;
-        // SAFETY: one valid pollfd, for the call only.
-        match unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } {
-            n if n > 0 => return Ok(true),
-            0 => {}
-            _ => {
-                let e = std::io::Error::last_os_error();
-                if e.kind() != ErrorKind::Interrupted {
-                    return Err(e);
-                }
-            }
-        }
-    }
 }
 
 /// The `result` of reply `line`, or why there's none: herdr's own error,

@@ -2,8 +2,8 @@
 
 Your own Lua file chooses each daemon's pane provider: what gives Neovim's
 windows terminals of their own (ADR 0007). With no file, the built-in default
-chooses: tmux, herdr or zellij in a pane of its own, Rex inside Rex, else
-none (see
+chooses: tmux, herdr, zellij or the Herdr app in a pane of its own, Rex
+inside Rex, else none (see
 [The default](#the-default) and
 [Built-in pane providers](#built-in-pane-providers)). `docs/capabilities.md`
 is the contract of a pane provider's commands.
@@ -657,9 +657,9 @@ app's and the core's versions.
 
 It reads the hc core through its socket and acts on the window through the
 `herdr-app` command, found on `PATH`, else at `~/.local/bin/herdr-app`,
-where an installed Herdr.app keeps it. No version is required: what a
-capability needs and the core or app lacks, it names, with both versions,
-and does without (exit 69).
+where an installed Herdr.app keeps it. No version is required: a method a
+capability needs and the core lacks, it names, with both versions, and does
+without (exit 69); `find` refuses instead.
 
 For now its table has only `find`, and `close`, which kills the hc
 terminal: each Neovim window is drawn in the pane it came from, as with no

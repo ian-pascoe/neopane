@@ -1,6 +1,6 @@
 //! The Herdr app window, through the `herdr-app` command: found on `PATH`,
 //! else at `~/.local/bin/herdr-app`, where an installed Herdr.app keeps
-//! it; else unsupported, naming both. Every run is `herdr-app ARGS…`,
+//! it; else none, naming both places. Every run is `herdr-app ARGS…`,
 //! answering one JSON object on stdout, killed at its deadline. It acts on
 //! the window under `HERDR_APP_HOME` (else `~/.config/herdr-app`), as the
 //! environment it runs in has it: the choosing attach's.
@@ -9,19 +9,19 @@
 //! no window, `herdr-app` exits 2, saying so on stderr; a command it
 //! refuses exits 1 with `{error}`.
 
-use std::ffi::{OsStr, OsString};
-use std::io::Read;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::providers::builtin::Given;
 use crate::providers::command::on_path;
+use crate::providers::deadline::{Unfinished, output_by};
 
-/// How long `--version` has, on its own.
+/// The most `--version` has.
 const VERSION_TIME: Duration = Duration::from_millis(500);
 
 /// The `herdr-app` command.
@@ -147,10 +147,12 @@ impl Window {
     }
 
     /// Its version, as `herdr-app --version` prints it after `herdr-app `,
-    /// such as `0.1.16`.
-    pub(super) fn version(&self) -> Result<String, Ran> {
+    /// such as `0.1.16`; killed at `due`, or [`VERSION_TIME`] from now if
+    /// sooner.
+    pub(super) fn version(&self, due: Instant) -> Result<String, Ran> {
         let shown = "herdr-app --version";
-        let (status, out, _) = self.exec(&["--version"], shown, Instant::now() + VERSION_TIME)?;
+        let due = due.min(Instant::now() + VERSION_TIME);
+        let (status, out, _) = self.exec(&["--version"], shown, due)?;
         let out = String::from_utf8_lossy(&out);
         let version = out.trim();
         let version = version.strip_prefix("herdr-app ").unwrap_or(version);
@@ -160,8 +162,8 @@ impl Window {
         Ok(version.to_string())
     }
 
-    /// Runs it with `args`, stdin `/dev/null`: its status, stdout and
-    /// stderr, killed if it hasn't exited by `due`, and not run past it.
+    /// Runs it with `args`: its status, stdout and stderr, killed if it
+    /// hasn't exited by `due`, and not run past it.
     fn exec<S: AsRef<OsStr>>(
         &self,
         args: &[S],
@@ -176,42 +178,17 @@ impl Window {
         if let Some(env) = &self.env {
             cmd.env_clear().envs(
                 env.iter()
-                    .map(|(k, v)| (OsString::from_vec(k.clone()), OsString::from_vec(v.clone()))),
+                    .map(|(k, v)| (OsStr::from_bytes(k), OsStr::from_bytes(v))),
             );
         }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Ran::Failed(format!("can't run {}: {e}", self.program.display())))?;
-        let read = |pipe: Option<Box<dyn Read + Send>>| {
-            std::thread::spawn(move || {
-                let mut out = Vec::new();
-                if let Some(mut p) = pipe {
-                    let _ = p.read_to_end(&mut out);
-                }
-                out
-            })
-        };
-        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < due => std::thread::sleep(Duration::from_millis(2)),
-                Ok(None) | Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Ran::Failed(format!("{shown}: killed, out of time")));
-                }
-            }
-        };
-        Ok((
-            status,
-            stdout.join().unwrap_or_default(),
-            stderr.join().unwrap_or_default(),
-        ))
+        match output_by(cmd, Some(due)) {
+            Ok(out) => Ok((out.status, out.stdout, out.stderr)),
+            Err(Unfinished::CantStart(e)) => Err(Ran::Failed(format!(
+                "can't run {}: {e}",
+                self.program.display()
+            ))),
+            Err(Unfinished::TimedOut) => Err(Ran::Failed(format!("{shown}: killed, out of time"))),
+        }
     }
 
     /// A window run by `program`, a test's fake.
@@ -272,7 +249,27 @@ mod tests {
     #[test]
     fn version_is_after_its_name() {
         let app = FakeApp::new(&[recorded_run("version")]);
-        assert_eq!(Window::faked(&app.program()).version(), Ok("0.1.16".into()));
+        assert_eq!(
+            Window::faked(&app.program()).version(soon()),
+            Ok("0.1.16".into())
+        );
+    }
+
+    #[test]
+    fn version_keeps_to_the_deadline_it_is_given() {
+        let mut slow = recorded_run("version");
+        slow.sleep = Some(5.0);
+        let app = FakeApp::new(&[slow]);
+        let started = Instant::now();
+        let ran =
+            Window::faked(&app.program()).version(Instant::now() + Duration::from_millis(100));
+        assert_eq!(
+            ran,
+            Err(Ran::Failed(
+                "herdr-app --version: killed, out of time".into()
+            ))
+        );
+        assert!(started.elapsed() < Duration::from_millis(400));
     }
 
     #[test]

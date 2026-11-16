@@ -624,15 +624,17 @@ a block of the doc.
 - **The core:** JSON-RPC 2.0, one JSON value a line, on one connection held
   for every request of a capability, `hello` first. It speaks protocol
   generation 1 and needs only the methods a capability calls, as `hello`'s
-  `methods` lists them; a core of another generation, or lacking one,
-  exits 69, naming it and both versions, the core's from `hello` and the
-  app's from `herdr-app --version`: `the hc core has no terminal.kill (hc
-  core 0.1.21, herdr-app 0.1.16)`. Lines that answer no request of its own,
+  `methods` lists them; on a core of another generation, or lacking one,
+  a capability exits 69 (`find` refuses, below), naming it and both
+  versions, the core's from `hello` and the app's from `herdr-app
+  --version`, within the capability's time: `the hc core has no
+  terminal.kill (hc core 0.1.21, herdr-app 0.1.16)`. Lines that answer no request of its own,
   such as event notifications, are skipped.
 - **The window:** `herdr-app ARGS…`, in the choosing attach's environment,
   answering one JSON object, found on `PATH`, else at
   `~/.local/bin/herdr-app`, where an installed Herdr.app keeps it; else
-  exit 69, `no herdr-app on PATH, nor at /Users/me/.local/bin/herdr-app`.
+  none, `no herdr-app on PATH, nor at /Users/me/.local/bin/herdr-app`,
+  which `find` refuses with. `close` never runs it but for a version.
   With no window under its home, `herdr-app` exits 2, saying so on stderr.
 
 - `find`: `HC_TERMINAL_ID` (`<NAME>_ENV_HC_TERMINAL_ID`) must name a
@@ -644,7 +646,7 @@ a block of the doc.
   any space; and `herdr-app status` answers. Where its process or its tty
   can't be read, it trusts `HC_TERMINAL_ID`, the terminal being live in a
   pane. Every other failure refuses (exit 1), a missing method or
-  `herdr-app` too, as exit 69 would accept the terminal. Prints the
+  `herdr-app` too, as exit 69 from `find` would accept the terminal. Prints the
   address. It has 0.5 s. `<name>.inside.herdr_app` runs the same proof,
   unprovable being no.
 - `close`: `terminal.kill`; done when the core answers the terminal's

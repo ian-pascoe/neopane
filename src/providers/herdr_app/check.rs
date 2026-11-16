@@ -23,7 +23,7 @@ pub(crate) fn probe(attach: &Attach, uses: &[Capability]) -> HerdrAppReport {
     let (path, version, answers) = match &window {
         Ok(w) => (
             Ok(w.path().display().to_string()),
-            w.version().ok(),
+            w.version(due).ok(),
             w.status(due).map(|_| ()).map_err(String::from),
         ),
         Err(why) => (Err(why.clone()), None, Err(why.clone())),
@@ -102,4 +102,55 @@ pub(crate) struct Missing {
     pub capability: Capability,
     /// What it lacks, such as `the hc core has no terminal.kill`.
     pub why: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::super::fake::{FakeApp, FakeCore, recorded_one, recorded_run};
+    use super::*;
+
+    /// An attach whose `PATH` finds `app` and whose `HC_TERMINAL_SOCKET`
+    /// names `core`.
+    fn attach(core: &FakeCore, app: &FakeApp) -> Attach {
+        let env = vec![
+            (b"HC_TERMINAL_SOCKET".to_vec(), core.path()),
+            (
+                b"PATH".to_vec(),
+                app.dir().to_string_lossy().into_owned().into_bytes(),
+            ),
+        ];
+        Attach {
+            env,
+            ..Attach::default()
+        }
+    }
+
+    #[test]
+    fn both_versions_the_generation_and_what_the_core_lacks_are_found() {
+        let app = FakeApp::new(&[recorded_run("status"), recorded_run("version")]);
+        let core = FakeCore::replaying(&["hello"]);
+        let r = probe(&attach(&core, &app), &[Capability::Find, Capability::Close]);
+        assert_eq!(r.path, Ok(app.program().display().to_string()));
+        assert_eq!(r.version.as_deref(), Some("0.1.16"));
+        assert_eq!(r.window, Ok(()));
+        assert_eq!(r.core_version.as_deref(), Some("0.1.21"));
+        assert_eq!(r.generation, Some(1));
+        assert_eq!(r.core, Ok(()));
+        assert_eq!(r.missing, []);
+
+        let mut hello = recorded_one("hello", "hello");
+        let methods = hello.result_mut()["methods"].as_array_mut().unwrap();
+        methods.retain(|m| m != &json!("terminal.kill"));
+        let core = FakeCore::serve(vec![hello]);
+        let r = probe(&attach(&core, &app), &[Capability::Find, Capability::Close]);
+        assert_eq!(
+            r.missing,
+            [Missing {
+                capability: Capability::Close,
+                why: "the hc core has no terminal.kill".into(),
+            }]
+        );
+    }
 }

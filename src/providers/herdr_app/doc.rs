@@ -6,31 +6,17 @@
 
 use serde_json::Value;
 
-/// A block of the doc showing a terminal: its Herdr app pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Block {
-    /// The pane's id, the block's.
-    pub pane: String,
-    pub tab: String,
-    pub space: String,
-}
-
-/// Every block of `doc` showing terminal `terminal`, in the doc's order.
-pub(super) fn blocks_of(doc: &Value, terminal: &str) -> Vec<Block> {
+/// The ids of every block of `doc` showing terminal `terminal`, in the
+/// doc's order: its Herdr app panes.
+pub(super) fn panes_of(doc: &Value, terminal: &str) -> Vec<String> {
     let mut found = Vec::new();
     for space in doc["spaces"].as_array().into_iter().flatten() {
-        let space_id = space["id"].as_str().unwrap_or_default();
         for tab in space["tabs"].as_array().into_iter().flatten() {
-            let tab_id = tab["id"].as_str().unwrap_or_default();
             walk(&tab["root"], &mut |node| {
                 if node["content"]["terminal"] == terminal
                     && let Some(pane) = node["id"].as_str()
                 {
-                    found.push(Block {
-                        pane: pane.into(),
-                        tab: tab_id.into(),
-                        space: space_id.into(),
-                    });
+                    found.push(pane.to_string());
                 }
             });
         }
@@ -61,21 +47,15 @@ mod tests {
     #[test]
     fn a_terminal_is_found_in_its_block_however_deep() {
         let nested = doc("nested-doc.get");
-        let tab = "tb14c28a7769ba1044103fd9584cc818f0";
-        let space = "sp22637f42bbefeecf910ee187a961334c";
         assert_eq!(
-            blocks_of(&nested, "t3"),
-            [Block {
-                pane: "p4c229a9b57964c201d7ab577ccf4a2ea".into(),
-                tab: tab.into(),
-                space: space.into(),
-            }]
+            panes_of(&nested, "t3"),
+            ["p4c229a9b57964c201d7ab577ccf4a2ea"]
         );
         assert_eq!(
-            blocks_of(&nested, "t1")[0].pane,
-            "pf7e3d563947903ed7a8c93ee0ac58181"
+            panes_of(&nested, "t1"),
+            ["pf7e3d563947903ed7a8c93ee0ac58181"]
         );
-        assert_eq!(blocks_of(&nested, "t9"), []);
-        assert_eq!(blocks_of(&Value::Null, "t1"), []);
+        assert_eq!(panes_of(&nested, "t9"), Vec::<String>::new());
+        assert_eq!(panes_of(&Value::Null, "t1"), Vec::<String>::new());
     }
 }

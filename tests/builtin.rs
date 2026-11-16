@@ -72,6 +72,51 @@ fn herdr_apps_close_outside_the_herdr_app_fails_saying_why() {
 }
 
 #[test]
+fn herdr_apps_close_on_a_core_lacking_terminal_kill_is_unsupported_naming_both_versions() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let dir = scratch("herdr-app-69");
+    // an hc core whose hello lists no terminal.kill
+    let socket = dir.join("hc.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&conn).read_line(&mut line).unwrap();
+        let id: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id["id"],
+            "result": { "generation": 1, "version": "0.1.21", "methods": ["hello"] },
+        });
+        (&conn).write_all(format!("{reply}\n").as_bytes()).unwrap();
+        // held open until the command is done with it
+        let _ = BufReader::new(&conn).read_line(&mut line);
+    });
+    let app = dir.join("herdr-app");
+    std::fs::write(&app, "#!/bin/sh\necho 'herdr-app 0.1.16'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(exe())
+        .args(["provider", "builtin", "herdr-app", "close"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "close")
+        .env(var("TERMINAL"), "t7")
+        .env("HC_TERMINAL_SOCKET", &socket)
+        .env("PATH", &dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(69));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        text(&out.stderr),
+        "herdr-app close: the hc core has no terminal.kill (hc core 0.1.21, herdr-app 0.1.16)\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_by_hand_without_the_variables_it_is_a_usage_error() {
     let out = builtin(&["tmux", "find"], &[]);
     assert_eq!(out.status.code(), Some(2));

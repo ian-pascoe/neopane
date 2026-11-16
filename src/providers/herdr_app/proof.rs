@@ -21,7 +21,7 @@
 use std::time::{Duration, Instant};
 
 use super::core::Core;
-use super::doc::blocks_of;
+use super::doc::panes_of;
 use super::window::Window;
 use super::{methods, versions};
 use crate::attach::env_value;
@@ -77,7 +77,7 @@ pub(super) fn prove(
     if let Some(why) = core.lacks(methods(Capability::Find)) {
         return Err(format!(
             "{why} ({})",
-            versions(&core.hello().version, &window)
+            versions(&core.hello().version, &window, due)
         ));
     }
     let record = core.terminal(&terminal)?;
@@ -101,9 +101,9 @@ pub(super) fn prove(
         },
     };
     let doc = core.doc()?;
-    let pane = match blocks_of(&doc, &terminal).as_slice() {
+    let pane = match panes_of(&doc, &terminal).as_slice() {
         [] => return Err(format!("{terminal} has no Herdr app pane")),
-        [one] => one.pane.clone(),
+        [one] => one.clone(),
         several => {
             return Err(format!(
                 "{terminal} shows in {} Herdr app panes",
@@ -126,11 +126,20 @@ fn set(v: Option<&[u8]>) -> Option<&[u8]> {
 
 /// `find`: the attaching terminal's hc terminal, or why it isn't one.
 pub(super) fn find(given: &Given) -> Result<String, String> {
-    find_by(given, tty::of_pid)
+    let found = find_by(given, INSIDE_TIME, tty::of_pid)?;
+    if let Some(why) = &found.unproven {
+        eprintln!("herdr-app find: {why}: trusting HC_TERMINAL_ID, as its pane is there");
+    }
+    Ok(found.terminal)
 }
 
-/// `find`, reading a process's terminal through `device_of`.
-fn find_by(given: &Given, device_of: impl Fn(u32) -> Option<u64>) -> Result<String, String> {
+/// `find`'s proof within `time`, reading a process's terminal through
+/// `device_of`: what it found, unproven or not.
+fn find_by(
+    given: &Given,
+    time: Duration,
+    device_of: impl Fn(u32) -> Option<u64>,
+) -> Result<Found, String> {
     let (terminal, socket) = (
         given.var("env_hc_terminal_id"),
         given.env("HC_TERMINAL_SOCKET"),
@@ -141,24 +150,22 @@ fn find_by(given: &Given, device_of: impl Fn(u32) -> Option<u64>) -> Result<Stri
         socket: socket.as_deref(),
         tty: &tty,
     };
-    let found = prove(&claim, INSIDE_TIME, device_of, || Window::of(given))?;
-    if let Some(why) = &found.unproven {
-        eprintln!("herdr-app find: {why}: trusting HC_TERMINAL_ID, as its pane is there");
-    }
-    Ok(found.terminal)
+    prove(&claim, time, device_of, || Window::of(given))
 }
 
 /// `inside.herdr_app`: whether `attach`'s terminal is directly the hc
 /// terminal its `HC_TERMINAL_ID` names, in a Herdr app pane, and why.
 /// Unprovable is no.
 pub(crate) fn inside(attach: &Attach) -> Proof {
-    inside_by(attach, tty::of_pid, || {
+    inside_by(attach, INSIDE_TIME, tty::of_pid, || {
         Window::within(commands_env(&attach.env))
     })
 }
 
+/// `inside.herdr_app` within `time`.
 fn inside_by(
     attach: &Attach,
+    time: Duration,
     device_of: impl Fn(u32) -> Option<u64>,
     window: impl Fn() -> Result<Window, String>,
 ) -> Proof {
@@ -168,7 +175,7 @@ fn inside_by(
         socket: env("HC_TERMINAL_SOCKET"),
         tty: &attach.tty,
     };
-    match prove(&claim, INSIDE_TIME, device_of, window) {
+    match prove(&claim, time, device_of, window) {
         Ok(Found {
             terminal,
             pane,
@@ -270,12 +277,34 @@ mod tests {
         }
     }
 
+    /// The time a test's proof has: well over [`INSIDE_TIME`], as the fakes
+    /// run shell scripts on a loaded machine.
+    const TIME: Duration = Duration::from_secs(5);
+
     /// `inside.herdr_app` of `attach`, the window found as the real one
-    /// is.
-    fn inside_of(attach: &Attach, device_of: impl Fn(u32) -> Option<u64>) -> Proof {
-        inside_by(attach, device_of, || {
+    /// is, within `time`.
+    fn inside_within(
+        attach: &Attach,
+        time: Duration,
+        device_of: impl Fn(u32) -> Option<u64>,
+    ) -> Proof {
+        inside_by(attach, time, device_of, || {
             Window::within(commands_env(&attach.env))
         })
+    }
+
+    /// The same, within [`TIME`].
+    fn inside_of(attach: &Attach, device_of: impl Fn(u32) -> Option<u64>) -> Proof {
+        inside_within(attach, TIME, device_of)
+    }
+
+    /// `find`'s terminal for `attach`, as the choosing attach, within
+    /// [`TIME`], and whether it was trusted unproven.
+    fn find_of(
+        attach: &Attach,
+        device_of: impl Fn(u32) -> Option<u64>,
+    ) -> Result<(String, bool), String> {
+        find_by(&given_of(attach), TIME, device_of).map(|f| (f.terminal, f.unproven.is_some()))
     }
 
     /// What `find` is given for `attach`, as the choosing attach.
@@ -315,7 +344,7 @@ mod tests {
         assert_eq!(core.methods(), ["hello", "terminal.get", "doc.get"]);
         assert_eq!(core.asked()[1]["params"], json!({ "terminal": "t3" }));
         assert_eq!(app.asked(), ["status"]);
-        assert_eq!(find_by(&given_of(&a), on(tty.device)), Ok("t3".into()));
+        assert_eq!(find_of(&a, on(tty.device)), Ok(("t3".into(), false)));
     }
 
     #[test]
@@ -327,7 +356,7 @@ mod tests {
             ours.path, theirs.path
         );
         assert_eq!(inside_of(&a, on(theirs.device)), proof(false, &why));
-        assert_eq!(find_by(&given_of(&a), on(theirs.device)), Err(why));
+        assert_eq!(find_of(&a, on(theirs.device)), Err(why));
     }
 
     #[test]
@@ -439,7 +468,7 @@ mod tests {
         let app = app();
         let a = attach(&silent, &app, &tty.path, &[], &[]);
         assert_eq!(
-            inside_of(&a, on(tty.device)),
+            inside_within(&a, INSIDE_TIME, on(tty.device)),
             proof(false, "the hc core didn't answer in 0.5 s")
         );
     }
@@ -453,7 +482,7 @@ mod tests {
         let core = FakeCore::serve(vec![hello]);
         let a = attach(&core, &app, &tty.path, &[], &[]);
         assert_eq!(
-            find_by(&given_of(&a), on(tty.device)),
+            find_of(&a, on(tty.device)),
             Err(
                 "the hc core speaks generation 2; the built-in herdr-app speaks 1 \
                  (hc core 0.2.0, herdr-app 0.1.16)"
@@ -469,6 +498,41 @@ mod tests {
         let a = attach(&core, &app, &tty.path, &[], &[]);
         let why = "can't read the terminal of hc terminal t3's process (pid 9932)";
         assert_eq!(inside_of(&a, |_| None), proof(false, why));
-        assert_eq!(find_by(&given_of(&a), |_| None), Ok("t3".into()));
+        assert_eq!(find_of(&a, |_| None), Ok(("t3".into(), true)));
+
+        // t3's record with no process
+        let mut exchanges = recorded("nested-terminal.get");
+        let get = exchanges
+            .iter_mut()
+            .find(|e| e.params == json!({ "terminal": "t3" }))
+            .unwrap();
+        get.result_mut()["pid"] = json!(null);
+        exchanges.extend(recorded("nested-doc.get"));
+        let core = FakeCore::serve(exchanges);
+        let a = attach(&core, &app, &tty.path, &[], &[]);
+        assert_eq!(
+            inside_of(&a, on(tty.device)),
+            proof(false, "hc terminal t3 has no process")
+        );
+        assert_eq!(find_of(&a, on(tty.device)), Ok(("t3".into(), true)));
+    }
+
+    #[test]
+    fn a_core_lacking_a_method_the_proof_calls_is_refused_naming_it() {
+        let (tty, app) = (pty(), app());
+        for method in ["doc.get", "terminal.get"] {
+            let mut hello = recorded_one("hello", "hello");
+            let methods = hello.result_mut()["methods"].as_array_mut().unwrap();
+            methods.retain(|m| m != method);
+            let core = FakeCore::serve(vec![hello]);
+            let a = attach(&core, &app, &tty.path, &[], &[]);
+            assert_eq!(
+                find_of(&a, on(tty.device)),
+                Err(format!(
+                    "the hc core has no {method} (hc core 0.1.21, herdr-app 0.1.16)"
+                ))
+            );
+            assert_eq!(core.methods(), ["hello"]);
+        }
     }
 }

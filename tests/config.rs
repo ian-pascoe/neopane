@@ -1147,23 +1147,30 @@ fn default_agrees_with_the_daemons() {
             ("REX_SESSION", "s"),
         ],
     ];
+    /// What the default chooses.
+    enum Want {
+        None,
+        Rex,
+        Table(config::BuiltinTable),
+    }
+    use config::BuiltinTable::{Herdr, HerdrApp, Tmux, Zellij};
     // the last of each names both: with no tty, `inside` can't prove it
     let want = [
-        None,
-        Some("rex"),
-        None,
-        None,
-        Some("rex"),
-        Some("rex"),
-        Some("rex"),
-        Some("tmux"),
-        Some("rex"),
-        Some("herdr"),
-        Some("rex"),
-        Some("zellij"),
-        Some("rex"),
-        Some("herdr-app"),
-        Some("rex"),
+        Want::None,
+        Want::Rex,
+        Want::None,
+        Want::None,
+        Want::Rex,
+        Want::Rex,
+        Want::Rex,
+        Want::Table(Tmux),
+        Want::Rex,
+        Want::Table(Herdr),
+        Want::Rex,
+        Want::Table(Zellij),
+        Want::Rex,
+        Want::Table(HerdrApp),
+        Want::Rex,
     ];
     for (env, want) in envs.into_iter().zip(want) {
         let mut f = Fixture::new(source);
@@ -1174,13 +1181,9 @@ fn default_agrees_with_the_daemons() {
         let daemons = config::default(&f.attach).choice();
         assert_eq!(f.choose().unwrap().choice, daemons, "{env:?}");
         let chose = match want {
-            None => Choice::None,
-            Some("rex") => Choice::Builtin(Builtin::Rex),
-            Some(name) => Choice::Whole(
-                config::BuiltinTable::from_name(name.as_bytes())
-                    .unwrap()
-                    .provider(),
-            ),
+            Want::None => Choice::None,
+            Want::Rex => Choice::Builtin(Builtin::Rex),
+            Want::Table(table) => Choice::Whole(table.provider()),
         };
         assert_eq!(daemons, chose, "{env:?}");
     }
