@@ -1053,6 +1053,18 @@ pinned to one commit; they need Zig 0.17, and are behind the `golden`
 feature, so a plain build never builds Ghostty.
 [docs/latency.md](docs/latency.md) is how to check a change for latency.
 
+The demo videos are scripted: `scripts/demo/record.sh tmux-core` records
+`scripts/demo/tmux-core.tape` in a tmux of its own, editing a throwaway
+worktree, and writes the captioned cut to `target/demo/tmux-core.mp4` and
+the social cut, set to music with
+[Remotion](https://www.remotion.dev), to
+`target/demo/tmux-core.social.mp4`. `zellij-core` and `herdr-core` are
+recorded the same way, with [VHS](https://github.com/charmbracelet/vhs);
+`rex-core` plays its tape in Rex.app through the `rex` CLI, and records its
+window on an [AeroSpace](https://github.com/nikitabobko/AeroSpace)
+workspace of its own, so it needs macOS and AeroSpace, and quits Rex.app
+while it runs.
+
 ## Renamed from neorex
 
 neopane was called neorex until the rename

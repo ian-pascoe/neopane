@@ -45,7 +45,7 @@ Enter
 Sleep 2.5s
 
 # caption: Rex's own keys move Neovim's focus
-# keys: ⌥⌘ ←
+# keys: Opt-Cmd ←
 Rex focus -s {session} left
 # highlight: 0.008 0.003 0.49 0.994
 Sleep 2s
@@ -81,7 +81,7 @@ Sleep 1.5s
 
 # caption: …split a block with Rex itself…
 # focus: all
-# keys: ⇧⌘ D
+# keys: Shift-Cmd D
 Rex split -s {session} --split=below --shell=none -- {shell}
 # highlight: 0.008 0.5 0.49 0.497
 Sleep 1.5s
@@ -102,6 +102,6 @@ Sleep 3s
 
 # caption: Close a Rex block, and its window closes
 # focus: all
-# keys: ⌘ W
+# keys: Cmd W
 Rex api call -s {session} block.close '{{"window_id": "{window_id}"}}'
 Sleep 3s
