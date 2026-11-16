@@ -198,7 +198,9 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   with `--detach` under a private `NEOPANE_TMPDIR`, attached in a split): the
   kill answered in 17 ms, the block left the doc within 0.6 s, its sibling
   took its weight, no toast (`status.overlays` stayed empty, and the window
-  showed none), and the daemon logged `the last pane went; asking Neovim about
+  showed none) [`core/terminal.kill-attach`, `app/status-after-kill-attach`,
+  re-recorded in an unshown tab with `doc.get` before and 1 s after the kill],
+  and the daemon logged `the last pane went; asking Neovim about
   unsaved changes` then `kept, staying unattached`: a hang-up, not an error.
   The attach itself dies of SIGHUP and logs nothing.
 - A program that exits nonzero within 2 s of starting shows a toast

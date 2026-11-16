@@ -43,7 +43,7 @@ neither with a `size`.
 | `terminal.list-all.jsonl` | `terminal.list {all: true}`: live and finished. |
 | `terminal.kill.jsonl` | `terminal.kill` of a live terminal (its finished record), then again (the same record). |
 | `terminal.kill-not-found.jsonl` | `terminal.kill` of `t99`: `not_found`. |
-| `terminal.kill-attach.jsonl` | `terminal.kill` of a pane running `neopane attach`: finished, `reason: killed`, `signal: 1` (SIGHUP). |
+| `terminal.kill-attach.jsonl` | A tab `[t11 \| t1g]`, `t1g` running `neopane attach` in an unshown tab: `doc.get` (`t1g`'s block there), `terminal.kill` of `t1g` (finished, `reason: killed`, `signal: 1`, SIGHUP), then 1 s later `doc.get` (its block gone, `t11` alone at weight 1). |
 | `terminal.keep.jsonl` | The core's `terminal.keep {keep: false}`, then `{keep: true}`. |
 | `terminal.keep-not-found.jsonl` | `terminal.keep` of `t99`: `not_found`. |
 | `terminal.keep-finished.jsonl` | `terminal.keep` of a finished terminal: `-32602`, `invalid_params`, "only live terminals can be kept". |
@@ -69,6 +69,7 @@ One run each: `{"argv", "exit", "stdout", "stderr"}`, `stdout` parsed as JSON
 | --- | --- |
 | `status.json` | `status` with the nested tab shown: `focused_pane`, `tab`, `space`, no rects. |
 | `status-zoomed.json` | `status` with `t2` zoomed: the same shape; the zoom is not in it. |
+| `status-after-kill-attach.json` | `status` right after `core/terminal.kill-attach`: `overlays` empty, no toast. |
 | `ls.json` | `ls` with the nested tab: spaces → tabs → terminals with their pane ids. |
 | `commands.json` | `commands`: every command, its arguments, what it does. |
 | `version.json` | `--version`: plain text, `herdr-app 0.1.16`, kept as a string in `stdout`. |
