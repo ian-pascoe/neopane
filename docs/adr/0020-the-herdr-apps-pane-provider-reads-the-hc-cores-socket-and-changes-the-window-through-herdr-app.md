@@ -54,15 +54,16 @@ the current window, and the daemon gives it back when it should.
   children keep their room. As herdr's frame does (ADR 0018), the chrome
   goes to the terminal's part, so `ORIGIN`'s comes short of Neovim's by
   about a chrome per pane along the split. A part sized in pixels, or a
-  node so among the splits over it, is refused rather than guessed at,
-  as the app takes pixels off first and the pair's share can't be told.
+  node so in a split along the axis over the pair, is refused rather
+  than guessed at, as the app takes pixels off first and the pair's
+  share can't be told.
   `open_beside` gives the new pane `RATIO` of the weight it and the
   origin's pane have, chrome ignored, as a split only halves.
 - **No zoom.** The app's zoom is in neither the doc nor `status`, only its
   `view.json`, so it isn't reported: while a tab is zoomed, Neovim's
   screen is laid out as if it weren't. `resize` reads `view.json` only to
-  leave the shown tab's zoomed pane out of measuring the window, as it
-  has the whole tab's cells. A split into a zoomed tab unzooms it, as
+  measure the window by the shown tab's zoomed pane alone, which fills
+  the tab, the others' cells being stale. A split into a zoomed tab unzooms it, as
   `open_beside` does.
 - **Two `terminal.keep`s.** The core's `terminal.keep {terminal, keep}` is
   the keep above. `herdr-app do terminal.keep {terminal, place}` is
@@ -114,8 +115,19 @@ the current window, and the daemon gives it back when it should.
   `SIZE` within rounding and the chrome's error, and `ORIGIN`'s part
   comes short of Neovim's by about a chrome per pane along the split.
 - `resize` needs `report_layout`: the daemon sizes only panes a layout
-  report places. Its measure is `report_layout`'s, so the sizes it sets
-  and the layout reported agree within rounding.
+  report places. Its chrome is `report_layout`'s, so the sizes it sets
+  and the layout reported agree within rounding, but while the shown tab
+  is zoomed, which only `view.json` says and `report_layout` doesn't
+  read: then `resize` measures the window by the zoomed pane alone, its
+  cells the whole tab's, with the measured chrome, while `report_layout`
+  lays the tab out unzoomed with the chrome its cells solve.
+- The tab's extent is taken along a line across the shown tab, the sum
+  of the cells and chrome of the panes it crosses, not each pane's cells
+  over its share: a line crosses the whole tab whatever the weights, so
+  cells laid out by the weights before a `layout.resize` just sent, as
+  the daemon sends a tab page's resizes one after another, tell it as
+  well. Whether `layout.resize` answers before the ptys are resized is
+  unchecked.
 - A split in a never-shown tab gives both panes the core's 120×40 until
   the tab is shown, and one in a hidden tab leaves its panes' sizes
   stale: a hidden tab's cols and rows are not to be trusted, and neither

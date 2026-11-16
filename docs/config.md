@@ -657,7 +657,8 @@ app's and the core's versions.
 
 It reads the hc core through its socket and acts on the window through the
 `herdr-app` command, found on `PATH`, else at `~/.local/bin/herdr-app`,
-where an installed Herdr.app keeps it. No version is required: a method a
+where an installed Herdr.app keeps it. `resize` also reads the app's
+`view.json` under its home, which alone says which pane is zoomed. No version is required: a method a
 capability needs and the core lacks, or a command `herdr-app` lacks, or no
 `herdr-app` at all, it names, with both versions, and does without (exit
 69); `find` refuses instead.
@@ -681,8 +682,10 @@ now:
   panes, is resized: the daemon resizes a tab page with a Herdr app tab of
   its own only through a pane provider that can also move panes
   (`place_beside`), which this one doesn't have.
-- Panes beside one sized in pixels, under the same splits, aren't resized:
-  their share of the tab can't be told.
+- Panes beside one sized in pixels, along the same split or one over
+  them, aren't resized: their share of the tab can't be told.
+- While the shown tab is zoomed, the zoomed pane alone measures the
+  window, as the others' cells are stale.
 - The new pane takes the window's focus, as the new window does in Neovim.
 - The hc core's keep is turned off for each pane it opens, so a pane whose
   attach was killed closes rather than coming back as a shell, and doesn't

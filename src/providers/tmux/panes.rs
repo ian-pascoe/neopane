@@ -4,7 +4,6 @@
 //! more; `close` kills a pane, done if it is already gone.
 
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
 
 use super::is_pane_id;
 use super::server::Server;
@@ -33,15 +32,9 @@ pub(super) fn open_beside(given: &Given) -> Result<String, String> {
     if before {
         args.push("-b".into());
     }
-    let size = given.var("size").unwrap_or_default();
-    if !size.is_empty() {
-        if !size.iter().all(u8::is_ascii_digit) {
-            return Err(format!(
-                "SIZE {:?} isn't cells",
-                String::from_utf8_lossy(&size)
-            ));
-        }
-        args.extend(["-l".into(), OsString::from_vec(size)]);
+    if given.var("size").is_some_and(|s| !s.is_empty()) {
+        let size = given.cells("size")?;
+        args.extend(["-l".into(), size.to_string().into()]);
     }
     args.extend(["-t".into(), origin.into()]);
     args.extend(["-P".into(), "-F".into(), "#{pane_id}".into()]);

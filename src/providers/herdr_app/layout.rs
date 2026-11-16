@@ -196,60 +196,103 @@ fn doubled(doc: &Value, p: &Pane) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Measure {
     pub chrome: [u32; 2],
-    /// A tab's columns and rows, chrome included: over the shown tab's
-    /// panes measured, their cells plus the chrome over their shares,
-    /// which the model gives each within rounding, the larger shares
-    /// counting for more. None along an axis no pane is measured on.
+    /// A tab's columns and rows, chrome included, as [`extent`] tells
+    /// them; None along an axis no line across the tab crosses only
+    /// measured panes.
     pub extent: [Option<f64>; 2],
 }
 
 /// The [`Measure`] of the window `doc`, its terminals `listed` and its
-/// `status` tell; the shown tab's pane `skip`, if any, not measured by,
-/// as a zoomed pane, which has the whole tab's cells. Or why the doc
-/// can't be read.
+/// `status` tell, the shown tab zoomed on pane `zoomed`, if any: that pane
+/// fills the tab, its cells the whole tab's, and the others' cells, hidden,
+/// are stale, so it alone is measured, and the chrome is the measured, as
+/// one pane can't solve it. `report_layout` doesn't know the zoom. Or why
+/// the doc can't be read.
 pub(super) fn measure_window(
     doc: &Value,
     listed: &[Terminal],
     status: &Value,
-    skip: Option<&str>,
+    zoomed: Option<&str>,
 ) -> Result<Measure, String> {
     let (tabs, _, _) = tabs_of(doc)?;
-    Ok(measure(doc, &tabs, listed, Some(status), skip))
+    Ok(measure(doc, &tabs, listed, Some(status), zoomed))
 }
 
 /// The [`Measure`] of the window `tabs` are of, by the shown tab's panes
-/// whose rects can be told, but for `skip`.
+/// whose rects can be told, or its pane `zoomed` alone.
 fn measure(
     doc: &Value,
     tabs: &[Tab],
     listed: &[Terminal],
     status: Option<&Value>,
-    skip: Option<&str>,
+    zoomed: Option<&str>,
 ) -> Measure {
     let shown = status.and_then(|s| s["tab"].as_str());
-    let shown: Vec<Pane> = tabs
+    let all: Vec<Pane> = tabs
         .iter()
         .filter(|t| Some(t.id) == shown)
         .flat_map(|t| &t.panes)
-        .filter(|p| !p.px && !p.approx && !doubled(doc, p) && Some(p.id) != skip)
         .copied()
         .collect();
+    let all = match zoomed.and_then(|z| all.iter().find(|p| p.id == z)) {
+        Some(p) => vec![Pane {
+            rect: [0.0, 0.0, 1.0, 1.0],
+            ..*p
+        }],
+        None => all,
+    };
+    let measured = |p: &Pane| !p.px && !p.approx && !doubled(doc, p);
+    let shown: Vec<Pane> = all.iter().filter(|p| measured(p)).copied().collect();
     let font = status
         .and_then(|s| s["font_size"].as_f64())
         .filter(|f| FONTS.contains(f))
         .unwrap_or(MEASURED_FONT);
     let chrome = chrome(&shown, listed, font);
     let extent = [0, 1].map(|axis| {
-        let (mut outer, mut share) = (0.0, 0.0);
-        for (p, cells) in shown.iter().filter_map(|p| Some((p, cells_of(p, listed)?))) {
-            if cells[axis] > 0 {
-                outer += f64::from(cells[axis] + chrome[axis]);
-                share += p.rect[2 + axis];
-            }
-        }
-        (share > 0.0).then(|| outer / share)
+        let cells = |p: &Pane| {
+            let cells = cells_of(p, listed).filter(|_| measured(p))?[axis];
+            (cells > 0).then_some(cells)
+        };
+        extent(&all, axis, cells, chrome[axis])
     });
     Measure { chrome, extent }
+}
+
+/// A tab's outer extent along `axis`, of its panes `panes`: the cells, as
+/// `cells` gives them, and `chrome` of each pane one line across the tab
+/// crosses, a line through the middle of a pane. However the panes are
+/// split, such a line crosses the whole tab, so the sum holds whatever
+/// weights the cells were laid out by: cells read just after a
+/// `layout.resize`, laid out by the weights before it, tell it as well.
+/// Of the lines whose panes all have cells, the one crossing the fewest,
+/// with the least chrome to be off by; None if there's none.
+fn extent(
+    panes: &[Pane],
+    axis: usize,
+    cells: impl Fn(&Pane) -> Option<u32>,
+    chrome: u32,
+) -> Option<f64> {
+    let across = 1 - axis;
+    let mut best: Option<(usize, f64)> = None;
+    for line in panes
+        .iter()
+        .map(|p| p.rect[across] + p.rect[2 + across] / 2.0)
+    {
+        let crossed: Vec<&Pane> = panes
+            .iter()
+            .filter(|p| p.rect[across] <= line && line < p.rect[across] + p.rect[2 + across])
+            .collect();
+        let sum: Option<f64> = crossed
+            .iter()
+            .map(|p| cells(p).map(|c| f64::from(c + chrome)))
+            .sum();
+        if let Some(sum) = sum
+            && best.is_none_or(|(n, _)| crossed.len() < n)
+        {
+            best = Some((crossed.len(), sum));
+        }
+    }
+    best.map(|(_, sum)| sum)
 }
 
 /// The cols and rows of pane `p`'s terminal, if `listed` has it live.
@@ -440,8 +483,8 @@ fn walk<'a>(
 }
 
 /// A node's weight, from its `size`: 1 with none; None if sized in
-/// pixels.
-fn weight(size: &Value) -> Result<Option<f64>, String> {
+/// pixels; or why it can't be read, a weight not above 0.
+pub(super) fn weight(size: &Value) -> Result<Option<f64>, String> {
     if size.is_null() {
         return Ok(Some(1.0));
     }

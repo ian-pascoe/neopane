@@ -319,6 +319,11 @@ mod tests {
             resized("w1:p4", "w1:p5", "right", "500").0,
             set(&[false, true], 43, 44)
         );
+        // past herdr's most cells: its most
+        assert_eq!(
+            resized("w1:p4", "w1:p5", "right", "70000").0,
+            set(&[false, true], 43, 44)
+        );
     }
 
     #[test]
