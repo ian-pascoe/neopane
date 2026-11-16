@@ -18,11 +18,19 @@ treat them as opaque strings).
 
 ## `core/*.jsonl`: JSON-RPC exchanges with the core
 
-One connection each, one JSON value per line, in wire order:
-`{"send": <request>}` for a line written to the socket and `{"recv": <reply or
-notification>}` for a line read from it. Every connection starts with
-`hello`. A fake core can replay a file by answering each `send` with the
-`recv` lines that follow it, up to the next `send`.
+One JSON value per line, in wire order: `{"send": <request>}` for a line
+written to the socket and `{"recv": <reply or notification>}` for a line read
+from it. Every file starts with a `hello`. Most are a whole connection, ids
+from 1. Ten are slices of a longer connection, cut at a `hello` sent again
+mid-connection (the core answers a repeated `hello` as the first), so their
+ids start higher: `nested-doc.get` (7), `nested-terminal.list` (5),
+`terminal.get-finished` (8), `terminal.get-not-found` (6),
+`terminal.keep-finished` (6), `terminal.keep-missing-param` (8),
+`terminal.keep-not-found` (4), `terminal.kill-not-found` (4),
+`doc.get-unwritten` (10) and `unknown-method` (12). A fake core can replay a
+file by answering each `send` with the `recv` lines that follow it, up to the
+next `send`, with the reply's `id` set to the request's own `id`: echo the
+ids the client sends, don't count them from 1.
 
 The **nested tab** is `[t1 | (t2 / t3)]` (the design's `[t1 | (t9 / t10)]`):
 a row holding `t1` (weight 0.5) and a column (weight 0.5) of `t2` over `t3`,
