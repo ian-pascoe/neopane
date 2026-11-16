@@ -95,7 +95,9 @@ impl BuiltinTable {
                 Capability::FocusDirection,
                 Capability::OpenTabPage,
             ],
-            BuiltinTable::HerdrApp => &[Capability::Find, Capability::Close],
+            BuiltinTable::HerdrApp => {
+                &[Capability::Find, Capability::Close, Capability::OpenBeside]
+            }
         }
     }
 
@@ -288,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn herdr_app_runs_the_binary_for_find_and_close_and_reaches_by_its_core_and_home() {
+    fn herdr_app_runs_the_binary_for_its_capabilities_and_reaches_by_its_core_and_home() {
         let t = BuiltinTable::HerdrApp.table();
         assert_eq!(t.name, "herdr-app");
         assert_eq!(BuiltinTable::HerdrApp.lua_name(), "herdr_app");
@@ -312,6 +314,10 @@ mod tests {
                 (
                     "close",
                     "{exe} provider builtin herdr-app close".to_string()
+                ),
+                (
+                    "open_beside",
+                    "{exe} provider builtin herdr-app open_beside".to_string()
                 ),
             ]
         );

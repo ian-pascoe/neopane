@@ -138,6 +138,12 @@ impl Window {
         }
     }
 
+    /// `herdr-app do COMMAND ARGS`, a window act, its arguments one JSON
+    /// object: its answer, killed at `due`.
+    pub(super) fn act(&self, command: &str, args: &Value, due: Instant) -> Result<Value, Ran> {
+        self.run(&["do", command, &args.to_string()], due)
+    }
+
     /// `herdr-app status`: the window answers, with what it shows.
     pub(super) fn status(&self, due: Instant) -> Result<Value, Ran> {
         self.run(&["status"], due)
@@ -240,6 +246,24 @@ mod tests {
             Ran::Unreadable(
                 "herdr-app ls failed (exit status: 64): fake herdr-app: no run for: ls".into()
             )
+        );
+    }
+
+    #[test]
+    fn an_act_is_do_with_its_arguments_as_one_json_object() {
+        let mut swap = recorded_run("do-pane.swap");
+        swap.args = vec![
+            "do".into(),
+            "pane.swap".into(),
+            r#"{"pane":"p4c","direction":"up"}"#.into(),
+        ];
+        let app = FakeApp::new(&[swap]);
+        let args = serde_json::json!({ "pane": "p4c", "direction": "up" });
+        let done = Window::faked(&app.program()).act("pane.swap", &args, soon());
+        assert_eq!(done, Ok(serde_json::json!({ "ok": true })));
+        assert_eq!(
+            app.asked(),
+            [r#"do pane.swap {"pane":"p4c","direction":"up"}"#]
         );
     }
 

@@ -24,6 +24,19 @@ pub(super) fn panes_of(doc: &Value, terminal: &str) -> Vec<String> {
     found
 }
 
+/// The one block of `doc` showing terminal `terminal`: its Herdr app pane;
+/// or why there's none, as when it shows in none or several.
+pub(super) fn pane_of(doc: &Value, terminal: &str) -> Result<String, String> {
+    match panes_of(doc, terminal).as_slice() {
+        [] => Err(format!("{terminal} has no Herdr app pane")),
+        [one] => Ok(one.clone()),
+        several => Err(format!(
+            "{terminal} shows in {} Herdr app panes",
+            several.len()
+        )),
+    }
+}
+
 /// Calls `f` on every block under `node`, `node` too.
 fn walk(node: &Value, f: &mut impl FnMut(&Value)) {
     if node["type"] == "block" {
@@ -57,5 +70,24 @@ mod tests {
         );
         assert!(panes_of(&nested, "t9").is_empty());
         assert!(panes_of(&Value::Null, "t1").is_empty());
+    }
+
+    #[test]
+    fn a_terminal_has_one_pane_else_says_why_not() {
+        let nested = doc("nested-doc.get");
+        assert_eq!(
+            pane_of(&nested, "t2"),
+            Ok("p7b3398d57b6dd529d0f978c04b35c687".into())
+        );
+        assert_eq!(
+            pane_of(&nested, "t9"),
+            Err("t9 has no Herdr app pane".into())
+        );
+        let twice: Value =
+            serde_json::from_str(&nested.to_string().replace("\"t2\"", "\"t3\"")).unwrap();
+        assert_eq!(
+            pane_of(&twice, "t3"),
+            Err("t3 shows in 2 Herdr app panes".into())
+        );
     }
 }

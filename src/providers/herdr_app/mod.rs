@@ -7,7 +7,8 @@
 //! the only map from a terminal to its Herdr app pane.
 //!
 //! - `core.rs`: the hc core's JSON-RPC socket, for reading: `hello`,
-//!   `terminal.get`, `terminal.kill`, `doc.get herdr-app`.
+//!   `terminal.get`, `terminal.kill`, the core's `terminal.keep`, `doc.get
+//!   herdr-app`.
 //! - `window.rs`: the `herdr-app` command, for the window: found on `PATH`,
 //!   else at `~/.local/bin/herdr-app`.
 //! - `doc.rs`: the blocks of the core's doc, by terminal.
@@ -16,15 +17,19 @@
 //!   the doc showing it; `herdr-app status` answering. A remote terminal,
 //!   `machine/t7`, is refused. `inside.herdr_app` runs the same proof.
 //! - `close`: `terminal.kill`, done for a terminal finished or not found.
+//! - `open_beside` (`beside.rs`, ADR 0020): `pane.split` beside the
+//!   origin's pane, running the attach, keep off, and `pane.swap` for left
+//!   and up.
 //! - `check.rs`, no capability: what `provider check`'s herdr-app section
 //!   shows: both versions, and whether the core and window answer.
 //!
 //! Each capability gives the line it prints, or why it failed or is
 //! unsupported; `run` prints it, or the failure as one `herdr-app
 //! CAPABILITY: why` line on stderr, and gives the exit status: 1, or 69
-//! for a core lacking what the capability needs, naming it and both
-//! versions.
+//! where the core or `herdr-app` lacks what the capability needs, naming
+//! it and both versions, or there is no `herdr-app`.
 
+mod beside;
 pub(crate) mod check;
 mod core;
 mod doc;
@@ -47,7 +52,8 @@ use crate::config::Capability;
 pub(super) enum Failure {
     /// It failed: exit 1.
     Failed(String),
-    /// The core lacks what it needs: exit 69.
+    /// The core or `herdr-app` lacks what it needs, or there is no
+    /// `herdr-app`: exit 69.
     Unsupported(String),
 }
 
@@ -64,6 +70,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
     let done = match cap {
         Capability::Find => proof::find(given).map(Some).map_err(Failure::Failed),
         Capability::Close => close(given).map(|()| None),
+        Capability::OpenBeside => beside::open_beside(given).map(Some),
         _ => return UNSUPPORTED,
     };
     let (why, code) = match done {
@@ -87,11 +94,7 @@ fn close(given: &Given) -> Result<(), Failure> {
 
 /// `close`, its requests, and a version for a message, having `time`.
 fn close_within(given: &Given, time: Duration) -> Result<(), Failure> {
-    let terminal = given.var("terminal").unwrap_or_default();
-    if terminal.is_empty() {
-        return Err(Failure::Failed("TERMINAL isn't set".into()));
-    }
-    let terminal = String::from_utf8_lossy(&terminal).into_owned();
+    let terminal = input(given, "terminal")?;
     let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Close), || Window::of(given))?;
     match core.kill(&terminal) {
@@ -106,8 +109,17 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
     match cap {
         Capability::Find => &["terminal.get", "doc.get"],
         Capability::Close => &["terminal.kill"],
+        Capability::OpenBeside => &["doc.get", "terminal.keep", "terminal.kill"],
         _ => &[],
     }
+}
+
+/// Input `name`, which must be set, as text.
+fn input(given: &Given, name: &str) -> Result<String, String> {
+    let shown = name.to_ascii_uppercase();
+    let value = given.var(name).filter(|v| !v.is_empty());
+    let value = value.ok_or_else(|| format!("{shown} isn't set"))?;
+    String::from_utf8(value).map_err(|_| format!("{shown} isn't UTF-8"))
 }
 
 /// Whether `core` has `methods` in the generation the built-in speaks,

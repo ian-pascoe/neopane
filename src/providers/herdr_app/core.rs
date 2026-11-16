@@ -1,7 +1,8 @@
 //! The hc core's JSON-RPC socket, as the built-in speaks it: JSON-RPC 2.0,
 //! one JSON value a line, over the Unix socket `HC_TERMINAL_SOCKET` names,
 //! held open for every request of one capability, which share one
-//! deadline. A connection starts with `hello`, whose `generation`,
+//! deadline; a cleanup after it ran out has a connection of its own
+//! ([`Core::again`]). A connection starts with `hello`, whose `generation`,
 //! `version` and `methods` are kept: the built-in speaks generation 1, and
 //! needs only the methods it calls. A reply's fields the built-in doesn't
 //! read are ignored, as are lines that answer no request of its own, such
@@ -212,6 +213,19 @@ impl Core {
         Terminal::of(&self.call("terminal.kill", json!({ "terminal": id }))?)
     }
 
+    /// The core's `terminal.keep` of terminal `id`: whether the core gives
+    /// it a shell again after it's lost. Not `herdr-app`'s `terminal.keep
+    /// {terminal, place}`, which shows a terminal in the window.
+    pub(super) fn keep(&mut self, id: &str, keep: bool) -> Result<Terminal, Refused> {
+        Terminal::of(&self.call("terminal.keep", json!({ "terminal": id, "keep": keep }))?)
+    }
+
+    /// The same core on a new connection, its requests having `time` from
+    /// now: for cleaning up after this one's time ran out.
+    pub(super) fn again(&self, time: Duration) -> Result<Core, String> {
+        Core::connect(&self.socket, time)
+    }
+
     /// The Herdr app's doc, `doc.get {name: "herdr-app"}`'s `value`:
     /// null if never written.
     pub(super) fn doc(&mut self) -> Result<Value, Refused> {
@@ -369,6 +383,32 @@ mod tests {
         let killed = core.kill("t10").unwrap();
         assert_eq!(killed.address, "t10");
         assert!(!killed.live);
+    }
+
+    #[test]
+    fn keep_sets_the_cores_keep_and_answers_the_record() {
+        let fake = FakeCore::replaying(&["terminal.keep", "terminal.keep-not-found"]);
+        let mut core = Core::connect(&fake.path(), TIME).unwrap();
+        assert_eq!(core.keep("t3", false).unwrap().address, "t3");
+        assert_eq!(
+            fake.asked()[1]["params"],
+            json!({ "terminal": "t3", "keep": false })
+        );
+        let refused = core.keep("t99", false).unwrap_err();
+        assert_eq!(refused.kind.as_deref(), Some("not_found"));
+    }
+
+    #[test]
+    fn again_is_a_new_connection_with_time_of_its_own() {
+        let fake = FakeCore::serve(vec![
+            recorded_one("hello", "hello"),
+            Exchange::silent("terminal.get", json!({ "terminal": "t1" })),
+        ]);
+        let mut core = Core::connect(&fake.path(), Duration::from_millis(200)).unwrap();
+        assert!(core.terminal("t1").is_err());
+        let again = core.again(TIME).unwrap();
+        assert_eq!(again.hello().version, "0.1.21");
+        assert_eq!(fake.methods(), ["hello", "terminal.get", "hello"]);
     }
 
     #[test]

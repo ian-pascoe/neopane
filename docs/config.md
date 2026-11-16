@@ -661,10 +661,23 @@ where an installed Herdr.app keeps it. No version is required: a method a
 capability needs and the core lacks, it names, with both versions, and does
 without (exit 69); `find` refuses instead.
 
-For now its table has only `find`, and `close`, which kills the hc
-terminal: each Neovim window is drawn in the pane it came from, as with no
-pane provider. Panes of their own, focus, resizing and tab pages are to
-come. A terminal of a remote space (`machine/t7`) is refused.
+Each Neovim window gets a Herdr app pane of its own, split beside the pane
+it came from, running its attach with no shell (ADR 0020). Its limits, for
+now:
+
+- The app splits only right or down, halving the pane split: a window
+  opened on the left or above, as `:vsplit` and `:split` open it, is split
+  right or below, then swapped with the pane it came from. Nothing sets
+  sizes yet, so three windows side by side take a half and two quarters.
+- The new pane takes the window's focus, as the new window does in Neovim.
+- The hc core's keep is turned off for each pane it opens, so a pane whose
+  attach was killed closes rather than coming back as a shell, and doesn't
+  come back after the core restarts; your own terminals keep theirs.
+- A split into a zoomed tab unzooms it.
+- `close` kills the hc terminal. Focus, layout reports, resizing and tab
+  pages are to come: until then a tab page's windows are drawn in its
+  pane.
+- A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup
 
