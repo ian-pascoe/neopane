@@ -4,30 +4,27 @@
 //! it. Weights share the panes' outer extent, chrome included, which the
 //! core's cols and rows leave out.
 //!
-//! - `resize`: the doc's lowest split holding `TERMINAL`'s pane and
-//!   `ORIGIN`'s, which must be split along `DIRECTION`, gets weights on
-//!   the pair of its children holding each that give the terminal's part
-//!   `SIZE` cells and the chrome of each pane along it, out of what the
-//!   pair has together, measured from `terminal.list`'s cells and the
-//!   chrome. So `ORIGIN`'s part comes short of Neovim's by a chrome per
-//!   pane along it, as herdr's frame does. The pair's ratio is set: in a
-//!   split of two, by one `layout.resize` of the terminal's part against
-//!   the other's; in one of three or more, by one of each, keeping their
-//!   sum, so the other children keep their room. A part sized in pixels
-//!   exits 1, resizing nothing. The cells are trusted only in the tab
-//!   `herdr-app status` says is shown, unzoomed as the app's `view.json`
-//!   says: a hidden tab's may be the core's 120×40, and a zoomed tab's
-//!   zoomed pane has the whole tab's; elsewhere it exits 1, setting
-//!   nothing.
+//! - `resize`, in `report_layout`'s model (`layout.rs`): a pane's outer
+//!   extent is its share of its tab, from the weights, times the tab's,
+//!   and its content that less the chrome. The doc's lowest split holding
+//!   `TERMINAL`'s pane and `ORIGIN`'s, which must be split along
+//!   `DIRECTION`, gets weights on the pair of its children holding each
+//!   that give the terminal's part `SIZE` cells and the chrome of each
+//!   pane along it, out of the pair's outer extent: its share of the tab
+//!   times the tab's extent, which [`measure_window`] tells from the shown
+//!   tab's cells, as every tab of the window has the same room, and with
+//!   the chrome as `report_layout` takes it. So `ORIGIN`'s part comes
+//!   short of Neovim's by about a chrome per pane along it, as herdr's
+//!   frame does. The pair's ratio is set: in a split of two, by one
+//!   `layout.resize` of the terminal's part against the other's; in one
+//!   of three or more, by one of each, keeping their sum, so the other
+//!   children keep their room. A part sized in pixels, or one beside a
+//!   node it is under, exits 1, resizing nothing: its share can't be
+//!   told. A zoomed pane of the shown tab, as the app's `view.json` says,
+//!   has the whole tab's cells, so isn't measured by.
 //! - `open_beside`, after its split ([`share_by`]): the new pane gets
 //!   `RATIO` of the weight it and the origin's pane have, chrome ignored.
-//!
-//! The chrome, in cells, is [`chrome`]'s: measured at font size 14 and
-//! zoom 1, and scaled by 14 ÷ the window's font size, as `herdr-app
-//! status` says it, a scaling never measured; the app's zoom (UI scale)
-//! is left out, unmeasured too.
 
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -35,25 +32,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::core::{Core, UNREADABLE};
+use super::core::Core;
 use super::doc::pane_of;
+use super::layout::measure_window;
 use super::window::Window;
-use super::{Failure, methods, needs, refused};
+use super::{Failure, act, methods, needs, window_of};
 use crate::config::Capability;
 use crate::providers::builtin::Given;
 
 /// What `resize` has, of its 2 s.
 const RESIZE_TIME: Duration = Duration::from_millis(1500);
-
-/// A pane's chrome, its border, two-row header, padding and gap, in cells
-/// at [`CHROME_FONT`] and zoom 1, as measured for SPI-1214.
-const CHROME_COLS: f64 = 5.0;
-const CHROME_ROWS: f64 = 4.0;
-/// The font size the chrome was measured at.
-const CHROME_FONT: f64 = 14.0;
-/// The font sizes taken as the window's; any other is taken as
-/// [`CHROME_FONT`].
-const FONT_SIZES: std::ops::RangeInclusive<f64> = 4.0..=200.0;
 
 /// The places a weight keeps: the app reads it as an f32.
 const WEIGHT_SCALE: f64 = 1e6;
@@ -76,12 +64,11 @@ fn resize_within(given: &Given, time: Duration) -> Result<(), Failure> {
         )));
     }
     // found first: no herdr-app costs no request of the core
-    let window = Window::of(given).map_err(Failure::Unsupported)?;
+    let window = window_of(given)?;
     let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Resize), || Ok(window.clone()))?;
-    let due = core.due();
 
-    let doc = core.doc().map_err(String::from)?;
+    let doc = core.doc()?;
     let pair = Pair::of(&doc, &terminal, &origin)?;
     if pair.split["type"] != axis.kind() {
         return Err(Failure::Failed(format!(
@@ -90,39 +77,30 @@ fn resize_within(given: &Given, time: Duration) -> Result<(), Failure> {
         )));
     }
     // sized in pixels: nothing to ask the core or the window for
-    pair.weights()?;
+    let tab_share = pair.share_of_tab(axis)?;
     let status = window
-        .status(due)
-        .map_err(|ran| format!("can't tell which Herdr app tab is shown: {ran}"))?;
-    let tab = pair.tab;
-    if status["tab"] != tab {
-        return Err(Failure::Failed(format!(
-            "{terminal}'s Herdr app tab {tab} isn't shown, so its cells can't be trusted"
-        )));
-    }
-    if let Some(pane) = zoomed(given, tab)? {
-        return Err(Failure::Failed(format!(
-            "{terminal}'s Herdr app tab {tab} is zoomed on {pane}, so its cells can't be trusted"
-        )));
-    }
-    let cells = cells(&mut core)?;
-    let measure = Measure {
-        axis,
-        cells: &cells,
-        // a status without one: the font the chrome was measured at
-        chrome: chrome(status["font_size"].as_f64()),
+        .status(core.due())
+        .map_err(|ran| format!("can't measure the Herdr app window: {ran}"))?;
+    let listed = core.list()?;
+    let skip = match status["tab"].as_str() {
+        Some(shown) => zoomed(given, shown)?,
+        None => None,
     };
-    let share = measure.share(&pair, size).map_err(|why| match why {
-        Unshared::Unmeasured => {
-            format!("{terminal} and {origin} have no cells in the hc core to measure them by")
-        }
-        Unshared::NoRoom => format!("{terminal} and {origin} have no room to share"),
+    let measure = measure_window(&doc, &listed, &status, skip.as_deref())?;
+    let extent = measure.extent[axis.index()].ok_or_else(|| {
+        "the shown Herdr app tab has no cells to measure the window by".to_string()
     })?;
+    let chrome = f64::from(measure.chrome[axis.index()]);
+    let share = pair
+        .fit(axis, extent * tab_share, chrome, size)
+        .ok_or_else(|| format!("{terminal} and {origin} have no room to share"))?;
     for (id, weight) in pair.settings(share)? {
-        let args = json!({ "id": id, "weight": weight });
-        window
-            .act("layout.resize", &args, due)
-            .map_err(|ran| refused(ran, &core, &window))?;
+        act(
+            &window,
+            &core,
+            "layout.resize",
+            &json!({ "id": id, "weight": weight }),
+        )?;
     }
     Ok(())
 }
@@ -171,36 +149,6 @@ pub(super) fn share_by(
     Ok(())
 }
 
-/// The window's chrome around each pane, in cells, `(cols, rows)`, at
-/// font size `font_size`: measured at 14 and zoom 1, it is pixels, so
-/// taken as fewer cells as the font grows, 14 ÷ `font_size`, a scaling
-/// never measured. A font size unknown, or outside 4 to 200, is taken as
-/// 14.
-pub(super) fn chrome(font_size: Option<f64>) -> (f64, f64) {
-    let font = font_size
-        .filter(|f| FONT_SIZES.contains(f))
-        .unwrap_or(CHROME_FONT);
-    let scale = CHROME_FONT / font;
-    (CHROME_COLS * scale, CHROME_ROWS * scale)
-}
-
-/// The cols and rows of each live terminal, by address, as
-/// `terminal.list` has them.
-fn cells(core: &mut Core) -> Result<HashMap<String, (f64, f64)>, String> {
-    let list = core.call("terminal.list", json!({}))?;
-    let terminals = list["terminals"].as_array().ok_or(UNREADABLE)?;
-    Ok(terminals
-        .iter()
-        .filter_map(|t| {
-            let address = t["address"].as_str()?;
-            Some((
-                address.to_string(),
-                (t["cols"].as_f64()?, t["rows"].as_f64()?),
-            ))
-        })
-        .collect())
-}
-
 /// The way a split lays out its children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Axis {
@@ -239,11 +187,11 @@ impl Axis {
         }
     }
 
-    /// The `(cols, rows)` of `cells` along it.
-    fn of_cells(self, (cols, rows): (f64, f64)) -> f64 {
+    /// Its place in a `[cols, rows]`.
+    fn index(self) -> usize {
         match self {
-            Axis::Row => cols,
-            Axis::Column => rows,
+            Axis::Row => 0,
+            Axis::Column => 1,
         }
     }
 }
@@ -263,11 +211,22 @@ fn size_of(node: &Value) -> Size {
     Size::Weight(weight.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(1.0))
 }
 
+/// Node `node`'s weight, or why it has none: it is sized in pixels.
+fn weight_of(node: &Value) -> Result<f64, String> {
+    match size_of(node) {
+        Size::Weight(w) => Ok(w),
+        Size::Px => Err(format!(
+            "Herdr app node {} is sized in pixels",
+            node["id"].as_str().unwrap_or("?")
+        )),
+    }
+}
+
 /// The lowest split of the doc holding two panes, and its children
 /// holding each: the terminal's part and the origin's.
 struct Pair<'d> {
-    /// The id of the tab it's in.
-    tab: &'d str,
+    /// The nodes from its tab's root down to the split, both included.
+    path: Vec<&'d Value>,
     split: &'d Value,
     part: &'d Value,
     other: &'d Value,
@@ -300,7 +259,7 @@ impl<'d> Pair<'d> {
                 return Err(format!("{terminal} and {origin} share a Herdr app pane"));
             };
             return Ok(Pair {
-                tab: tab["id"].as_str().unwrap_or_default(),
+                path: to_pane[..depth].to_vec(),
                 split: to_pane[depth - 1],
                 part,
                 other,
@@ -313,14 +272,48 @@ impl<'d> Pair<'d> {
 
     /// The weights of its part and the other, or why they have none.
     fn weights(&self) -> Result<(f64, f64), String> {
-        let weight = |node: &Value| match size_of(node) {
-            Size::Weight(w) => Ok(w),
-            Size::Px => Err(format!(
-                "Herdr app node {} is sized in pixels",
-                node["id"].as_str().unwrap_or("?")
-            )),
-        };
-        Ok((weight(self.part)?, weight(self.other)?))
+        Ok((weight_of(self.part)?, weight_of(self.other)?))
+    }
+
+    /// Its outer share of its tab along `axis`, by the weights of every
+    /// split along it over the pair, the pair's split too; or why it
+    /// can't be told: a node sized in pixels among them, whose room their
+    /// weights don't share.
+    fn share_of_tab(&self, axis: Axis) -> Result<f64, String> {
+        let (part, other) = self.weights()?;
+        let mut share = 1.0;
+        let held = self.path.iter().skip(1).copied().chain([self.part]);
+        for (node, child) in self.path.iter().zip(held) {
+            if node["type"] != axis.kind() {
+                continue;
+            }
+            let mut total = 0.0;
+            for c in node["children"].as_array().into_iter().flatten() {
+                total += weight_of(c)?;
+            }
+            let held = if std::ptr::eq(*node, self.split) {
+                part + other
+            } else {
+                weight_of(child)?
+            };
+            share *= held / total;
+        }
+        Ok(share)
+    }
+
+    /// The share of the pair's weight its part takes to have `size` cells
+    /// and `chrome` for each pane along `axis`, out of the pair's `outer`
+    /// extent, held to leave each part its chrome and a cell; None if
+    /// there's no room for that.
+    fn fit(&self, axis: Axis, outer: f64, chrome: f64, size: u32) -> Option<f64> {
+        let chrome = |node| chrome * panes_along(node, axis) as f64;
+        let (part_chrome, other_chrome) = (chrome(self.part), chrome(self.other));
+        let (least, most) = (part_chrome + 1.0, outer - other_chrome - 1.0);
+        if least > most || most.is_nan() {
+            return None;
+        }
+        let wanted = f64::from(size) + part_chrome;
+        Some(wanted.clamp(least, most) / outer)
     }
 
     /// The `layout.resize`s that give its part `share` of the weight it
@@ -373,86 +366,6 @@ fn path_to<'d>(node: &'d Value, pane: &str) -> Option<Vec<&'d Value>> {
     None
 }
 
-/// Why a pair has no share to give.
-#[derive(Debug)]
-enum Unshared {
-    /// No pane of a part has cells to measure it by.
-    Unmeasured,
-    /// Too little room for both parts' chrome and a cell each.
-    NoRoom,
-}
-
-/// Outer extents along an axis, in cells: a pane's cells and its chrome.
-struct Measure<'a> {
-    axis: Axis,
-    cells: &'a HashMap<String, (f64, f64)>,
-    /// A pane's chrome, `(cols, rows)`.
-    chrome: (f64, f64),
-}
-
-impl Measure<'_> {
-    /// The share of the pair's outer extent that gives its part `size`
-    /// cells and the chrome of each pane along it, held to leave each
-    /// part its chrome and a cell; or why there's none.
-    fn share(&self, pair: &Pair, size: u32) -> Result<f64, Unshared> {
-        let total = sum_of([pair.part, pair.other].map(|n| (self.outer(n), size_of(n))))
-            .ok_or(Unshared::Unmeasured)?;
-        let chrome = |node| self.axis.of_cells(self.chrome) * panes_along(node, self.axis) as f64;
-        let (part_chrome, other_chrome) = (chrome(pair.part), chrome(pair.other));
-        let (least, most) = (part_chrome + 1.0, total - other_chrome - 1.0);
-        if least > most {
-            return Err(Unshared::NoRoom);
-        }
-        let wanted = f64::from(size) + part_chrome;
-        Ok(wanted.clamp(least, most) / total)
-    }
-
-    /// `node`'s outer extent: a pane's cells and chrome; a split's sum
-    /// along the axis, else its widest child. None where it can't be
-    /// told: a block with no live terminal, as a mod's, counts by the
-    /// weight of its measured siblings.
-    fn outer(&self, node: &Value) -> Option<f64> {
-        if node["type"] == "block" {
-            let cells = self.cells.get(node["content"]["terminal"].as_str()?)?;
-            return Some(self.axis.of_cells(*cells) + self.axis.of_cells(self.chrome));
-        }
-        let children = node["children"].as_array()?;
-        if node["type"] == self.axis.kind() {
-            sum_of(children.iter().map(|c| (self.outer(c), size_of(c))))
-        } else {
-            children
-                .iter()
-                .filter_map(|c| self.outer(c))
-                .reduce(f64::max)
-        }
-    }
-}
-
-/// The extent of siblings along their split, each measured or not, and
-/// sized: those not measured take what their weight gives them beside the
-/// measured; None if one is sized in pixels, or none is measured.
-fn sum_of(items: impl IntoIterator<Item = (Option<f64>, Size)>) -> Option<f64> {
-    let (mut fixed, mut measured, mut weighed, mut unweighed) = (0.0, 0.0, 0.0, 0.0);
-    for item in items {
-        match item {
-            (Some(outer), Size::Px) => fixed += outer,
-            (Some(outer), Size::Weight(w)) => {
-                measured += outer;
-                weighed += w;
-            }
-            (None, Size::Weight(w)) => unweighed += w,
-            (None, Size::Px) => return None,
-        }
-    }
-    if unweighed > 0.0 {
-        if weighed <= 0.0 {
-            return None;
-        }
-        measured += measured / weighed * unweighed;
-    }
-    (fixed + measured > 0.0).then_some(fixed + measured)
-}
-
 /// The panes along `axis` in `node`, each with its chrome: one for a
 /// pane, a split's sum along it, else its most of a child.
 fn panes_along(node: &Value, axis: Axis) -> usize {
@@ -475,16 +388,17 @@ mod tests {
     /// fakes run shell scripts on a loaded machine.
     const TIME: Duration = Duration::from_secs(5);
 
-    /// The nested tab's panes: `t1`'s and `t3`'s.
+    /// The nested tab's panes: `t1`'s, `t2`'s and `t3`'s.
     const P1: &str = "pf7e3d563947903ed7a8c93ee0ac58181";
+    const P2: &str = "p7b3398d57b6dd529d0f978c04b35c687";
     const P3: &str = "p4c229a9b57964c201d7ab577ccf4a2ea";
     /// The shapes tab's: `t4`'s, `t5`'s, and the column holding `t6`.
     const P4: &str = "pbdfcba84288586794b7f1b61d52a8b4a";
     const P5: &str = "p6167ba561752977dbf43138259612244";
     const S6: &str = "s97cb6df4a068ddeecf30d45c2c51a536";
-    /// The shapes tab's id; `status` shows the nested tab.
-    const SHAPES_TAB: &str = "tb647b2d25c9734a2636b21f8d1a7c8c1c";
+    /// The nested tab, which `status` shows, and the shapes tab.
     const NESTED_TAB: &str = "tb14c28a7769ba1044103fd9584cc818f0";
+    const SHAPES_TAB: &str = "tb647b2d25c9734a2636b21f8d1a7c8c1c";
 
     /// A recorded `layout.resize`, answering `{"id":ID,"weight":WEIGHT}`.
     fn resized(id: &str, weight: &str) -> Run {
@@ -497,15 +411,19 @@ mod tests {
         run
     }
 
-    /// The nested tab `[t1@0.5 | (t2 / t3)@0.5]`, its cells: 39×52,
-    /// 39×24, 39×24.
+    fn resized_line(id: &str, weight: &str) -> String {
+        format!(r#"do layout.resize {{"id":"{id}","weight":{weight}}}"#)
+    }
+
+    /// The nested tab `[t1@0.5 | (t2 / t3)@0.5]`, shown, its cells 39×52,
+    /// 39×24, 39×24: the chrome 5 by 4, so a tab is 88 by 56, outer.
     fn nested() -> FakeCore {
         FakeCore::replaying(&["nested-doc.get", "nested-terminal.list"])
     }
 
-    /// The shapes tab `[t4@0.5 | t5@0.25 | (t6 / t7@0.5 / [t8 | t9]@0.5)@0.25]`
-    /// beside the nested one, their cells: `t4` 38×52, `t5` 17×52, `t6`
-    /// 17×24, `t7` 17×10, `t8` and `t9` 6×10.
+    /// The nested tab beside the shapes tab
+    /// `[t4@0.5 | t5@0.25 | (t6 / t7@0.5 / [t8 | t9]@0.5)@0.25]`, with
+    /// every terminal's cells.
     fn shapes() -> FakeCore {
         FakeCore::replaying(&["shapes-doc-and-list"])
     }
@@ -531,6 +449,14 @@ mod tests {
         FakeCore::serve(exchanges)
     }
 
+    /// The nested core, its `terminal.list` changed by `edit`.
+    fn nested_listing(edit: impl Fn(&mut Value)) -> FakeCore {
+        let mut exchanges = recorded("nested-doc.get");
+        exchanges.push(recorded_one("nested-terminal.list", "terminal.list"));
+        edit(exchanges[2].result_mut());
+        FakeCore::serve(exchanges)
+    }
+
     /// `status`, its font size `size`.
     fn status_at(size: f64) -> Run {
         let mut run = recorded_run("status");
@@ -539,25 +465,6 @@ mod tests {
             .replace("\"font_size\": 14.0", &format!("\"font_size\": {size:?}"));
         assert!(run.stdout.contains(&format!("{size:?}")));
         run
-    }
-
-    /// `status`, showing tab `tab`.
-    fn status_on(tab: &str) -> Run {
-        let mut run = recorded_run("status");
-        run.stdout = run.stdout.replace(NESTED_TAB, tab);
-        run
-    }
-
-    /// The nested core, `edit` made to its doc and its `terminal.list`.
-    fn nested_edited(edit: impl Fn(&mut Value, &mut Value)) -> FakeCore {
-        let mut exchanges = recorded("nested-doc.get");
-        exchanges.push(recorded_one("nested-terminal.list", "terminal.list"));
-        let mut doc = exchanges[1].result_mut()["value"].take();
-        let mut list = exchanges[2].result_mut().take();
-        edit(&mut doc, &mut list);
-        exchanges[1].result_mut()["value"] = doc;
-        *exchanges[2].result_mut() = list;
-        FakeCore::serve(exchanges)
     }
 
     /// `given`, its window's home `home`.
@@ -569,8 +476,18 @@ mod tests {
         })
     }
 
-    fn resized_line(id: &str, weight: &str) -> String {
-        format!(r#"do layout.resize {{"id":"{id}","weight":{weight}}}"#)
+    fn vars<'a>(
+        terminal: &'a str,
+        origin: &'a str,
+        direction: &'a str,
+        size: &'a str,
+    ) -> [(&'static str, &'a str); 4] {
+        [
+            ("TERMINAL", terminal),
+            ("ORIGIN", origin),
+            ("DIRECTION", direction),
+            ("SIZE", size),
+        ]
     }
 
     fn resize(
@@ -581,75 +498,64 @@ mod tests {
         direction: &str,
         size: &str,
     ) -> Result<(), Failure> {
-        let given = given(
-            core,
-            app,
-            &[
-                ("TERMINAL", terminal),
-                ("ORIGIN", origin),
-                ("DIRECTION", direction),
-                ("SIZE", size),
-            ],
-        );
-        resize_within(&given, TIME)
+        let vars = vars(terminal, origin, direction, size);
+        resize_within(&given(core, app, &vars), TIME)
     }
 
     #[test]
     fn in_a_split_of_two_the_terminals_part_alone_gets_its_cells_and_chrome() {
-        // t1 left of the column: outer 39 + 5 and 39 + 5 at font 14; 30
-        // cells and 5 of chrome are 35 of 88, so t1's weight is the
-        // column's 0.5 × 35 / 53
+        // t1 and the column share the tab's 88 columns; 30 cells and 5
+        // of chrome are 35 of them, so t1's weight is the column's
+        // 0.5 × 35 / 53
         let core = nested();
         let app = FakeApp::new(&[recorded_run("status"), resized(P1, "0.330189")]);
         assert_eq!(resize(&core, &app, "t1", "t2", "left", "30"), Ok(()));
         assert_eq!(
             app.asked(),
-            [
-                "status".to_string(),
-                format!(r#"do layout.resize {{"id":"{P1}","weight":0.330189}}"#)
-            ]
+            ["status".to_string(), resized_line(P1, "0.330189")]
         );
         assert_eq!(core.methods(), ["hello", "doc.get", "terminal.list"]);
     }
 
     #[test]
-    fn in_a_split_of_more_both_parts_are_set_keeping_their_sum() {
-        // t5 right of t4, outer 43 + 22 = 65 of weight 0.75: t5 gets
-        // 35 / 65 of it, t4 30 / 65, and the column keeps its 0.25
+    fn a_hidden_tab_is_measured_by_the_shown_one_and_both_parts_keep_their_sum() {
+        // the shapes tab is hidden; the shown tab says a tab is 88 wide.
+        // t5 and t4 have 0.75 of it, 66: t5 gets 35 / 66 of their 0.75,
+        // t4 31 / 66, and the column keeps its 0.25
         let core = shapes();
         let app = FakeApp::new(&[
-            status_on(SHAPES_TAB),
-            resized(P5, "0.403846"),
-            resized(P4, "0.346154"),
+            recorded_run("status"),
+            resized(P5, "0.397727"),
+            resized(P4, "0.352273"),
         ]);
         assert_eq!(resize(&core, &app, "t5", "t4", "right", "30"), Ok(()));
         assert_eq!(
             app.asked()[1..],
-            [resized_line(P5, "0.403846"), resized_line(P4, "0.346154")]
+            [resized_line(P5, "0.397727"), resized_line(P4, "0.352273")]
         );
     }
 
     #[test]
     fn a_part_of_several_panes_along_has_the_chrome_of_each() {
-        // t6's column right of t4: 17 + 5 wide, [t8 | t9] 6 + 5 twice;
-        // two panes along it, so 20 cells want 30 of the 65
+        // t6's column right of t4: [t8 | t9] puts two panes along it, so
+        // 20 cells want 30 of the pair's 66
         let core = shapes();
         let app = FakeApp::new(&[
-            status_on(SHAPES_TAB),
-            resized(S6, "0.346154"),
-            resized(P4, "0.403846"),
+            recorded_run("status"),
+            resized(S6, "0.340909"),
+            resized(P4, "0.409091"),
         ]);
         assert_eq!(resize(&core, &app, "t6", "t4", "right", "20"), Ok(()));
         assert_eq!(
             app.asked()[1..],
-            [resized_line(S6, "0.346154"), resized_line(P4, "0.403846")]
+            [resized_line(S6, "0.340909"), resized_line(P4, "0.409091")]
         );
     }
 
     #[test]
     fn a_missing_size_is_weight_one() {
-        // t3 below t2, neither sized: rows 24 + 4 twice, so 30 rows want
-        // 34 of 56, and t3's weight is t2's 1 × 34 / 22
+        // t3 below t2, neither sized, the column the tab's 56 rows: 30
+        // rows want 34 of them, and t3's weight is t2's 1 × 34 / 22
         let core = nested();
         let app = FakeApp::new(&[recorded_run("status"), resized(P3, "1.545455")]);
         assert_eq!(resize(&core, &app, "t3", "t2", "down", "30"), Ok(()));
@@ -657,17 +563,19 @@ mod tests {
     }
 
     #[test]
-    fn the_chrome_is_scaled_by_14_over_the_font_size() {
-        // the arithmetic only: that the app's chrome scales so is
-        // unmeasured. At font 28 the chrome is 2.5 cols: t1 and the column are 41.5
-        // each, 30 cells want 32.5 of 83, and t1 gets 0.5 × 32.5 / 50.5
+    fn the_chrome_is_report_layouts() {
+        // at font 28 the measured chrome is 3 columns (2.5, rounded),
+        // which the shown tab's cells can't tell another of, its panes all
+        // half its width: a tab is 42 × 3 ÷ 1.5 = 84, 30 cells want 33,
+        // and t1 gets 0.5 × 33 / 51
         let core = nested();
-        let app = FakeApp::new(&[status_at(28.0), resized(P1, "0.321782")]);
+        let app = FakeApp::new(&[status_at(28.0), resized(P1, "0.323529")]);
         assert_eq!(resize(&core, &app, "t1", "t2", "left", "30"), Ok(()));
-        assert_eq!(app.asked()[1..], [resized_line(P1, "0.321782")]);
-        assert_eq!(chrome(Some(14.0)), (5.0, 4.0));
-        assert_eq!(chrome(Some(7.0)), (10.0, 8.0));
-        assert_eq!(chrome(None), (5.0, 4.0));
+        assert_eq!(app.asked()[1..], [resized_line(P1, "0.323529")]);
+        // its rows tell 4 over the measured 2: as at font 14
+        let core = nested();
+        let app = FakeApp::new(&[status_at(28.0), resized(P3, "1.545455")]);
+        assert_eq!(resize(&core, &app, "t3", "t2", "down", "30"), Ok(()));
     }
 
     #[test]
@@ -689,7 +597,95 @@ mod tests {
     }
 
     #[test]
-    fn a_part_sized_in_pixels_resizes_nothing() {
+    fn too_little_room_for_both_chromes_resizes_nothing() {
+        // at font 5 the chrome is 14 columns: a tab is 106, t8 and t9's
+        // row a quarter of it, 26.5, short of 15 and 15
+        let core = shapes();
+        let app = FakeApp::new(&[status_at(5.0)]);
+        assert_eq!(
+            resize(&core, &app, "t9", "t8", "right", "3"),
+            Err(Failure::Failed("t9 and t8 have no room to share".into()))
+        );
+        assert_eq!(app.asked(), ["status"]);
+    }
+
+    #[test]
+    fn a_shown_tab_with_no_cells_resizes_nothing() {
+        let core = nested_listing(|list| list["terminals"] = json!([]));
+        let app = FakeApp::new(&[recorded_run("status")]);
+        assert_eq!(
+            resize(&core, &app, "t1", "t2", "left", "30"),
+            Err(Failure::Failed(
+                "the shown Herdr app tab has no cells to measure the window by".into()
+            ))
+        );
+        assert_eq!(app.asked(), ["status"]);
+    }
+
+    #[test]
+    fn a_zoomed_pane_of_the_shown_tab_isnt_measured_by() {
+        // t2 zoomed is 82 × 52, the whole tab's
+        let zoomed = || {
+            nested_listing(|list| {
+                let t2 = list["terminals"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|t| t["address"] == "t2")
+                    .unwrap();
+                t2["cols"] = json!(82);
+                t2["rows"] = json!(52);
+            })
+        };
+        let vars = vars("t3", "t2", "down", "30");
+        let core = zoomed();
+        let app = FakeApp::new(&[recorded_run("status"), resized(P3, "1.545455")]);
+        let view = json!({ "tabs": { NESTED_TAB: { "zoomed": P2, "focused": P2 } } });
+        std::fs::write(app.dir().join("view.json"), view.to_string()).unwrap();
+        let at = at_home(given(&core, &app, &vars), app.dir());
+        assert_eq!(resize_within(&at, TIME), Ok(()));
+        assert_eq!(app.asked()[1..], [resized_line(P3, "1.545455")]);
+
+        // unknown, it would take t2's cells for its share's
+        let core = zoomed();
+        let app = FakeApp::new(&[recorded_run("status"), resized(P3, "1.545455")]);
+        let view =
+            json!({ "tabs": { NESTED_TAB: { "zoomed": null }, SHAPES_TAB: { "zoomed": P4 } } });
+        std::fs::write(app.dir().join("view.json"), view.to_string()).unwrap();
+        let at = at_home(given(&core, &app, &vars), app.dir());
+        assert!(resize_within(&at, TIME).is_err());
+        assert_ne!(app.asked()[1], resized_line(P3, "1.545455"));
+
+        // a view.json that can't be read
+        let core = nested();
+        let app = FakeApp::new(&[recorded_run("status")]);
+        std::fs::write(app.dir().join("view.json"), "{").unwrap();
+        let at = at_home(given(&core, &app, &vars), app.dir());
+        let Err(Failure::Failed(why)) = resize_within(&at, TIME) else {
+            panic!("resized");
+        };
+        assert!(
+            why.starts_with("can't read ") && why.contains("view.json"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_cant_say_what_it_shows_resizes_nothing() {
+        let core = nested();
+        let app = FakeApp::new(&[recorded_run("err-no-window-status")]);
+        let Err(Failure::Failed(why)) = resize(&core, &app, "t3", "t2", "down", "30") else {
+            panic!("resized");
+        };
+        assert!(
+            why.starts_with("can't measure the Herdr app window: herdr-app: no Herdr window"),
+            "{why}"
+        );
+        assert_eq!(core.methods(), ["hello", "doc.get"]);
+    }
+
+    #[test]
+    fn a_part_sized_in_pixels_or_beside_one_over_it_resizes_nothing() {
         for id in [P5, P4] {
             let core = shapes_sized(id, json!({ "px": 300 }));
             let app = FakeApp::new(&[recorded_run("status")]);
@@ -702,6 +698,17 @@ mod tests {
             assert_eq!(core.methods(), ["hello", "doc.get"]);
             assert!(app.asked().is_empty());
         }
+        // t8 and t9's row is in the column beside t5: their share of the
+        // tab's width can't be told
+        let core = shapes_sized(P5, json!({ "px": 300 }));
+        let app = FakeApp::new(&[recorded_run("status")]);
+        assert_eq!(
+            resize(&core, &app, "t9", "t8", "right", "3"),
+            Err(Failure::Failed(format!(
+                "Herdr app node {P5} is sized in pixels"
+            )))
+        );
+        assert!(app.asked().is_empty());
     }
 
     #[test]
@@ -759,13 +766,23 @@ mod tests {
         unknown.stdout = recorded_run("err-unknown-command")
             .stdout
             .replace("no.such", "layout.resize");
-        let app = FakeApp::new(&[recorded_run("status"), unknown, recorded_run("version")]);
-        assert_eq!(
-            resize(&nested(), &app, "t3", "t2", "down", "30"),
-            Err(Failure::Unsupported(
-                "herdr-app has no layout.resize (hc core 0.1.21, herdr-app 0.1.16)".into()
-            ))
-        );
+        let mut no_weight = unknown.clone();
+        no_weight.stdout = recorded_run("err-unknown-argument")
+            .stdout
+            .replace("pane.split", "layout.resize")
+            .replace("bogus", "weight");
+        for (run, why) in [
+            (unknown, "herdr-app has no layout.resize"),
+            (no_weight, "herdr-app's layout.resize takes no weight"),
+        ] {
+            let app = FakeApp::new(&[recorded_run("status"), run, recorded_run("version")]);
+            assert_eq!(
+                resize(&nested(), &app, "t3", "t2", "down", "30"),
+                Err(Failure::Unsupported(format!(
+                    "{why} (hc core 0.1.21, herdr-app 0.1.16)"
+                )))
+            );
+        }
     }
 
     #[test]
@@ -791,130 +808,6 @@ mod tests {
         }
         assert!(core.asked().is_empty());
         assert!(app.asked().is_empty());
-    }
-
-    #[test]
-    fn a_tab_not_shown_resizes_nothing() {
-        // status shows the nested tab; t5 and t4 are in the shapes tab
-        let core = shapes();
-        let app = FakeApp::new(&[recorded_run("status")]);
-        assert_eq!(
-            resize(&core, &app, "t5", "t4", "right", "30"),
-            Err(Failure::Failed(format!(
-                "t5's Herdr app tab {SHAPES_TAB} isn't shown, so its cells can't be trusted"
-            )))
-        );
-        assert_eq!(core.methods(), ["hello", "doc.get"]);
-        assert_eq!(app.asked(), ["status"]);
-    }
-
-    #[test]
-    fn a_zoomed_tab_resizes_nothing() {
-        let core = nested();
-        let app = FakeApp::new(&[recorded_run("status")]);
-        let view = json!({ "tabs": { NESTED_TAB: { "zoomed": P3, "focused": P3 } } });
-        std::fs::write(app.dir().join("view.json"), view.to_string()).unwrap();
-        let vars = [
-            ("TERMINAL", "t3"),
-            ("ORIGIN", "t2"),
-            ("DIRECTION", "down"),
-            ("SIZE", "30"),
-        ];
-        let at = at_home(given(&core, &app, &vars), app.dir());
-        assert_eq!(
-            resize_within(&at, TIME),
-            Err(Failure::Failed(format!(
-                "t3's Herdr app tab {NESTED_TAB} is zoomed on {P3}, so its cells can't be trusted"
-            )))
-        );
-        assert_eq!(core.methods(), ["hello", "doc.get"]);
-
-        // another tab zoomed, or none: resized
-        let core = nested();
-        let app = FakeApp::new(&[recorded_run("status"), resized(P3, "1.545455")]);
-        let view =
-            json!({ "tabs": { NESTED_TAB: { "zoomed": null }, SHAPES_TAB: { "zoomed": P4 } } });
-        std::fs::write(app.dir().join("view.json"), view.to_string()).unwrap();
-        let at = at_home(given(&core, &app, &vars), app.dir());
-        assert_eq!(resize_within(&at, TIME), Ok(()));
-
-        // a view.json that can't be read
-        let core = nested();
-        let app = FakeApp::new(&[recorded_run("status")]);
-        std::fs::write(app.dir().join("view.json"), "{").unwrap();
-        let at = at_home(given(&core, &app, &vars), app.dir());
-        let Err(Failure::Failed(why)) = resize_within(&at, TIME) else {
-            panic!("resized");
-        };
-        assert!(
-            why.starts_with("can't read ") && why.contains("view.json"),
-            "{why}"
-        );
-    }
-
-    #[test]
-    fn a_window_that_cant_say_what_it_shows_resizes_nothing() {
-        let core = nested();
-        let app = FakeApp::new(&[recorded_run("err-no-window-status")]);
-        let Err(Failure::Failed(why)) = resize(&core, &app, "t3", "t2", "down", "30") else {
-            panic!("resized");
-        };
-        assert!(
-            why.starts_with("can't tell which Herdr app tab is shown: herdr-app: no Herdr window"),
-            "{why}"
-        );
-        assert_eq!(core.methods(), ["hello", "doc.get"]);
-    }
-
-    #[test]
-    fn too_little_room_for_both_chromes_resizes_nothing() {
-        // no cols at all: 5 + 5, where each part needs 5 and a cell
-        let core = nested_edited(|_, list| {
-            for t in list["terminals"].as_array_mut().unwrap() {
-                t["cols"] = json!(0);
-            }
-        });
-        let app = FakeApp::new(&[recorded_run("status")]);
-        assert_eq!(
-            resize(&core, &app, "t1", "t2", "left", "30"),
-            Err(Failure::Failed("t1 and t2 have no room to share".into()))
-        );
-        assert_eq!(app.asked(), ["status"]);
-    }
-
-    #[test]
-    fn panes_with_no_cells_resize_nothing() {
-        let core = nested_edited(|_, list| list["terminals"] = json!([]));
-        let app = FakeApp::new(&[recorded_run("status")]);
-        assert_eq!(
-            resize(&core, &app, "t1", "t2", "left", "30"),
-            Err(Failure::Failed(
-                "t1 and t2 have no cells in the hc core to measure them by".into()
-            ))
-        );
-    }
-
-    #[test]
-    fn a_block_with_no_terminal_counts_by_its_siblings_weight() {
-        // [t1@0.5 | [t2 | mod]@0.5]: t2 is 44 wide at weight 1, so the mod
-        // at weight 1 is 44 too; 35 of 132, t1 0.5 × 35 / 97
-        let core = nested_edited(|doc, _| {
-            let column = &mut doc["spaces"][0]["tabs"][0]["root"]["children"][1];
-            column["type"] = json!("row");
-            column["children"][1]["content"] = json!({ "mod": "files" });
-        });
-        let app = FakeApp::new(&[recorded_run("status"), resized(P1, "0.180412")]);
-        assert_eq!(resize(&core, &app, "t1", "t2", "left", "30"), Ok(()));
-        assert_eq!(app.asked()[1..], [resized_line(P1, "0.180412")]);
-    }
-
-    #[test]
-    fn a_font_size_past_belief_is_taken_as_14() {
-        for font in [0.0, -14.0, f64::NAN, f64::INFINITY, 3.9, 201.0] {
-            assert_eq!(chrome(Some(font)), (5.0, 4.0), "{font}");
-        }
-        assert_eq!(chrome(Some(4.0)), (17.5, 14.0));
-        assert_eq!(chrome(Some(28.0)), (2.5, 2.0));
     }
 
     #[test]

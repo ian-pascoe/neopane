@@ -13,6 +13,8 @@
 //!   another more than a cell away. The area, cells and inset over share,
 //!   is then the same from every pane of a tab within rounding: the app
 //!   gives each pane whole cells, about 1 ÷ its share cells off.
+//! - [`measure_window`] gives `resize` the same chrome, and a tab's
+//!   extent, which the shown tab's cells tell for every tab of the window.
 //!
 //! The chrome scales by the window's font size only; its zoom and UI font
 //! size are left to the solve.
@@ -133,22 +135,8 @@ pub(super) fn layout(
     status: Option<&Value>,
 ) -> Result<(Value, Vec<String>), String> {
     let (tabs, lost, warnings) = tabs_of(doc)?;
-    // over every block of the doc, a left-out tab's too, as pane acts
-    // count them
-    let doubled = |p: &Pane| p.terminal.is_some_and(|t| panes_of(doc, t).len() > 1);
-    let shown = status.and_then(|s| s["tab"].as_str());
-    let shown: Vec<Pane> = tabs
-        .iter()
-        .filter(|t| Some(t.id) == shown)
-        .flat_map(|t| &t.panes)
-        .filter(|p| !p.px && !p.approx && !doubled(p))
-        .copied()
-        .collect();
-    let font = status
-        .and_then(|s| s["font_size"].as_f64())
-        .filter(|f| FONTS.contains(f))
-        .unwrap_or(MEASURED_FONT);
-    let [cols, rows] = chrome(&shown, listed, font);
+    let doubled = |p: &Pane| doubled(doc, p);
+    let [cols, rows] = measure(doc, &tabs, listed, status, None).chrome;
     let inset = [cols / 2, rows - rows / 2, cols - cols / 2, rows / 2];
     let mut areas = Vec::new();
     // terminals it can't place in a tab: each alone, by the pane id of its
@@ -194,6 +182,84 @@ pub(super) fn layout(
     Ok((report, warnings))
 }
 
+/// Whether pane `p`'s terminal shows in two blocks or more, counted over
+/// every block of `doc`, a left-out tab's too, as pane acts count them.
+fn doubled(doc: &Value, p: &Pane) -> bool {
+    p.terminal.is_some_and(|t| panes_of(doc, t).len() > 1)
+}
+
+/// What the shown tab tells of the window, in cells: the pane chrome,
+/// columns and rows, as [`chrome`] gives it, and a tab's outer extent
+/// along each, if its cells can tell it. Every tab of a window has the
+/// same room, so the shown tab's cells measure a hidden one's, whose own
+/// may be stale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Measure {
+    pub chrome: [u32; 2],
+    /// A tab's columns and rows, chrome included: over the shown tab's
+    /// panes measured, their cells plus the chrome over their shares,
+    /// which the model gives each within rounding, the larger shares
+    /// counting for more. None along an axis no pane is measured on.
+    pub extent: [Option<f64>; 2],
+}
+
+/// The [`Measure`] of the window `doc`, its terminals `listed` and its
+/// `status` tell; the shown tab's pane `skip`, if any, not measured by,
+/// as a zoomed pane, which has the whole tab's cells. Or why the doc
+/// can't be read.
+pub(super) fn measure_window(
+    doc: &Value,
+    listed: &[Terminal],
+    status: &Value,
+    skip: Option<&str>,
+) -> Result<Measure, String> {
+    let (tabs, _, _) = tabs_of(doc)?;
+    Ok(measure(doc, &tabs, listed, Some(status), skip))
+}
+
+/// The [`Measure`] of the window `tabs` are of, by the shown tab's panes
+/// whose rects can be told, but for `skip`.
+fn measure(
+    doc: &Value,
+    tabs: &[Tab],
+    listed: &[Terminal],
+    status: Option<&Value>,
+    skip: Option<&str>,
+) -> Measure {
+    let shown = status.and_then(|s| s["tab"].as_str());
+    let shown: Vec<Pane> = tabs
+        .iter()
+        .filter(|t| Some(t.id) == shown)
+        .flat_map(|t| &t.panes)
+        .filter(|p| !p.px && !p.approx && !doubled(doc, p) && Some(p.id) != skip)
+        .copied()
+        .collect();
+    let font = status
+        .and_then(|s| s["font_size"].as_f64())
+        .filter(|f| FONTS.contains(f))
+        .unwrap_or(MEASURED_FONT);
+    let chrome = chrome(&shown, listed, font);
+    let extent = [0, 1].map(|axis| {
+        let (mut outer, mut share) = (0.0, 0.0);
+        for (p, cells) in shown.iter().filter_map(|p| Some((p, cells_of(p, listed)?))) {
+            if cells[axis] > 0 {
+                outer += f64::from(cells[axis] + chrome[axis]);
+                share += p.rect[2 + axis];
+            }
+        }
+        (share > 0.0).then(|| outer / share)
+    });
+    Measure { chrome, extent }
+}
+
+/// The cols and rows of pane `p`'s terminal, if `listed` has it live.
+fn cells_of(p: &Pane, listed: &[Terminal]) -> Option<[u32; 2]> {
+    let t = listed
+        .iter()
+        .find(|t| Some(t.address.as_str()) == p.terminal)?;
+    t.size.filter(|_| t.live)
+}
+
 /// Where pane `p` goes, `doubled` if its terminal shows in two blocks or
 /// more: the id it has in its tab's area, if it is in it, and the
 /// terminal that is in an area of its own, if any. A doubled terminal
@@ -220,12 +286,7 @@ fn own_area(pane: &str, terminal: &str) -> Value {
 /// from, with their sizes as `listed` has them, solve it more than
 /// [`TRUSTED`] away, and within 0 and twice the measured.
 fn chrome(shown: &[Pane], listed: &[Terminal], font: f64) -> [u32; 2] {
-    let size = |p: &Pane| {
-        let t = listed
-            .iter()
-            .find(|t| Some(t.address.as_str()) == p.terminal)?;
-        t.size.filter(|_| t.live)
-    };
+    let size = |p: &Pane| cells_of(p, listed);
     [0, 1].map(|axis| {
         let measured = (MEASURED_CHROME[axis] * MEASURED_FONT / font).round();
         let points: Vec<(f64, f64)> = shown

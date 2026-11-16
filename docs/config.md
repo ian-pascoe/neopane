@@ -671,18 +671,18 @@ now:
   swapped with the pane it came from, and given its share of the room as
   a weight.
 - Sizes are the app's weights, which take in each pane's border and
-  header: `resize` turns cells into weights with that chrome as measured
-  at font size 14, scaled by the window's font size (unmeasured at other
-  sizes). The window resized gets its size, give or take a cell; the pane
-  beside it comes short of Neovim's by about that chrome, some 5 columns
-  or 4 rows, for each pane along the split.
-- Only the tab the window shows is resized, and not while it is zoomed:
-  another tab's sizes can't be trusted, and it keeps the weights it had
-  until Neovim's sizes change again.
-- The daemon resizes panes as the live layout reports them, which comes
-  with layout reports, next; and a tab page with a Herdr app tab of its
-  own isn't resized, as the daemon resizes those only through a pane
-  provider that can also move panes (`place_beside`).
+  header: `resize` turns cells into weights with the chrome the layout
+  report takes as each pane's inset, and the tab's size the shown tab's
+  cells tell, which every tab of the window shares. The window resized
+  gets its size, give or take a cell; the pane beside it comes short of
+  Neovim's by about that chrome, some 5 columns or 4 rows at font size
+  14, for each pane along the split.
+- Only the first tab page, which shares its Herdr app tab with your other
+  panes, is resized: the daemon resizes a tab page with a Herdr app tab of
+  its own only through a pane provider that can also move panes
+  (`place_beside`), which this one doesn't have.
+- Panes beside one sized in pixels, under the same splits, aren't resized:
+  their share of the tab can't be told.
 - The new pane takes the window's focus, as the new window does in Neovim.
 - The hc core's keep is turned off for each pane it opens, so a pane whose
   attach was killed closes rather than coming back as a shell, and doesn't

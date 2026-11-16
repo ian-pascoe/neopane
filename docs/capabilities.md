@@ -666,8 +666,7 @@ pane, a block of the doc.
   `herdr-app do pane.split {direction, pane, argv}` of that pane, `right`
   for `left` and `right`, `down` for `up` and `down`, its `argv` the
   attach command from `ATTACH`, run with no shell; the new pane takes the
-  window's focus, which stands, and halves the origin's room: `SIZE` and
-  `RATIO` are ignored for now. Right after, the core's `terminal.keep
+  window's focus, which stands, and halves the origin's room. Right after, the core's `terminal.keep
   {terminal, keep: false}` of the new terminal, so the core gives it no
   shell again once lost, as when a signal kills the attach; only the
   panes it opens, and a failure warns on stderr. (`herdr-app do
@@ -682,10 +681,11 @@ pane, a block of the doc.
   same runs an attach whose pane id the daemon has given up, which is
   refused, or hung up if it had attached, and exits, closing the pane.
   Last, with `RATIO`, the new pane gets `RATIO` of the weight it and
-  `ORIGIN`'s pane have together, as `resize` below sets weights, chrome
-  ignored, from the doc that showed its block, read again after a swap;
-  a failure warns, leaving the halves the split made. The requests share
-  4 s. Needs `doc.get`, `terminal.keep` and
+  `ORIGIN`'s pane have together, set as `resize` below sets them, chrome
+  ignored (`SIZE` is), from the doc that showed its block, read again
+  after a swap that worked; a failure warns, leaving the halves the split
+  made. What it warns of goes on stderr, after the failure's own words if
+  it fails. The requests share 4 s. Needs `doc.get`, `terminal.keep` and
   `terminal.kill`. Prints the new terminal's address. An attach command
   not UTF-8 exits 1: JSON can't carry it. A split into a zoomed tab
   unzooms it.
@@ -763,6 +763,38 @@ pane, a block of the doc.
   core's `hello`, so a core of another generation exits 69. It goes to the
   neighbour on that side focused most recently, not the nearest, and at
   the tab's edge moves nowhere, done.
+- `resize`, in `report_layout`'s model, which it needs, as the daemon
+  sizes only the panes a layout report places: a pane's outer extent is
+  its share of its tab, from the weights, times the tab's, and its cells
+  that less the chrome. `doc.get`, the one block of the terminal and of
+  `ORIGIN`, in one tab, and the lowest split holding both, which must be
+  a `row` for `left` and `right`, a `column` for `up` and `down`; else
+  exit 1. Its two children holding them, the terminal's part and
+  `ORIGIN`'s, get the ratio that gives the terminal's part `SIZE` cells
+  and the chrome of each pane along it, held to leave each part its
+  chrome and a cell, out of the pair's outer extent: their share of the
+  tab, by the weights of every split along the axis over them, times the
+  tab's extent. A part sized in pixels, or a node so among the splits
+  over them, exits 1, resizing nothing: their share can't be told. Then
+  `herdr-app status` and `terminal.list` measure the window as
+  `report_layout` does, with the same chrome: every tab has the same
+  room, so the shown tab's cells measure any tab, a hidden one's too,
+  whose own cells may be stale. The tab's extent is the shown tab's
+  measured panes' cells plus chrome over their shares, the larger shares
+  counting for more. A zoomed pane has the whole tab's cells, so the
+  shown tab's zoomed pane, as `tabs.<tab>.zoomed` in the app's
+  `view.json` under its home says, isn't measured by (no `view.json`,
+  or no zoom there, is none; one that can't be read exits 1). A `status`
+  that fails, or a shown tab with no cells to measure by, exits 1. In a
+  split of two, one `layout.resize` of the terminal's part against
+  `ORIGIN`'s sets the ratio; in one of three or more, one of each,
+  keeping their sum so the split's other children keep their room.
+  Weights keep six decimals; one already so isn't set again. As herdr's
+  `resize` adds its frame, `ORIGIN`'s part takes what is left, so it
+  comes short of Neovim's by about a chrome for each pane along the
+  split, where Neovim has a one-cell separator. A `layout.resize` the app
+  lacks, or its `weight`, exits 69. Needs `doc.get` and `terminal.list`.
+  It has 1.5 s.
 
 No `events`, for now: the core sends no focus event. `pane.focus`,
 `pane.go` and a tab's selection send the panes' programs focus reports,
@@ -771,31 +803,6 @@ move made with the app's own keys is learned at that report. Whether a
 mouse click between panes sends focus reports is unchecked; if it
 doesn't, a click is learned only at the next report something else has
 the daemon run.
-- `resize`: `doc.get`, the one block of the terminal and of `ORIGIN`, in
-  one tab, and the lowest split holding both, which must be a `row` for
-  `left` and `right`, a `column` for `up` and `down`; else exit 1. Its two
-  children holding them, the terminal's part and `ORIGIN`'s, get the
-  ratio it sets: in a split of two, by one `layout.resize` of the
-  terminal's part against `ORIGIN`'s; in one of three or more, by one of
-  each, keeping their sum so the split's other children keep their room.
-  Either part sized in pixels exits 1, resizing nothing. Then `herdr-app
-  status` must answer, its `tab` the pair's: the cells of a tab not shown
-  can't be trusted, the core's 120×40 in one never shown and stale in one
-  hidden since a split, and it exits 1, setting nothing; so does a tab
-  zoomed, as `tabs.<tab>.zoomed` in the app's `view.json` under its home
-  says (none there, or no `view.json`, is unzoomed; one that can't be read
-  exits 1), whose zoomed pane has the whole tab's cells. The daemon asks
-  again only once Neovim's sizes change. The terminal's part is to have
-  `SIZE` cells and the chrome of each pane along it, held to leave each
-  part its chrome and a cell, out of the outer extent of the two parts:
-  each pane's cols or rows, from `terminal.list`, and its chrome; a
-  split's sum along it, else its widest child; a pane with no live
-  terminal, as a mod's, counts by the weight of its measured siblings. As
-  herdr's `resize` adds its frame, `ORIGIN`'s part takes what is left, so
-  it comes short of Neovim's by about a chrome for each pane along the
-  split, where Neovim has a one-cell separator. Weights keep six
-  decimals; one already so isn't set again. Needs `doc.get` and
-  `terminal.list`. It has 1.5 s.
 
 ## Placeholders
 

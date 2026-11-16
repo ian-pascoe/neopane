@@ -315,15 +315,7 @@ impl Side {
 
 /// `RATIO`, the terminal's share, between 0 and 1; 0.5 if unset.
 pub(super) fn ratio(given: &Given) -> Result<f64, String> {
-    let Some(ratio) = given.var("ratio").filter(|r| !r.is_empty()) else {
-        return Ok(0.5);
-    };
-    let shown = String::from_utf8_lossy(&ratio);
-    shown
-        .parse::<f64>()
-        .ok()
-        .filter(|r| *r > 0.0 && *r < 1.0)
-        .ok_or_else(|| format!("RATIO {shown:?} isn't between 0 and 1"))
+    Ok(given.ratio()?.unwrap_or(0.5))
 }
 
 #[cfg(test)]

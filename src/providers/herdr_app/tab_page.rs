@@ -20,8 +20,8 @@ use serde_json::json;
 use super::core::Core;
 use super::doc::spaces_of;
 use super::{
-    BLOCK_TIME, CLEANUP_TIME, Failure, act, block_of, cleanup_kill, kill, methods, needs, refused,
-    window_of,
+    BLOCK_TIME, CLEANUP_TIME, Failure, Opened, act, block_of, cleanup_kill, kill, methods, needs,
+    noted, refused, window_of,
 };
 use crate::config::Capability;
 use crate::providers::builtin::Given;
@@ -42,13 +42,6 @@ struct Times {
     cleanup: Duration,
     /// The most a block is waited for in the doc.
     block: Duration,
-}
-
-/// A tab page opened: the attach's terminal, and what to warn of.
-#[derive(Debug, PartialEq, Eq)]
-struct Opened {
-    terminal: String,
-    warnings: Vec<String>,
 }
 
 /// `open_tab_page`: the attach's terminal, or why there's none.
@@ -103,7 +96,7 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
         noted(failure, &notes)
     };
     let shell_pane = match block_of(&mut core, &shell, times.block) {
-        Ok(pane) => pane,
+        Ok((pane, _)) => pane,
         Err(failure) => return Err(undo(&core, &shell, failure, &warnings)),
     };
     let terminal = match window.split(&shell_pane, SPLIT_SIDE, &argv, due) {
@@ -128,15 +121,6 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
     match block_of(&mut core, &terminal, times.block) {
         Ok(_) => Ok(Opened { terminal, warnings }),
         Err(failure) => Err(undo(&core, &terminal, failure, &warnings)),
-    }
-}
-
-/// `failure`, `notes` after its own words.
-fn noted(failure: Failure, notes: &[String]) -> Failure {
-    let note = |why: String| notes.iter().fold(why, |why, note| format!("{why}; {note}"));
-    match failure {
-        Failure::Failed(why) => Failure::Failed(note(why)),
-        Failure::Unsupported(why) => Failure::Unsupported(note(why)),
     }
 }
 
