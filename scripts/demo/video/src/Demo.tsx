@@ -63,7 +63,7 @@ export type DemoProps = {
   timeline: Timeline | null;
 };
 
-const TITLE = 2.2; // seconds of title, ending on the drop
+const TITLE = 4.5; // seconds of title, ending on the drop: 12 beats at 160 BPM
 const END = 3.6; // seconds of end card after the recording
 const REC_W = 1920;
 const REC_H = 996;
@@ -262,8 +262,10 @@ function glitch(since: number, frames: number, amp: number) {
   };
 }
 
-// The title's lines land on the build's hits: the label four beats before
-// the drop, the headline two, the subline one
+// The title's lines land on the build's beats, early enough to read: the
+// label twelve beats before the drop, the headline eight, the subline six;
+// the build's hits four and two beats before it bump the title and glitch
+// the headline
 const TitleCard: React.FC<{
   headline: string;
   subline: string;
@@ -279,9 +281,15 @@ const TitleCard: React.FC<{
       fps,
       config: { damping: 13, stiffness: 320, mass: 0.6 },
     });
-  const label = at(4);
-  const head = at(2);
-  const sub = at(1);
+  const label = at(12) + 2;
+  const head = at(8);
+  const sub = at(6);
+  const hits = [at(4), at(2)];
+  let hit = 0;
+  for (const h of hits) {
+    if (frame >= h) hit = Math.max(hit, Math.exp(-(frame - h) / 3));
+  }
+  const lastHit = Math.max(...hits.filter((h) => frame >= h), -1000);
   return (
     <AbsoluteFill
       style={{
@@ -290,6 +298,7 @@ const TitleCard: React.FC<{
         flexDirection: "column",
         gap: 24,
         backgroundColor: "rgba(16,17,22,0.55)",
+        scale: String(1 + 0.05 * hit),
       }}
     >
       <div
@@ -312,7 +321,7 @@ const TitleCard: React.FC<{
           letterSpacing: -4,
           opacity: frame >= head ? 1 : 0,
           scale: String(1.7 - 0.7 * slam(head)),
-          ...glitch(frame - head, 7, 14),
+          ...glitch(Math.min(frame - head, frame - lastHit), 7, 14),
         }}
       >
         {headline}
