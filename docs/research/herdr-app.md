@@ -69,7 +69,12 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   [`app/err-no-window-*`].
 - `pane.split {direction, pane, argv}` answers `{pane, terminal}` in 30–40 ms;
   the new pane takes focus, also in an unshown tab, without showing that tab
-  [`app/do-pane.split*`].
+  [`app/do-pane.split*`]. Its terminal runs `argv` as given, no shell (its
+  record's `argv` is exactly what was sent), and has `parent: null`,
+  `die_with_parent: false`, `keep: true` [`core/nested-terminal.get`: `t2`,
+  `t3`]. Unchanged from SPI-1213, but these splits were sent from the
+  sandbox's shell, not from inside a pane; SPI-1213 found the same from
+  inside one.
 - `tab.new {argv, focus: false, space}` answers `{space, tab, terminal}` (no
   pane id) in ~30 ms and keeps the shown tab [`app/do-tab.new`].
 - **Changed since 0.1.17: `tab.new` and `terminal.open {place: "tab"}` run
@@ -236,3 +241,11 @@ passes `XDG_*` and `HERDR_APP_HOME` on to its terminals.
   `HERDR_APP_HOME`. `commands` works without a window [`app/commands`].
 - Launching the private app left `~/.local/bin/herdr-app` untouched (its
   link already pointed at the app).
+
+## Not re-run on 0.1.21
+
+These SPI-1213 facts (from hc 0.1.17 and the same app) were not checked
+again: that an installed Herdr.app repairs a broken `~/.local/bin/herdr-app`
+on launch; that Finder launches load the login shell's PATH; that
+`pane.focus` leaves the macOS frontmost app unchanged (this run's window was
+hidden throughout); and a split made from inside a pane (above).
