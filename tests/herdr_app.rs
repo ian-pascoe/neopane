@@ -49,11 +49,12 @@ const APP_VERSION: &str = "0.1.16";
 /// new terminal, `terminal.run` with the core's keep on, and a block
 /// written into the core's doc, shaped as the app shapes it
 /// (`docs/research/herdr-app.md`); `pane.split` and `pane.focus` move the
-/// focus as the app does. Any other `do` it refuses, as the app refuses an
-/// unknown command: `pane.go` and `layout.resize`, which `focus_direction`
-/// and `resize` ask, are deliberately unexercised, for a test of either to
-/// add to [`act`]. Unlike the app, it leaves a finished terminal's block
-/// in the doc. Stopped as it drops.
+/// focus as the app does, and `layout.resize` sets a node's size. Its
+/// directory is its `HERDR_APP_HOME`, with no `view.json`: nothing is
+/// zoomed. Any other `do` it refuses, as the app refuses an unknown
+/// command: `pane.go`, which `focus_direction` asks, is deliberately
+/// unexercised, for a test of it to add to [`act`]. Unlike the app, it
+/// leaves a finished terminal's block in the doc. Stopped as it drops.
 struct FakeWindow {
     dir: PathBuf,
     socket: PathBuf,
@@ -332,6 +333,17 @@ fn act(spawn: &Spawn, focus: &mut Focus, command: &str, args: &Value) -> Result<
             focus.of_tab.insert(tab, new.clone());
             json!({ "pane": new, "terminal": terminal })
         }
+        "layout.resize" => {
+            let id = args["id"].as_str().ok_or("no id")?;
+            let node = sized(&mut doc, id).ok_or(format!("no node \"{id}\""))?;
+            // as the app: a weight, else pixels, else nothing changes
+            if let Some(weight) = args["weight"].as_f64() {
+                node["size"] = json!({ "weight": weight });
+            } else if let Some(px) = args["px"].as_f64() {
+                node["size"] = json!({ "px": px });
+            }
+            json!({ "ok": true })
+        }
         "pane.focus" => {
             let pane = args["pane"].as_str().ok_or("no pane")?;
             let (_, tab) = home_of(&doc, pane).ok_or(format!("no pane \"{pane}\""))?;
@@ -437,6 +449,15 @@ fn find_block(doc: &Value, pane: &str) -> Option<Vec<usize>> {
         .map(|(path, _)| path)
 }
 
+/// The node of `doc`'s tabs with id `id`, a pane or a split, for its size.
+fn sized<'a>(doc: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+    let path = nodes(doc)
+        .into_iter()
+        .find(|(path, n)| n["id"] == id && path.len() > 2)
+        .map(|(path, _)| path)?;
+    Some(node_at(doc, &path))
+}
+
 /// The node at `path` in `doc`.
 fn node_at<'a>(doc: &'a mut Value, path: &[usize]) -> &'a mut Value {
     let mut node = &mut doc["spaces"][path[0]]["tabs"][path[1]]["root"];
@@ -502,6 +523,16 @@ fn swap(doc: &mut Value, pane: &str, direction: &str) {
     }
 }
 
+/// The weight of the block of `doc` showing terminal `terminal`: 1 where
+/// it has no size, as the app counts it.
+fn weight_of(doc: &Value, terminal: &str) -> f64 {
+    let (_, block) = nodes(doc)
+        .into_iter()
+        .find(|(_, n)| n["type"] == "block" && n["content"]["terminal"] == terminal)
+        .unwrap_or_else(|| panic!("no block shows {terminal}: {doc}"));
+    block["size"]["weight"].as_f64().unwrap_or(1.0)
+}
+
 /// The terminals a tab's blocks show, in the doc's order: each tab's, by
 /// tab id.
 fn tabs_of(doc: &Value) -> Vec<(String, Vec<String>)> {
@@ -528,6 +559,7 @@ fn capability(core: &HcCore, window: &FakeWindow, cap: &str) -> std::process::Co
     cmd.env(format!("{up}_PROTOCOL"), "1")
         .env(format!("{up}_CAPABILITY"), cap)
         .env("HC_TERMINAL_SOCKET", &core.socket)
+        .env("HERDR_APP_HOME", window.bin())
         .env("PATH", window.bin())
         .env("HOME", core.dir.join("home"))
         .stdin(Stdio::null());
@@ -633,7 +665,7 @@ fn open_beside_splits_the_origins_pane_running_the_attach_its_keep_off() {
         let out = capability(&core, &window, "open_beside")
             .env(format!("{up}_ORIGIN"), &origin)
             .env(format!("{up}_DIRECTION"), direction)
-            .env(format!("{up}_RATIO"), "0.5")
+            .env(format!("{up}_RATIO"), "0.3")
             .env(format!("{up}_ATTACH"), "/bin/sleep 100000")
             .env(format!("{up}_TITLE"), "t")
             .output()
@@ -660,11 +692,16 @@ fn open_beside_splits_the_origins_pane_running_the_attach_its_keep_off() {
         } else {
             [origin.clone(), new.clone()]
         };
+        let doc = core.doc().0;
         assert_eq!(
-            tabs_of(&core.doc().0),
+            tabs_of(&doc),
             [("tb1".to_string(), order.to_vec())],
             "{direction}"
         );
+        // RATIO is the new pane's share of the weight the pair has
+        let (theirs, ours) = (weight_of(&doc, &new), weight_of(&doc, &origin));
+        let share = theirs / (theirs + ours);
+        assert!((share - 0.3).abs() < 1e-3, "{direction}: {share}: {doc}");
         core.call("terminal.kill", json!({ "terminal": new }));
         core.call("terminal.kill", json!({ "terminal": origin }));
     }
@@ -755,6 +792,7 @@ fn provider_check_in_a_pane_with_a_stale_zellijs_variables_proves_it_inside_the_
         ),
         ("XDG_CONFIG_HOME".into(), core.dir.join("config").into()),
         ("PATH".into(), path.unwrap()),
+        ("HERDR_APP_HOME".into(), window.bin().into()),
         // copied from another terminal: zellij's is named too, so the
         // proofs decide
         ("ZELLIJ".into(), "0".into()),
@@ -796,6 +834,7 @@ fn in_a_pane_a_split_opens_a_pane_running_the_attach_and_close_kills_it() {
         ("XDG_CONFIG_HOME".into(), tmp.as_os_str().to_owned()),
         ("XDG_STATE_HOME".into(), tmp.as_os_str().to_owned()),
         ("PATH".into(), path_with(&bin)),
+        ("HERDR_APP_HOME".into(), bin.clone().into()),
     ];
     let env: Vec<(&str, &OsStr)> = env
         .iter()
