@@ -26,7 +26,11 @@ notification>}` for a line read from it. Every connection starts with
 
 The **nested tab** is `[t1 | (t2 / t3)]` (the design's `[t1 | (t9 / t10)]`):
 a row holding `t1` (weight 0.5) and a column (weight 0.5) of `t2` over `t3`,
-neither with a `size`.
+neither with a `size`, as `nested-doc.get` reads it. A `layout.resize` test
+afterwards left `t2` with `size: {weight: 1.0}` (`t3` still none, so the same
+1:1 split), so every later `doc.get` of that tab reads `t2@{weight: 1.0}`:
+`shapes-*`, `zoomed-doc-and-list`, `after-core-restart` and
+`terminal.kill-attach`.
 
 | File | What |
 | --- | --- |
