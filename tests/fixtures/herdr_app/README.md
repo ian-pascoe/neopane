@@ -8,8 +8,8 @@ unit tests. The facts they show, how each was found, and the sandbox recipe:
 Recorded on 2026-11-16 with **hc 0.1.21** (`hc --version`; `hello` answers
 `version: "0.1.21"`, `generation: 1`) and **Herdr app 0.1.16**
 (`herdr-app --version`), macOS arm64, window 1016×1110 pt, font size 14,
-zoom 1. Nothing pins hc yet: SPI-1220's CI should pin `HC_VERSION` to 0.1.21
-to match these fixtures. `app/version.json`,
+zoom 1. CI installs this hc, pinned in `scripts/install-hc.sh`, for the live
+core tests (`tests/herdr_app.rs`): move the pin and the fixtures together. `app/version.json`,
 `core/hc-version.json`, `core/server.status.jsonl`,
 `core/terminal.kill-attach.jsonl` and `app/status-after-kill-attach.json` come
 from a second session the same day, in the same sandbox after the app and

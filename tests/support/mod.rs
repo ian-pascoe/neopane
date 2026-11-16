@@ -938,3 +938,218 @@ impl Drop for HerdrServer {
         let _ = self.child.wait();
     }
 }
+
+/// Whether `hc`, the hc core's command, runs; with `CI` set, it must.
+pub fn have_hc() -> bool {
+    let ran = Command::new("hc")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(
+        ran || std::env::var_os("CI").is_none(),
+        "hc isn't installed"
+    );
+    ran
+}
+
+/// A private hc core, the Herdr app's: its own `HC_SESSION`, and its state,
+/// config and home under a directory of its own, so neither the user's
+/// core nor their config is touched. Started without the user's pane
+/// provider variables or any `<NAME>*` one: its terminals get its
+/// environment, and what [`HcCore::run`] adds. Stopped, its directory
+/// removed, as it drops.
+pub struct HcCore {
+    /// Its JSON-RPC socket, as its terminals' `HC_TERMINAL_SOCKET` has it.
+    pub socket: PathBuf,
+    /// Under `/tmp`: a socket's path must stay short.
+    pub dir: PathBuf,
+    session: String,
+    pid: Option<i32>,
+}
+
+impl HcCore {
+    /// Starts one for test `test`, a name of at most 10 letters, and waits
+    /// for it to answer.
+    pub fn start(test: &str) -> HcCore {
+        // a socket's path is at most 104 bytes on macOS: $TMPDIR is long
+        let dir = PathBuf::from(format!("/tmp/{NAME}-hc-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["s", "config", "home"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        // the core's sockets are under its state, named for its session,
+        // twice, and must fit 103 bytes: its state alone keeps it apart
+        assert!(test.len() <= 10, "{test} is too long for a session name");
+        let session = test.to_string();
+        let socket = dir.join(format!("s/herdr-core/{session}/{session}.sock"));
+        let mut core = HcCore {
+            socket,
+            dir,
+            session,
+            pid: None,
+        };
+        let out = core.command().args(["server", "start"]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "hc server start: {}",
+            text(&out.stderr)
+        );
+        let due = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let status = loop {
+            match core.try_call("server.status", serde_json::json!({})) {
+                Ok(status) => break status,
+                Err(e) => assert!(
+                    std::time::Instant::now() < due,
+                    "the hc core never answered: {e}: {}",
+                    core.log()
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        core.pid = status["pid"].as_i64().and_then(|p| i32::try_from(p).ok());
+        core
+    }
+
+    /// `hc` on this core, with none of [`PROVIDER_VARS`], `HC_*` or
+    /// `<NAME>*` variables but its own.
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new("hc");
+        let upper = NAME.to_ascii_uppercase();
+        without_provider_vars(&mut cmd)
+            .env_remove("HC_SCOPE")
+            .env_remove(&upper)
+            .env_remove(format!("{upper}_CONFIG"))
+            .env_remove(format!("{upper}_PROVIDER"))
+            .envs(self.env())
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    /// The variables that point `hc` at this core alone.
+    pub fn env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
+        vec![
+            ("HC_SESSION", self.session.clone().into()),
+            ("XDG_STATE_HOME", self.dir.join("s").into()),
+            ("XDG_CONFIG_HOME", self.dir.join("config").into()),
+            ("HOME", self.dir.join("home").into()),
+        ]
+    }
+
+    /// The core's log, for a failure's message.
+    pub fn log(&self) -> String {
+        let at = self.dir.join(format!("s/herdr-core/{}", self.session));
+        std::fs::read_to_string(at.join("core.log")).unwrap_or_default()
+    }
+
+    /// The `result` of request `method` with `params`, or the reply that
+    /// has none, on a connection of its own.
+    pub fn try_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        hc_call(&self.socket, method, params)
+    }
+
+    /// [`try_call`](Self::try_call)'s result; panics without one.
+    pub fn call(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.try_call(method, params)
+            .unwrap_or_else(|e| panic!("hc core {method}: {e}"))
+    }
+
+    /// A new terminal running `argv` in `cwd`, with `env` over the core's
+    /// own: its address.
+    pub fn run(&self, argv: &[&str], cwd: &Path, env: &[(&str, &std::ffi::OsStr)]) -> String {
+        let env: serde_json::Map<String, serde_json::Value> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.to_str().unwrap().into()))
+            .collect();
+        let made = self.call(
+            "terminal.run",
+            serde_json::json!({ "argv": argv, "cwd": cwd, "env": env, "no_parent": true }),
+        );
+        made["address"].as_str().unwrap().to_string()
+    }
+
+    /// Terminal `terminal`'s record, live or finished.
+    pub fn terminal(&self, terminal: &str) -> serde_json::Value {
+        self.call("terminal.get", serde_json::json!({ "terminal": terminal }))
+    }
+
+    /// The path of the tty terminal `terminal`'s process runs on, such as
+    /// `/dev/ttys004`; None if it can't be read.
+    pub fn tty_of(&self, terminal: &str) -> Option<String> {
+        let pid = self.terminal(terminal)["pid"].as_u64()?;
+        let ps = Command::new("ps")
+            .args(["-o", "tty=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let tty = text(&ps.stdout).trim().to_string();
+        (!tty.is_empty() && !tty.starts_with('?')).then(|| format!("/dev/{tty}"))
+    }
+
+    /// Its Herdr app doc, and the doc's version.
+    pub fn doc(&self) -> (serde_json::Value, u64) {
+        let got = self.call("doc.get", serde_json::json!({ "name": "herdr-app" }));
+        (got["value"].clone(), got["version"].as_u64().unwrap())
+    }
+
+    /// Writes its Herdr app doc, as the app does, over version `version`.
+    pub fn set_doc(&self, doc: &serde_json::Value, version: u64) {
+        self.call(
+            "doc.set",
+            serde_json::json!({ "name": "herdr-app", "value": doc, "version": version }),
+        );
+    }
+}
+
+impl Drop for HcCore {
+    fn drop(&mut self) {
+        let _ = self.try_call("server.stop", serde_json::json!({}));
+        if let Some(pid) = self.pid {
+            // SAFETY: plain syscalls, to the core this test started.
+            let alive = || unsafe { libc::kill(pid, 0) } == 0;
+            let due = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while alive() && std::time::Instant::now() < due {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if alive() {
+                // SAFETY: as above.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The `result` of request `method` with `params` to the hc core at
+/// `socket`, or the reply that has none, on a connection of its own.
+pub fn hc_call(
+    socket: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead, Write};
+    let mut conn = std::os::unix::net::UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let request =
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    conn.write_all(format!("{request}\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+    // the core holds the connection open: its reply is one line
+    let mut lines = std::io::BufReader::new(conn).lines();
+    loop {
+        let line = lines
+            .next()
+            .ok_or("the hc core closed the connection")?
+            .map_err(|e| e.to_string())?;
+        let v: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| format!("{e}: {line}"))?;
+        if v["id"] == 1 {
+            return v.get("result").cloned().ok_or(line);
+        }
+    }
+}
