@@ -127,6 +127,28 @@ impl Given {
         Ok(words.into_iter().map(OsString::from_vec).collect())
     }
 
+    /// Input `name`, set and UTF-8, such as `ORIGIN`, or why not.
+    pub(crate) fn text(&self, name: &str) -> Result<String, String> {
+        let shown = name.to_ascii_uppercase();
+        let value = self.var(name).filter(|v| !v.is_empty());
+        let value = value.ok_or_else(|| format!("{shown} isn't set"))?;
+        String::from_utf8(value).map_err(|_| format!("{shown} isn't UTF-8"))
+    }
+
+    /// The attach command's words, each UTF-8, for a multiplexer that
+    /// takes them as JSON strings, `runner`, which can't run others; or
+    /// why not.
+    pub(crate) fn attach_strings(&self, runner: &str) -> Result<Vec<String>, String> {
+        self.attach_words()?
+            .into_iter()
+            .map(|w| {
+                w.into_string().map_err(|_| {
+                    format!("the attach command isn't UTF-8, which {runner} can't run")
+                })
+            })
+            .collect()
+    }
+
     /// Input `name`, an integer, such as `X`, or why not.
     pub(crate) fn integer(&self, name: &str) -> Result<i64, String> {
         let n = self.var(name).unwrap_or_default();

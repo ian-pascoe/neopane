@@ -6,9 +6,8 @@
 //! Terminal ids are hc terminal addresses, such as `t7`; the core's doc is
 //! the only map from a terminal to its Herdr app pane.
 //!
-//! - `core.rs`: the hc core's JSON-RPC socket, for reading: `hello`,
-//!   `terminal.get`, `terminal.kill`, the core's `terminal.keep`, `doc.get
-//!   herdr-app`.
+//! - `core.rs`: the hc core's JSON-RPC socket: `hello`, `terminal.get`,
+//!   `terminal.kill`, `terminal.keep {keep: false}`, `doc.get herdr-app`.
 //! - `window.rs`: the `herdr-app` command, for the window: found on `PATH`,
 //!   else at `~/.local/bin/herdr-app`.
 //! - `doc.rs`: the blocks of the core's doc, by terminal.
@@ -20,6 +19,8 @@
 //! - `open_beside` (`beside.rs`, ADR 0020): `pane.split` beside the
 //!   origin's pane, running the attach, keep off, and `pane.swap` for left
 //!   and up.
+//! - `open_tab_page` (`tab_page.rs`): a bare `tab.new` in `ORIGIN`'s space,
+//!   the attach split into it, its shell killed.
 //! - `check.rs`, no capability: what `provider check`'s herdr-app section
 //!   shows: both versions, and whether the core and window answer.
 //!
@@ -36,6 +37,7 @@ mod doc;
 #[cfg(test)]
 mod fake;
 mod proof;
+mod tab_page;
 mod window;
 
 pub(crate) use proof::inside;
@@ -43,7 +45,7 @@ pub(crate) use proof::inside;
 use std::time::{Duration, Instant};
 
 use self::core::Core;
-use self::window::Window;
+use self::window::{Ran, Window};
 use super::builtin::{DONE, FAILED, Given, UNSUPPORTED, print_line};
 use crate::config::Capability;
 
@@ -63,6 +65,12 @@ impl From<String> for Failure {
     }
 }
 
+impl From<core::Refused> for Failure {
+    fn from(refused: core::Refused) -> Failure {
+        Failure::Failed(refused.why)
+    }
+}
+
 /// Runs capability `cap` with `given`: prints what it came to, its
 /// failure as one `herdr-app CAPABILITY: why` line on stderr, and gives
 /// its exit status.
@@ -71,6 +79,7 @@ pub(crate) fn run(cap: Capability, given: &Given) -> u8 {
         Capability::Find => proof::find(given).map(Some).map_err(Failure::Failed),
         Capability::Close => close(given).map(|()| None),
         Capability::OpenBeside => beside::open_beside(given).map(Some),
+        Capability::OpenTabPage => tab_page::open_tab_page(given).map(Some),
         _ => return UNSUPPORTED,
     };
     let (why, code) = match done {
@@ -97,10 +106,15 @@ fn close_within(given: &Given, time: Duration) -> Result<(), Failure> {
     let terminal = input(given, "terminal")?;
     let mut core = Core::of(given, time)?;
     needs(&core, methods(Capability::Close), || Window::of(given))?;
-    match core.kill(&terminal) {
+    kill(&mut core, &terminal).map_err(Failure::from)
+}
+
+/// `terminal.kill` of `terminal`: done for one finished or not found.
+fn kill(core: &mut Core, terminal: &str) -> Result<(), core::Refused> {
+    match core.kill(terminal) {
         Ok(_) => Ok(()),
         Err(refused) if refused.kind.as_deref() == Some("not_found") => Ok(()),
-        Err(refused) => Err(Failure::Failed(refused.why)),
+        Err(refused) => Err(refused),
     }
 }
 
@@ -110,6 +124,7 @@ pub(super) fn methods(cap: Capability) -> &'static [&'static str] {
         Capability::Find => &["terminal.get", "doc.get"],
         Capability::Close => &["terminal.kill"],
         Capability::OpenBeside => &["doc.get", "terminal.keep", "terminal.kill"],
+        Capability::OpenTabPage => &["doc.get", "terminal.kill", "terminal.keep"],
         _ => &[],
     }
 }
@@ -138,6 +153,24 @@ fn needs(
             versions(&core.hello().version, window, core.due())
         ))),
     }
+}
+
+/// Why a window act failed, `ran`: unsupported where the app lacks its
+/// command or an argument, naming it and both versions.
+fn refused(ran: Ran, core: &Core, window: &Window) -> Failure {
+    match ran.lacking() {
+        Some(what) => Failure::Unsupported(format!(
+            "{what} ({})",
+            versions(&core.hello().version, || Ok(window.clone()), core.due())
+        )),
+        None => Failure::Failed(ran.into()),
+    }
+}
+
+/// The `herdr-app` the choosing attach finds, for a window act; else
+/// unsupported, naming where it looked.
+fn window_of(given: &Given) -> Result<Window, Failure> {
+    Window::of(given).map_err(Failure::Unsupported)
 }
 
 /// Both versions, for a message: `hc core 0.1.21, herdr-app 0.1.16`; the

@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::client::{Herdr, UNREADABLE, text};
-use super::panes::{Beside, Side, input, move_pane, put_beside, ratio, tab_of};
+use super::panes::{Beside, Side, move_pane, put_beside, ratio, tab_of};
 use super::splits::{Axis, Node, tree};
 use crate::providers::builtin::Given;
 
@@ -40,8 +40,8 @@ const FRAME: u16 = 2;
 
 /// Moves the terminal beside the origin, or says why it can't.
 pub(super) fn place_beside(given: &Given) -> Result<(), String> {
-    let terminal = input(given, "terminal")?;
-    let origin = input(given, "origin")?;
+    let terminal = given.text("terminal")?;
+    let origin = given.text("origin")?;
     let side = Side::of(given)?;
     let ratio = ratio(given)?;
     let size = given
@@ -117,8 +117,8 @@ pub(super) fn place_beside(given: &Given) -> Result<(), String> {
 
 /// Sizes the terminal, or says why it can't.
 pub(super) fn resize(given: &Given) -> Result<(), String> {
-    let terminal = input(given, "terminal")?;
-    let origin = input(given, "origin")?;
+    let terminal = given.text("terminal")?;
+    let origin = given.text("origin")?;
     let side = Side::of(given)?;
     let size = size(given)?;
     let herdr = Herdr::of(given, MOVE_TIME)?;

@@ -658,8 +658,9 @@ app's and the core's versions.
 It reads the hc core through its socket and acts on the window through the
 `herdr-app` command, found on `PATH`, else at `~/.local/bin/herdr-app`,
 where an installed Herdr.app keeps it. No version is required: a method a
-capability needs and the core lacks, it names, with both versions, and does
-without (exit 69); `find` refuses instead.
+capability needs and the core lacks, or a command `herdr-app` lacks, or no
+`herdr-app` at all, it names, with both versions, and does without (exit
+69); `find` refuses instead.
 
 Each Neovim window gets a Herdr app pane of its own, split beside the pane
 it came from, running its attach with no shell (ADR 0020). Its limits, for
@@ -674,9 +675,11 @@ now:
   attach was killed closes rather than coming back as a shell, and doesn't
   come back after the core restarts; your own terminals keep theirs.
 - A split into a zoomed tab unzooms it.
-- `close` kills the hc terminal. Focus, layout reports, resizing and tab
-  pages are to come: until then a tab page's windows are drawn in its
-  pane.
+- Each Neovim tab page after the first opens in a Herdr app tab of its
+  own, in the space of the pane it came from, without showing it or moving
+  focus.
+- `close` kills the hc terminal. Focus, layout reports and resizing are to
+  come.
 - A terminal of a remote space (`machine/t7`) is refused.
 
 ## Editor setup

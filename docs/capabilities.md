@@ -612,7 +612,8 @@ pane's focus report has the daemon run.
 ### Herdr app
 
 `<name>.builtin.herdr_app()`, its table named `herdr-app` (ADRs 0019 and
-0020): `find`, `close` and `open_beside`, for now, on the hc core whose socket
+0020): `find`, `close`, `open_beside` and `open_tab_page`, for now, on the
+hc core whose socket
 `HC_TERMINAL_SOCKET` names and the Herdr app window under `HERDR_APP_HOME`
 (else `~/.config/herdr-app`). Context variables `HC_TERMINAL_SOCKET` and
 `HERDR_APP_HOME`, find variable `HC_TERMINAL_ID`: the core and the app's
@@ -681,6 +682,31 @@ pane, a block of the doc.
   `terminal.kill`. Prints the new terminal's address. An attach command
   not UTF-8 exits 1: JSON can't carry it. A split into a zoomed tab
   unzooms it.
+- `open_tab_page`: a Herdr app tab is a tab page area. `tab.new` with an
+  `argv` runs it through the login shell and keeps that shell after it, so
+  the tab is made bare and the attach split into it:
+  1. `hello`, with `doc.get`, `terminal.kill` and `terminal.keep`;
+  2. `ORIGIN`'s space, from the one block of the doc showing it (none or
+     several exits 1);
+  3. `herdr-app do tab.new {focus: false, space}`, with no `argv`;
+  4. `pane.split {direction: "right", pane, argv: ATTACH…}` into the new
+     tab's pane, its shell's block in the doc, running the attach with no
+     shell;
+  5. `terminal.kill` of that shell, leaving the attach the tab's one pane,
+     so the tab closes when the attach ends;
+  6. the core's `terminal.keep {keep: false}` of the attach, so it ends
+     with the core rather than coming back as a shell.
+
+  The shown tab and focused pane stay as they were; the new tab's focused
+  pane is the attach. If no block of the doc shows the shell or the attach
+  within 1 s, it is killed and the open exits 1; a split that fails kills
+  the shell and exits 1. Killing what it made has 0.5 s more after the 4 s
+  run out. If the shell's kill fails, the tab keeps a login shell and won't
+  close when the attach ends; that, and a keep that fails, is only said on
+  stderr, after the failure if the open fails. A command or argument
+  `herdr-app` doesn't know exits 69, naming it and both versions, as does
+  no `herdr-app`, naming where it looked. Prints the attach's terminal. It
+  has 4 s.
 
 ## Placeholders
 
