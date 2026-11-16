@@ -17,6 +17,8 @@ mkdir -p "$out"
 
 cleanup() {
   tmux -L "$demo_tmux_socket" kill-server 2>/dev/null || true
+  ZELLIJ_SOCKET_DIR="$demo_zellij_sockets" zellij delete-session --force \
+    "$demo_zellij_session" >/dev/null 2>&1 || true
   NEOPANE_TMPDIR="$demo_tmpdir" "$demo_repo/target/release/neopane" kill --all --force \
     >/dev/null 2>&1 || true
   # The daemons' Neovim keeps the demo's unsaved edits in swap files, which

@@ -21,8 +21,13 @@ cd "$demo_work"
 
 case "${1:-}" in
 tmux) exec tmux -L "$demo_tmux_socket" -f "$here/tmux.conf" new-session -s demo ;;
+zellij)
+  mkdir -p "$demo_zellij_sockets"
+  export ZELLIJ_SOCKET_DIR="$demo_zellij_sockets" ZELLIJ_CONFIG_DIR="$here/zellij"
+  exec zellij --session "$demo_zellij_session"
+  ;;
 *)
-  echo "usage: $0 tmux" >&2
+  echo "usage: $0 tmux|zellij" >&2
   exit 2
   ;;
 esac
