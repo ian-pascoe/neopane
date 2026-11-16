@@ -982,17 +982,21 @@ impl HcCore {
     /// Starts one for test `test`, a name of at most 10 letters, and waits
     /// for it to answer.
     pub fn start(test: &str) -> HcCore {
-        // a socket's path is at most 104 bytes on macOS: $TMPDIR is long
-        // the core's sockets are under its state, named for its session,
-        // twice, and must fit 103 bytes: its state alone keeps it apart
+        // a socket's path is at most 104 bytes on macOS: $TMPDIR is long.
+        // The core's sockets, named for its session, are under its runtime
+        // directory, or its state without one, and must fit 103 bytes: its
+        // directories alone keep it apart
         assert!(test.len() <= 10, "{test} is too long for a session name");
         let dir = PathBuf::from(format!("/tmp/{NAME}-hc-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for d in ["s", "config", "home"] {
+        for d in ["s", "r", "config", "home"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("r"), std::fs::Permissions::from_mode(0o700)).unwrap();
         let session = test.to_string();
-        let socket = dir.join(format!("s/herdr-core/{session}/{session}.sock"));
+        // where it should be: the core's lock says where it is
+        let socket = dir.join(format!("r/herdr-core/{session}.sock"));
         let mut core = HcCore {
             socket,
             dir,
@@ -1014,10 +1018,24 @@ impl HcCore {
             text(&out.stderr)
         );
         let due = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while let Err(e) = core.try_call("server.status", serde_json::json!({})) {
+        loop {
+            if let Some(socket) = core.locked_socket() {
+                core.socket = socket;
+            }
+            let Err(e) = core.try_call("server.status", serde_json::json!({})) else {
+                break;
+            };
             assert!(
                 std::time::Instant::now() < due,
-                "the hc core never answered: {e}: {}",
+                "the hc core never answered at {}: {e}\n\
+                 its lock {} says: {:?}\n\
+                 hc server start printed: {}{}\n\
+                 its log: {}",
+                core.socket.display(),
+                core.lock().display(),
+                std::fs::read_to_string(core.lock()).ok(),
+                text(&out.stdout),
+                text(&out.stderr),
                 core.log()
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1025,16 +1043,26 @@ impl HcCore {
         core
     }
 
+    /// Its lock file, under its state, which holds its socket's path.
+    fn lock(&self) -> PathBuf {
+        self.dir
+            .join(format!("s/herdr-core/{}/core.lock", self.session))
+    }
+
+    /// The socket its lock says it listens on, if it says one yet.
+    fn locked_socket(&self) -> Option<PathBuf> {
+        let said = std::fs::read_to_string(self.lock()).ok()?;
+        let said = said.trim();
+        (!said.is_empty()).then(|| PathBuf::from(said))
+    }
+
     /// The pids of the processes holding its lock: the core's, should
     /// `hc server start` not have said it. Best effort: none without
     /// `lsof`.
     fn locked_by(&self) -> Vec<i32> {
-        let lock = self
-            .dir
-            .join(format!("s/herdr-core/{}/core.lock", self.session));
         Command::new("lsof")
             .arg("-t")
-            .arg(lock)
+            .arg(self.lock())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -1059,10 +1087,17 @@ impl HcCore {
 
     /// `cmd` without any of [`PROVIDER_VARS`], `HC_*` or `<NAME>*`
     /// variables, for a core's own, or its app's, to be set after.
+    ///
+    /// The session's runtime directory and bus go too: under a
+    /// `XDG_RUNTIME_DIR`, such as a CI runner's `/run/user/1001`, hc puts
+    /// its socket there, shared, and starts its core through the systemd
+    /// user manager it finds there.
     pub fn isolate(cmd: &mut Command) -> &mut Command {
         without_prefixed(cmd, "HC_");
         without_prefixed(cmd, &NAME.to_ascii_uppercase());
         without_provider_vars(cmd)
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
     }
 
     /// The variables that point `hc` at this core alone.
@@ -1070,6 +1105,7 @@ impl HcCore {
         vec![
             ("HC_SESSION", self.session.clone().into()),
             ("XDG_STATE_HOME", self.dir.join("s").into()),
+            ("XDG_RUNTIME_DIR", self.dir.join("r").into()),
             ("XDG_CONFIG_HOME", self.dir.join("config").into()),
             ("HOME", self.dir.join("home").into()),
         ]
