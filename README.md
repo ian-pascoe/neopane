@@ -513,9 +513,11 @@ checks the choice: the terminal must be the live hc terminal
 of a window that answers. Its reach is that hc core and the app's home
 (`HERDR_APP_HOME`); terminals of remote spaces are refused. No version is
 required: a method the core lacks is named, with both versions, and
-`neopane provider check` shows both. For now it only finds the terminal and
-closes terminals, so windows are drawn in the pane they came from, as with
-no pane provider; panes of their own come next. `neopane provider show
+`neopane provider check` shows both. Each window gets a Herdr app pane of
+its own, split beside the one it was opened from and running the attach
+with no shell, the hc core's keep off so it closes for good
+([ADR 0020](docs/adr/0020-the-herdr-apps-pane-provider-reads-the-hc-cores-socket-and-changes-the-window-through-herdr-app.md));
+focus, sizes and tab pages come next. `neopane provider show
 herdr-app` prints its table, which `neopane.builtin.herdr_app()` returns
 for your config to change ([docs/config.md](docs/config.md#herdr-app)).
 

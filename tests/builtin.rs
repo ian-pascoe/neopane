@@ -33,7 +33,7 @@ fn an_unknown_name_capability_or_extra_word_is_unsupported() {
         &["tmux"],
         &["nope", "find"],
         &["zellij", "place_beside"],
-        &["herdr-app", "open_beside"],
+        &["herdr-app", "events"],
         &["herdr_app", "find"],
         &["tmux", "open"],
         &["tmux", "nope"],

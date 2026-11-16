@@ -21,7 +21,7 @@
 use std::time::{Duration, Instant};
 
 use super::core::Core;
-use super::doc::panes_of;
+use super::doc::pane_of;
 use super::window::Window;
 use super::{methods, versions};
 use crate::attach::env_value;
@@ -100,17 +100,7 @@ pub(super) fn prove(
             Some(_) => None,
         },
     };
-    let doc = core.doc()?;
-    let pane = match panes_of(&doc, &terminal).as_slice() {
-        [] => return Err(format!("{terminal} has no Herdr app pane")),
-        [one] => one.clone(),
-        several => {
-            return Err(format!(
-                "{terminal} shows in {} Herdr app panes",
-                several.len()
-            ));
-        }
-    };
+    let pane = pane_of(&core.doc()?, &terminal)?;
     app.status(due).map_err(String::from)?;
     Ok(Found {
         terminal,
