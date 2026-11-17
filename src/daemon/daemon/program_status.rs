@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::nvim::windows::BufWin;
 
 impl Daemon {
     /// Writes each pane's terminal the reports that bring the program
@@ -12,8 +13,8 @@ impl Daemon {
     /// that had frames dropped waits until it has caught up, and is then
     /// written in full. A terminal that can't take them is gone, which its
     /// hang-up tells.
-    pub(super) fn relay_status(&mut self) {
-        let shown = self.status_shown();
+    pub(super) fn relay_program_status(&mut self) {
+        let shown = self.program_status_shown();
         for p in self.panes.list.iter_mut() {
             if p.closing.is_some() {
                 continue;
@@ -27,8 +28,8 @@ impl Daemon {
                 continue;
             }
             let bufs = shown.get(&id).map(Vec::as_slice).unwrap_or_default();
-            let desired = self.program_status.desired(bufs);
-            let watched = match s.write_status(&desired) {
+            let wanted = self.program_status.wanted(bufs);
+            let watched = match s.write_program_status(&wanted) {
                 Ok(Some(Sent::Waiting)) => self
                     .event_loop
                     .add_write(s.output_fd(), token)
@@ -42,11 +43,11 @@ impl Daemon {
         }
     }
 
-    /// The status buffers with records each pane shows the status of, by
-    /// pane id: those with a window it holds, in the tab page it shows or
-    /// another; a float's, in its float group pane, or else in the window
-    /// pane its group is drawn in.
-    fn status_shown(&mut self) -> HashMap<u32, Vec<i64>> {
+    /// The terminal buffers with status records each pane shows the
+    /// status of, by pane id: those with a window it holds, in the tab page
+    /// it shows or another; a float's, in its float group pane, and in the
+    /// panes its last frame drew it in, entered or not.
+    fn program_status_shown(&self) -> HashMap<u32, Vec<i64>> {
         let mut out: HashMap<u32, Vec<i64>> = HashMap::new();
         let mut add = |id: u32, buf: i64| {
             let bufs = out.entry(id).or_default();
@@ -54,33 +55,26 @@ impl Daemon {
                 bufs.push(buf);
             }
         };
-        let current = self.current_pane_id();
-        let mut homed: Option<Vec<(u32, float_groups::Group)>> = None;
-        let wins: Vec<(i64, i64)> = self.program_status.shown().collect();
-        for (buf, win) in wins {
-            let mut held = false;
+        for BufWin { buf, win } in self.program_status.shown() {
             for p in self.panes.list.iter().filter(|p| p.holds(win)) {
                 add(p.id, buf);
-                held = true;
             }
-            if held {
+            let Some(grid) = self.grids.grid_of(win) else {
+                continue;
+            };
+            if self.grids.wins.get(&grid).map(|w| w.kind) != Some(WinKind::Float) {
                 continue;
             }
             if let Some(p) = floating_panes::layer_of_win(&self.grids, &self.panes, win) {
                 add(p.id, buf);
-                continue;
             }
-            let homed = homed.get_or_insert_with(|| {
-                self.float_homes.in_panes(
-                    &self.grids,
-                    &self.panes,
-                    self.nvim.entered_floats(),
-                    current,
-                )
-            });
-            for (home, g) in homed.iter() {
-                if float_groups::has_win(&self.grids, g, win) {
-                    add(*home, buf);
+            for p in &self.panes.list {
+                let drew = p
+                    .terminal_surface
+                    .as_ref()
+                    .is_some_and(|s| s.view.drawn_floats().iter().any(|r| r.grid == grid));
+                if drew {
+                    add(p.id, buf);
                 }
             }
         }

@@ -9,7 +9,7 @@ pub(crate) mod report;
 use indexmap::IndexMap;
 
 use crate::name::NAME;
-use crate::nvim::windows::StatusEnd as End;
+use crate::nvim::windows::{BufWin, ProgramStatusEnd as End};
 use report::{Change, Record};
 
 /// Most status records a terminal buffer keeps: the spec's cap.
@@ -32,21 +32,22 @@ struct Stored {
 /// them.
 #[derive(Debug, Default)]
 pub(crate) struct ProgramStatus {
-    /// Each status buffer's records, least recently updated first.
+    /// The records of each terminal buffer with a program status, least
+    /// recently updated first.
     buffers: IndexMap<i64, Vec<Stored>>,
-    /// The windows of each status buffer, as last told: buffer, window.
-    windows: Vec<(i64, i64)>,
+    /// Their windows, as last told.
+    windows: Vec<BufWin>,
     /// The last update's number.
     seq: u64,
 }
 
 /// The status records a Neovim pane's terminal is to hold: each one's id,
 /// None for the root record, and its report's body.
-pub(crate) type Desired = IndexMap<Option<String>, String>;
+pub(crate) type Wanted = IndexMap<Option<String>, String>;
 
 impl ProgramStatus {
     /// Terminal buffer `buf` reported `body`. One the spec ignores or
-    /// discards changes nothing; the buffer is a status buffer all the
+    /// discards changes nothing; the buffer has a program status all the
     /// same.
     pub(crate) fn report(&mut self, buf: i64, body: &[u8]) {
         let records = self.buffers.entry(buf).or_default();
@@ -85,22 +86,22 @@ impl ProgramStatus {
             }
             End::Gone => {
                 self.buffers.shift_remove(&buf);
-                self.windows.retain(|&(b, _)| b != buf);
+                self.windows.retain(|w| w.buf != buf);
             }
         }
     }
 
-    /// The windows of the status buffers, buffer and window, as told.
-    pub(crate) fn set_windows(&mut self, windows: Vec<(i64, i64)>) {
+    /// The windows of the terminal buffers with a program status, as told.
+    pub(crate) fn set_windows(&mut self, windows: Vec<BufWin>) {
         self.windows = windows;
     }
 
-    /// The windows of the status buffers with records: buffer, window.
-    pub(crate) fn shown(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
+    /// The windows of the terminal buffers with status records.
+    pub(crate) fn shown(&self) -> impl Iterator<Item = BufWin> + '_ {
         self.windows
             .iter()
             .copied()
-            .filter(|(b, _)| self.buffers.get(b).is_some_and(|r| !r.is_empty()))
+            .filter(|w| self.buffers.get(&w.buf).is_some_and(|r| !r.is_empty()))
     }
 
     /// The status records a Neovim pane's terminal is to hold, showing the
@@ -109,7 +110,8 @@ impl ProgramStatus {
     /// own ids, with several, every record of each under a segment of its
     /// own, `<name>-<buffer>`. At most `PANE_CAP`, the root record and the
     /// most recently updated: the root record first, the rest oldest first.
-    pub(crate) fn desired(&self, bufs: &[i64]) -> Desired {
+    /// None whose report, ended by `ESC \`, would break the spec's limits.
+    pub(crate) fn wanted(&self, bufs: &[i64]) -> Wanted {
         let with: Vec<(i64, &Vec<Stored>)> = bufs
             .iter()
             .filter_map(|b| Some((*b, self.buffers.get(b).filter(|r| !r.is_empty())?)))
@@ -117,7 +119,9 @@ impl ProgramStatus {
         let root = with
             .iter()
             .flat_map(|(_, rs)| rs.iter().filter(|s| s.id.is_none()))
-            .max_by_key(|s| (s.record.state.rank(), s.seq));
+            .map(|s| (s, s.record.body(None)))
+            .filter(|(_, body)| report::fits(body))
+            .max_by_key(|(s, _)| (s.record.state.rank(), s.seq));
         let mut rest: Vec<(String, String, u64)> = Vec::new();
         for (buf, records) in &with {
             for s in records.iter() {
@@ -139,9 +143,9 @@ impl ProgramStatus {
                 }
             }
         }
-        let mut out = Desired::new();
-        if let Some(r) = root {
-            out.insert(None, r.record.body(None));
+        let mut out = Wanted::new();
+        if let Some((_, body)) = root {
+            out.insert(None, body);
         }
         rest.sort_by_key(|r| std::cmp::Reverse(r.2));
         rest.truncate(PANE_CAP - out.len());
@@ -162,7 +166,11 @@ pub(crate) fn under(id: &str, top: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn ids(d: &Desired) -> Vec<Option<&str>> {
+    fn bw(buf: i64, win: i64) -> BufWin {
+        BufWin { buf, win }
+    }
+
+    fn ids(d: &Wanted) -> Vec<Option<&str>> {
         d.keys().map(|k| k.as_deref()).collect()
     }
 
@@ -244,10 +252,10 @@ mod tests {
         }
         let mut s = ProgramStatus::default();
         s.report(1, b"state=done");
-        s.set_windows(vec![(1, 1000), (2, 1001)]);
+        s.set_windows(vec![bw(1, 1000), bw(2, 1001)]);
         s.end(1, End::Gone);
         assert!(!s.buffers.contains_key(&1));
-        assert_eq!(vec![(2, 1001)], s.windows);
+        assert_eq!(vec![bw(2, 1001)], s.windows);
     }
 
     #[test]
@@ -256,8 +264,8 @@ mod tests {
         s.report(1, b"state=done");
         s.report(2, b"state=done");
         s.report(2, b"state=clear");
-        s.set_windows(vec![(1, 1000), (2, 1001), (3, 1002)]);
-        assert_eq!(vec![(1, 1000)], s.shown().collect::<Vec<_>>());
+        s.set_windows(vec![bw(1, 1000), bw(2, 1001), bw(3, 1002)]);
+        assert_eq!(vec![bw(1, 1000)], s.shown().collect::<Vec<_>>());
     }
 
     #[test]
@@ -265,22 +273,22 @@ mod tests {
         let mut s = ProgramStatus::default();
         s.report(1, b"state=working:id=a");
         s.report(1, b"state=idle:app=x");
-        let d = s.desired(&[1]);
+        let d = s.wanted(&[1]);
         assert_eq!(vec![None, Some("a")], ids(&d));
         assert_eq!("state=idle:app=x", d[&None]);
         assert_eq!("state=working:id=a", d[&Some("a".into())]);
         // no root: none
         s.report(1, b"state=clear");
         s.report(1, b"state=done:id=a");
-        assert_eq!(vec![Some("a")], ids(&s.desired(&[1])));
-        assert!(s.desired(&[]).is_empty());
-        assert!(s.desired(&[7]).is_empty());
+        assert_eq!(vec![Some("a")], ids(&s.wanted(&[1])));
+        assert!(s.wanted(&[]).is_empty());
+        assert!(s.wanted(&[7]).is_empty());
     }
 
     #[test]
     fn the_root_is_the_most_pressing_root_ties_to_the_latest() {
         let mut s = ProgramStatus::default();
-        let root = |s: &ProgramStatus, bufs: &[i64]| s.desired(bufs).get(&None).cloned();
+        let root = |s: &ProgramStatus, bufs: &[i64]| s.wanted(bufs).get(&None).cloned();
         s.report(1, b"state=working:app=one");
         s.report(2, b"state=blocked:app=two");
         s.report(3, b"state=done:app=three");
@@ -309,7 +317,7 @@ mod tests {
         s.report(1, b"state=working:app=one");
         s.report(1, b"state=blocked:id=a/b");
         s.report(2, b"state=done:id=c");
-        let d = s.desired(&[1, 2]);
+        let d = s.wanted(&[1, 2]);
         let seg = |b: i64, rest: &str| format!("{NAME}-{b}{rest}");
         assert_eq!(
             vec![
@@ -334,10 +342,10 @@ mod tests {
         let long = format!("{0}/{0}/{0}/{1}", "l".repeat(32), "m".repeat(29));
         s.report(2, format!("state=idle:id={deep}").as_bytes());
         s.report(2, format!("state=idle:id={long}").as_bytes());
-        let d = s.desired(&[1, 2]);
+        let d = s.wanted(&[1, 2]);
         assert_eq!(4, d.len());
         // alone, they pass
-        assert_eq!(3, s.desired(&[2]).len());
+        assert_eq!(3, s.wanted(&[2]).len());
     }
 
     #[test]
@@ -347,12 +355,36 @@ mod tests {
         for i in 0..70 {
             s.report(1, format!("state=idle:id=r{i}").as_bytes());
         }
-        let d = s.desired(&[1]);
+        let d = s.wanted(&[1]);
         assert_eq!(64, d.len());
         assert_eq!(None, d.keys().next().unwrap().as_deref());
         // r7 to r69, oldest first
         assert_eq!(Some("r7"), d.keys().nth(1).unwrap().as_deref());
         assert_eq!(Some("r69"), d.keys().last().unwrap().as_deref());
+    }
+
+    // A report ended by BEL may be one byte too long ended by `ESC \`.
+    #[test]
+    fn a_root_record_too_long_to_write_is_not_the_root() {
+        let mut s = ProgramStatus::default();
+        let long = |state: &str| {
+            let head = format!("state={state}:x=");
+            format!("{head}{}", "a".repeat(4096 - 8 - head.len()))
+        };
+        s.report(1, b"state=idle");
+        s.report(2, long("blocked").as_bytes());
+        // kept, as the spec allows it
+        assert_eq!(1, s.buffers[&2].len());
+        assert_eq!(
+            Some(&"state=idle".to_string()),
+            s.wanted(&[1, 2]).get(&None)
+        );
+        assert!(s.wanted(&[2]).is_empty());
+        // one byte less fits
+        let shorter = long("blocked");
+        let shorter = &shorter[..shorter.len() - 1];
+        s.report(2, shorter.as_bytes());
+        assert_eq!(Some(&shorter.to_string()), s.wanted(&[1, 2]).get(&None));
     }
 
     #[test]

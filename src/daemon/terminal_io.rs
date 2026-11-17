@@ -61,8 +61,11 @@ impl TerminalIo for FdIo {
 
     fn wrap(&self, _frame: &mut Vec<u8>) {}
 
-    /// Only the daemon's frames go on the helper socket, and few: there is
-    /// room for it.
+    /// Only the daemon's frames go on the helper socket, and few: a `u` goes
+    /// only as the undo bytes change, as a pane title, a first root record
+    /// or a new top segment of program status is written, or after frames
+    /// were dropped, and once a root record is written they stop changing.
+    /// There is room for it.
     fn send_undo(&self, helper: &UnixStream, u: &[u8], _out: &mut Vec<u8>) {
         write_within(helper, u, Instant::now() + END_FLUSH);
     }

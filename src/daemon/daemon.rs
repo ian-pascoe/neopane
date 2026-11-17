@@ -631,7 +631,7 @@ impl Daemon {
         self.send_focus(false)?;
         self.sync_tabline_width()?;
         self.tell_panes_show()?;
-        self.relay_status();
+        self.relay_program_status();
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
         if self.stopping_done() {
@@ -833,7 +833,7 @@ impl Daemon {
         let repaint = s.backlog.take_dropped();
         if repaint {
             s.view.full = true;
-            s.status_dropped();
+            s.program_status_dropped();
         }
         self.event_loop.remove_write(fd)?;
         if repaint {
@@ -1477,9 +1477,9 @@ impl Daemon {
             windows::Note::Terminals(ptys) => self.told.terminals = ptys,
             windows::Note::Done { buf, by_pane } => self.on_done(buf, by_pane),
             windows::Note::Statuslines => self.ask_statuslines()?,
-            windows::Note::Status { buf, body } => self.program_status.report(buf, &body),
-            windows::Note::StatusEnd { buf, end } => self.program_status.end(buf, end),
-            windows::Note::StatusWindows(w) => self.program_status.set_windows(w),
+            windows::Note::ProgramStatus { buf, body } => self.program_status.report(buf, &body),
+            windows::Note::ProgramStatusEnd { buf, end } => self.program_status.end(buf, end),
+            windows::Note::ProgramStatusWindows(w) => self.program_status.set_windows(w),
         }
         Ok(())
     }

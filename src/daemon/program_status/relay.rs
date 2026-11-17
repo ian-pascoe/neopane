@@ -4,44 +4,48 @@
 //! bytes.
 
 use super::report::{clear_body, sequence};
-use super::{Desired, under};
+use super::{Wanted, under};
 
 /// The status records written to one terminal.
 #[derive(Debug, Default)]
-pub(crate) struct Relayed {
+pub(crate) struct Written {
     /// What it holds: each record's id, None for the root record, and its
     /// report's body.
-    written: Desired,
+    held: Wanted,
     /// A root record was written to it once: its whole record set is
     /// neopane's to clear.
     root_written: bool,
+    /// The top segment of every id written to it, first written first:
+    /// what it may hold still, had a clear been dropped.
+    tops: Vec<String>,
     /// Reports written may have been dropped: it is written in full next.
     unknown: bool,
 }
 
-impl Relayed {
+impl Written {
     /// The reports that bring the terminal from what it holds to
-    /// `desired`, which it holds after: a record changed or new, each
+    /// `wanted`, which it holds after: a record changed or new, each
     /// record gone cleared, where all of a top segment's records go by
-    /// one clear of it. A root record gone, or reports perhaps dropped,
-    /// clear everything first.
-    pub(crate) fn update(&mut self, desired: &Desired) -> Vec<u8> {
+    /// one clear of it. A root record gone clears everything first;
+    /// reports perhaps dropped clear what the undo bytes would first.
+    pub(crate) fn update(&mut self, wanted: &Wanted) -> Vec<u8> {
         let mut out = Vec::new();
-        let all_again = (self.unknown && (self.root_written || !self.written.is_empty()))
-            || (self.written.contains_key(&None) && !desired.contains_key(&None));
-        self.unknown = false;
-        if all_again {
-            out.extend(sequence(&clear_body(None)));
-            self.written.clear();
+        if self.unknown {
+            out = self.clears(usize::MAX);
+            self.held.clear();
+        } else if self.held.contains_key(&None) && !wanted.contains_key(&None) {
+            out = sequence(&clear_body(None));
+            self.held.clear();
         }
+        self.unknown = false;
         // the ids to clear, none beneath another
         let mut clears: Vec<&str> = Vec::new();
-        for id in self.written.keys().flatten() {
-            if desired.contains_key(&Some(id.clone())) {
+        for id in self.held.keys().flatten() {
+            if wanted.contains_key(&Some(id.clone())) {
                 continue;
             }
-            let top = id.split('/').next().unwrap();
-            let kept_under_top = desired.keys().flatten().any(|d| under(d, top));
+            let top = top_of(id);
+            let kept_under_top = wanted.keys().flatten().any(|d| under(d, top));
             let clear = if kept_under_top { id.as_str() } else { top };
             if !clears.iter().any(|c| under(clear, c)) {
                 clears.retain(|c| !under(c, clear));
@@ -51,48 +55,49 @@ impl Relayed {
         for c in &clears {
             out.extend(sequence(&clear_body(Some(c))));
         }
-        for (id, body) in desired {
+        for (id, body) in wanted {
             let cleared = id
                 .as_deref()
                 .is_some_and(|id| clears.iter().any(|c| under(id, c)));
-            if cleared || self.written.get(id) != Some(body) {
+            if cleared || self.held.get(id) != Some(body) {
                 out.extend(sequence(body));
             }
         }
-        self.root_written |= desired.contains_key(&None);
-        self.written = desired.clone();
+        self.root_written |= wanted.contains_key(&None);
+        for id in wanted.keys().flatten() {
+            let top = top_of(id);
+            if !self.tops.iter().any(|t| t == top) {
+                self.tops.push(top.to_string());
+            }
+        }
+        self.held = wanted.clone();
         out
     }
 
     /// What the terminal holds.
     #[cfg(test)]
-    pub(crate) fn held(&self) -> &Desired {
-        &self.written
+    pub(crate) fn held(&self) -> &Wanted {
+        &self.held
     }
 
     /// Reports written may have been dropped, as frames are: the next
-    /// `update` clears everything and writes it all again.
+    /// `update` clears what the undo bytes would and writes it all again.
     pub(crate) fn forget(&mut self) {
         self.unknown = true;
     }
 
     /// The reports that clear what was written, for the undo bytes, in
     /// `room` bytes at most: once a root record was written, one clear of
-    /// everything; else one clear of each top segment it holds, or, if
-    /// those don't fit, one clear of everything.
+    /// everything; else one clear of each top segment ever written, or, if
+    /// those don't fit, one clear of everything. They change only as a
+    /// report is written.
     pub(crate) fn clears(&self, room: usize) -> Vec<u8> {
         let everything = sequence(&clear_body(None));
         if self.root_written {
             return everything;
         }
-        let mut tops: Vec<&str> = Vec::new();
-        for id in self.written.keys().flatten() {
-            let top = id.split('/').next().unwrap();
-            if !tops.contains(&top) {
-                tops.push(top);
-            }
-        }
-        let out: Vec<u8> = tops
+        let out: Vec<u8> = self
+            .tops
             .iter()
             .flat_map(|t| sequence(&clear_body(Some(t))))
             .collect();
@@ -100,11 +105,16 @@ impl Relayed {
     }
 }
 
+/// The top segment of id `id`.
+fn top_of(id: &str) -> &str {
+    id.split('/').next().unwrap_or(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn desired(records: &[(Option<&str>, &str)]) -> Desired {
+    fn wanted(records: &[(Option<&str>, &str)]) -> Wanted {
         records
             .iter()
             .map(|(id, body)| (id.map(str::to_string), body.to_string()))
@@ -122,28 +132,28 @@ mod tests {
 
     #[test]
     fn only_what_changed_is_written() {
-        let mut r = Relayed::default();
-        let d = desired(&[(None, "state=working"), (Some("a"), "state=idle:id=a")]);
+        let mut r = Written::default();
+        let d = wanted(&[(None, "state=working"), (Some("a"), "state=idle:id=a")]);
         assert_eq!(
             vec!["state=working", "state=idle:id=a"],
             bodies(&r.update(&d))
         );
         assert!(r.update(&d).is_empty());
-        let d = desired(&[(None, "state=blocked"), (Some("a"), "state=idle:id=a")]);
+        let d = wanted(&[(None, "state=blocked"), (Some("a"), "state=idle:id=a")]);
         assert_eq!(vec!["state=blocked"], bodies(&r.update(&d)));
         // a child gone is cleared
-        let d = desired(&[(None, "state=blocked")]);
+        let d = wanted(&[(None, "state=blocked")]);
         assert_eq!(vec!["state=clear:id=a"], bodies(&r.update(&d)));
     }
 
     #[test]
     fn a_root_gone_clears_everything_then_writes_the_rest() {
-        let mut r = Relayed::default();
-        r.update(&desired(&[
+        let mut r = Written::default();
+        r.update(&wanted(&[
             (None, "state=working"),
             (Some("a"), "state=idle:id=a"),
         ]));
-        let d = desired(&[(Some("a"), "state=idle:id=a")]);
+        let d = wanted(&[(Some("a"), "state=idle:id=a")]);
         assert_eq!(
             vec!["state=clear", "state=idle:id=a"],
             bodies(&r.update(&d))
@@ -153,8 +163,8 @@ mod tests {
 
     #[test]
     fn a_top_segment_all_gone_is_cleared_once() {
-        let mut r = Relayed::default();
-        let all = desired(&[
+        let mut r = Written::default();
+        let all = wanted(&[
             (None, "state=working"),
             (Some("s-1"), "state=working:id=s-1"),
             (Some("s-1/a"), "state=idle:id=s-1/a"),
@@ -163,7 +173,7 @@ mod tests {
         ]);
         r.update(&all);
         // s-1 goes: one clear; s-2's own segment, never written, clears it too
-        let d = desired(&[(None, "state=working")]);
+        let d = wanted(&[(None, "state=working")]);
         assert_eq!(
             vec!["state=clear:id=s-1", "state=clear:id=s-2"],
             bodies(&r.update(&d))
@@ -171,7 +181,7 @@ mod tests {
         // records kept beneath a top segment: each gone one cleared, and
         // what its clear took written again
         r.update(&all);
-        let d = desired(&[
+        let d = wanted(&[
             (None, "state=working"),
             (Some("s-1"), "state=working:id=s-1"),
             (Some("s-1/a/b"), "state=idle:id=s-1/a/b"),
@@ -185,15 +195,15 @@ mod tests {
 
     #[test]
     fn rekeyed_records_clear_the_old_segment_and_write_the_new_ids() {
-        let mut r = Relayed::default();
+        let mut r = Written::default();
         // two buffers shown, then one
-        r.update(&desired(&[
+        r.update(&wanted(&[
             (None, "state=working"),
             (Some("s-1"), "state=working:id=s-1"),
             (Some("s-1/a"), "state=idle:id=s-1/a"),
             (Some("s-2"), "state=done:id=s-2"),
         ]));
-        let d = desired(&[(None, "state=working"), (Some("a"), "state=idle:id=a")]);
+        let d = wanted(&[(None, "state=working"), (Some("a"), "state=idle:id=a")]);
         assert_eq!(
             vec![
                 "state=clear:id=s-1",
@@ -206,25 +216,33 @@ mod tests {
 
     #[test]
     fn reports_perhaps_dropped_are_written_again_in_full() {
-        let mut r = Relayed::default();
+        let mut r = Written::default();
         // nothing written: nothing to clear
         r.forget();
-        assert!(r.update(&Desired::new()).is_empty());
-        let d = desired(&[(Some("a"), "state=idle:id=a")]);
+        assert!(r.update(&Wanted::new()).is_empty());
+        // no root written: what the terminal holds of its own stays, and
+        // every top segment written is cleared, held now or not
+        r.update(&wanted(&[(Some("b/c"), "state=idle:id=b/c")]));
+        let d = wanted(&[(Some("a"), "state=idle:id=a")]);
         r.update(&d);
         r.forget();
         assert_eq!(
-            vec!["state=clear", "state=idle:id=a"],
+            vec!["state=clear:id=b", "state=clear:id=a", "state=idle:id=a"],
             bodies(&r.update(&d))
         );
         assert!(r.update(&d).is_empty());
+        // a root written once: everything
+        let d = wanted(&[(None, "state=idle")]);
+        r.update(&d);
+        r.forget();
+        assert_eq!(vec!["state=clear", "state=idle"], bodies(&r.update(&d)));
     }
 
     #[test]
     fn the_clears_undo_what_was_written() {
-        let mut r = Relayed::default();
+        let mut r = Written::default();
         assert!(r.clears(4096).is_empty());
-        r.update(&desired(&[
+        r.update(&wanted(&[
             (Some("a"), "state=idle:id=a"),
             (Some("a/b"), "state=idle:id=a/b"),
             (Some("c/d"), "state=idle:id=c/d"),
@@ -233,11 +251,18 @@ mod tests {
             vec!["state=clear:id=a", "state=clear:id=c"],
             bodies(&r.clears(4096))
         );
+        // a top segment cleared stays in them: its clear may have been
+        // dropped with frames
+        r.update(&wanted(&[(Some("a"), "state=idle:id=a")]));
+        assert_eq!(
+            vec!["state=clear:id=a", "state=clear:id=c"],
+            bodies(&r.clears(4096))
+        );
         // too long for the room: everything
         assert_eq!(vec!["state=clear"], bodies(&r.clears(30)));
         // a root written once: everything, from then on
-        r.update(&desired(&[(None, "state=idle")]));
-        r.update(&desired(&[(Some("a"), "state=idle:id=a")]));
+        r.update(&wanted(&[(None, "state=idle")]));
+        r.update(&wanted(&[(Some("a"), "state=idle:id=a")]));
         assert_eq!(vec!["state=clear"], bodies(&r.clears(4096)));
     }
 }
