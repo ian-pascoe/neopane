@@ -22,6 +22,10 @@ _Avoid_: tab (on its own)
 The tabline Neovim shows when `'tabline'` is empty: a label per tab page, then a close button.
 _Avoid_: default tabline, Neovim's own tabline
 
+**Terminal buffer**:
+A Neovim buffer running a program in a `:terminal`.
+_Avoid_: terminal (on its own: a Neovim pane's), job, `:terminal` window
+
 ### neopane
 
 **Daemon**:
@@ -122,6 +126,18 @@ _Avoid_: hidden window, paneless window, detached window
 **Layout area**:
 The space a group of Neovim panes share, as the layout provider reports it, such as a Rex window, a tmux window, a Herdr app tab or a sway workspace, with floating terminals over it. A Neovim pane with no live layout, or out of the pane provider's reach, is a layout area of its own; so is a requested pane the live layout still hasn't reported a second after its terminal attached with its terminal id, which until then is in no layout area. A tab page area is one when its layout provider reports it so, as a tmux window is; a tab page's Rex floating pane floats within the Rex window's. Terminals hidden while another is zoomed or full screen are reported in a layout area of their own, such as tmux's `@N~hidden`, herdr's `w1:t1~hidden` or zellij's `tab_N~hidden`: to the daemon an ordinary layout area, though none of it is on screen. The Herdr app's pane provider likewise reports a terminal it can't place in its tab, one in a pane sized in pixels or shown in two panes, in a layout area of its own, its id the Herdr app pane's.
 _Avoid_: screen (Neovim's), window (Rex's, Neovim's, the OS's), workspace
+
+**Program status**:
+What a program in a terminal buffer reports about itself, such as working, blocked on the user or done, as status records. neopane keeps it per terminal buffer and shows it in the terminals of the Neovim panes holding or drawing that buffer's windows.
+_Avoid_: status (on its own: the control request), agent status, badge, notification
+
+**Status record**:
+One part of a program status, under an id or none; each report replaces one whole record.
+_Avoid_: entry, item
+
+**Root record**:
+The status record with no id, the one every terminal that shows program status reads. A Neovim pane's root record is the most pressing root record among the terminal buffers it shows the status of.
+_Avoid_: main status, summary
 
 **Foreign pane**:
 A terminal in a layout area that isn't a Neovim pane, such as a shell or an agent in a Rex or tmux pane.
