@@ -5,6 +5,7 @@
 
 use super::report::{clear_body, sequence};
 use super::{Wanted, under};
+use crate::attach::UNDO_LIMIT;
 
 /// The status records written to one terminal.
 #[derive(Debug, Default)]
@@ -12,12 +13,16 @@ pub(crate) struct Written {
     /// What it holds: each record's id, None for the root record, and its
     /// report's body.
     held: Wanted,
-    /// A root record was written to it once: its whole record set is
-    /// neopane's to clear.
-    root_written: bool,
+    /// It is cleared whole: a root record was written to it once, making
+    /// its whole record set neopane's to clear, or the clears of `tops`
+    /// grew past what a `u` holds.
+    clear_all: bool,
     /// The top segment of every id written to it, first written first:
-    /// what it may hold still, had a clear been dropped.
+    /// what it may hold still, had a clear been dropped. Empty once
+    /// `clear_all`.
     tops: Vec<String>,
+    /// How many bytes the clears of `tops` take.
+    tops_len: usize,
     /// Reports written may have been dropped: it is written in full next.
     unknown: bool,
 }
@@ -63,12 +68,19 @@ impl Written {
                 out.extend(sequence(body));
             }
         }
-        self.root_written |= wanted.contains_key(&None);
+        self.clear_all |= wanted.contains_key(&None);
         for id in wanted.keys().flatten() {
             let top = top_of(id);
-            if !self.tops.iter().any(|t| t == top) {
-                self.tops.push(top.to_string());
+            if self.clear_all || self.tops.iter().any(|t| t == top) {
+                continue;
             }
+            self.tops.push(top.to_string());
+            self.tops_len += sequence(&clear_body(Some(top))).len();
+            self.clear_all = self.tops_len > UNDO_LIMIT;
+        }
+        if self.clear_all {
+            self.tops.clear();
+            self.tops_len = 0;
         }
         self.held = wanted.clone();
         out
@@ -87,13 +99,14 @@ impl Written {
     }
 
     /// The reports that clear what was written, for the undo bytes, in
-    /// `room` bytes at most: once a root record was written, one clear of
+    /// `room` bytes at most: once a root record was written, or the clears
+    /// of the top segments written grew past what a `u` holds, one clear of
     /// everything; else one clear of each top segment ever written, or, if
     /// those don't fit, one clear of everything. They change only as a
     /// report is written.
     pub(crate) fn clears(&self, room: usize) -> Vec<u8> {
         let everything = sequence(&clear_body(None));
-        if self.root_written {
+        if self.clear_all {
             return everything;
         }
         let out: Vec<u8> = self
@@ -264,5 +277,30 @@ mod tests {
         r.update(&wanted(&[(None, "state=idle")]));
         r.update(&wanted(&[(Some("a"), "state=idle:id=a")]));
         assert_eq!(vec!["state=clear"], bodies(&r.clears(4096)));
+    }
+
+    // Segments come and go for good: once their clears pass what a `u`
+    // holds, one clear of everything stands for them, and replays too.
+    #[test]
+    fn top_segments_past_a_us_room_are_cleared_whole() {
+        let mut r = Written::default();
+        let mut i = 0;
+        while r.clears(usize::MAX) != sequence(&clear_body(None)) {
+            let id = format!("seg-{i:0>28}");
+            r.update(&wanted(&[(Some(&id), &format!("state=idle:id={id}"))]));
+            i += 1;
+            assert!(r.tops_len <= UNDO_LIMIT);
+        }
+        assert!(r.tops.is_empty());
+        // each clear is 56 bytes: the 74th passes 4096
+        assert_eq!(74, i);
+        r.forget();
+        assert_eq!(
+            vec![
+                "state=clear".to_string(),
+                format!("state=idle:id=seg-{:0>28}", i - 1)
+            ],
+            bodies(&r.update(&r.held().clone()))
+        );
     }
 }

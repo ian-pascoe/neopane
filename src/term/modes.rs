@@ -39,11 +39,11 @@ pub(crate) fn set_title(title: &str) -> Vec<u8> {
 }
 
 /// The undo bytes of a pane's terminal: `undo`, then, once a pane title
-/// is written (`titled`), `TITLE_POP`, then `status_clears`, the reports
-/// that clear the status records written to it (ADR 0021).
-pub(crate) fn undo_of(titled: bool, status_clears: &[u8]) -> Vec<u8> {
+/// is written (`titled`), `TITLE_POP`, then `program_status_clears`, the
+/// reports that clear the status records written to it (ADR 0021).
+pub(crate) fn undo_of(titled: bool, program_status_clears: &[u8]) -> Vec<u8> {
     let title: &[u8] = if titled { TITLE_POP.as_bytes() } else { b"" };
-    [&undo(), title, status_clears].concat()
+    [&undo(), title, program_status_clears].concat()
 }
 
 #[cfg(test)]
