@@ -18,15 +18,15 @@ run *args:
 
 # Run the tests
 test:
-    cargo test
+    cargo test --no-fail-fast
 
 # Run the Herdr app tests against a private Herdr app window (macOS)
 test-herdr-app:
-    cargo test --test herdr_app -- --ignored --test-threads=1
+    cargo test --no-fail-fast --test herdr_app -- --ignored --test-threads=1
 
 # Run the tests and the golden tests (downloads and builds Ghostty once; needs Zig 0.17)
 golden:
-    cargo test
+    cargo test --no-fail-fast
     scripts/golden.sh --test golden
 
 # Format the Rust sources

@@ -349,11 +349,16 @@ fn the_current_window_is_taken_first_when_unshown() {
     rig.files = files.clone();
     let wins = rig.wins_on(&files[..2]);
     rig.win_of(1);
-    // a tab page made after setup: with Rex closed, its window is unshown
-    let _ = rig.d.nvim.client.exec_lua("vim.cmd('tabnew')", 0);
-    rig.d.nvim.client.flush().unwrap();
-    rig.pump(|r| r.d.nvim.current_win != 0 && r.d.nvim.current_win != wins[0]);
-    let new = rig.d.nvim.current_win;
+    // a tab page made after setup, last, so only being current puts its
+    // window first.
+    // Its window is unshown until Neovim answers the daemon's adopt of
+    // it; then pane 1, with Rex closed, takes it. Made on the test's own
+    // channel and attached to before the daemon's loop runs, the attach's
+    // ask goes before the adopt, so Neovim answers it while the window is
+    // unshown. Waiting for the daemon to see it current first left the
+    // adopt racing the attach (SPI-1250). This holds while the daemon,
+    // not windows.lua, adopts a new tab page's window.
+    let new = rig.ints("vim.cmd('$tabnew') return { vim.api.nvim_get_current_win() }")[0];
     assert!(!wins.contains(&new));
     let second = rig.attach(None, None);
     assert_eq!(new, rig.win_of(second));

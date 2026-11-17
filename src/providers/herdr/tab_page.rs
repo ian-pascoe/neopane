@@ -1,7 +1,16 @@
 //! `open_tab_page`: a herdr tab is a tab page area. `layout.apply` makes
 //! a tab in `ORIGIN`'s workspace, `focus:false`, its one pane running the
-//! attach command with no shell, and leaves the server's focus where it
-//! is: the daemon focuses the new pane when Neovim goes to its tab page.
+//! attach command, and leaves the server's focus where it is: the daemon
+//! focuses the new pane when Neovim goes to its tab page.
+//!
+//! The pane goes to the alternate screen before the attach starts
+//! ([`ON_THE_ALTERNATE_SCREEN`]). The daemon focuses a pane as it draws
+//! its first frame, which is what takes a terminal there: herdr, which
+//! keeps a scrollbar's column of a pane on the primary screen, sizes the
+//! tab's ptys as it answers `pane.focus`, and a pane that leaves the
+//! primary screen between that and herdr's next frame keeps the column
+//! short until the tab is next laid out, which a tab of one pane, with no
+//! split to set, never is (SPI-1207).
 //!
 //! A `layout.apply` with no answer may have made its tab all the same:
 //! the daemon gives up a pane whose open failed, refusing its attach, or
@@ -18,10 +27,17 @@ use crate::providers::builtin::Given;
 /// What `open_tab_page` has, of its 5 s.
 const OPEN_TIME: Duration = Duration::from_millis(4000);
 
+/// Runs the words after it, the attach command, on the alternate screen:
+/// `sh` enters it and becomes the attach, which is the pane's command
+/// from then on. The daemon enters it again as it draws, changing nothing.
+const ON_THE_ALTERNATE_SCREEN: [&str; 4] =
+    ["/bin/sh", "-c", r#"printf '\033[?1049h'; exec "$@""#, "sh"];
+
 /// The new tab's pane, or why there's none.
 pub(super) fn open_tab_page(given: &Given) -> Result<String, String> {
     let origin = given.text("origin")?;
-    let words = given.attach_strings("herdr")?;
+    let mut words: Vec<String> = ON_THE_ALTERNATE_SCREEN.map(String::from).into();
+    words.extend(given.attach_strings("herdr")?);
     let herdr = Herdr::of(given, OPEN_TIME)?;
     let pane = herdr.call("pane.get", json!({ "pane_id": origin }))?;
     let workspace = text(&pane["pane"], "workspace_id")?;
@@ -65,7 +81,10 @@ mod tests {
             json!({
                 "workspace_id": "w1",
                 "focus": false,
-                "root": { "type": "pane", "command": ["/bin/np", "attach", "--address", "/tmp/a b"] },
+                "root": { "type": "pane", "command": [
+                    "/bin/sh", "-c", r#"printf '\033[?1049h'; exec "$@""#, "sh",
+                    "/bin/np", "attach", "--address", "/tmp/a b",
+                ] },
             })
         );
     }

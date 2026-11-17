@@ -355,15 +355,21 @@ fn attach_with(
             match relay_input(tty, &mut stream) {
                 Relayed::Sent => {}
                 // the daemon closes the pane; what's left of the terminal
-                // is restored as on any other way out
+                // is restored as on any other way out. The terminal is
+                // looked at before the socket, so what the daemon sent in
+                // the same poll, its `u` too, is taken first (SPI-1249);
+                // read, it also lets the socket close with an end, not a
+                // reset as Linux gives a socket closed with data unread.
                 Relayed::TerminalGone => {
+                    let cut = reader.take_last(&mut stream, &mut restore);
                     drop(stream);
-                    restore.end(false);
+                    restore.end(cut);
                     return Exit::ok();
                 }
                 Relayed::ReadFailed(e) => {
+                    let cut = reader.take_last(&mut stream, &mut restore);
                     drop(stream);
-                    restore.end(false);
+                    restore.end(cut);
                     return Exit::fail(format!("can't read the terminal: {e}"));
                 }
                 Relayed::DaemonGone => return gone(&restore),
@@ -767,6 +773,27 @@ impl Reader {
         }
         self.buf.extend_from_slice(&chunk[..n]);
         Ok(())
+    }
+
+    /// What the daemon has sent, read without waiting, taken as the
+    /// helper goes: its output written to the terminal in order, and its
+    /// latest `u` kept in `restore`. Whether any output was written, which
+    /// more output may have been on its way to finish.
+    fn take_last(&mut self, stream: &mut UnixStream, restore: &mut Restore) -> bool {
+        let _ = stream.set_nonblocking(true);
+        while self.read_more(stream).is_ok() {}
+        let mut wrote = false;
+        while let Ok(Some(m)) = self.decoded() {
+            match m {
+                Message::Undo(undo) => restore.undo = undo,
+                Message::Output(o) => {
+                    write_blocking(restore.tty, &o);
+                    wrote = true;
+                }
+                _ => {}
+            }
+        }
+        wrote
     }
 
     /// The latest `u` among what the daemon has sent, read without
@@ -1935,6 +1962,9 @@ mod tests {
 
     /// A relayed terminal that can't be read is a failure, and still
     /// undone and restored.
+    ///
+    /// It reaches the race of SPI-1249, a `u` unread in the poll that
+    /// finds the terminal failing, only now and then.
     #[test]
     fn a_relayed_terminal_that_cant_be_read_fails_and_is_restored() {
         let (master, slave) = open_pty(80, 24);

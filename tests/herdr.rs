@@ -63,10 +63,21 @@ fn tab_of(herdr: &HerdrServer, pane: &str) -> Value {
     herdr.call("pane.layout", json!({ "pane_id": pane }))["layout"].clone()
 }
 
+/// Whether herdr pane `pane` shows `text` on its screen now.
+fn shows(herdr: &HerdrServer, pane: &str, text: &str) -> bool {
+    let read = herdr.call("pane.read", json!({ "pane_id": pane, "source": "visible" }));
+    read["read"]["text"]
+        .as_str()
+        .is_some_and(|t| t.contains(text))
+}
+
+/// Panes, each its id and the pty size its rect gives, rows and columns.
+type Framed = Vec<(String, (u16, u16))>;
+
 /// Each pane of `layout`, left to right then top to bottom: its id, and
 /// the pty size its rect gives an alternate-screen program, rows and
 /// columns, in a tab with a split.
-fn framed(layout: &Value) -> Vec<(String, (u16, u16))> {
+fn framed(layout: &Value) -> Framed {
     let cells = |p: &Value, k: &str| p["rect"][k].as_u64().unwrap();
     let mut panes = layout["panes"].as_array().unwrap().clone();
     panes.sort_by_key(|p| (cells(p, "x"), cells(p, "y")));
@@ -945,6 +956,25 @@ impl Live {
             .as_str()
             .unwrap()
             .to_string();
+        // the new pane's pty, Neovim's screen and its window as wide as
+        // its tab before the split: one made a column short is laid out
+        // that short for good, as its windows are external, and every
+        // later size of the tab page is a column off (SPI-1207)
+        let fits = || {
+            let width = tab_of(&self.herdr, &pane)["panes"][0]["rect"]["width"].as_u64();
+            let pty = self.herdr.pty_size(&pane).map(|s| u64::from(s.1));
+            let expr = format!("&columns .. ' ' .. winwidth({first})");
+            let screen = remote_expr(&self.ending.sock, &expr).unwrap_or_default();
+            let ok = width.is_some()
+                && pty == width
+                && screen.split(' ').all(|c| c.parse::<u64>().ok() == width);
+            (
+                ok,
+                format!("tab {width:?} pty {pty:?} columns, window {screen}"),
+            )
+        };
+        let (ok, shown) = until(|f: &(bool, String)| f.0, fits);
+        assert!(ok, "{shown}: {}", self.log());
         let split = remote_expr(&self.ending.sock, "execute('vsplit') .. win_getid()").unwrap();
         let s = until(|s: &Value| s["panes"] == 3, || self.status());
         assert_eq!(s["panes"], 3, "its attach never came: {}", self.log());
@@ -959,39 +989,47 @@ impl Live {
     }
 
     /// Waits for the herdr panes of `pane`'s tab to be `order`, left to
-    /// right, each pty at its rect's size less its frame, and each window
-    /// of `wins`, in tab page `tab`, as wide as its pane's pty: the
-    /// columns of each pane, or what was last seen.
+    /// right, each pane fitted as `fitted` has it: the columns of each
+    /// pane, or what was last seen.
     fn until_laid_out(&self, pane: &str, order: &[&str], tab: u32, wins: &[&str]) -> Vec<u16> {
         let seen = || {
-            let layout = tab_of(&self.herdr, pane);
-            let sizes = framed(&layout);
+            let (sizes, fitted, shown) = self.fitted(pane, tab, wins);
             let ids: Vec<&str> = sizes.iter().map(|s| s.0.as_str()).collect();
-            let ptys: Vec<_> = sizes.iter().map(|s| self.herdr.pty_size(&s.0)).collect();
-            let widths: Vec<String> = wins
-                .iter()
-                .map(|w| {
-                    let expr = format!("execute('{tab}tabnext') .. winwidth({w})");
-                    remote_expr(&self.ending.sock, &expr).unwrap_or_default()
-                })
-                .collect();
-            let ok = ids == order
-                && sizes.iter().zip(&ptys).all(|(s, p)| Some(s.1) == *p)
-                && sizes
-                    .iter()
-                    .zip(&widths)
-                    .all(|(s, w)| w.parse::<u16>().ok() == Some(s.1.1));
-            (
-                ok,
-                format!("{ids:?} {sizes:?} ptys {ptys:?} windows {widths:?}"),
-                sizes,
-            )
+            (ids == order && fitted, shown, sizes)
         };
         let got = until(|g: &(bool, String, _)| g.0, seen);
         assert!(got.0, "{}: {}", got.1, self.log());
         got.2.iter().map(|s| s.1.1).collect()
     }
+
+    /// The herdr panes of `pane`'s tab, left to right, as `framed` has
+    /// them; whether each pty is at its rect's size less its frame, and
+    /// each window of `wins`, in tab page `tab`, as wide as its pane's
+    /// pty; and what was seen, to show.
+    fn fitted(&self, pane: &str, tab: u32, wins: &[&str]) -> (Framed, bool, String) {
+        let sizes = framed(&tab_of(&self.herdr, pane));
+        let ids: Vec<&str> = sizes.iter().map(|s| s.0.as_str()).collect();
+        let ptys: Vec<_> = sizes.iter().map(|s| self.herdr.pty_size(&s.0)).collect();
+        let widths: Vec<String> = wins
+            .iter()
+            .map(|w| {
+                let expr = format!("execute('{tab}tabnext') .. winwidth({w})");
+                remote_expr(&self.ending.sock, &expr).unwrap_or_default()
+            })
+            .collect();
+        let fitted = sizes.len() == wins.len()
+            && sizes.iter().zip(&ptys).all(|(s, p)| Some(s.1) == *p)
+            && sizes
+                .iter()
+                .zip(&widths)
+                .all(|(s, w)| w.parse::<u16>().ok() == Some(s.1.1));
+        let shown = format!("{ids:?} {sizes:?} ptys {ptys:?} windows {widths:?}");
+        (sizes, fitted, shown)
+    }
 }
+
+/// The line the split's window shows, so its pane is known by sight.
+const SPLIT_MARK: &str = "SPLIT-MARK";
 
 /// A tab page whose windows Neovim lays out in one flush, before they are
 /// external, in another order than their panes open in: the daemon moves
@@ -999,6 +1037,15 @@ impl Live {
 /// and back), and every pane and window comes out at its size. (`<C-w>L`
 /// on a window already in its pane is undone, as a layout plugin's move
 /// is: the window goes back to its pane, where it was.)
+///
+/// The end is waited for in one look at herdr. On the way herdr passes
+/// through states with part of it: the split's pane focused in the tab
+/// before it moves, on the wrong side, then out in a tab of its own; the
+/// first window's pane focused a moment. A look at part of the end takes
+/// one of them for it (SPI-1205). The split's pane is known by sight, its
+/// window showing `SPLIT_MARK`, not by the focus: before the move, with
+/// both panes as wide, the first window's pane is focused on the far side
+/// a moment.
 #[test]
 fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
     let Some(live) = Live::start("hd-move") else {
@@ -1010,7 +1057,8 @@ fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
     for (n, split, wincmd) in [(2, "vsplit", "L"), (3, "belowright vsplit", "H")] {
         let made = format!(
             "execute('tabnew') .. win_getid() .. ' ' .. execute('{split}') .. \
-             win_getid() .. execute('wincmd {wincmd}')"
+             win_getid() .. execute('enew | call setline(1, \"{SPLIT_MARK}\")') .. \
+             execute('wincmd {wincmd}')"
         );
         let made = remote_expr(&live.ending.sock, &made).unwrap();
         let (first, split) = made.split_once(' ').unwrap();
@@ -1018,32 +1066,37 @@ fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
         let panes = 2 * n - 1;
         let s = until(|s: &Value| s["panes"] == panes, || live.status());
         assert_eq!(s["panes"], panes, "its attach never came: {}", live.log());
-        // the split's window is current: its pane has the focus
-        let in_two = |f: &String| {
-            let panes = tab_of(&live.herdr, f)["panes"].as_array().map(Vec::len);
-            !seen.contains(f) && panes == Some(2)
+        // the split's window is current, so its pane has the focus, in a
+        // new tab of two, on the side the split went to; no tab of the
+        // move's own is left; and each pane and window is at its size
+        let (wins, far) = match wincmd {
+            "L" => ([first, split], 1),
+            _ => ([split, first], 0),
         };
-        let focused = until(in_two, || live.focused());
-        assert!(in_two(&focused), "{focused}: {}", live.log());
-        let layout = tab_of(&live.herdr, &focused);
-        let other = framed(&layout)
-            .into_iter()
-            .map(|p| p.0)
-            .find(|p| *p != focused)
-            .unwrap_or_else(|| panic!("{layout}: {}", live.log()));
-        let (order, wins) = match wincmd {
-            "L" => ([other.as_str(), focused.as_str()], [first, split]),
-            _ => ([focused.as_str(), other.as_str()], [split, first]),
+        let end = || {
+            let focused = live.focused();
+            let tabs = live.herdr.call("tab.list", json!({}))["tabs"]
+                .as_array()
+                .map(Vec::len);
+            let (sizes, fitted, panes) = live.fitted(&focused, n, &wins);
+            let ids: Vec<String> = sizes.into_iter().map(|s| s.0).collect();
+            let marked: Vec<bool> = ids
+                .iter()
+                .map(|p| shows(&live.herdr, p, SPLIT_MARK))
+                .collect();
+            let ok = !seen.contains(&focused)
+                && ids.get(far) == Some(&focused)
+                && marked.iter().enumerate().all(|(i, &m)| m == (i == far))
+                && tabs == Some(n as usize)
+                && fitted;
+            let shown = format!("focus {focused} tabs {tabs:?} marked {marked:?} {panes}");
+            (ok, shown, ids)
         };
-        live.until_laid_out(&focused, &order, n, &wins);
-        seen.extend([focused.clone(), other.clone()]);
-        // the move kept the pane's id and its focus, and left no tab
-        assert_eq!(live.focused(), focused, "{}", live.log());
-        let tabs = live.herdr.call("tab.list", json!({}))["tabs"]
-            .as_array()
-            .unwrap()
-            .len();
-        assert_eq!(tabs as u32, n, "{}", live.log());
+        let (ok, shown, ids) = until(|e: &(bool, String, _)| e.0, end);
+        assert!(ok, "{shown}: {}", live.log());
+        // still so: a state on the way would have moved on
+        assert_eq!(live.focused(), ids[far], "{}", live.log());
+        seen.extend(ids);
     }
 }
 

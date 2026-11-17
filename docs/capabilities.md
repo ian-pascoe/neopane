@@ -438,12 +438,16 @@ tab page area. herdr has one focus per server, not per client: `focus`,
   event: with `events`, a report's focus is the one the daemon follows.
 - `open_tab_page`: `pane.get` for `ORIGIN`'s workspace, then `layout.apply`
   makes a tab there (`focus:false`), whose one pane runs the attach
-  command from `ATTACH`, with no shell; prints its pane id. The server's
-  focus stays: the daemon focuses the pane when Neovim goes to its tab
-  page. A tab made by an apply that got no answer in its 4 s closes
-  itself: the daemon gives the pane up, so its attach is refused, or ended
-  as closed if it came first, and ends; herdr closes a pane whose command
-  ended, and a tab with its last pane.
+  command from `ATTACH`, `sh` putting the pane on the alternate screen
+  and then becoming it; prints its pane id. The pane is there before the
+  daemon focuses it: one that leaves the primary screen as herdr answers
+  `pane.focus` may keep the scrollbar's column short until the tab is
+  next laid out (SPI-1207). The server's focus stays: the daemon focuses
+  the pane when Neovim goes to its tab page. A tab made by an apply that
+  got no answer in its 4 s closes itself: the daemon gives the pane up,
+  so its attach is refused, or ended as closed if it came first, and
+  ends; herdr closes a pane whose command ended, and a tab with its last
+  pane.
 - `place_beside`: exit 1, with `herdr tab w1:t1 is zoomed`, if the tab of
   `ORIGIN` or of the terminal is zoomed, as herdr moves no pane into or out
   of one; and if the terminal is in another workspace than `ORIGIN`, as a
