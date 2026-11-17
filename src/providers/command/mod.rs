@@ -117,6 +117,10 @@ const DUE_TIMER_ID: usize = 0;
 const DUE_TOKEN: usize = 0;
 const RUN_TOKEN: usize = 1;
 
+/// How soon a run whose end nothing will tell is looked at again: one the
+/// kernel wouldn't watch is exiting, about to be reaped.
+const UNSEEN_LOOK: Duration = Duration::from_millis(10);
+
 /// A pane provider as the runner takes it: each capability's command.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Spec {
@@ -708,12 +712,23 @@ impl CommandProvider {
     }
 
     /// Sets the timer for the soonest deadline, kill or start of `events`,
-    /// or for now while an answer waits to be given.
+    /// for now while an answer waits to be given, or for a look again soon
+    /// at a run that nothing will tell the end of.
     fn arm_timer(&self, now: Instant) {
         let restart = match &self.events_run {
             Some(Events::Waiting { until }) => Some(*until),
             _ => None,
         };
+        let unseen = self
+            .running
+            .iter()
+            .map(|r| &r.run)
+            .chain(match &self.events_run {
+                Some(Events::Running { run, .. }) => Some(run),
+                _ => None,
+            })
+            .any(Run::ends_unseen)
+            .then_some(now + UNSEEN_LOOK);
         let soonest = self
             .running
             .iter()
@@ -721,6 +736,7 @@ impl CommandProvider {
             .map(|r| r.due)
             .chain(self.kills.iter().map(|&(_, at)| at))
             .chain(restart)
+            .chain(unseen)
             .chain((!self.answers_due.is_empty()).then_some(now))
             .min();
         if let Some(at) = soonest {

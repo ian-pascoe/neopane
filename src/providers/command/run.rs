@@ -72,6 +72,33 @@ pub(crate) struct Run {
     /// Stderr's first `MAX_STDERR` bytes.
     stderr_kept: Vec<u8>,
     stderr_cut: bool,
+    /// Whether its exit is watched. The kernel may refuse to watch one
+    /// already exiting (macOS refuses a process from the moment it starts
+    /// to exit), whose pipes can close before it can be reaped.
+    watched: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static WATCH_EXITS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Runs `f` with this thread's runs started unwatched, as the kernel
+/// leaves a run it refused to watch.
+#[cfg(test)]
+pub(crate) fn with_exits_unwatched<R>(f: impl FnOnce() -> R) -> R {
+    WATCH_EXITS.set(false);
+    let r = f();
+    WATCH_EXITS.set(true);
+    r
+}
+
+/// Whether `start` watches each run's exit.
+fn watch_exits() -> bool {
+    #[cfg(test)]
+    return WATCH_EXITS.get();
+    #[cfg(not(test))]
+    true
 }
 
 /// How a run ended.
@@ -127,8 +154,12 @@ impl Run {
             set_nonblocking(r.as_raw_fd());
             let _ = event_loop.add_read(r.as_raw_fd(), token);
         }
-        // one that ended before it was watched is found by `ended`
-        let _ = event_loop.add_exit(child.id() as libc::pid_t, token);
+        // one the kernel won't watch is found by `ended`, once nothing
+        // will tell its end: see `ends_unseen`
+        let watched = watch_exits()
+            && event_loop
+                .add_exit(child.id() as libc::pid_t, token)
+                .is_ok();
         Ok(Run {
             child,
             stdout: stdout_r,
@@ -148,6 +179,7 @@ impl Run {
             },
             stderr_kept: Vec::new(),
             stderr_cut: false,
+            watched,
         })
     }
 
@@ -232,6 +264,15 @@ impl Run {
             Kept::Lines { ended, dropped, .. } => (std::mem::take(ended), std::mem::take(dropped)),
             _ => (Vec::new(), 0),
         }
+    }
+
+    /// Whether no event may tell its end, its exit unwatched, so it must be
+    /// looked at again to be found ended: its pipes may close before it can
+    /// be reaped, or stay open in something it started. On macOS one the
+    /// kernel wouldn't watch is exiting; where watches fail for another
+    /// reason (a Linux without pidfds), a run is looked at till it ends.
+    pub(crate) fn ends_unseen(&self) -> bool {
+        !self.watched
     }
 
     /// How it ended, if it has: what its pipes held by then is read, and

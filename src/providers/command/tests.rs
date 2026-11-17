@@ -65,8 +65,9 @@ fn close() -> Ask {
     }
 }
 
-/// Waits up to `within` for `p` to answer, handing it its loop's readiness
-/// as the daemon would.
+/// Waits up to `within` for `p` to answer, handing it its loop's
+/// readiness only when its fd is ready, as the daemon does: handed it on
+/// every look, it would find a run ended that nothing told of.
 fn answer(p: &mut CommandProvider, within: Duration) -> Option<(AskId, Outcome)> {
     let deadline = Instant::now() + within;
     loop {
@@ -84,8 +85,9 @@ fn answer(p: &mut CommandProvider, within: Duration) -> Option<(AskId, Outcome)>
         }];
         let ms = left.as_millis().clamp(1, 100) as libc::c_int;
         // SAFETY: one valid pollfd.
-        unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
-        p.on_ready(RUN_TOKEN);
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) } > 0 {
+            p.on_ready(RUN_TOKEN);
+        }
     }
 }
 
@@ -478,6 +480,24 @@ fn a_report_is_read_into_a_live_layout() {
     assert_eq!(
         Some([0.0, 0.0, 1.0, 1.0]),
         l.area_of(&TerminalId::from("%1")).and_then(|a| a.rect())
+    );
+}
+
+#[test]
+fn a_command_whose_exit_isnt_watched_is_found_ended_once_its_pipes_close() {
+    // the kernel refused to watch its exit, as macOS does once it starts
+    // to exit; its pipes close before it can be reaped (SPI-1254)
+    let mut p = reporting(
+        r#"echo '{"areas":[{"id":"w1","terminals":[{"terminal":"%1","rect":[0,0,1,1]}]}]}'
+           exec >&- 2>&-; sleep 0.3"#,
+    );
+    let got = run::with_exits_unwatched(|| {
+        p.ask(AskId(1), Ask::ReportLayout);
+        answer(&mut p, Duration::from_secs(2))
+    });
+    assert!(
+        matches!(got, Some((AskId(1), Outcome::Done(Answer::Layout(_))))),
+        "{got:?}"
     );
 }
 
