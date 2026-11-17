@@ -57,6 +57,7 @@ mod choosing;
 pub(crate) mod control;
 mod lifetime;
 mod open;
+mod program_status;
 mod self_attach;
 mod statuslines;
 use attaches::PENDING_BASE;
@@ -623,12 +624,14 @@ impl Daemon {
     }
 
     /// After each batch of events: tells Neovim whether any pane has focus,
-    /// and the tabline width. Losing focus waits a moment, in case another
+    /// and the tabline width, and writes each pane's terminal the program
+    /// status it is to hold. Losing focus waits a moment, in case another
     /// pane gains it.
     fn after_batch(&mut self) -> Result<()> {
         self.send_focus(false)?;
         self.sync_tabline_width()?;
         self.tell_panes_show()?;
+        self.relay_status();
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
         if self.stopping_done() {
@@ -830,6 +833,7 @@ impl Daemon {
         let repaint = s.backlog.take_dropped();
         if repaint {
             s.view.full = true;
+            s.status_dropped();
         }
         self.event_loop.remove_write(fd)?;
         if repaint {
@@ -3670,6 +3674,7 @@ mod tests {
     mod floats_in_panes;
     mod in_layout;
     mod no_area;
+    mod program_status;
     mod statuslines;
     mod tab_layouts;
     mod tabs;

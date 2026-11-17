@@ -138,7 +138,10 @@ helper gives the answer 10 s.
 
 `u`'s `undo` (bin) undoes what the daemon writes: today `CSI ?2026l`, the
 editor modes off, then, once a pane title is written, `ESC ] 2 ; ESC \` and
-`CSI 23;2 t`. They must close any state an OSC the daemon writes can leave
+`CSI 23;2 t`, then, once program status is written (ADR 0021), the reports
+that clear it: `ESC ] 7501 ; state=clear ESC \` once a root record was
+written, else `ESC ] 7501 ; state=clear:id=<segment> ESC \` for each top
+segment of the ids written, or the first if those don't fit. They must close any state an OSC the daemon writes can leave
 open (`OSC 8 ; ; ST` if it ever writes OSC 8).
 
 ### Ending
