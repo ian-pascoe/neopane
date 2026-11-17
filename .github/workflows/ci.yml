@@ -41,6 +41,10 @@ jobs:
         run: |
           scripts/install-herdr.sh "$HOME/herdr"
           echo "$HOME/herdr" >> "$GITHUB_PATH"
+      - name: Install hc
+        run: |
+          scripts/install-hc.sh /tmp/hc
+          echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -83,6 +87,10 @@ jobs:
         run: |
           scripts/install-herdr.sh "$HOME/herdr"
           echo "$HOME/herdr" >> "$GITHUB_PATH"
+      - name: Install hc
+        run: |
+          scripts/install-hc.sh /tmp/hc
+          echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -105,5 +113,9 @@ jobs:
         run: |
           scripts/install-herdr.sh "$HOME/herdr"
           echo "$HOME/herdr" >> "$GITHUB_PATH"
+      - name: Install hc
+        run: |
+          scripts/install-hc.sh /tmp/hc
+          echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo check --all-targets
       - run: cargo test

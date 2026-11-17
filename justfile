@@ -20,6 +20,10 @@ run *args:
 test:
     cargo test
 
+# Run the Herdr app tests against a private Herdr app window (macOS)
+test-herdr-app:
+    cargo test --test herdr_app -- --ignored --test-threads=1
+
 # Run the tests and the golden tests (downloads and builds Ghostty once; needs Zig 0.17)
 golden:
     cargo test
