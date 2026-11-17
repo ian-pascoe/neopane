@@ -320,6 +320,35 @@ pub enum Note {
     /// the mode, the current window or buffer, or a buffer's modified flag
     /// changed, with `'laststatus'` 0.
     Statuslines,
+    /// Terminal buffer `buf`'s program reported program status `body`, what
+    /// follows `OSC 7501 ;`, its whole sequence 4096 bytes at most. The
+    /// buffer has a program status from then on (ADR 0021).
+    ProgramStatus { buf: i64, body: Vec<u8> },
+    /// The program status of terminal buffer `buf` ends, as `end` says.
+    ProgramStatusEnd { buf: i64, end: ProgramStatusEnd },
+    /// The windows of the terminal buffers with a program status, sorted:
+    /// told whole as they change.
+    ProgramStatusWindows(Vec<BufWin>),
+}
+
+/// A window of a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct BufWin {
+    pub buf: i64,
+    pub win: i64,
+}
+
+/// Why the program status of a terminal buffer ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum ProgramStatusEnd {
+    /// An OSC 133 `A` prompt began in it.
+    Prompt,
+    /// Its program exited.
+    Exit,
+    /// It was deleted or wiped out: it no longer has a program status.
+    Gone,
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -578,26 +607,57 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         return parse_unsaved(params).map(Some);
     }
     if method == b"cwd" {
-        if rpc::expect_array(params)? < 1 {
-            return Err(rpc::Error::BadMessage);
-        }
+        expect_args(params, 1)?;
         return Ok(Some(Note::Cwd(rpc::expect_str(params)?.to_vec())));
     }
     if method == b"statuslines" {
         return Ok(Some(Note::Statuslines));
     }
     if method == b"done" {
-        if rpc::expect_array(params)? < 2 {
-            return Err(rpc::Error::BadMessage);
-        }
+        expect_args(params, 2)?;
         let buf = rpc::expect_handle(params)?;
         let by_pane = rpc::expect_bool(params)?;
         return Ok(Some(Note::Done { buf, by_pane }));
     }
-    if method == b"terminals" {
-        if rpc::expect_array(params)? < 1 {
-            return Err(rpc::Error::BadMessage);
+    if method == b"program_status" {
+        expect_args(params, 2)?;
+        let buf = rpc::expect_handle(params)?;
+        let body = match rpc::next_token(params)? {
+            msgpack::Token::Str(n) | msgpack::Token::Bin(n) => rpc::expect_bytes(params, n)?,
+            _ => return Err(rpc::Error::BadMessage),
+        };
+        return Ok(Some(Note::ProgramStatus {
+            buf,
+            body: body.to_vec(),
+        }));
+    }
+    if method == b"program_status_end" {
+        expect_args(params, 2)?;
+        let buf = rpc::expect_handle(params)?;
+        let end = match rpc::expect_str(params)? {
+            b"prompt" => ProgramStatusEnd::Prompt,
+            b"exit" => ProgramStatusEnd::Exit,
+            b"gone" => ProgramStatusEnd::Gone,
+            _ => return Err(rpc::Error::BadMessage),
+        };
+        return Ok(Some(Note::ProgramStatusEnd { buf, end }));
+    }
+    if method == b"program_status_windows" {
+        expect_args(params, 1)?;
+        let n = rpc::expect_array(params)?;
+        let mut shown = Vec::with_capacity(n.min(64) as usize);
+        for _ in 0..n {
+            if rpc::expect_array(params)? != 2 {
+                return Err(rpc::Error::BadMessage);
+            }
+            let buf = rpc::expect_handle(params)?;
+            let win = rpc::expect_handle(params)?;
+            shown.push(BufWin { buf, win });
         }
+        return Ok(Some(Note::ProgramStatusWindows(shown)));
+    }
+    if method == b"terminals" {
+        expect_args(params, 1)?;
         return parse_strs(params).map(|ptys| Some(Note::Terminals(ptys)));
     }
     let tag = match method {
@@ -675,9 +735,7 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
 /// `[equalalways, splitbelow, splitright, vert, laststatus]`: three booleans,
 /// the one character separators are drawn with, and a number.
 fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
-    if rpc::expect_array(params)? < 5 {
-        return Err(rpc::Error::BadMessage);
-    }
+    expect_args(params, 5)?;
     let equalalways = rpc::expect_bool(params)?;
     let splitbelow = rpc::expect_bool(params)?;
     let splitright = rpc::expect_bool(params)?;
@@ -698,9 +756,7 @@ fn parse_options(params: &mut Decoder<'_>) -> rpc::Result<Note> {
 
 /// `[key, count]`: the `wincmd` key, one of `hjkl`, and how many times.
 fn parse_direction(params: &mut Decoder<'_>) -> rpc::Result<Note> {
-    if rpc::expect_array(params)? < 2 {
-        return Err(rpc::Error::BadMessage);
-    }
+    expect_args(params, 2)?;
     let key = rpc::expect_str(params)?;
     let count = rpc::expect_int(params)?;
     if key.len() != 1 || count < 1 {
@@ -721,12 +777,18 @@ fn parse_direction(params: &mut Decoder<'_>) -> rpc::Result<Note> {
 
 /// `[files, ask]`, as `Note::Unsaved` has them.
 fn parse_unsaved(params: &mut Decoder<'_>) -> rpc::Result<Note> {
-    if rpc::expect_array(params)? < 2 {
-        return Err(rpc::Error::BadMessage);
-    }
+    expect_args(params, 2)?;
     let files = parse_strs(params)?;
     let ask = u32::try_from(rpc::expect_int(params)?).map_err(|_| rpc::Error::BadMessage)?;
     Ok(Note::Unsaved { files, ask })
+}
+
+/// A note's arguments: an array of `n` at least, the first next.
+fn expect_args(params: &mut Decoder<'_>, n: u32) -> rpc::Result<()> {
+    if rpc::expect_array(params)? < n {
+        return Err(rpc::Error::BadMessage);
+    }
+    Ok(())
 }
 
 /// An array of strings, each as bytes.
@@ -1421,6 +1483,248 @@ mod tests {
              end",
         );
         h.until_note(Note::Terminals(vec![]));
+    }
+
+    /// A shell script for a `:terminal` to run, removed as it drops.
+    struct Script(std::path::PathBuf);
+
+    impl Script {
+        fn new(tag: &str, body: &str) -> Script {
+            let path = std::env::temp_dir().join(format!("{NAME}-{tag}-{}.sh", std::process::id()));
+            std::fs::write(&path, body).unwrap();
+            Script(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for Script {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    impl Harness {
+        /// Runs `script` in a `:terminal` in the current window; returns its
+        /// buffer.
+        fn terminal(&mut self, script: &Script) -> i64 {
+            self.sync(&format!("vim.cmd.terminal('sh {}')", script.path()));
+            self.eval_str("return tostring(vim.api.nvim_get_current_buf())")
+                .parse()
+                .unwrap()
+        }
+
+        /// Waits for every note of `want`, in any order, among the notes,
+        /// then clears them.
+        fn until_notes(&mut self, want: &[Note]) {
+            for _ in 0..100 {
+                if want.iter().all(|w| self.notes.contains(w)) {
+                    break;
+                }
+                self.sync("vim.wait(10)");
+            }
+            for w in want {
+                assert!(self.notes.contains(w), "{w:?}: {:?}", self.notes);
+            }
+            self.notes.clear();
+        }
+    }
+
+    fn reported(buf: i64, body: &str) -> Note {
+        Note::ProgramStatus {
+            buf,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_terminals_program_status_comes_in_notes_ended_by_a_prompt_and_its_exit() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // ST, then BEL; a prompt; then a wait, for the notes to come before
+        // its exit
+        let script = Script::new(
+            "status",
+            "printf '\\033]7501;state=working:app=x\\033\\\\'\n\
+             printf '\\033]7501;state=done:id=a\\007'\n\
+             printf '\\033]133;A\\007'\n\
+             sleep 1\n",
+        );
+        let buf = h.terminal(&script);
+        h.until_notes(&[
+            reported(buf, "state=working:app=x"),
+            reported(buf, "state=done:id=a"),
+            Note::ProgramStatusEnd {
+                buf,
+                end: ProgramStatusEnd::Prompt,
+            },
+        ]);
+        h.until_note(Note::ProgramStatusEnd {
+            buf,
+            end: ProgramStatusEnd::Exit,
+        });
+    }
+
+    #[test]
+    fn a_prompt_in_a_terminal_that_never_reported_status_tells_nothing() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new("prompt", "printf '\\033]133;A\\007'\n");
+        let buf = h.terminal(&script);
+        h.until_note(Note::Terminals(vec![]));
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| matches!(
+                n,
+                Note::ProgramStatusEnd { .. }
+                    | Note::ProgramStatus { .. }
+                    | Note::ProgramStatusWindows(_)
+            )),
+            "{buf}: {:?}",
+            h.notes
+        );
+    }
+
+    // The program gets the answer to `?` before Neovim's answer to the DA1
+    // sent after it, and `?` is no report.
+    #[test]
+    fn the_status_query_is_answered_ahead_of_da1() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let out = std::env::temp_dir().join(format!("{NAME}-query-{}.out", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let reply = b"\x1b]7501;?\x1b\\";
+        let script = Script::new(
+            "query",
+            &format!(
+                "stty raw -echo\n\
+                 printf '\\033]7501;?\\033\\\\\\033[c'\n\
+                 head -c {} > {}\n\
+                 stty sane\n",
+                reply.len(),
+                out.display()
+            ),
+        );
+        h.terminal(&script);
+        h.until_note(Note::Terminals(vec![]));
+        let got = std::fs::read(&out).unwrap_or_default();
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(
+            String::from_utf8_lossy(reply),
+            String::from_utf8_lossy(&got)
+        );
+        assert!(
+            !h.notes
+                .iter()
+                .any(|n| matches!(n, Note::ProgramStatus { .. })),
+            "{:?}",
+            h.notes
+        );
+    }
+
+    #[test]
+    fn the_program_status_windows_note_tells_where_reporting_terminals_show() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new(
+            "windows",
+            "printf '\\033]7501;state=working\\033\\\\'\nsleep 30\n",
+        );
+        let win = h.wins[0];
+        let buf = h.terminal(&script);
+        h.until_notes(&[
+            reported(buf, "state=working"),
+            Note::ProgramStatusWindows(vec![BufWin { buf, win }]),
+        ]);
+        // hidden: no window
+        h.sync("vim.cmd('hide enew')");
+        h.until_note(Note::ProgramStatusWindows(vec![]));
+        // shown again
+        h.sync(&format!("vim.cmd('buffer {buf}')"));
+        h.until_note(Note::ProgramStatusWindows(vec![BufWin { buf, win }]));
+    }
+
+    #[test]
+    fn a_reporting_terminal_buffer_deleted_or_wiped_out_is_gone() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new(
+            "gone",
+            "printf '\\033]7501;state=working\\033\\\\'\nsleep 30\n",
+        );
+        // hidden, then deleted
+        let buf = h.terminal(&script);
+        h.until_note(reported(buf, "state=working"));
+        h.sync("vim.cmd('hide enew')");
+        h.sync(&format!("vim.cmd('bdelete! {buf}')"));
+        h.until_note(Note::ProgramStatusEnd {
+            buf,
+            end: ProgramStatusEnd::Gone,
+        });
+        // wiped out as it's hidden, its program done: one still running
+        // keeps it
+        let done = Script::new("gone-done", "printf '\\033]7501;state=done\\033\\\\'\n");
+        let buf = h.terminal(&done);
+        h.until_notes(&[
+            reported(buf, "state=done"),
+            Note::ProgramStatusEnd {
+                buf,
+                end: ProgramStatusEnd::Exit,
+            },
+        ]);
+        h.sync(&format!("vim.bo[{buf}].bufhidden = 'wipe' vim.cmd('enew')"));
+        h.until_note(Note::ProgramStatusEnd {
+            buf,
+            end: ProgramStatusEnd::Gone,
+        });
+        // gone, it no longer has a program status: nothing more is told
+        h.barrier();
+        assert!(
+            !h.notes
+                .iter()
+                .any(|n| matches!(n, Note::ProgramStatusEnd { .. })),
+            "{:?}",
+            h.notes
+        );
+    }
+
+    // A report as long as a sequence may be comes whole; one byte more, not
+    // at all.
+    #[test]
+    fn a_report_of_4096_bytes_comes_whole_and_a_longer_one_not() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // ESC ] 7501 ; body ESC \: 4096 bytes
+        let fits = format!(
+            "state=idle:x={}",
+            "a".repeat(4096 - 9 - "state=idle:x=".len())
+        );
+        assert_eq!(4096 - 9, fits.len());
+        let over = format!("{fits}A");
+        let script = Script::new(
+            "long",
+            &format!(
+                "printf '\\033]7501;{over}\\033\\\\'\n\
+                 printf '\\033]7501;{fits}\\033\\\\'\n\
+                 printf '\\033]7501;state=done\\033\\\\'\n\
+                 sleep 1\n"
+            ),
+        );
+        let buf = h.terminal(&script);
+        h.until_notes(&[reported(buf, &fits), reported(buf, "state=done")]);
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| *n == reported(buf, &over)),
+            "the longer one came"
+        );
     }
 
     #[test]

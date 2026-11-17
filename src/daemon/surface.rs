@@ -8,8 +8,10 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use super::backlog::Backlog;
+use super::program_status::Wanted;
+use super::program_status::relay::Written;
 use super::terminal_io::{FdIo, RelayIo, TerminalIo};
-use crate::attach::{End, Ending, Message, Size, Transport};
+use crate::attach::{End, Ending, Message, Size, Transport, UNDO_LIMIT};
 use crate::nvim::forwarder::Forwarder;
 use crate::screen::pane_view::PaneView;
 use crate::term::modes;
@@ -37,6 +39,13 @@ pub(crate) struct Surface {
     pub forwarder: Forwarder,
     /// Output the terminal hasn't taken yet.
     pub backlog: Backlog,
+    /// It has a pane title (ADR 0006).
+    titled: bool,
+    /// The program status written to it (ADR 0021).
+    program_status: Written,
+    /// The undo bytes its helper was last sent, None if that `u` may have
+    /// been dropped.
+    undo_sent: Option<Vec<u8>>,
 }
 
 impl Surface {
@@ -84,6 +93,10 @@ impl Surface {
                 ..Forwarder::default()
             },
             backlog: Backlog::default(),
+            titled: false,
+            program_status: Written::default(),
+            // as the accept sent them
+            undo_sent: Some(modes::undo()),
         })
     }
 
@@ -126,12 +139,63 @@ impl Surface {
     /// back, in a new `u` sent before it (#91 decision 6). Never waits,
     /// as `send_frame`.
     pub(crate) fn write_title(&mut self, title: &str) -> std::io::Result<Sent> {
-        let u = Message::Undo(modes::undo_with_title())
-            .encode()
-            .expect("the undo bytes fit a `u`");
+        self.titled = true;
+        self.send_with_undo(&modes::set_title(title))
+    }
+
+    /// Writes the reports that bring the program status the terminal holds
+    /// to `wanted` (ADR 0021), outside any frame, and a new `u` before
+    /// them if the undo bytes change. None if nothing changed. Never
+    /// waits, as `send_frame`.
+    pub(crate) fn write_program_status(
+        &mut self,
+        wanted: &Wanted,
+    ) -> std::io::Result<Option<Sent>> {
+        let reports = self.program_status.update(wanted);
+        // the undo bytes change only with what the terminal holds, which
+        // changes only by a report
+        if reports.is_empty() && self.undo_sent.is_some() {
+            return Ok(None);
+        }
+        self.send_with_undo(&reports).map(Some)
+    }
+
+    /// The program status the terminal holds.
+    #[cfg(test)]
+    pub(crate) fn program_status_held(&self) -> &Wanted {
+        self.program_status.held()
+    }
+
+    /// Frames were dropped, and with them perhaps program status reports
+    /// and a `u`: both are written again in full next.
+    pub(crate) fn program_status_dropped(&mut self) {
+        self.program_status.forget();
+        self.undo_sent = None;
+    }
+
+    /// The undo bytes for what the daemon wrote to the terminal: the modes,
+    /// then the title if it has one, then the program status. A program
+    /// status whose clears don't fit the `u`'s limit is cleared whole.
+    fn undo(&self) -> Vec<u8> {
+        let base = modes::undo_of(self.titled, b"");
+        let clears = self
+            .program_status
+            .clears(UNDO_LIMIT.saturating_sub(base.len()));
+        modes::undo_of(self.titled, &clears)
+    }
+
+    /// Writes `bytes`, after a `u` with the undo bytes if they changed.
+    fn send_with_undo(&mut self, bytes: &[u8]) -> std::io::Result<Sent> {
+        let undo = self.undo();
         let mut out = Vec::new();
-        self.io.send_undo(&self.helper_socket, &u, &mut out);
-        self.writer.extend_from_slice(&modes::set_title(title));
+        if self.undo_sent.as_ref() != Some(&undo) {
+            let u = Message::Undo(undo.clone())
+                .encode()
+                .expect("the undo bytes fit a `u`");
+            self.io.send_undo(&self.helper_socket, &u, &mut out);
+            self.undo_sent = Some(undo);
+        }
+        self.writer.extend_from_slice(bytes);
         self.io.wrap(&mut self.writer);
         out.append(&mut self.writer);
         let fd = self.output_fd();
@@ -346,7 +410,7 @@ mod tests {
         assert!(!rest.is_empty(), "the `o` in flight is cut off");
     }
 
-    // Relayed, the new `u` goes between whole frames, before the title.
+    // Written, the new `u` goes between whole frames, before the title.
     #[test]
     fn a_relayed_pane_title_follows_its_u_on_the_helper_socket() {
         use crate::attach::Message;
@@ -360,11 +424,138 @@ mod tests {
         let [Message::Undo(u), Message::Output(o), Message::End(_)] = &said[..] else {
             panic!("{said:?}");
         };
-        assert_eq!(&modes::undo_with_title(), u);
+        assert_eq!(&modes::undo_of(true, b""), u);
         assert!(u.ends_with(b"\x1b]2;\x1b\\\x1b[23;2t"));
         assert_eq!(
             b"\x1b[22;2t\x1b]2;np-abcdefghij\x1b\\".as_slice(),
             o.as_slice()
         );
+    }
+
+    /// The records `records`, ids and bodies, as `Wanted`.
+    fn wanted(records: &[(Option<&str>, &str)]) -> Wanted {
+        records
+            .iter()
+            .map(|(id, body)| (id.map(str::to_string), body.to_string()))
+            .collect()
+    }
+
+    /// The `u` and `o` frames a relayed `surface` sent its helper.
+    fn sent(surface: Box<Surface>, helper: &UnixStream) -> Vec<crate::attach::Message> {
+        surface.destroy(Ending::Closed, "");
+        let (mut said, _) = frames_and_rest(helper);
+        said.pop();
+        said
+    }
+
+    fn reports(bodies: &[&str]) -> Vec<u8> {
+        bodies
+            .iter()
+            .flat_map(|b| format!("\x1b]7501;{b}\x1b\\").into_bytes())
+            .collect()
+    }
+
+    // The `u` that clears the records goes before the reports, outside any
+    // frame; reports that change nothing in the undo bytes send no `u`.
+    #[test]
+    fn program_status_follows_the_u_that_clears_it() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        let d = wanted(&[(Some("a"), "state=idle:id=a")]);
+        assert_eq!(Some(Sent::All), surface.write_program_status(&d).unwrap());
+        // nothing changed: nothing written
+        assert_eq!(None, surface.write_program_status(&d).unwrap());
+        let d = wanted(&[(Some("a"), "state=done:id=a")]);
+        assert_eq!(Some(Sent::All), surface.write_program_status(&d).unwrap());
+        let said = sent(surface, &helper);
+        let [
+            Message::Undo(u),
+            Message::Output(first),
+            Message::Output(second),
+        ] = &said[..]
+        else {
+            panic!("{said:?}");
+        };
+        assert_eq!(&modes::undo_of(false, &reports(&["state=clear:id=a"])), u);
+        assert_eq!(&reports(&["state=idle:id=a"]), first);
+        assert_eq!(&reports(&["state=done:id=a"]), second);
+    }
+
+    // A title written after the status keeps its clears in the undo bytes,
+    // and the status written after the title keeps the title's pop.
+    #[test]
+    fn the_title_and_the_program_status_each_keep_the_others_undo() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        surface
+            .write_program_status(&wanted(&[(None, "state=working")]))
+            .unwrap();
+        surface.write_title("np-abcdefghij").unwrap();
+        surface
+            .write_program_status(&wanted(&[(None, "state=done")]))
+            .unwrap();
+        let undos: Vec<Vec<u8>> = sent(surface, &helper)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Undo(u) => Some(u),
+                _ => None,
+            })
+            .collect();
+        let clear = reports(&["state=clear"]);
+        assert_eq!(
+            vec![modes::undo_of(false, &clear), modes::undo_of(true, &clear)],
+            undos
+        );
+    }
+
+    // Clears that don't fit the `u` clear everything instead. A pane's 64
+    // records at most fit, their top segments 32 bytes at most: more do.
+    #[test]
+    fn too_many_clears_for_the_u_clear_everything() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        let ids: Vec<String> = (0..80).map(|i| format!("{i:0>32}/x")).collect();
+        let bodies: Vec<String> = ids.iter().map(|id| format!("state=idle:id={id}")).collect();
+        let records: Vec<(Option<&str>, &str)> = ids
+            .iter()
+            .zip(&bodies)
+            .map(|(i, b)| (Some(i.as_str()), b.as_str()))
+            .collect();
+        surface.write_program_status(&wanted(&records)).unwrap();
+        let said = sent(surface, &helper);
+        let Some(Message::Undo(u)) = said.first() else {
+            panic!("{said:?}");
+        };
+        assert!(u == &modes::undo_of(false, &reports(&["state=clear"])));
+    }
+
+    // Frames dropped: the `u` and the status go again in full.
+    #[test]
+    fn dropped_program_status_is_written_again_with_its_u() {
+        use crate::attach::Message;
+        let (socket, helper) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut surface = Surface::relayed(socket, cells(80, 24));
+        surface.writer.clear();
+        let d = wanted(&[(Some("a"), "state=idle:id=a")]);
+        surface.write_program_status(&d).unwrap();
+        surface.program_status_dropped();
+        assert_eq!(Some(Sent::All), surface.write_program_status(&d).unwrap());
+        let said = sent(surface, &helper);
+        let [_, _, Message::Undo(u), Message::Output(o)] = &said[..] else {
+            panic!("{said:?}");
+        };
+        assert_eq!(&modes::undo_of(false, &reports(&["state=clear:id=a"])), u);
+        // cleared as the undo bytes would: no root was written
+        assert_eq!(&reports(&["state=clear:id=a", "state=idle:id=a"]), o);
     }
 }

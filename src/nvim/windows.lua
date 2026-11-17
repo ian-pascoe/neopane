@@ -2282,6 +2282,68 @@ api.nvim_create_autocmd('TermClose', {
   end,
 })
 
+-- Program status (ADR 0021): the terminal buffers whose programs reported
+-- one with OSC 7501: buffer -> true. Neovim neither keeps nor forwards
+-- these reports; the daemon keeps each one's status records, for the
+-- terminals of the panes showing it.
+local reporting_bufs = {}
+-- their windows, as last told: { { buffer, window }, ... }
+local windows_told = {}
+api.nvim_create_autocmd('TermRequest', {
+  group = group,
+  callback = function(ev)
+    local data = ev.data
+    local seq = type(data) == 'table' and data.sequence or data
+    if type(seq) ~= 'string' then return end
+    local buf = ev.buf
+    if seq:sub(1, 7) == '\27]7501;' then
+      local body = seq:sub(8)
+      -- the program asks whether reports are kept: answered here, as
+      -- Neovim holds what the terminal writes back, its answer to the DA1
+      -- sent after this included, until the handlers have run
+      if body == '?' then
+        pcall(vim.fn.chansend, vim.bo[buf].channel, '\27]7501;?\27\\')
+        return
+      end
+      -- the whole sequence holds 4096 bytes at most
+      local st = type(data) == 'table' and data.terminator or '\27\\'
+      if #seq + #st > 4096 then return end
+      reporting_bufs[buf] = true
+      note('program_status', buf, body)
+    elseif reporting_bufs[buf] and seq:match('^\27%]133;A') then
+      -- a prompt began: the program's working, blocked and idle records go
+      note('program_status_end', buf, 'prompt')
+    end
+  end,
+})
+api.nvim_create_autocmd('TermClose', {
+  group = group,
+  callback = function(ev)
+    if reporting_bufs[ev.buf] then note('program_status_end', ev.buf, 'exit') end
+  end,
+})
+api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
+  group = group,
+  callback = function(ev)
+    if not reporting_bufs[ev.buf] then return end
+    reporting_bufs[ev.buf] = nil
+    note('program_status_end', ev.buf, 'gone')
+  end,
+})
+-- The windows of the terminal buffers with a program status, told whole as
+-- they change, whenever Neovim waits for input.
+local function report_program_status_windows()
+  local now = {}
+  for buf in pairs(reporting_bufs) do
+    for _, win in ipairs(vim.fn.win_findbuf(buf)) do now[#now + 1] = { buf, win } end
+  end
+  table.sort(now, function(a, b) return a[1] < b[1] or (a[1] == b[1] and a[2] < b[2]) end)
+  if vim.deep_equal(now, windows_told) then return end
+  windows_told = now
+  note('program_status_windows', now)
+end
+api.nvim_create_autocmd('SafeState', { group = group, callback = report_program_status_windows })
+
 -- Waited files' buffers, each told done once (`<tool>_done`): buffer ->
 -- true.
 local watched = {}

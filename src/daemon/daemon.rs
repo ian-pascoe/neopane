@@ -57,6 +57,7 @@ mod choosing;
 pub(crate) mod control;
 mod lifetime;
 mod open;
+mod program_status;
 mod self_attach;
 mod statuslines;
 use attaches::PENDING_BASE;
@@ -125,6 +126,8 @@ pub(crate) struct Daemon {
     pub(crate) lifetime: lifetime::Lifetime,
     /// What Neovim told of itself that `status` shows, never asking it.
     pub(crate) told: control::Told,
+    /// The program status of the terminal buffers (ADR 0021).
+    pub(crate) program_status: super::program_status::ProgramStatus,
     /// Ending, as a `stop` asked: attaches are refused, and it stops once
     /// the terminals it requested are closed.
     stopping: bool,
@@ -437,6 +440,7 @@ impl Daemon {
             stopped: None,
             lifetime: lifetime::Lifetime::default(),
             told: control::Told::default(),
+            program_status: Default::default(),
             stopping: false,
             no_provider: control::NoProvider::None,
             quit_status: None,
@@ -620,12 +624,14 @@ impl Daemon {
     }
 
     /// After each batch of events: tells Neovim whether any pane has focus,
-    /// and the tabline width. Losing focus waits a moment, in case another
+    /// and the tabline width, and writes each pane's terminal the program
+    /// status it is to hold. Losing focus waits a moment, in case another
     /// pane gains it.
     fn after_batch(&mut self) -> Result<()> {
         self.send_focus(false)?;
         self.sync_tabline_width()?;
         self.tell_panes_show()?;
+        self.relay_program_status();
         // what was asked in the batch, and anything a write that failed left
         self.drain_provider()?;
         if self.stopping_done() {
@@ -827,6 +833,7 @@ impl Daemon {
         let repaint = s.backlog.take_dropped();
         if repaint {
             s.view.full = true;
+            s.program_status_dropped();
         }
         self.event_loop.remove_write(fd)?;
         if repaint {
@@ -1470,6 +1477,9 @@ impl Daemon {
             windows::Note::Terminals(ptys) => self.told.terminals = ptys,
             windows::Note::Done { buf, by_pane } => self.on_done(buf, by_pane),
             windows::Note::Statuslines => self.ask_statuslines()?,
+            windows::Note::ProgramStatus { buf, body } => self.program_status.report(buf, &body),
+            windows::Note::ProgramStatusEnd { buf, end } => self.program_status.end(buf, end),
+            windows::Note::ProgramStatusWindows(w) => self.program_status.set_windows(w),
         }
         Ok(())
     }
@@ -3664,6 +3674,7 @@ mod tests {
     mod floats_in_panes;
     mod in_layout;
     mod no_area;
+    mod program_status;
     mod statuslines;
     mod tab_layouts;
     mod tabs;
