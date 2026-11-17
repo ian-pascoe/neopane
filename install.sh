@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs neopane from a GitHub release, on macOS or Linux:
 #
-#   curl -fsSL https://raw.githubusercontent.com/ian-pascoe/neopane/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/neopane/main/install.sh | bash
 #
 # NEOPANE_VERSION     a release tag, such as v0.1.0 (default: the latest)
 # NEOPANE_INSTALL_DIR where neopane goes, with npane linked to it
@@ -10,7 +10,7 @@
 #                     download URL; CI points it at its own builds)
 set -euo pipefail
 
-repo="ian-pascoe/neopane"
+repo="spiritledsoftware/neopane"
 version="${NEOPANE_VERSION:-latest}"
 install_dir="${NEOPANE_INSTALL_DIR:-$HOME/.local/bin}"
 

@@ -756,7 +756,7 @@ const EndCard: React.FC<{ alsoIn: string }> = ({ alsoIn }) => {
           opacity: interpolate(frame, [14, 22], [0, 1], clamp),
         }}
       >
-        github.com/ian-pascoe/neopane
+        github.com/spiritledsoftware/neopane
         {alsoIn ? <span style={{ color: "#8a8d99" }}> · {alsoIn}</span> : null}
       </div>
     </AbsoluteFill>
