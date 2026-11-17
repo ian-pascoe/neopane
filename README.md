@@ -4,7 +4,8 @@ One Neovim, every window a real terminal pane.
 
 https://github.com/user-attachments/assets/5787c351-8683-4d67-a079-1d6cbb42e196
 
-The same demo in [Rex](#rex), [zellij](#zellij) and [herdr](#herdr).
+The same demo in [Rex](#rex), [zellij](#zellij), [herdr](#herdr) and the
+[Herdr app](#herdr-app).
 
 `:vsplit` in neopane opens a real pane in your terminal multiplexer, a Rex
 block, a tmux, zellij or herdr pane, and closing that pane closes the
@@ -500,8 +501,7 @@ pane keeps the size zellij gives it. It needs zellij 0.46.0 or newer.
 
 ### Herdr app
 
-<!-- TODO(SPI-1221): embed the herdr-app-core README cut here once it is
-uploaded, as the other sections do. -->
+https://github.com/user-attachments/assets/8da8d7de-e21d-4f6e-b779-bf3a12458121
 
 The Herdr desktop app has a pane provider of its own, `herdr-app`, apart
 from herdr's
