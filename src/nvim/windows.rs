@@ -320,6 +320,27 @@ pub enum Note {
     /// the mode, the current window or buffer, or a buffer's modified flag
     /// changed, with `'laststatus'` 0.
     Statuslines,
+    /// Terminal buffer `buf`'s program reported program status `body`, what
+    /// follows `OSC 7501 ;`, its whole sequence 4096 bytes at most. It is a
+    /// status buffer from then on (ADR 0021).
+    Status { buf: i64, body: Vec<u8> },
+    /// Status buffer `buf`'s program status ends, as `end` says.
+    StatusEnd { buf: i64, end: StatusEnd },
+    /// The windows of the status buffers, buffer and window, sorted: told
+    /// whole as they change.
+    StatusWindows(Vec<(i64, i64)>),
+}
+
+/// Why a status buffer's program status ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum StatusEnd {
+    /// An OSC 133 `A` prompt began in it.
+    Prompt,
+    /// Its program exited.
+    Exit,
+    /// It was deleted or wiped out: it is no longer a status buffer.
+    Gone,
 }
 
 /// `'equalalways'`, `'splitbelow'` and `'splitright'`, and what `'fillchars'`
@@ -593,6 +614,47 @@ pub fn parse_note(method: &[u8], params: &mut Decoder<'_>) -> rpc::Result<Option
         let buf = rpc::expect_handle(params)?;
         let by_pane = rpc::expect_bool(params)?;
         return Ok(Some(Note::Done { buf, by_pane }));
+    }
+    if method == b"status" {
+        if rpc::expect_array(params)? < 2 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let buf = rpc::expect_handle(params)?;
+        let body = match rpc::next_token(params)? {
+            msgpack::Token::Str(n) | msgpack::Token::Bin(n) => rpc::expect_bytes(params, n)?,
+            _ => return Err(rpc::Error::BadMessage),
+        };
+        return Ok(Some(Note::Status {
+            buf,
+            body: body.to_vec(),
+        }));
+    }
+    if method == b"status_end" {
+        if rpc::expect_array(params)? < 2 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let buf = rpc::expect_handle(params)?;
+        let end = match rpc::expect_str(params)? {
+            b"prompt" => StatusEnd::Prompt,
+            b"exit" => StatusEnd::Exit,
+            b"gone" => StatusEnd::Gone,
+            _ => return Err(rpc::Error::BadMessage),
+        };
+        return Ok(Some(Note::StatusEnd { buf, end }));
+    }
+    if method == b"status_windows" {
+        if rpc::expect_array(params)? < 1 {
+            return Err(rpc::Error::BadMessage);
+        }
+        let n = rpc::expect_array(params)?;
+        let mut pairs = Vec::with_capacity(n.min(64) as usize);
+        for _ in 0..n {
+            if rpc::expect_array(params)? != 2 {
+                return Err(rpc::Error::BadMessage);
+            }
+            pairs.push((rpc::expect_handle(params)?, rpc::expect_handle(params)?));
+        }
+        return Ok(Some(Note::StatusWindows(pairs)));
     }
     if method == b"terminals" {
         if rpc::expect_array(params)? < 1 {
@@ -1421,6 +1483,242 @@ mod tests {
              end",
         );
         h.until_note(Note::Terminals(vec![]));
+    }
+
+    /// A shell script for a `:terminal` to run, removed as it drops.
+    struct Script(std::path::PathBuf);
+
+    impl Script {
+        fn new(tag: &str, body: &str) -> Script {
+            let path = std::env::temp_dir().join(format!("{NAME}-{tag}-{}.sh", std::process::id()));
+            std::fs::write(&path, body).unwrap();
+            Script(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+    }
+
+    impl Drop for Script {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    impl Harness {
+        /// Runs `script` in a `:terminal` in the current window; returns its
+        /// buffer.
+        fn terminal(&mut self, script: &Script) -> i64 {
+            self.sync(&format!("vim.cmd.terminal('sh {}')", script.path()));
+            self.eval_str("return tostring(vim.api.nvim_get_current_buf())")
+                .parse()
+                .unwrap()
+        }
+
+        /// Waits for every note of `want`, in any order, among the notes,
+        /// then clears them.
+        fn until_notes(&mut self, want: &[Note]) {
+            for _ in 0..100 {
+                if want.iter().all(|w| self.notes.contains(w)) {
+                    break;
+                }
+                self.sync("vim.wait(10)");
+            }
+            for w in want {
+                assert!(self.notes.contains(w), "{w:?}: {:?}", self.notes);
+            }
+            self.notes.clear();
+        }
+    }
+
+    fn status(buf: i64, body: &str) -> Note {
+        Note::Status {
+            buf,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_terminals_program_status_comes_in_notes_ended_by_a_prompt_and_its_exit() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // ST, then BEL; a prompt; then a wait, for the notes to come before
+        // its exit
+        let script = Script::new(
+            "status",
+            "printf '\\033]7501;state=working:app=x\\033\\\\'\n\
+             printf '\\033]7501;state=done:id=a\\007'\n\
+             printf '\\033]133;A\\007'\n\
+             sleep 1\n",
+        );
+        let buf = h.terminal(&script);
+        h.until_notes(&[
+            status(buf, "state=working:app=x"),
+            status(buf, "state=done:id=a"),
+            Note::StatusEnd {
+                buf,
+                end: StatusEnd::Prompt,
+            },
+        ]);
+        h.until_note(Note::StatusEnd {
+            buf,
+            end: StatusEnd::Exit,
+        });
+    }
+
+    #[test]
+    fn a_prompt_in_a_terminal_that_never_reported_status_tells_nothing() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new("prompt", "printf '\\033]133;A\\007'\n");
+        let buf = h.terminal(&script);
+        h.until_note(Note::Terminals(vec![]));
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| matches!(
+                n,
+                Note::StatusEnd { .. } | Note::Status { .. } | Note::StatusWindows(_)
+            )),
+            "{buf}: {:?}",
+            h.notes
+        );
+    }
+
+    // The program gets the answer to `?` before Neovim's answer to the DA1
+    // sent after it, and `?` is no report.
+    #[test]
+    fn the_status_query_is_answered_ahead_of_da1() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let out = std::env::temp_dir().join(format!("{NAME}-query-{}.out", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let reply = b"\x1b]7501;?\x1b\\";
+        let script = Script::new(
+            "query",
+            &format!(
+                "stty raw -echo\n\
+                 printf '\\033]7501;?\\033\\\\\\033[c'\n\
+                 head -c {} > {}\n\
+                 stty sane\n",
+                reply.len(),
+                out.display()
+            ),
+        );
+        h.terminal(&script);
+        h.until_note(Note::Terminals(vec![]));
+        let got = std::fs::read(&out).unwrap_or_default();
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(
+            String::from_utf8_lossy(reply),
+            String::from_utf8_lossy(&got)
+        );
+        assert!(
+            !h.notes.iter().any(|n| matches!(n, Note::Status { .. })),
+            "{:?}",
+            h.notes
+        );
+    }
+
+    #[test]
+    fn the_status_windows_note_tells_where_status_buffers_show() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new(
+            "windows",
+            "printf '\\033]7501;state=working\\033\\\\'\nsleep 30\n",
+        );
+        let win = h.wins[0];
+        let buf = h.terminal(&script);
+        h.until_notes(&[
+            status(buf, "state=working"),
+            Note::StatusWindows(vec![(buf, win)]),
+        ]);
+        // hidden: no window
+        h.sync("vim.cmd('hide enew')");
+        h.until_note(Note::StatusWindows(vec![]));
+        // shown again
+        h.sync(&format!("vim.cmd('buffer {buf}')"));
+        h.until_note(Note::StatusWindows(vec![(buf, win)]));
+    }
+
+    #[test]
+    fn a_status_buffer_deleted_or_wiped_out_is_gone() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        let script = Script::new(
+            "gone",
+            "printf '\\033]7501;state=working\\033\\\\'\nsleep 30\n",
+        );
+        // hidden, then deleted
+        let buf = h.terminal(&script);
+        h.until_note(status(buf, "state=working"));
+        h.sync("vim.cmd('hide enew')");
+        h.sync(&format!("vim.cmd('bdelete! {buf}')"));
+        h.until_note(Note::StatusEnd {
+            buf,
+            end: StatusEnd::Gone,
+        });
+        // wiped out as it's hidden, its program done: one still running
+        // keeps it
+        let done = Script::new("gone-done", "printf '\\033]7501;state=done\\033\\\\'\n");
+        let buf = h.terminal(&done);
+        h.until_notes(&[
+            status(buf, "state=done"),
+            Note::StatusEnd {
+                buf,
+                end: StatusEnd::Exit,
+            },
+        ]);
+        h.sync(&format!("vim.bo[{buf}].bufhidden = 'wipe' vim.cmd('enew')"));
+        h.until_note(Note::StatusEnd {
+            buf,
+            end: StatusEnd::Gone,
+        });
+        // gone, it is no longer a status buffer: nothing more is told
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| matches!(n, Note::StatusEnd { .. })),
+            "{:?}",
+            h.notes
+        );
+    }
+
+    // A report as long as a sequence may be comes whole; one byte more, not
+    // at all.
+    #[test]
+    fn a_report_of_4096_bytes_comes_whole_and_a_longer_one_not() {
+        let Some(mut h) = Harness::start() else {
+            return;
+        };
+        // ESC ] 7501 ; body ESC \: 4096 bytes
+        let fits = format!(
+            "state=idle:x={}",
+            "a".repeat(4096 - 9 - "state=idle:x=".len())
+        );
+        assert_eq!(4096 - 9, fits.len());
+        let over = format!("{fits}A");
+        let script = Script::new(
+            "long",
+            &format!(
+                "printf '\\033]7501;{over}\\033\\\\'\n\
+                 printf '\\033]7501;{fits}\\033\\\\'\n\
+                 printf '\\033]7501;state=done\\033\\\\'\n\
+                 sleep 1\n"
+            ),
+        );
+        let buf = h.terminal(&script);
+        h.until_notes(&[status(buf, &fits), status(buf, "state=done")]);
+        h.barrier();
+        assert!(
+            !h.notes.iter().any(|n| *n == status(buf, &over)),
+            "the longer one came"
+        );
     }
 
     #[test]

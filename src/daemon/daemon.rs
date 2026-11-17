@@ -125,6 +125,8 @@ pub(crate) struct Daemon {
     pub(crate) lifetime: lifetime::Lifetime,
     /// What Neovim told of itself that `status` shows, never asking it.
     pub(crate) told: control::Told,
+    /// The program status of the terminal buffers (ADR 0021).
+    pub(crate) program_status: super::program_status::ProgramStatus,
     /// Ending, as a `stop` asked: attaches are refused, and it stops once
     /// the terminals it requested are closed.
     stopping: bool,
@@ -437,6 +439,7 @@ impl Daemon {
             stopped: None,
             lifetime: lifetime::Lifetime::default(),
             told: control::Told::default(),
+            program_status: Default::default(),
             stopping: false,
             no_provider: control::NoProvider::None,
             quit_status: None,
@@ -1470,6 +1473,9 @@ impl Daemon {
             windows::Note::Terminals(ptys) => self.told.terminals = ptys,
             windows::Note::Done { buf, by_pane } => self.on_done(buf, by_pane),
             windows::Note::Statuslines => self.ask_statuslines()?,
+            windows::Note::Status { buf, body } => self.program_status.report(buf, &body),
+            windows::Note::StatusEnd { buf, end } => self.program_status.end(buf, end),
+            windows::Note::StatusWindows(w) => self.program_status.set_windows(w),
         }
         Ok(())
     }

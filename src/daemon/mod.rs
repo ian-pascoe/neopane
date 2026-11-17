@@ -20,6 +20,7 @@ pub(crate) mod pane;
 pub mod pane_helper;
 pub(crate) mod pane_layout;
 pub(crate) mod panes;
+pub(crate) mod program_status;
 pub(crate) mod provider;
 pub(crate) mod provider_focus;
 pub mod serve;
