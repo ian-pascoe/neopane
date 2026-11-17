@@ -23,6 +23,10 @@ Every user-visible name comes from `NAME` in `src/name.rs` (ADR 0005): Neovim va
 - Run `just golden` after changing what gets drawn (`src/screen/`, `PaneView`). It checks every frame through Ghostty's emulator, which it builds with Zig 0.17.
 - Run `just fmt` and `just lint` on Rust sources. `windows.lua` has no formatter config: keep its two-space hand formatting. If your edit tool reformats Lua, write the file from a shell command instead.
 
+## Pull requests and releases
+
+A PR's title is a Conventional Commit (`feat: …`, `fix(tmux): …`, `docs: …`; `feat!:` for a breaking change), and its body ends with `Fixes SPI-123` when it closes an issue. The squash merge makes them the commit on `main`, which release-please reads: `feat` and `fix` decide the next version and get a line in `CHANGELOG.md`. The `PR title` check fails any other title. Never edit the version in `Cargo.toml`, `CHANGELOG.md` or `.release-please-manifest.json` by hand: merging release-please's release PR does, and its release runs `.github/workflows/release.yml` (CONTRIBUTING.md, Releases).
+
 ## Running it live
 
 The daemon focuses Rex blocks and switches tabs, so a test instance in the user's own Rex session steals their focus. Test live in a session of your own (`rex new`), or in a PTY with `REX_SESSION` pointing at it.

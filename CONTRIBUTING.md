@@ -58,11 +58,27 @@ live in a terminal you work in can steal its focus: the "Running it live" sectio
   - A new note from Neovim changes both sides: `note` in `src/nvim/windows.lua`, and its parser in
     `src/nvim/windows.rs`.
 - `windows.lua` has no formatter: keep its two-space hand formatting.
-- Write the commit subject as a plain sentence saying what changed, as in `git log`. Pull requests are squashed when
-  they merge, so the PR title becomes the commit subject.
+- Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org): `feat: ...` for something
+  new users see, `fix: ...` for a bug fix, or `docs:`, `perf:`, `refactor:`, `test:`, `build:`, `ci:`, `chore:`. A
+  scope is optional (`fix(tmux): ...`), and `!` after the type (`feat!: ...`) marks a breaking change. Pull requests
+  are squashed when they merge, so the title becomes the commit on `main`, and a check fails on a title that isn't
+  one. Commits inside the pull request can say what you like.
 
 AI-assisted contributions are welcome; neopane itself is built that way. You are responsible for what you submit:
 read it, test it, and be ready to explain it.
+
+## Releases
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please). Each merge to `main`
+updates a release pull request, which bumps the version in `Cargo.toml` and `Cargo.lock` and adds the changes to
+`CHANGELOG.md`: `feat` and `fix` titles (and `perf`, `revert`, `docs`) each get a line, the others none. Until 1.0, a
+`feat` bumps the minor version, a `fix` the patch, and a breaking change the minor version too.
+
+Merging the release pull request tags the version and drafts its GitHub release. The `Release` workflow then builds
+the archives for macOS and Linux, uploads them, publishes the release, and publishes the crate to crates.io. If a step
+fails, fix it and dispatch `Release` with the tag (`gh workflow run release.yml -f tag=v0.2.0`): it picks up where the
+release stands. To release a version other than the one proposed, put `Release-As: 0.3.0` in the body of a commit on
+`main`.
 
 ## License
 
