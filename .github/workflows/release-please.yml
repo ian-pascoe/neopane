@@ -1,0 +1,45 @@
+name: release-please
+
+# Every push to main updates the release PR: the next version, from the Conventional Commits since the last release, in
+# Cargo.toml, Cargo.lock and CHANGELOG.md. Merging it tags the version and makes its GitHub release, a draft, then calls
+# release.yml, which uploads the archives, publishes the release and publishes the crate. A tag made with GITHUB_TOKEN
+# starts no workflow, so release.yml is called here rather than started by the tag.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    # Forks have no business releasing.
+    if: github.repository_owner == 'spiritledsoftware'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write # the "autorelease: pending" labels
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

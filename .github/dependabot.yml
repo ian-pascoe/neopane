@@ -11,6 +11,10 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+    # Conventional Commits, as the PR title check asks; chore, so an update alone makes no release.
+    commit-message:
+      prefix: chore
+      include: scope
     ignore:
       # Pinned exactly, with the Ghostty commit scripts/golden.sh fetches: they move together, by hand.
       - dependency-name: ghostty-vt
@@ -26,6 +30,8 @@ updates:
       day: monday
     cooldown:
       default-days: 7
+    commit-message:
+      prefix: ci
     groups:
       actions:
         patterns: ["*"]

@@ -1,0 +1,38 @@
+name: PR title
+
+# Pull requests are squashed, and the PR title becomes the commit subject on main, which release-please reads for the
+# next version and the changelog. So the title must be a Conventional Commit: `feat: ...`, `fix(tmux): ...`.
+# pull_request_target so it runs on forks' PRs too; it checks out nothing and runs none of the PR's code.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  title:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            revert
+            docs
+            refactor
+            test
+            build
+            ci
+            chore
+            style
+          requireScope: false
+          # The subject is the rest of the title: lower case at the start, like `fix: keep floats on resize`, but a
+          # name such as Neovim or Rex may open it.
+          subjectPattern: ^.+$
