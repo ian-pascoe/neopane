@@ -6,18 +6,18 @@ take.sh runs it with the take's environment: HERDR_APP_HOME names the
 private window, and HC_SESSION, XDG_STATE_HOME and XDG_RUNTIME_DIR its hc
 core. VHS can't record the Herdr app, a GUI app, so this plays the tape's
 steps itself, as rex/play.py does in Rex, into the terminal of the pane
-the window focuses, found each step from `herdr-app status` and the
-core's doc: Type a character at a time at the tape's TypingSpeed, and
+the window focuses, found before each step from `herdr-app status` and
+the core's doc: Type a character at a time at the tape's TypingSpeed, and
 keys, through the core's `terminal.keys`, and Sleep as itself.
 
-hc's keys can't spell a shifted symbol, `:` or `_`: Shift+; reaches the
-terminal as Shift+; and not `:`. Those few go to the daemon's Neovim
-instead, by its `nvim_input`, where they'd have landed: the tape types
-them only into Neovim. A `HerdrApp ARGS` line, which VHS and tape.py
-skip, runs `herdr-app ARGS` for what the app's own keys would do, since
-keys sent to a terminal never reach the app. Each step starts when
-tape.py says it does, so the marks land where tape.py puts them. winrec
-records the window from Show until the tape ends.
+hc's keys can't spell `:` or `_` (FALLBACK): a Type holding either goes
+whole to the daemon's Neovim instead, a character at a time by its
+`nvim_input`, where it would have landed: the tape types them only into
+Neovim. A `HerdrApp ARGS` line, which VHS and tape.py skip, runs
+`herdr-app ARGS` for what the app's own keys would do, since keys sent to
+a terminal never reach the app. Each step starts when tape.py says it
+does, so the marks land where tape.py puts them. winrec records the
+window from Show until the tape ends.
 """
 
 import glob
@@ -47,8 +47,11 @@ KEYS = {
 }
 
 # What hc's keys spell as typed: a US keyboard's unshifted keys, and
-# letters with Shift
+# letters with Shift. Its shifted symbols are missing: it takes `shift+;`,
+# but sends Shift with `;` (kitty's `ESC [59;2u`), not `:`
 PLAIN = set("abcdefghijklmnopqrstuvwxyz0123456789;/.,-'`[]\\=")
+# What a Type may hold that hc can't spell: the whole Type goes to Neovim
+FALLBACK = set(":_")
 
 
 def herdr_app(*args):
@@ -91,6 +94,18 @@ class Core:
             sys.exit(f"pane {pane} has no terminal in the doc")
         return found
 
+    def press(self, terminal, ch):
+        """Types `ch` into `terminal`, as hc's keys spell it."""
+        if ch == " ":
+            key = "space"
+        elif ch in PLAIN:
+            key = ch
+        elif ch.isascii() and ch.isupper():
+            key = f"shift+{ch.lower()}"
+        else:
+            sys.exit(f"hc's keys can't type {ch!r}, and it isn't in FALLBACK")
+        self.call("terminal.keys", {"terminal": terminal, "keys": [key]})
+
 
 def find(node, pane):
     if isinstance(node, dict):
@@ -107,22 +122,36 @@ def find(node, pane):
     return None
 
 
-def nvim_input(keys):
-    """Gives `keys` to the daemon's Neovim, by msgpack-RPC `nvim_input`."""
+def nvim_sock():
+    """The socket of the take's one daemon's Neovim, under its directory
+    (ADR 0004: `$NEOPANE_TMPDIR/neopane-<uid>/<daemon name>/nvim.sock`)."""
     uid = os.getuid()
     socks = glob.glob(
         os.path.join(os.environ["NEOPANE_TMPDIR"], f"neopane-{uid}", "*", "nvim.sock")
     )
     if len(socks) != 1:
         sys.exit(f"want one daemon's Neovim, found {socks}")
-    data = keys.encode()
-    assert len(data) < 32
-    # [0, msgid, "nvim_input", [keys]]: a fixarray, fixints and fixstrs
+    return socks[0]
+
+
+def nvim_input(ch):
+    """Gives character `ch` to the daemon's Neovim, by msgpack-RPC
+    `nvim_input`, and checks its reply."""
+    data = ("<lt>" if ch == "<" else ch).encode()
+    # [0, 1, "nvim_input", [keys]]: a fixarray, fixints and fixstrs
     msg = b"\x94\x00\x01\xaanvim_input\x91" + bytes([0xA0 | len(data)]) + data
     with socket.socket(socket.AF_UNIX) as s:
-        s.connect(socks[0])
+        s.connect(nvim_sock())
         s.sendall(msg)
-        s.recv(4096)
+        reply = b""
+        while len(reply) < 4:
+            more = s.recv(4096)
+            if not more:
+                break
+            reply += more
+    # [1, 1, nil, count]: a response to request 1, its error nil
+    if reply[:4] != b"\x94\x01\x01\xc0":
+        sys.exit(f"nvim_input {ch!r}: {reply!r}")
 
 
 def key_name(word):
@@ -132,13 +161,30 @@ def key_name(word):
     return f"{mod.lower()}+{KEYS.get(key, key.lower())}"
 
 
+def tape_root():
+    return os.path.abspath(os.path.join(here, "..", "..", ".."))
+
+
 def main():
     path, window, out = sys.argv[1:4]
     core = Core()
-    winrec = os.path.join(here, "..", "..", "..", "target", "demo", "winrec")
+    winrec = os.path.join(tape_root(), "target", "demo", "winrec")
+    # the recorder, once Show starts it: stopped however the tape ends
+    recording = []
+    try:
+        at = play(path, core, winrec, window, out, recording)
+    finally:
+        for recorder in recording:
+            recorder.terminate()
+            recorder.wait()
+    print(f"{at:.3f}")
+
+
+def play(path, core, winrec, window, out, recording):
+    """Plays tape `path`, adding the recorder it starts to `recording`:
+    the shown part's length."""
     speed = 0.05
     shown = False
-    recorder = None
     start = 0.0
     at = 0.0  # seconds into the shown part this step starts at
 
@@ -148,18 +194,6 @@ def main():
             delay = start + at - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
-
-    def press(terminal, ch):
-        if ch == " ":
-            core.call("terminal.keys", {"terminal": terminal, "keys": ["space"]})
-        elif ch in PLAIN:
-            core.call("terminal.keys", {"terminal": terminal, "keys": [ch]})
-        elif ch.isupper():
-            core.call(
-                "terminal.keys", {"terminal": terminal, "keys": [f"shift+{ch.lower()}"]}
-            )
-        else:
-            nvim_input(ch)
 
     with open(path) as f:
         lines = f.read().splitlines()
@@ -180,6 +214,7 @@ def main():
                 stdout=subprocess.PIPE,
                 text=True,
             )
+            recording.append(recorder)
             if recorder.stdout.readline().strip() != "recording":
                 sys.exit("winrec didn't start")
             shown = True
@@ -195,11 +230,16 @@ def main():
         elif word.startswith("Type"):
             each = tape.seconds(word[5:]) if word.startswith("Type@") else speed
             text = line.split(None, 1)[1][1:-1]
-            wait()
-            terminal = core.focused()
+            # one channel for the whole text, so its characters keep
+            # their order; the terminal found before its time comes
+            to_nvim = any(ch in FALLBACK for ch in text)
+            terminal = None if to_nvim else core.focused()
             for ch in text:
                 wait()
-                press(terminal, ch)
+                if to_nvim:
+                    nvim_input(ch)
+                else:
+                    core.press(terminal, ch)
                 at += each
                 if not shown:
                     time.sleep(each)
@@ -208,7 +248,6 @@ def main():
             herdr_app(*shlex.split(line[len("HerdrApp") :]))
         elif m := tape.KEY_RE.match(line):
             each = tape.seconds(m.group(2)[1:]) if m.group(2) else speed
-            wait()
             terminal = core.focused()
             for _ in range(int(m.group(3) or 1)):
                 wait()
@@ -222,10 +261,7 @@ def main():
         else:
             sys.exit(f"{path}: can't play {line}")
     wait()
-    if recorder:
-        recorder.terminate()
-        recorder.wait()
-    print(f"{at:.3f}")
+    return at
 
 
 if __name__ == "__main__":

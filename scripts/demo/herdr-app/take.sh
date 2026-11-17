@@ -67,6 +67,33 @@ show_again() {
   fi
 }
 
+# A box left by a take that crashed may still run its window and core:
+# quit them first, by that box's own home and session alone, never yours
+if [ -d "$box/apphome" ]; then
+  (
+    set +e
+    for v in $(compgen -e | grep -E '^(HC_|HERDR_)'); do
+      unset "$v"
+    done
+    unset DBUS_SESSION_BUS_ADDRESS
+    stale="$(mktemp -d)"
+    # the app is its own CLI, chosen by the name herdr-app
+    ln -s "$app" "$stale/herdr-app"
+    HERDR_APP_HOME="$box/apphome" "$stale/herdr-app" "do" app.quit >/dev/null 2>&1
+    for _ in $(seq 50); do
+      HERDR_APP_HOME="$box/apphome" "$stale/herdr-app" status >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+    rm -rf "$stale"
+    # only if that core's state is there: hc starts a core it can't find
+    if [ -d "$box/state/herdr-core/$demo_herdr_app_session" ]; then
+      HC_SESSION="$demo_herdr_app_session" XDG_STATE_HOME="$box/state" \
+        XDG_CONFIG_HOME="$box/config" XDG_RUNTIME_DIR="$box/run" HOME="$box/home" \
+        "$hc_exe" server stop >/dev/null 2>&1
+    fi
+  )
+fi
+
 # The box: the core's and the app's environment, with none of yours. The
 # panes get yours back (shell.sh), through the DEMO_ variables
 rm -rf "$box"
@@ -87,7 +114,9 @@ printf '{"frame.welcomed": "skipped", "workspace.panels": []}\n' >"$box/apphome/
 printf '{"last_run": "%s", "presented": []}\n' \
   "$("$app" --version | awk '{print $2}')" >"$box/apphome/update-notes.json"
 
-for v in $(compgen -e | grep -E '^(HC_|REX_|TMUX|ZELLIJ|HERDR_|NEOPANE|TERM_PROGRAM)'); do
+# the demo's own knobs, NEOPANE_DEMO_*, stay: shell.sh reads env.sh again
+for v in $(compgen -e | grep -E '^(HC_|REX_|TMUX|ZELLIJ|HERDR_|NEOPANE|TERM_PROGRAM)' |
+  grep -v '^NEOPANE_DEMO_'); do
   unset "$v"
 done
 unset DBUS_SESSION_BUS_ADDRESS
@@ -103,7 +132,9 @@ export NEOPANE_TMPDIR="$demo_tmpdir"
 export PATH="$box/bin:$demo_repo/target/release:$PATH"
 export SHELL="$here/shell.sh"
 # No update checks, so no toast offering a newer hc, and no update
-# downloaded for the app you share; no sounds
+# downloaded for the app you share; no sounds. HERDR_RELEASES_URL is
+# undocumented, read from the app's binary: pointed at nothing, it only
+# makes the update checks fail
 export HERDR_RELEASES_URL=http://127.0.0.1:9 HERDR_APP_NO_SOUND=1
 
 app_pid=
@@ -112,7 +143,7 @@ restore() {
   set +e
   if [ -n "$app_pid" ]; then
     # by its own home: never your window
-    herdr-app do app.quit >/dev/null 2>&1
+    herdr-app "do" app.quit >/dev/null 2>&1
     for _ in $(seq 100); do
       kill -0 "$app_pid" 2>/dev/null || break
       sleep 0.1
@@ -161,11 +192,11 @@ for _ in $(seq 100); do
   herdr-app status >/dev/null 2>&1 && break
   sleep 0.1
 done
-herdr-app do window.maximize >/dev/null
-herdr-app do layout.hide --id sidebar >/dev/null
+herdr-app "do" window.maximize >/dev/null
+herdr-app "do" layout.hide --id sidebar >/dev/null
 # A new home's window has no space, and the core's doc no window, until
 # its first: one tab of one pane, running shell.sh
-herdr-app do space.new --name neopane --folder "$demo_work" --focus true >/dev/null
+herdr-app "do" space.new --name neopane --folder "$demo_work" --focus true >/dev/null
 for _ in $(seq 100); do
   [ -n "$(herdr-app status | python3 -c \
     'import json, sys; print(json.load(sys.stdin)["focused_pane"] or "")')" ] && break
@@ -184,9 +215,9 @@ length="$(cat "$out.length")"
 python3 - "$w" "$h" "$title" >"$out.crop" <<'EOF2'
 import sys
 w, h, top = (float(a) for a in sys.argv[1:4])
-fit = f"scale=-2:996,pad=1920:996:(ow-iw)/2:0:color=0x16181a"
+fit = "scale=-2:996,pad=1920:996:(ow-iw)/2:0:color=0x16181a"
 if (h - top) / w < 996 / 1920:
-    fit = f"scale=1920:-2,pad=1920:996:0:(oh-ih)/2:color=0x16181a"
+    fit = "scale=1920:-2,pad=1920:996:0:(oh-ih)/2:color=0x16181a"
 print(f"crop=iw:ih*{(h - top) / h:.5f}:0:ih*{top / h:.5f},{fit}")
 EOF2
 ffmpeg -v error -y -i "$out.vfr.mp4" \

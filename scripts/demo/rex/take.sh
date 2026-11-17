@@ -140,9 +140,9 @@ length="$(cat "$out.length")"
 python3 - "$w" "$h" "$title" >"$out.crop" <<'EOF2'
 import sys
 w, h, top = (float(a) for a in sys.argv[1:4])
-fit = f"scale=-2:996,pad=1920:996:(ow-iw)/2:0:color=0x191a20"
+fit = "scale=-2:996,pad=1920:996:(ow-iw)/2:0:color=0x191a20"
 if (h - top) / w < 996 / 1920:
-    fit = f"scale=1920:-2,pad=1920:996:0:(oh-ih)/2:color=0x191a20"
+    fit = "scale=1920:-2,pad=1920:996:0:(oh-ih)/2:color=0x191a20"
 print(f"crop=iw:ih*{(h - top) / h:.5f}:0:ih*{top / h:.5f},{fit}")
 EOF2
 ffmpeg -v error -y -i "$out.vfr.mp4" \

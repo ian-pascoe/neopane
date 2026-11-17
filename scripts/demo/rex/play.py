@@ -78,64 +78,67 @@ def main():
             if delay > 0:
                 time.sleep(delay)
 
-    with open(path) as f:
-        lines = f.read().splitlines()
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        word = line.split()[0]
-        if word == "Set" and line.split()[1] == "TypingSpeed":
-            speed = tape.seconds(line.split()[2])
-        elif word in ("Set", "Require", "Output"):
-            continue
-        elif word == "Hide":
-            shown = False
-        elif word == "Show":
-            recorder = subprocess.Popen(
-                [winrec, window, "record", out, "30"],
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-            if recorder.stdout.readline().strip() != "recording":
-                sys.exit("winrec didn't start")
-            shown = True
-            start = time.monotonic()
-            at = 0.0
-        elif word == "Sleep":
-            pause = tape.seconds(line.split()[1])
-            if shown:
-                at += pause
+    # the recorder, once Show starts it, is stopped however the tape ends
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            word = line.split()[0]
+            if word == "Set" and line.split()[1] == "TypingSpeed":
+                speed = tape.seconds(line.split()[2])
+            elif word in ("Set", "Require", "Output"):
+                continue
+            elif word == "Hide":
+                shown = False
+            elif word == "Show":
+                recorder = subprocess.Popen(
+                    [winrec, window, "record", out, "30"],
+                    stdout=subprocess.PIPE,
+                    text=True,
+                )
+                if recorder.stdout.readline().strip() != "recording":
+                    sys.exit("winrec didn't start")
+                shown = True
+                start = time.monotonic()
+                at = 0.0
+            elif word == "Sleep":
+                pause = tape.seconds(line.split()[1])
+                if shown:
+                    at += pause
+                    wait()
+                else:
+                    time.sleep(pause)
+            elif word.startswith("Type"):
+                each = tape.seconds(word[5:]) if word.startswith("Type@") else speed
+                text = line.split(None, 1)[1][1:-1]
+                for ch in text:
+                    wait()
+                    rex("send", "-s", session, ch)
+                    at += each
+                    if not shown:
+                        time.sleep(each)
+            elif word == "Rex":
                 wait()
+                args = shlex.split(line[len("Rex") :].strip().format(**fill))
+                rex(*args)
+            elif m := tape.KEY_RE.match(line):
+                each = tape.seconds(m.group(2)[1:]) if m.group(2) else speed
+                for _ in range(int(m.group(3) or 1)):
+                    wait()
+                    rex("send-key", "-s", session, key_name(m.group(1)))
+                    at += each
+                    if not shown:
+                        time.sleep(each)
             else:
-                time.sleep(pause)
-        elif word.startswith("Type"):
-            each = tape.seconds(word[5:]) if word.startswith("Type@") else speed
-            text = line.split(None, 1)[1][1:-1]
-            for ch in text:
-                wait()
-                rex("send", "-s", session, ch)
-                at += each
-                if not shown:
-                    time.sleep(each)
-        elif word == "Rex":
-            wait()
-            args = shlex.split(line[len("Rex") :].strip().format(**fill))
-            rex(*args)
-        elif m := tape.KEY_RE.match(line):
-            each = tape.seconds(m.group(2)[1:]) if m.group(2) else speed
-            for _ in range(int(m.group(3) or 1)):
-                wait()
-                rex("send-key", "-s", session, key_name(m.group(1)))
-                at += each
-                if not shown:
-                    time.sleep(each)
-        else:
-            sys.exit(f"{path}: can't play {line}")
-    wait()
-    if recorder:
-        recorder.terminate()
-        recorder.wait()
+                sys.exit(f"{path}: can't play {line}")
+        wait()
+    finally:
+        if recorder:
+            recorder.terminate()
+            recorder.wait()
     print(f"{at:.3f}")
 
 
