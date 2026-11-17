@@ -956,6 +956,25 @@ impl Live {
             .as_str()
             .unwrap()
             .to_string();
+        // the new pane's pty, Neovim's screen and its window as wide as
+        // its tab before the split: one made a column short is laid out
+        // that short for good, as its windows are external, and every
+        // later size of the tab page is a column off (SPI-1207)
+        let fits = || {
+            let width = tab_of(&self.herdr, &pane)["panes"][0]["rect"]["width"].as_u64();
+            let pty = self.herdr.pty_size(&pane).map(|s| u64::from(s.1));
+            let expr = format!("&columns .. ' ' .. winwidth({first})");
+            let screen = remote_expr(&self.ending.sock, &expr).unwrap_or_default();
+            let ok = width.is_some()
+                && pty == width
+                && screen.split(' ').all(|c| c.parse::<u64>().ok() == width);
+            (
+                ok,
+                format!("tab {width:?} pty {pty:?} columns, window {screen}"),
+            )
+        };
+        let (ok, shown) = until(|f: &(bool, String)| f.0, fits);
+        assert!(ok, "{shown}: {}", self.log());
         let split = remote_expr(&self.ending.sock, "execute('vsplit') .. win_getid()").unwrap();
         let s = until(|s: &Value| s["panes"] == 3, || self.status());
         assert_eq!(s["panes"], 3, "its attach never came: {}", self.log());
