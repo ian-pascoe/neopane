@@ -95,16 +95,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --no-fail-fast
 
+  # On Linux: the toolchain is what it checks, and macOS runners can be
+  # scarce enough that a required job waits for one in vain
   msrv:
     name: test (MSRV 1.88)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    env:
+      # Neovim's release tarball: apt's Neovim is too old
+      NVIM_VERSION: v0.12.6
     steps:
       - uses: actions/checkout@v4
       # Keep the version in step with rust-version in Cargo.toml
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - name: Install Neovim and tmux
-        run: brew install neovim tmux
+      - name: Install Neovim
+        run: |
+          curl -fsSL --retry 3 -o nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          mkdir -p "$HOME/nvim"
+          tar -xzf nvim.tar.gz -C "$HOME/nvim" --strip-components=1
+          echo "$HOME/nvim/bin" >> "$GITHUB_PATH"
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
       - name: Install zellij
         run: |
           scripts/install-zellij.sh "$HOME/zellij"
