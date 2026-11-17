@@ -47,7 +47,7 @@ jobs:
           echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test --no-fail-fast
 
   linux:
     name: fmt, clippy, test (Linux)
@@ -93,7 +93,7 @@ jobs:
           echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test --no-fail-fast
 
   msrv:
     name: test (MSRV 1.88)
@@ -118,4 +118,4 @@ jobs:
           scripts/install-hc.sh /tmp/hc
           echo /tmp/hc >> "$GITHUB_PATH"
       - run: cargo check --all-targets
-      - run: cargo test
+      - run: cargo test --no-fail-fast
