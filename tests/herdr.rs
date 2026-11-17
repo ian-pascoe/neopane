@@ -63,6 +63,14 @@ fn tab_of(herdr: &HerdrServer, pane: &str) -> Value {
     herdr.call("pane.layout", json!({ "pane_id": pane }))["layout"].clone()
 }
 
+/// Whether herdr pane `pane` shows `text` on its screen now.
+fn shows(herdr: &HerdrServer, pane: &str, text: &str) -> bool {
+    let read = herdr.call("pane.read", json!({ "pane_id": pane, "source": "visible" }));
+    read["read"]["text"]
+        .as_str()
+        .is_some_and(|t| t.contains(text))
+}
+
 /// Panes, each its id and the pty size its rect gives, rows and columns.
 type Framed = Vec<(String, (u16, u16))>;
 
@@ -1001,6 +1009,9 @@ impl Live {
     }
 }
 
+/// The line the split's window shows, so its pane is known by sight.
+const SPLIT_MARK: &str = "SPLIT-MARK";
+
 /// A tab page whose windows Neovim lays out in one flush, before they are
 /// external, in another order than their panes open in: the daemon moves
 /// a pane within its herdr tab (`place_beside`, out to a tab of its own
@@ -1012,10 +1023,10 @@ impl Live {
 /// through states with part of it: the split's pane focused in the tab
 /// before it moves, on the wrong side, then out in a tab of its own; the
 /// first window's pane focused a moment. A look at part of the end takes
-/// one of them for it (SPI-1205). The split's pane is known only by the
-/// focus: a moment before the move with the first window's pane focused
-/// on the far side, both panes as wide, would pass the look, so the focus
-/// is looked at again after it.
+/// one of them for it (SPI-1205). The split's pane is known by sight, its
+/// window showing `SPLIT_MARK`, not by the focus: before the move, with
+/// both panes as wide, the first window's pane is focused on the far side
+/// a moment.
 #[test]
 fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
     let Some(live) = Live::start("hd-move") else {
@@ -1027,7 +1038,8 @@ fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
     for (n, split, wincmd) in [(2, "vsplit", "L"), (3, "belowright vsplit", "H")] {
         let made = format!(
             "execute('tabnew') .. win_getid() .. ' ' .. execute('{split}') .. \
-             win_getid() .. execute('wincmd {wincmd}')"
+             win_getid() .. execute('enew | call setline(1, \"{SPLIT_MARK}\")') .. \
+             execute('wincmd {wincmd}')"
         );
         let made = remote_expr(&live.ending.sock, &made).unwrap();
         let (first, split) = made.split_once(' ').unwrap();
@@ -1049,11 +1061,16 @@ fn a_window_neovim_moves_to_the_far_side_moves_its_herdr_pane_within_its_tab() {
                 .map(Vec::len);
             let (sizes, fitted, panes) = live.fitted(&focused, n, &wins);
             let ids: Vec<String> = sizes.into_iter().map(|s| s.0).collect();
+            let marked: Vec<bool> = ids
+                .iter()
+                .map(|p| shows(&live.herdr, p, SPLIT_MARK))
+                .collect();
             let ok = !seen.contains(&focused)
                 && ids.get(far) == Some(&focused)
+                && marked.iter().enumerate().all(|(i, &m)| m == (i == far))
                 && tabs == Some(n as usize)
                 && fitted;
-            let shown = format!("focus {focused} tabs {tabs:?} {panes}");
+            let shown = format!("focus {focused} tabs {tabs:?} marked {marked:?} {panes}");
             (ok, shown, ids)
         };
         let (ok, shown, ids) = until(|e: &(bool, String, _)| e.0, end);
