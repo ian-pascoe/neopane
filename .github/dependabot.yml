@@ -1,0 +1,31 @@
+# Weekly dependency updates, grouped to keep the PR count low. Dependabot's security updates (a repository setting)
+# open their own PRs as soon as an advisory lands, whatever this schedule says.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Let a new release settle a week before proposing it.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    ignore:
+      # Pinned exactly, with the Ghostty commit scripts/golden.sh fetches: they move together, by hand.
+      - dependency-name: ghostty-vt
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+  # The workflows' actions. The tools CI installs (Neovim, zellij, herdr, hc) are pinned in ci.yml and scripts/install-*.sh,
+  # which Dependabot doesn't read: bump them by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,93 @@
+name: Bug report
+description: Something neopane does wrong, or a crash.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. neopane is very early, so bugs are expected and welcome.
+        The [Troubleshooting](https://github.com/spiritledsoftware/neopane#troubleshooting) section of the README may already cover it.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran and the Neovim actions you took. A config that reproduces it with `nvim --clean` is best.
+      placeholder: |
+        1. In a tmux pane, run `neopane notes.md`
+        2. `:vsplit`
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Pane provider
+      description: What the terminal you ran neopane in is. `neopane status` names the one the daemon holds.
+      options:
+        - Rex
+        - tmux
+        - zellij
+        - herdr
+        - Herdr app
+        - None (plain terminal)
+        - A custom provider from my config
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: neopane version
+      description: "`neopane --version`, or the commit you built."
+    validations:
+      required: true
+
+  - type: input
+    id: nvim
+    attributes:
+      label: Neovim version
+      description: First line of `nvim --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and terminal
+      placeholder: macOS 26.1, Ghostty 1.3 / Ubuntu 24.04, kitty 0.44
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: "`neopane provider check` output"
+      description: Run in the same kind of terminal. Leave it out if the bug has nothing to do with panes.
+      render: text
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Daemon log
+      description: |
+        The relevant part of the daemon's log: `neopane status` prints its path (`/tmp/neopane-<uid>/<name>/log` by default).
+        `NEOPANE_LOG=debug` logs more. Remove anything private, such as file names.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues.
+          required: true

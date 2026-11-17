@@ -8,7 +8,7 @@ pub const NAME: &str = "neopane";
 
 /// The project's home: its repository, named after the tool (SPI-673).
 pub fn repo_url() -> String {
-    format!("https://github.com/ian-pascoe/{NAME}")
+    format!("https://github.com/spiritledsoftware/{NAME}")
 }
 
 /// The name in upper case, as in `$<NAME>`.

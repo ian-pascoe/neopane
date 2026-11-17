@@ -23,8 +23,8 @@ concurrency:
 jobs:
   project:
     name: project
-    # Forks have neither the secret nor the Linear project. The owner, not the name, so the rename to neopane keeps it.
-    if: github.repository_owner == 'ian-pascoe'
+    # Forks have neither the secret nor the Linear project. The owner, not the name, so a rename keeps it.
+    if: github.repository_owner == 'spiritledsoftware'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

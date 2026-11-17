@@ -1,5 +1,8 @@
 # neopane
 
+[![CI](https://github.com/spiritledsoftware/neopane/actions/workflows/ci.yml/badge.svg)](https://github.com/spiritledsoftware/neopane/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 One Neovim, every window a real terminal pane.
 
 https://github.com/user-attachments/assets/5787c351-8683-4d67-a079-1d6cbb42e196
@@ -20,7 +23,7 @@ it shares its buffers, registers, undo and language servers.
   daemon you can attach to from other terminals and leave running.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ian-pascoe/neopane/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/neopane/main/install.sh | bash
 # or: brew install spiritledsoftware/tap/neopane
 # or: cargo install --locked neopane
 neopane notes.md
@@ -28,7 +31,7 @@ neopane notes.md
 
 It needs Neovim 0.12 or later, on macOS or Linux. It is
 [very early](#status): bug reports are welcome on
-[GitHub Issues](https://github.com/ian-pascoe/neopane/issues).
+[GitHub Issues](https://github.com/spiritledsoftware/neopane/issues).
 
 Formerly neorex. Not the original neorex by Alex Locke, which this began as
 and continues under that name.
@@ -45,7 +48,8 @@ and continues under that name.
 - [Differences from plain Neovim](#differences-from-plain-neovim)
 - [Debug commands, build and tests](#debug-commands-build-and-tests)
 - [Renamed from neorex](#renamed-from-neorex)
-- [Plans](#plans), [Credits](#credits), [License](#license)
+- [Plans](#plans), [Contributing](#contributing), [Sponsoring](#sponsoring),
+  [Credits](#credits), [License](#license)
 
 ## What it does
 
@@ -85,7 +89,8 @@ Very early and rough: expect bugs and missing features.
 
 neopane has been built with heavy use of AI, first in Zig and now in Rust.
 Much of the code still needs cleanup and better design, which is happening
-incrementally. Contributions are welcome.
+incrementally. Contributions are welcome: see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Install
 
@@ -101,7 +106,7 @@ On macOS or Linux, the latest release, as `~/.local/bin/neopane`, with
 `npane` linked to it as a shorthand:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ian-pascoe/neopane/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/spiritledsoftware/neopane/main/install.sh | bash
 ```
 
 Piped to `NEOPANE_VERSION=v0.1.0 bash`, it installs that release instead;
@@ -613,7 +618,7 @@ Environment:
 Each daemon keeps its files in $NEOPANE_TMPDIR, else /tmp, under
 /neopane-<uid>/<daemon name>/, and logs to `log` there. The log stays after
 the daemon ends; the next daemon of that name keeps it as log.1.
-More: https://github.com/ian-pascoe/neopane  Developer tools: neopane help debug
+More: https://github.com/spiritledsoftware/neopane  Developer tools: neopane help debug
 ```
 
 ### Own options first, then Neovim's
@@ -1128,7 +1133,7 @@ The old names have no aliases: change them by hand.
 | `~/.config/neorex/` | `~/.config/neopane/` |
 | `/tmp/neorex-<uid>/` | `/tmp/neopane-<uid>/` |
 | the Rex block label and client name `neorex` | `neopane` |
-| the repository `ian-pascoe/neorex` (its URLs redirect) | `ian-pascoe/neopane` |
+| the repository `ian-pascoe/neorex`, then `ian-pascoe/neopane` (their URLs redirect) | `spiritledsoftware/neopane` |
 
 A daemon started before the rename keeps running under its old name, and
 leftover `neorex-<uid>` directories are left alone: remove them once no old
@@ -1144,6 +1149,19 @@ Much of neopane will be split out into standalone crates:
 - terminal key input (the kitty keyboard protocol)
 
 neopane should then be easier to extend to other editors that provide similar processes for running external windows.
+
+## Contributing
+
+Bug reports, feature requests and pull requests are welcome.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setting up, the tests and the
+conventions; [SECURITY.md](SECURITY.md) how to report a vulnerability
+privately. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Sponsoring
+
+If neopane is useful to you, you can support its development through
+[GitHub Sponsors](https://github.com/sponsors/ian-pascoe).
 
 ## Credits
 
