@@ -38,9 +38,12 @@ pub(crate) fn set_title(title: &str) -> Vec<u8> {
     format!("{TITLE_PUSH}\x1b]2;{title}\x1b\\").into_bytes()
 }
 
-/// `undo`, once a pane title is written: it puts the title back too.
-pub(crate) fn undo_with_title() -> Vec<u8> {
-    [undo(), TITLE_POP.as_bytes().to_vec()].concat()
+/// The undo bytes of a pane's terminal: `undo`, then, once a pane title
+/// is written (`titled`), `TITLE_POP`, then `status_clears`, the reports
+/// that clear the status records written to it (ADR 0021).
+pub(crate) fn undo_of(titled: bool, status_clears: &[u8]) -> Vec<u8> {
+    let title: &[u8] = if titled { TITLE_POP.as_bytes() } else { b"" };
+    [&undo(), title, status_clears].concat()
 }
 
 #[cfg(test)]
@@ -53,5 +56,20 @@ mod tests {
     fn editor_modes_wrap_the_kitty_flags() {
         assert!(EDITOR_ON.ends_with(&format!("{}{}", input::KITTY_PUSH, input::KITTY_QUERY)));
         assert!(EDITOR_OFF.starts_with(input::KITTY_POP));
+    }
+
+    #[test]
+    fn the_undo_bytes_end_the_modes_then_put_the_title_back_then_clear_the_status() {
+        let clears = b"\x1b]7501;state=clear\x1b\\";
+        assert_eq!(undo(), undo_of(false, b""));
+        assert_eq!(
+            [undo(), TITLE_POP.as_bytes().to_vec()].concat(),
+            undo_of(true, b"")
+        );
+        assert_eq!([undo(), clears.to_vec()].concat(), undo_of(false, clears));
+        assert_eq!(
+            [undo(), TITLE_POP.as_bytes().to_vec(), clears.to_vec()].concat(),
+            undo_of(true, clears)
+        );
     }
 }
