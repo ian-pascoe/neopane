@@ -3,14 +3,18 @@
 //! wait-for -E NAME`, which ends at that event anywhere on the server.
 //!
 //! - A waiter that ends with the event is armed again at once. Once no
-//!   waiter has ended for [`SETTLE`] since the last was armed again, so
-//!   that it has registered with the server and what it missed meanwhile
-//!   shows in the read, it prints one line: `{"focus":"%N"}` if the focused
-//!   pane, found as `report_layout` finds it, changed, else a bare line, so
-//!   the layout is read again. Its first line, once the waiters are armed
-//!   and have settled likewise, is where focus starts, if a client shows
-//!   any: the daemon follows moves from there. Else it is a bare line: the
-//!   layout may have changed before the waiters registered.
+//!   waiter has ended for [`SETTLE`] since the last was armed again, and
+//!   tmux lists every waiter armed, so that each has registered with the
+//!   server and what it missed meanwhile shows in the read, it prints one
+//!   line: `{"focus":"%N"}` if the focused pane, found as `report_layout`
+//!   finds it, changed, else a bare line, so the layout is read again.
+//!   Its first line, once the waiters are armed, have settled and are
+//!   listed likewise, is where focus starts, if a client shows any: the
+//!   daemon follows moves from there. Else it is a bare line: the layout
+//!   may have changed before the waiters registered.
+//! - A listing is `tmux wait-for -E -l EVENT`, which names each waiter by
+//!   its `wait-for` client's pid, so `tmux` must be run, not forked from a
+//!   wrapper, for the pid it spawned to be the one listed.
 //! - A waiter that fails at once, within [`AT_ONCE`], is dropped; one that
 //!   fails later, such as at a server's restart, is armed again, and fails
 //!   at once if the server is gone. Once every waiter is gone, it fails.
@@ -22,6 +26,7 @@
 //! keeps every pane of its session from losing focus. Hooks set on the
 //! server would outlive a daemon killed.
 
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -59,6 +64,9 @@ const SETTLE: Duration = Duration::from_millis(30);
 
 /// The longest a burst settles, however many waiters keep ending.
 const MOST_SETTLE: Duration = Duration::from_millis(250);
+
+/// How often it asks tmux which waiters are registered, while some aren't.
+const LISTING_EVERY: Duration = Duration::from_millis(10);
 
 /// A waiter failing sooner than this after it was armed failed at once.
 const AT_ONCE: Duration = Duration::from_secs(1);
@@ -101,6 +109,10 @@ pub(super) trait Waiters {
     /// The next waiter to end, waiting at most `within`, or until one does
     /// with None.
     fn next(&mut self, within: Option<Duration>) -> Option<Ended>;
+    /// Whether every waiter armed that hasn't ended has registered with the
+    /// server: it is listed as waiting on its event. A waiter that ended is
+    /// no longer waited for.
+    fn registered(&mut self) -> bool;
     /// The focused pane, as `report_layout` finds it, if any.
     fn focus(&mut self) -> Option<String>;
 }
@@ -115,7 +127,8 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
     // where focus starts, read once the waiters have registered, so what
     // happens meanwhile is in it: the daemon follows only moves from there.
     // Printed, bare, when no client shows focus too: see the module doc
-    settle(waiters, None, &mut live);
+    let mut held = VecDeque::new();
+    settle(waiters, None, &mut held, &mut live);
     let mut focus = waiters.focus();
     let first = match &focus {
         Some(pane) => json!({ "focus": pane }).to_string(),
@@ -125,10 +138,14 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
         return Failure::Failed("the reader is gone".into());
     }
     while live > 0 {
-        let Some(first) = waiters.next(None) else {
-            continue;
+        let first = match held.pop_front() {
+            Some(first) => first,
+            None => match waiters.next(None) {
+                Some(first) => first,
+                None => continue,
+            },
         };
-        if !settle(waiters, Some(first), &mut live) {
+        if !settle(waiters, Some(first), &mut held, &mut live) {
             continue;
         }
         let now = waiters.focus();
@@ -147,28 +164,59 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
 }
 
 /// Takes `first`, then every waiter that ends until none has for
-/// [`SETTLE`] since the last was armed again, so a read after it sees
-/// what a waiter that was registering missed; at most [`MOST_SETTLE`] in
-/// all, past which those still ending start the next burst. One that
-/// woke, or failed late, is armed again; one that failed at once is
-/// dropped from `live`. Whether any woke.
-fn settle(waiters: &mut impl Waiters, first: Option<Ended>, live: &mut usize) -> bool {
+/// [`SETTLE`] since the last was armed again, at most [`MOST_SETTLE`] in
+/// all, past which those still ending are put in `held`, not armed
+/// again, to start the next burst. Then it waits until every waiter armed
+/// has registered with the server (`registered`), however long that takes,
+/// taking those that end meanwhile likewise: a read after it sees what a
+/// waiter that was registering missed. One that woke, or failed late, is
+/// armed again; one that failed at once is dropped from `live`. Whether
+/// any woke, and was armed again.
+fn settle(
+    waiters: &mut impl Waiters,
+    first: Option<Ended>,
+    held: &mut VecDeque<Ended>,
+    live: &mut usize,
+) -> bool {
     let start = Instant::now();
     let mut due = start + SETTLE;
     let mut woke = false;
     let mut ended = first;
+    // the last burst's, taken before anything new
+    let mut backlog = std::mem::take(held);
     loop {
+        if ended.is_none() {
+            ended = backlog.pop_front();
+        }
         if let Some(e) = ended.take() {
-            woke |= e.woke;
             if e.woke || e.ran >= AT_ONCE {
-                waiters.arm(e.event);
-                due = (Instant::now() + SETTLE).min(start + MOST_SETTLE);
+                if Instant::now() >= start + MOST_SETTLE {
+                    held.push_back(e);
+                } else {
+                    woke |= e.woke;
+                    waiters.arm(e.event);
+                    due = (Instant::now() + SETTLE).min(start + MOST_SETTLE);
+                }
             } else {
                 *live -= 1;
             }
         }
+        if !backlog.is_empty() {
+            continue;
+        }
         let left = due.saturating_duration_since(Instant::now());
         ended = waiters.next(Some(left));
+        if ended.is_some() {
+            continue;
+        }
+        // the burst is over; what's armed may not have registered, and a
+        // change before it does ends no waiter
+        while !waiters.registered() {
+            ended = waiters.next(Some(LISTING_EVERY));
+            if ended.is_some() {
+                break;
+            }
+        }
         if ended.is_none() {
             return woke;
         }
@@ -184,6 +232,9 @@ struct TmuxWaiters {
     rx: Receiver<Ended>,
     /// The pids of the waiters running.
     running: Arc<Mutex<Vec<u32>>>,
+    /// The waiters running that tmux hasn't been seen to list yet, by
+    /// event and pid; one that ends leaves it.
+    unlisted: Arc<Mutex<Vec<(&'static str, u32)>>>,
 }
 
 impl TmuxWaiters {
@@ -194,8 +245,18 @@ impl TmuxWaiters {
             tx,
             rx,
             running: Arc::default(),
+            unlisted: Arc::default(),
         }
     }
+}
+
+/// The pids of the waiters `tmux wait-for -E -l EVENT` printed as `out`,
+/// one `client-PID` per line: the pid of each `wait-for` client.
+fn listed_pids(out: &[u8]) -> Vec<u32> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("client-")?.parse().ok())
+        .collect()
 }
 
 impl Waiters for TmuxWaiters {
@@ -222,10 +283,13 @@ impl Waiters for TmuxWaiters {
         };
         let pid = child.id();
         self.running.lock().unwrap().push(pid);
+        self.unlisted.lock().unwrap().push((event, pid));
         let running = Arc::clone(&self.running);
+        let unlisted = Arc::clone(&self.unlisted);
         std::thread::spawn(move || {
             let exited = exited_unreaped(|| wait_unreaped(pid));
             let woke = reap(&mut child, &running, exited);
+            unlisted.lock().unwrap().retain(|&(_, p)| p != pid);
             let _ = tx.send(Ended {
                 event,
                 woke,
@@ -239,6 +303,34 @@ impl Waiters for TmuxWaiters {
             None => self.rx.recv().ok(),
             Some(d) => self.rx.recv_timeout(d).ok(),
         }
+    }
+
+    fn registered(&mut self) -> bool {
+        let mut events: Vec<&str> = Vec::new();
+        for &(event, _) in self.unlisted.lock().unwrap().iter() {
+            if !events.contains(&event) {
+                events.push(event);
+            }
+        }
+        if events.is_empty() {
+            return true;
+        }
+        // one tmux asks for every event: `wait-for -E -l A ; wait-for -E -l B`
+        let mut args = Vec::new();
+        for event in events {
+            if !args.is_empty() {
+                args.push(";");
+            }
+            args.extend(["wait-for", "-E", "-l", event]);
+        }
+        // a listing that fails shows none: they stay unlisted, and are
+        // asked about again, until they register or end
+        let listed = self.server.run(&args).map(|out| listed_pids(&out));
+        let mut unlisted = self.unlisted.lock().unwrap();
+        if let Ok(listed) = listed {
+            unlisted.retain(|(_, pid)| !listed.contains(pid));
+        }
+        unlisted.is_empty()
     }
 
     fn focus(&mut self) -> Option<String> {
@@ -325,16 +417,20 @@ mod tests {
     /// What the loop asked of a fake, in order.
     #[derive(Debug, Clone, PartialEq)]
     enum Call {
+        Arm(&'static str),
         Next(Option<Duration>),
+        Registered(bool),
         Focus,
     }
 
     /// Waiters that end as their script says; focus is each of `focus` in
-    /// turn, the last kept.
+    /// turn, the last kept. They have registered as each of `listed` says
+    /// in turn, then always.
     #[derive(Default)]
     struct Fake {
         script: VecDeque<Step>,
         armed: Vec<&'static str>,
+        listed: VecDeque<bool>,
         focus: VecDeque<Option<String>>,
         last_focus: Option<String>,
         calls: Vec<Call>,
@@ -342,7 +438,14 @@ mod tests {
 
     impl Waiters for Fake {
         fn arm(&mut self, event: &'static str) {
+            self.calls.push(Call::Arm(event));
             self.armed.push(event);
+        }
+
+        fn registered(&mut self) -> bool {
+            let listed = self.listed.pop_front().unwrap_or(true);
+            self.calls.push(Call::Registered(listed));
+            listed
         }
 
         fn next(&mut self, within: Option<Duration>) -> Option<Ended> {
@@ -396,11 +499,31 @@ mod tests {
     }
 
     /// Whether, before each focus read, the loop last waited a whole
-    /// settle for more waiters to end: what `calls` says.
+    /// settle for more waiters to end, then found them registered: what
+    /// `calls` says.
     fn settled_before_each_read(calls: &[Call]) -> bool {
         calls.iter().enumerate().all(|(i, c)| {
             *c != Call::Focus
-                || matches!(calls[..i].last(), Some(Call::Next(Some(d))) if *d >= SETTLE - Duration::from_millis(3))
+                || matches!(
+                    calls[..i].iter().rev().find(|c| !matches!(c, Call::Registered(_))),
+                    Some(Call::Next(Some(d))) if *d >= SETTLE - Duration::from_millis(3)
+                )
+        })
+    }
+
+    /// Whether, before each focus read, the last the loop asked of the
+    /// waiters was whether they had registered, and they had, with none
+    /// armed since: what `calls` says.
+    fn registered_before_each_read(calls: &[Call]) -> bool {
+        calls.iter().enumerate().all(|(i, c)| {
+            *c != Call::Focus
+                || matches!(
+                    calls[..i]
+                        .iter()
+                        .rev()
+                        .find(|c| matches!(c, Call::Arm(_) | Call::Registered(_))),
+                    Some(Call::Registered(true))
+                )
         })
     }
 
@@ -438,6 +561,122 @@ mod tests {
         let (lines, _) = run(&mut fake);
         assert_eq!(lines, [""]);
         assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    /// SPI-1281: a `wait-for` that is slow to start registers after the
+    /// settle, and what changes before it does ends no waiter. The first
+    /// line, which makes the daemon read the layout again, waits for every
+    /// waiter to be listed, however long that takes.
+    #[test]
+    fn its_first_line_waits_for_every_waiter_to_register() {
+        let mut fake = Fake {
+            // each a poll, in which no waiter ends
+            script: then_all_fail(vec![Step::Quiet, Step::Quiet, Step::Quiet]),
+            listed: [false, false, false].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [""]);
+        let asked: Vec<_> = fake
+            .calls
+            .iter()
+            .filter(|c| matches!(c, Call::Registered(_)))
+            .collect();
+        assert_eq!(
+            asked[..3],
+            [&Call::Registered(false); 3],
+            "{:?}",
+            fake.calls
+        );
+        assert!(registered_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    /// A waiter armed again after its event registers late likewise: the
+    /// line for the event waits for it.
+    #[test]
+    fn a_line_waits_for_the_waiter_armed_again_to_register() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                woke("window-layout-changed"),
+                Step::Quiet,
+                Step::Quiet,
+                Step::Quiet,
+            ]),
+            // at the start, then after the event
+            listed: [true, false, false, true].into(),
+            focus: [Some("%0".into()), Some("%1".into())].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [r#"{"focus":"%0"}"#, r#"{"focus":"%1"}"#]);
+        assert!(registered_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    /// A waiter that wakes while the loop waits for another to register
+    /// is in the same burst: it is armed again, and waited for too.
+    #[test]
+    fn a_waiter_waking_while_another_registers_is_armed_again_and_waited_for() {
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                // the start: nothing ends in the settle, one waiter isn't
+                // registered, and another wakes meanwhile
+                woke("window-pane-changed"),
+                Step::Quiet,
+            ]),
+            listed: [false, true].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(fake.armed[EVENTS.len()..].contains(&"window-pane-changed"));
+        assert!(registered_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    /// Waiters that keep waking while the loop waits for one to register
+    /// don't keep it from printing for ever: past [`MOST_SETTLE`] they are
+    /// not armed again, the line is printed, and they start the next burst.
+    #[test]
+    fn a_burst_past_the_most_settle_is_cut_while_a_waiter_registers() {
+        let late = |event, ms| {
+            Step::Late(
+                Duration::from_millis(ms),
+                Ended {
+                    event,
+                    woke: true,
+                    ran: Duration::from_secs(5),
+                },
+            )
+        };
+        let mut fake = Fake {
+            script: then_all_fail(vec![
+                late("window-layout-changed", 80),
+                late("window-pane-changed", 80),
+                // at 360 ms: past the most a burst settles
+                late("pane-resized", 200),
+                Step::Quiet,
+            ]),
+            listed: [false].into(),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let first_read = fake.calls.iter().position(|c| *c == Call::Focus).unwrap();
+        let armed_before_read = |event| {
+            fake.calls[..first_read]
+                .iter()
+                .filter(|c| **c == Call::Arm(event))
+                .count()
+        };
+        // the first two were armed again in the burst, the third wasn't
+        assert_eq!(armed_before_read("window-layout-changed"), 2);
+        assert_eq!(armed_before_read("window-pane-changed"), 2);
+        assert_eq!(armed_before_read("pane-resized"), 1);
+        // it was armed again in the next burst
+        assert_eq!(
+            fake.armed.iter().filter(|e| **e == "pane-resized").count(),
+            2
+        );
+        assert!(registered_before_each_read(&fake.calls), "{:?}", fake.calls);
     }
 
     #[test]
@@ -548,8 +787,9 @@ mod tests {
         assert_eq!(lines, [r#"{"focus":"%4"}"#]);
         assert_eq!(fake.armed[EVENTS.len()..], ["window-pane-changed"]);
         // a settle first, not a read
+        let after_arming = fake.calls.iter().find(|c| !matches!(c, Call::Arm(_)));
         assert!(
-            matches!(fake.calls[0], Call::Next(Some(_))),
+            matches!(after_arming, Some(Call::Next(Some(_)))),
             "{:?}",
             fake.calls
         );
@@ -573,6 +813,14 @@ mod tests {
         };
         run(&mut fake);
         assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
+    }
+
+    #[test]
+    fn a_listing_names_each_waiter_by_its_clients_pid() {
+        assert_eq!(listed_pids(b"client-52293\nclient-52294\n"), [52293, 52294]);
+        assert_eq!(listed_pids(b""), Vec::<u32>::new());
+        // not a waiter's line
+        assert_eq!(listed_pids(b"/dev/ttys004\nclient-x\n"), Vec::<u32>::new());
     }
 
     #[test]

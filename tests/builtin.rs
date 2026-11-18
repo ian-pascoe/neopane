@@ -358,6 +358,74 @@ const EVENTS: [&str; 10] = [
     "client-active",
 ];
 
+/// SPI-1281: a `wait-for` that is slow to start registers with the server
+/// late, and a change before it does ends no waiter. `events` prints its
+/// first line, on which the daemon reads the layout again, only once tmux
+/// lists a waiter on each event. Here every `wait-for -E EVENT` takes half
+/// a second to start: a first line after `SETTLE` (30 ms) alone would be
+/// read before any waiter was listed.
+#[test]
+fn events_prints_its_first_line_once_tmux_lists_a_waiter_on_each_event() {
+    if !have_tmux() || !have_tmux_events() {
+        return;
+    }
+    let dir = scratch("tmux-slow-waiters");
+    let real = Command::new("sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .unwrap()
+        .stdout;
+    let real = text(&real).trim().to_string();
+    // tmux, but a waiter takes its time to start; a listing, and anything
+    // else, doesn't
+    let shim = dir.join("tmux");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *' -l '*) ;; *' wait-for '*) sleep 0.5;; esac\nexec {real} \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let tmux = TmuxServer::start(&dir, &[], &[]);
+    let mut events = provider_builtin(&["tmux", "events"])
+        .env(var("PROTOCOL"), "1")
+        .env(var("CAPABILITY"), "events")
+        .env("TMUX", tmux.tmux_var())
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(events.stdout.take().unwrap());
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut lines, &mut first).unwrap();
+    let waiting: Vec<(&str, String)> = EVENTS
+        .iter()
+        .map(|e| (*e, tmux.run(&["wait-for", "-E", "-l", e])))
+        .collect();
+    let _ = events.kill();
+    // its waiters, left by the kill, hold its stderr until the server ends
+    drop(tmux);
+    let out = events.wait_with_output().unwrap();
+    assert!(!first.is_empty(), "events ended: {}", text(&out.stderr));
+    for (event, waiters) in &waiting {
+        assert_eq!(
+            waiters.lines().count(),
+            1,
+            "{event} had no waiter when the first line came"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn events_keeps_a_waiter_on_each_of_its_events_past_the_second_a_bad_one_would_fail_in() {
     if !have_tmux() || !have_tmux_events() {
