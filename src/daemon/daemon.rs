@@ -1379,6 +1379,8 @@ impl Daemon {
         // the pane provider may move focus as the terminal goes
         self.focus.pane_closed(Instant::now());
         let i = self.panes.index_of(id).unwrap();
+        let focused = self.panes.list[i].terminal.clone();
+        self.terminal_closes(focused.as_ref());
         let p = &mut self.panes.list[i];
         p.closing = Some(Close::TerminalHungUp);
         if let Some(l) = p.layer {
@@ -1851,6 +1853,7 @@ impl Daemon {
                 continue;
             }
             p.closing = Some(Close::WindowClosed);
+            let focused = p.terminal.clone();
             // a requested terminal is closed, whether or not its helper
             // connected; a self-attached one goes back to its shell (#86 D10)
             if !p.is_self_attached()
@@ -1858,6 +1861,7 @@ impl Daemon {
             {
                 self.act(asks::close(t));
             }
+            self.terminal_closes(focused.as_ref());
             self.panes.remove(i, &self.event_loop);
         }
         if self.lifetime.is_attached() && !self.panes_count_but(None) {
@@ -2150,6 +2154,15 @@ impl Daemon {
         });
     }
 
+    /// Terminal `t` closes, or its pane does: no focus of it is asked any
+    /// more, and one asked that fails warns of nothing (SPI-1259).
+    fn terminal_closes(&mut self, t: Option<&TerminalId>) {
+        if let Some(t) = t {
+            self.asks.terminal_closes(t);
+            self.focus.terminal_closes(t);
+        }
+    }
+
     /// Asks the pane provider for `ask`, or falls back without it. What
     /// became of it, `run_steps` acts on.
     pub(crate) fn act(&mut self, ask: Ask) {
@@ -2219,7 +2232,7 @@ impl Daemon {
                 // wait on it is for later
                 ProviderEvent::Closed(t) => {
                     log_info!("{NAME} daemon: {t} closed");
-                    self.asks.closing(&t);
+                    self.terminal_closes(Some(&t));
                     self.focus.pane_closed(Instant::now());
                 }
                 ProviderEvent::Gone { reason } => self.gone_choosing_or_after(&reason)?,
@@ -6458,6 +6471,27 @@ mod tests {
     /// Past the echo span of a focus that worked by now.
     fn after_echo() -> Instant {
         Instant::now() + Duration::from_millis(super::super::provider_focus::ECHO_MS)
+    }
+
+    #[test]
+    fn a_focus_of_a_pane_whose_window_closed_as_it_ran_fails_without_a_warning() {
+        let mut fx = focusing();
+        focus_pane(&mut fx, 1, 1000, Some("t1"));
+        focus_pane(&mut fx, 2, 1001, Some("t2"));
+        fx.d.nvim.current_win = 1000;
+        provider_focused(&mut fx, "t1");
+        fx.d.nvim.current_win = 1001;
+        fx.d.focus_terminal(Some(&TerminalId::from("t2")));
+        // :close in its window before that focus lands, which then can't
+        fx.d.grids.wins.swap_remove(&4);
+        fx.d.reconcile().unwrap();
+        let f = fake(&mut fx.d);
+        let (asked, _) = f.asks.iter().find(|(_, a)| *a == focus_ask("t2")).unwrap();
+        f.answer(*asked, Outcome::Failed("pane t2 not found".into()));
+        fx.d.drain_provider().unwrap();
+        assert!(fx.d.panes.by_win(1001).is_none());
+        let sent = sent_to_nvim(&mut fx);
+        assert!(!sent.contains("focus failed"), "{sent:?}");
     }
 
     #[test]

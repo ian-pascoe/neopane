@@ -9,7 +9,7 @@
 //! ask that is unsupported marks its capability so; one that fails or times
 //! out falls back, the first failure of each capability warning in Neovim,
 //! unless it focused a terminal that closed meanwhile: that one can only
-//! fail, and a focus waiting for it is dropped.
+//! fail, and a focus waiting for one that closes is dropped.
 //! A terminal id answered too late is closed.
 //!
 //! `Asks` only keeps the books: what the daemon has to do about each, it
@@ -83,9 +83,6 @@ impl Asks {
     /// Asks `p` for `ask`, now or once the layout acts before it are done;
     /// or, without `p` or the capability, falls back.
     pub(crate) fn act(&mut self, p: Option<&mut dyn PaneProvider>, ask: Ask, now: Instant) {
-        if let Ask::Close { terminal } = &ask {
-            self.closing(terminal);
-        }
         let cap = ask.capability();
         let Some(p) = p.filter(|p| self.can(&**p, cap)) else {
             self.steps.push_back(Step::FallBack(ask));
@@ -105,10 +102,10 @@ impl Asks {
         }
     }
 
-    /// Terminal `t` closes, or is asked to: a focus act for it waiting its
-    /// turn is dropped, never asked, and one asked that fails or times out
-    /// falls back without a warning, as it can only fail (SPI-1259).
-    pub(crate) fn closing(&mut self, t: &TerminalId) {
+    /// Terminal `t` closes: a focus act for it waiting its turn is dropped,
+    /// never asked, and one asked that fails or times out falls back
+    /// without a warning, as it can only fail (SPI-1259).
+    pub(crate) fn terminal_closes(&mut self, t: &TerminalId) {
         if let Some((_, ask)) = self.focus_waiting.take_if(|(_, a)| focuses(a, t)) {
             self.steps.push_back(Step::Replaced(ask));
         }
@@ -686,29 +683,21 @@ mod tests {
     #[test]
     fn a_focus_of_a_terminal_closed_as_it_runs_falls_back_without_a_warning() {
         let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
-        let t1 = TerminalId::from("t1");
         // a new window's pane, focused as it opens, closes before that lands
         asks.act(Some(&mut fake), focus("t1"), now);
-        asks.act(Some(&mut fake), close(t1.clone()), now);
-        fake.answer(fake.asks[0].0, Outcome::Failed("pane t1 not found".into()));
-        fake.answer(fake.asks[1].0, Outcome::Done(Answer::Nothing));
+        asks.terminal_closes(&TerminalId::from("t1"));
+        fake.answer(fake.last_id(), Outcome::Failed("pane t1 not found".into()));
         deliver(&mut asks, &mut fake, now);
-        assert_eq!(
-            vec![
-                Step::FallBack(focus("t1")),
-                Step::Done(close(t1), Answer::Nothing),
-            ],
-            steps(&mut asks)
-        );
+        assert_eq!(vec![Step::FallBack(focus("t1"))], steps(&mut asks));
 
-        // nor does one that times out; the terminal closing tells too
+        // nor does one that times out
         asks.act(Some(&mut fake), focus("t2"), now);
-        asks.closing(&TerminalId::from("t2"));
+        asks.terminal_closes(&TerminalId::from("t2"));
         asks.time_out(&mut fake, now + Duration::from_secs(2));
-        let timed_out = steps(&mut asks);
-        assert_eq!(vec![Step::FallBack(focus("t2"))], timed_out);
+        assert_eq!(vec![Step::FallBack(focus("t2"))], steps(&mut asks));
 
-        // a focus of a terminal still there that fails warns, the first
+        // a focus of a terminal still open warns as it fails, the first
+        // failure of focus
         asks.act(Some(&mut fake), focus("t3"), now);
         fake.answer(fake.last_id(), Outcome::Failed("no".into()));
         deliver(&mut asks, &mut fake, now);
@@ -726,7 +715,7 @@ mod tests {
         let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
         asks.act(Some(&mut fake), focus("a"), now);
         asks.act(Some(&mut fake), focus("b"), now);
-        asks.closing(&TerminalId::from("b"));
+        asks.terminal_closes(&TerminalId::from("b"));
         assert_eq!(vec![Step::Replaced(focus("b"))], steps(&mut asks));
         fake.answer(fake.asks[0].0, Outcome::Done(Answer::Nothing));
         deliver(&mut asks, &mut fake, now);
