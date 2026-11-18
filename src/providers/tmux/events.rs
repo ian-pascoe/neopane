@@ -9,7 +9,8 @@
 //!   pane, found as `report_layout` finds it, changed, else a bare line, so
 //!   the layout is read again. Its first line, once the waiters are armed
 //!   and have settled likewise, is where focus starts, if a client shows
-//!   any: the daemon follows moves from there.
+//!   any: the daemon follows moves from there. Else it is a bare line: the
+//!   layout may have changed before the waiters registered.
 //! - A waiter that fails at once, within [`AT_ONCE`], is dropped; one that
 //!   fails later, such as at a server's restart, is armed again, and fails
 //!   at once if the server is gone. Once every waiter is gone, it fails.
@@ -36,10 +37,13 @@ use crate::providers::builtin::{DONE, Given, print_line};
 /// The first tmux with `wait-for -E`.
 pub(super) const FIRST_WITH_EVENTS: (u32, u32) = (3, 8);
 
-/// The events waited for: what moves panes or windows, or the client the
-/// focus is read from.
-pub(super) const EVENTS: [&str; 9] = [
+/// The events waited for: what moves or resizes panes or windows, or the
+/// client the focus is read from. An option that resizes panes, such as
+/// `pane-border-status`, ends only `pane-resized`: the layout stays the
+/// same.
+pub(super) const EVENTS: [&str; 10] = [
     "window-layout-changed",
+    "pane-resized",
     "window-pane-changed",
     "session-window-changed",
     "client-session-changed",
@@ -109,12 +113,15 @@ pub(super) fn watch(waiters: &mut impl Waiters, mut print: impl FnMut(&str) -> b
     }
     let mut live = EVENTS.len();
     // where focus starts, read once the waiters have registered, so what
-    // happens meanwhile is in it: the daemon follows only moves from there
+    // happens meanwhile is in it: the daemon follows only moves from there.
+    // Printed, bare, when no client shows focus too: see the module doc
     settle(waiters, None, &mut live);
     let mut focus = waiters.focus();
-    if let Some(pane) = &focus
-        && !print(&json!({ "focus": pane }).to_string())
-    {
+    let first = match &focus {
+        Some(pane) => json!({ "focus": pane }).to_string(),
+        None => String::new(),
+    };
+    if !print(&first) {
         return Failure::Failed("the reader is gone".into());
     }
     while live > 0 {
@@ -413,10 +420,24 @@ mod tests {
             script: then_all_fail(Vec::new()),
             ..Fake::default()
         };
-        let (lines, why) = run(&mut fake);
+        let (_, why) = run(&mut fake);
         assert_eq!(fake.armed, EVENTS);
-        assert!(lines.is_empty(), "{lines:?}");
         assert!(matches!(why, Failure::Failed(_)));
+    }
+
+    /// What changed before the waiters registered, such as a
+    /// `pane-border-status` set, ended none of them: the first line asks
+    /// for the layout to be read again, a bare one where no client shows
+    /// focus.
+    #[test]
+    fn its_first_line_comes_once_the_waiters_settled_bare_where_no_client_shows_focus() {
+        let mut fake = Fake {
+            script: then_all_fail(Vec::new()),
+            ..Fake::default()
+        };
+        let (lines, _) = run(&mut fake);
+        assert_eq!(lines, [""]);
+        assert!(settled_before_each_read(&fake.calls), "{:?}", fake.calls);
     }
 
     #[test]
@@ -461,7 +482,7 @@ mod tests {
             ..Fake::default()
         };
         let (lines, _) = run(&mut fake);
-        assert_eq!(lines, [r#"{"focus":"%2"}"#]);
+        assert_eq!(lines, ["", r#"{"focus":"%2"}"#]);
         assert_eq!(
             fake.armed[EVENTS.len()..],
             [
@@ -482,7 +503,8 @@ mod tests {
             ..Fake::default()
         };
         let (lines, why) = run(&mut fake);
-        assert!(lines.is_empty(), "{lines:?}");
+        // the first line alone
+        assert_eq!(lines, [""]);
         assert_eq!(fake.armed[EVENTS.len()..], ["client-active"]);
         // it was armed again, so one more had to fail at once
         assert!(matches!(why, Failure::Failed(_)));

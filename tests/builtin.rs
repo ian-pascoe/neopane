@@ -345,8 +345,9 @@ fn events_is_unsupported_below_tmux_3_8_naming_its_version() {
 }
 
 /// The events `events` waits for, as the ticket names them.
-const EVENTS: [&str; 9] = [
+const EVENTS: [&str; 10] = [
     "window-layout-changed",
+    "pane-resized",
     "window-pane-changed",
     "session-window-changed",
     "client-session-changed",

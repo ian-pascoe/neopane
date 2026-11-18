@@ -356,13 +356,16 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
   `[0, 0, 1, 1]`; the panes the zoom hides are in `@N~hidden`, where the
   unzoomed `#{window_layout}` has them, as their own `pane_*` are stale.
 - `events`: one `tmux wait-for -E EVENT` waiter per event:
-  `window-layout-changed`, `window-pane-changed`, `session-window-changed`,
-  `client-session-changed`, `window-linked`, `window-unlinked`,
-  `client-attached`, `client-detached` and `client-active`. A waiter is no
-  client: `session_attached`, `list-clients` and the user's hooks don't see
-  it, and panes still get focus-out. Its first line, once the waiters have
-  had 30 ms to register, is where focus starts, `{"focus":"%N"}`, if a
-  client shows any. A waiter that wakes is armed again; once no waiter has
+  `window-layout-changed`, `pane-resized`, `window-pane-changed`,
+  `session-window-changed`, `client-session-changed`, `window-linked`,
+  `window-unlinked`, `client-attached`, `client-detached` and
+  `client-active`. An option that resizes panes, such as
+  `pane-border-status`, ends only `pane-resized`. A waiter is no client:
+  `session_attached`, `list-clients` and the user's hooks don't see it,
+  and panes still get focus-out. Its first line, once the waiters have had
+  30 ms to register, is where focus starts, `{"focus":"%N"}`, if a client
+  shows any, else an empty line: either way the daemon reads the layout
+  again, for what changed before they registered. A waiter that wakes is armed again; once no waiter has
   woken for 30 ms since the last was armed again (at most 250 ms), it
   prints `{"focus":"%N"}` if the focused pane, read as `report_layout`
   reads it, changed, else an empty line. A waiter failing
