@@ -42,7 +42,10 @@ fn focus_by(given: &Given, columns_of: impl Fn(u32) -> Option<u16>) -> Result<()
     let pane = given.text("terminal")?;
     let herdr = Herdr::of(given, FOCUS_TIME)?;
     herdr.call("pane.focus", json!({ "pane_id": pane }))?;
-    fit(&herdr.again(FIT_TIME), &pane, columns_of);
+    let due = Instant::now() + FIT_TIME;
+    fit(&herdr.again(FIT_TIME), &pane, columns_of, || {
+        wait_for_a_look(due)
+    });
     Ok(())
 }
 
@@ -62,17 +65,31 @@ fn focus_by(given: &Given, columns_of: impl Fn(u32) -> Option<u16>) -> Result<()
 /// `pane.resize` lays out the tabs clients show, as the focus did,
 /// and by `amount` 0 moves no split; so while the pty is a column narrow
 /// it is asked, and the pty looked at again, until it fits or
-/// [`FIT_TIME`] runs out: a pane herdr hasn't yet seen switch fits once
-/// it has, and one on the primary screen for good never does.
-fn fit(herdr: &Herdr, pane: &str, columns_of: impl Fn(u32) -> Option<u16>) {
-    let due = Instant::now() + FIT_TIME;
+/// `look_again` says there's no time for another look, waiting for it
+/// if there is: a pane herdr hasn't yet seen switch fits once it has, and
+/// one on the primary screen for good never does.
+fn fit(
+    herdr: &Herdr,
+    pane: &str,
+    columns_of: impl Fn(u32) -> Option<u16>,
+    mut look_again: impl FnMut() -> bool,
+) {
     while one_column_short(herdr, pane, &columns_of) == Some(true) {
         let resize = json!({ "pane_id": pane, "direction": "right", "amount": 0 });
-        if herdr.call("pane.resize", resize).is_err() || Instant::now() + FIT_LOOK > due {
+        if herdr.call("pane.resize", resize).is_err() || !look_again() {
             return;
         }
-        std::thread::sleep(FIT_LOOK);
     }
+}
+
+/// Waits [`FIT_LOOK`] for `fit`'s next look if there's time for it before
+/// `due`: whether there was.
+fn wait_for_a_look(due: Instant) -> bool {
+    if Instant::now() + FIT_LOOK > due {
+        return false;
+    }
+    std::thread::sleep(FIT_LOOK);
+    true
 }
 
 /// Whether `pane`, alone in its unzoomed tab, has a pty one column
@@ -217,22 +234,27 @@ mod tests {
         );
     }
 
+    /// The fake herdr's server, its requests having `FOCUS_TIME`, which
+    /// only stops a test that would hang: when `fit` gives up is the
+    /// test's to say.
+    fn herdr(fake: &Fake) -> Herdr {
+        Herdr::at(&fake.path(), FOCUS_TIME)
+    }
+
     #[test]
     fn a_pane_alone_whose_pty_is_a_column_short_has_its_tab_laid_out_until_it_fits() {
         // herdr reads the switch to the alternate screen late: the first
         // lay-out still leaves the scrollbar's column
         let fake = alone();
-        let given = given(&fake, &[("TERMINAL", "w1:p2")]);
         let looks = std::cell::Cell::new(0);
         let read = |_| {
             looks.set(looks.get() + 1);
             Some(if looks.get() < 3 { 73 } else { 74 })
         };
-        assert_eq!(focus_by(&given, read), Ok(()));
+        fit(&herdr(&fake), "w1:p2", read, || true);
         assert_eq!(
             fake.methods(),
             [
-                "pane.focus",
                 "pane.layout",
                 "pane.process_info",
                 "pane.resize",
@@ -245,9 +267,22 @@ mod tests {
         );
         // no split moves, no focus moves
         assert_eq!(
-            fake.asked()[3]["params"],
+            fake.asked()[2]["params"],
             json!({ "pane_id": "w1:p2", "direction": "right", "amount": 0 })
         );
+    }
+
+    #[test]
+    fn a_pty_short_for_good_has_its_tab_laid_out_at_every_look_there_is_time_for() {
+        let fake = alone();
+        let mut more = 2;
+        let look_again = || {
+            more -= 1;
+            more >= 0
+        };
+        fit(&herdr(&fake), "w1:p2", |_| Some(73), look_again);
+        let look = ["pane.layout", "pane.process_info", "pane.resize"];
+        assert_eq!(fake.methods(), look.repeat(3));
     }
 
     #[test]
@@ -256,17 +291,19 @@ mod tests {
         let given = given(&fake, &[("TERMINAL", "w1:p2")]);
         let started = Instant::now();
         assert_eq!(focus_by(&given, |_| Some(73)), Ok(()));
+        // given up once its time is up, not before
         let took = started.elapsed();
-        assert!(
-            took >= FIT_TIME - FIT_LOOK && took < FIT_TIME + FOCUS_TIME,
-            "{took:?}"
-        );
-        let resizes = fake
-            .methods()
-            .iter()
-            .filter(|m| *m == "pane.resize")
-            .count();
-        assert!(resizes > 2, "{:?}", fake.methods());
+        assert!(took >= FIT_TIME - FIT_LOOK, "{took:?}");
+        assert_eq!(fake.methods()[0], "pane.focus");
+    }
+
+    #[test]
+    fn a_look_is_waited_for_only_if_there_is_time_for_it() {
+        let started = Instant::now();
+        assert!(!wait_for_a_look(started + FIT_LOOK / 2));
+        assert!(!wait_for_a_look(started));
+        assert!(wait_for_a_look(started + Duration::from_secs(60)));
+        assert!(started.elapsed() >= FIT_LOOK);
     }
 
     #[test]
