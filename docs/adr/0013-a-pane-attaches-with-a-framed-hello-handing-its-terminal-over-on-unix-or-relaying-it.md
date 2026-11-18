@@ -122,6 +122,3 @@ that dies no longer leaves a terminal raw on the alternate screen.
   and window input modes and reads sizes from its window-buffer events, and
   the address is written `//./pipe/<name>`, with no `/` in the name, so the
   attach command stays bare words.
-
-Research: `docs/research/windows-attach.md` and
-`attach-exit-and-restore.md`, each on its `research/` branch.

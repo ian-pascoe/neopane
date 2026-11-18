@@ -41,5 +41,3 @@ a command word (`attach`, `list`, `status`, `kill`, `provider`, `help`,
 - Only `-h` and `-v` are short, with the meanings Neovim gives them.
 - Command words may be added; `detach` is held for one. Scripts open files as
   `./NAME`.
-
-Research: `docs/research/cli-facts.md` on branch `research/cli-facts`.

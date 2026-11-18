@@ -65,6 +65,3 @@ nobody threw away.
   names them, unless `--force`, which ends it with the changes kept in swap
   files, as a signal does: a daemon that outlived its pane for unsaved work
   isn't thrown away by a `kill` that didn't know about it (#94).
-
-Research: `docs/research/daemon-lifetime.md` on branch
-`research/daemon-lifetime`.
