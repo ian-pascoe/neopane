@@ -2,8 +2,11 @@ name: release-please
 
 # Every push to main updates the release PR: the next version, from the Conventional Commits since the last release, in
 # Cargo.toml, Cargo.lock and CHANGELOG.md. Merging it tags the version and makes its GitHub release, a draft, then calls
-# release.yml, which uploads the archives, publishes the release and publishes the crate. A tag made with GITHUB_TOKEN
-# starts no workflow, so release.yml is called here rather than started by the tag.
+# release.yml, which uploads the archives, publishes the release and publishes the crate. release.yml is called here,
+# not started by the tag, so it runs once whoever made the tag.
+#
+# release-please acts as the GitHub App whose id and private key are the RELEASE_APP_* secrets: a PR opened with
+# GITHUB_TOKEN starts no workflow, and main's ruleset merges no PR without its CI checks.
 on:
   push:
     branches: [main]
@@ -19,17 +22,26 @@ jobs:
     # Forks have no business releasing.
     if: github.repository_owner == 'spiritledsoftware'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write # the "autorelease: pending" labels
-      pull-requests: write
+    # The app's token does the writing; GITHUB_TOKEN needs nothing.
+    permissions: {}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # This repository only, with only what release-please needs, whatever else the app may do.
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write # the "autorelease: pending" labels
+          permission-pull-requests: write
       - uses: googleapis/release-please-action@v5
         id: release
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
