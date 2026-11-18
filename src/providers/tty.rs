@@ -274,7 +274,7 @@ pub(crate) fn path_of_device(_dev: u64) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command};
@@ -282,7 +282,7 @@ mod tests {
     use super::*;
 
     /// A new pty: its master, its slave, and the slave's path.
-    fn pty() -> (OwnedFd, OwnedFd, Vec<u8>) {
+    pub(crate) fn pty() -> (OwnedFd, OwnedFd, Vec<u8>) {
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: both fds are written; the rest may be null.
         let r = unsafe {
@@ -309,7 +309,7 @@ mod tests {
 
     /// A `sleep` in a session of its own, with `tty` its controlling
     /// terminal if given, else none.
-    fn sleeper(tty: Option<&OwnedFd>) -> Child {
+    pub(crate) fn sleeper(tty: Option<&OwnedFd>) -> Child {
         let tty = tty.map(|t| t.as_raw_fd());
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
@@ -330,7 +330,7 @@ mod tests {
         cmd.spawn().unwrap()
     }
 
-    fn end(mut child: Child) {
+    pub(crate) fn end(mut child: Child) {
         child.kill().unwrap();
         child.wait().unwrap();
     }

@@ -4,13 +4,14 @@
 //! focuses the new pane when Neovim goes to its tab page.
 //!
 //! The pane goes to the alternate screen before the attach starts
-//! ([`ON_THE_ALTERNATE_SCREEN`]). The daemon focuses a pane as it draws
-//! its first frame, which is what takes a terminal there: herdr, which
-//! keeps a scrollbar's column of a pane on the primary screen, sizes the
-//! tab's ptys as it answers `pane.focus`, and a pane that leaves the
-//! primary screen between that and herdr's next frame keeps the column
+//! ([`ON_THE_ALTERNATE_SCREEN`]), not as the daemon draws its first frame:
+//! herdr, which keeps a scrollbar's column of a pane on the primary
+//! screen, sizes the tab's ptys as it answers `pane.focus`, and a pane
+//! whose switch it reads between that and its next frame keeps the column
 //! short until the tab is next laid out, which a tab of one pane, with no
-//! split to set, never is (SPI-1207).
+//! split to set, never is (SPI-1207). That narrows the race, but a focus
+//! can still come before herdr has read the switch; `focus` gives the
+//! column back (`focus::fit`).
 //!
 //! A `layout.apply` with no answer may have made its tab all the same:
 //! the daemon gives up a pane whose open failed, refusing its attach, or

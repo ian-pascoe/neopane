@@ -19,7 +19,8 @@
 //!   two within one tab, out to a tab of its own and back, as herdr moves
 //!   no pane within its tab; `layout.set_split_ratio` on the lowest split
 //!   holding both, its path read from herdr's split ids (`splits.rs`).
-//! - `focus` and `focus_direction` (`focus.rs`): `pane.focus`; steps of
+//! - `focus` and `focus_direction` (`focus.rs`): `pane.focus`, then a
+//!   lone pane's pty given the scrollbar's column herdr may keep; steps of
 //!   `pane.focus_direction` from the server's focus, stopping at the
 //!   tab's edge. herdr's focus is one per server: it moves every client.
 //! - `open_tab_page` (`tab_page.rs`): `layout.apply`, a tab of the
