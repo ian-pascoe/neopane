@@ -55,7 +55,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The tag's commit; a pull request's own (inputs.tag is empty).
           ref: ${{ inputs.tag }}
@@ -101,7 +101,7 @@ jobs:
         run: |
           file "target/${{ matrix.target }}/release/neopane"
           file "target/${{ matrix.target }}/release/neopane" | grep -q 'static'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: neopane-${{ matrix.target }}
           path: dist/
@@ -115,13 +115,13 @@ jobs:
       contents: write
     steps:
       # install.sh from the tag, as the archives are
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
           sparse-checkout: install.sh
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: neopane-*
           path: dist
@@ -143,7 +143,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
