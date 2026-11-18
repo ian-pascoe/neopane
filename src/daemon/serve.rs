@@ -1050,6 +1050,7 @@ mod tests {
         }
     }
 
+    /// Puts back the action `ignore_sighup` returned.
     fn restore_sighup(was: libc::sigaction) {
         // SAFETY: restores an action `sigaction` returned.
         unsafe { libc::sigaction(libc::SIGHUP, &was, std::ptr::null_mut()) };
@@ -1153,7 +1154,9 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped());
         // started while SIGHUP is ignored, as it is while another test's
-        // daemon runs: its loop ignores SIGHUP process-wide
+        // daemon runs: its loop ignores SIGHUP process-wide. (That loop may
+        // save and restore this ignore, as two daemons' loops may each
+        // other's; for one spawn, and no test signals its own process.)
         let was = ignore_sighup();
         let spawned = command.spawn();
         restore_sighup(was);
