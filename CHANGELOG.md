@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/spiritledsoftware/neopane/compare/v0.2.1...v0.2.2) (2026-11-18)
+
+
+### Documentation
+
+* drop research notes no planned work needs ([#246](https://github.com/spiritledsoftware/neopane/issues/246)) ([1c1b5fb](https://github.com/spiritledsoftware/neopane/commit/1c1b5fb5203f2d1abc8ecc14c4a8c63d5e028cd9))
+
 ## [0.2.1](https://github.com/spiritledsoftware/neopane/compare/v0.2.0...v0.2.1) (2026-11-18)
 
 
