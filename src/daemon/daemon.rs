@@ -2219,6 +2219,7 @@ impl Daemon {
                 // wait on it is for later
                 ProviderEvent::Closed(t) => {
                     log_info!("{NAME} daemon: {t} closed");
+                    self.asks.closing(&t);
                     self.focus.pane_closed(Instant::now());
                 }
                 ProviderEvent::Gone { reason } => self.gone_choosing_or_after(&reason)?,
