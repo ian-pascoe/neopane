@@ -110,9 +110,16 @@ fn in_a_zellij_pane_splits_open_panes_on_the_left_and_above_and_close_removes_th
     assert_eq!(s["provider"], "zellij", "{}", log());
     let before = zellij.terminals();
 
-    // :vsplit opens a pane on the left, split then swapped, running the
-    // attach
-    remote_expr(&sock, "execute('vsplit')").unwrap();
+    // a split on the left opens a pane there, split then swapped, running
+    // the attach. Not entered, here and below, so the daemon asks no focus:
+    // its focus acts run beside its layout acts, so one asked as a :vsplit
+    // or :close moved the current window could land after the close, and
+    // focusing a tiled pane hides the floats opened below
+    let win = remote_expr(
+        &sock,
+        "luaeval('vim.api.nvim_open_win(0, false, {split = \"left\"})')",
+    )
+    .unwrap();
     let now = until(
         |t: &Vec<String>| t.len() > before.len(),
         || zellij.terminals(),
@@ -140,21 +147,24 @@ fn in_a_zellij_pane_splits_open_panes_on_the_left_and_above_and_close_removes_th
         "{new} isn't left of {origin}: {panes:?}"
     );
 
-    // :close removes it
-    remote_expr(&sock, "execute('close')").unwrap();
+    // closing it removes it
+    remote_expr(
+        &sock,
+        &format!("luaeval('vim.api.nvim_win_close({win}, false)')"),
+    )
+    .unwrap();
     let now = until(|t: &Vec<String>| *t == before, || zellij.terminals());
     assert_eq!(now, before, "{}", log());
 
     // with the tab's floats shown, which a split can't open under, a split
-    // opens a pane above, the floats hidden around it and shown again; one
-    // not entered, as focusing a tiled pane hides the tab's floats
+    // opens a pane above, the floats hidden around it and shown again
     zellij.run(&["new-pane", "--floating", "--", "sleep", "100000"]);
     let floats_shown = || {
         let tabs: serde_json::Value =
             serde_json::from_str(&zellij.run(&["list-tabs", "--json", "--all"])).unwrap();
         tabs[0]["are_floating_panes_visible"] == true
     };
-    assert!(floats_shown());
+    assert!(until(|s: &bool| *s, floats_shown), "no float shown");
     let before = zellij.terminals();
     remote_expr(
         &sock,
@@ -178,7 +188,12 @@ fn in_a_zellij_pane_splits_open_panes_on_the_left_and_above_and_close_removes_th
         ours["pane_y"].as_u64() < theirs["pane_y"].as_u64(),
         "{new} isn't above {origin}: {panes:?}"
     );
-    assert!(floats_shown(), "the floats stayed hidden");
+    // shown again only after the swap: wait for that
+    assert!(
+        until(|s: &bool| *s, floats_shown),
+        "the floats stayed hidden: {}",
+        log()
+    );
 
     drop(ending);
     drop(zellij);
