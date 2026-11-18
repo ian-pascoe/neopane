@@ -715,6 +715,9 @@ mod tests {
         let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
         asks.act(Some(&mut fake), focus("a"), now);
         asks.act(Some(&mut fake), focus("b"), now);
+        // another's closing leaves it
+        asks.terminal_closes(&TerminalId::from("c"));
+        assert_eq!(Vec::<Step>::new(), steps(&mut asks));
         asks.terminal_closes(&TerminalId::from("b"));
         assert_eq!(vec![Step::Replaced(focus("b"))], steps(&mut asks));
         fake.answer(fake.asks[0].0, Outcome::Done(Answer::Nothing));

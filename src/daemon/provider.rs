@@ -337,7 +337,7 @@ pub(crate) enum ProviderEvent {
     /// `Focused` once it has read where focus is: the command runner's
     /// `events` line, waiting for a report (`provider_focus.rs`).
     FocusHeard(TerminalId),
-    /// This terminal closed: only logged for now.
+    /// This terminal closed: no focus of it is asked any more.
     Closed(TerminalId),
     /// The pane provider failed as a whole: nothing it was asked will be
     /// answered.

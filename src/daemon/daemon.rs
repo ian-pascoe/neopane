@@ -1853,9 +1853,9 @@ impl Daemon {
                 continue;
             }
             p.closing = Some(Close::WindowClosed);
-            let focused = p.terminal.clone();
             // a requested terminal is closed, whether or not its helper
             // connected; a self-attached one goes back to its shell (#86 D10)
+            let focused = p.terminal.clone().filter(|_| !p.is_self_attached());
             if !p.is_self_attached()
                 && let Some(t) = close
             {
@@ -2228,8 +2228,8 @@ impl Daemon {
                 ProviderEvent::LayoutChanged => self.ask_for_report(),
                 ProviderEvent::Focused(t) => self.on_focused(&t, Instant::now())?,
                 ProviderEvent::FocusHeard(t) => self.on_focus_heard(&t, Instant::now())?,
-                // its pane hangs up by itself; ending a requested pane's
-                // wait on it is for later
+                // its pane hangs up by itself; no focus of it is asked any
+                // more; ending a requested pane's wait on it is for later
                 ProviderEvent::Closed(t) => {
                     log_info!("{NAME} daemon: {t} closed");
                     self.terminal_closes(Some(&t));
