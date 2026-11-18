@@ -87,11 +87,11 @@ fn open_beside_within(
     }
     let (pane, doc) = match block_of(&mut core, &terminal, block) {
         Ok(found) => found,
-        Err(failure) => {
+        Err(unshown) => {
             if let Err(why) = cleanup_kill(&core, &terminal, cleanup) {
                 warnings.insert(0, format!("{terminal} is left: {why}"));
             }
-            return Err(noted(failure, &warnings));
+            return Err(noted(unshown.into(), &warnings));
         }
     };
     let mut doc = Some(doc);

@@ -661,12 +661,15 @@ pane, a block of the doc.
   `terminal.get` finds the terminal `live`, and the controlling terminal
   of its `pid` is `TTY`, compared by device, as `HC_TERMINAL_ID` passes on
   to the panes of a multiplexer run in the pane; exactly one block of the
-  doc shows it, in any space; and `herdr-app status` answers. Where its
+  doc shows it, in any space, the doc read again every 25 ms while it
+  shows in none, as the app writes a new terminal's block only once the
+  core has started it; and `herdr-app status` answers. Where its
   process or its tty can't be read, it trusts `HC_TERMINAL_ID`, the
   terminal being live in a pane. Every other failure refuses (exit 1), a
   missing method or `herdr-app` too, as exit 69 from `find` would accept
-  the terminal. Prints the address. It has 0.5 s.
-  `<name>.inside.herdr_app` runs the same proof, unprovable being no.
+  the terminal. Prints the address. It has 2.5 s.
+  `<name>.inside.herdr_app` runs the same proof in 0.5 s, unprovable
+  being no.
 - `close`: `terminal.kill`; done when the core answers the terminal's
   record, finished, or `not_found`; any other error exits 1. Killing a
   terminal closes its pane, and a terminal running an attach hangs up.

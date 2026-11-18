@@ -1,6 +1,7 @@
 //! The proof that a terminal is directly a Herdr app pane's hc terminal,
 //! which `find`, the config's `<name>.inside.herdr_app` and the built-in
-//! default's proofs all run, within [`INSIDE_TIME`]:
+//! default's proofs all run, within [`INSIDE_TIME`], `find` within
+//! [`FIND_TIME`]:
 //!
 //! 1. The terminal's `HC_TERMINAL_ID` names a terminal of this machine: a
 //!    remote one, `machine/t7`, is refused.
@@ -10,7 +11,10 @@
 //!    controlling terminal (`providers::tty`) is the attach's tty, by
 //!    device: `HC_TERMINAL_ID` alone isn't proof, as a multiplexer run in
 //!    the pane passes it on to its own panes.
-//! 4. One block of the core's doc shows it: its Herdr app pane.
+//! 4. One block of the core's doc shows it: its Herdr app pane. The app
+//!    writes a new terminal's block only once the core has started it, so
+//!    an attach run straight in a new pane may ask first: a doc without it
+//!    is read again, within the proof's time.
 //! 5. `herdr-app status` answers: a window under the attach's
 //!    `HERDR_APP_HOME` shows the doc.
 //!
@@ -21,9 +25,8 @@
 use std::time::{Duration, Instant};
 
 use super::core::Core;
-use super::doc::pane_of;
 use super::window::Window;
-use super::{methods, versions};
+use super::{block_of, methods, versions};
 use crate::attach::env_value;
 use crate::config::{Attach, Capability, INSIDE_TIME, Proof};
 use crate::providers::builtin::Given;
@@ -100,7 +103,11 @@ pub(super) fn prove(
             Some(_) => None,
         },
     };
-    let pane = pane_of(&core.doc()?, &terminal)?;
+    let (pane, _) = block_of(
+        &mut core,
+        &terminal,
+        due.saturating_duration_since(Instant::now()),
+    )?;
     app.status(due).map_err(String::from)?;
     Ok(Found {
         terminal,
@@ -114,9 +121,14 @@ fn set(v: Option<&[u8]>) -> Option<&[u8]> {
     v.filter(|v| !v.is_empty())
 }
 
+/// What `find`'s proof has, of its 3 s: more than an `inside` proof's
+/// [`INSIDE_TIME`], as the doc may show a new terminal's block a while
+/// after the terminal starts.
+const FIND_TIME: Duration = Duration::from_millis(2500);
+
 /// `find`: the attaching terminal's hc terminal, or why it isn't one.
 pub(super) fn find(given: &Given) -> Result<String, String> {
-    let found = find_by(given, INSIDE_TIME, tty::of_pid)?;
+    let found = find_by(given, FIND_TIME, tty::of_pid)?;
     if let Some(why) = &found.unproven {
         eprintln!("herdr-app find: {why}: trusting HC_TERMINAL_ID, as its pane is there");
     }
@@ -419,10 +431,19 @@ mod tests {
         exchanges.push(doc.clone());
         let paneless = FakeCore::serve(exchanges);
         let a = attach(&paneless, &app, &tty.path, &[], &[]);
+        // waited for until the proof's time runs out
+        let started = Instant::now();
         assert_eq!(
-            inside_of(&a, on(tty.device)),
+            inside_within(&a, Duration::from_secs(1), on(tty.device)),
             proof(false, "t3 has no Herdr app pane")
         );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        let docs = paneless
+            .methods()
+            .iter()
+            .filter(|m| *m == "doc.get")
+            .count();
+        assert!(docs >= 2, "read {docs} times");
 
         // t2's block showing t3 too
         let mut exchanges = recorded("nested-terminal.get");
@@ -436,6 +457,24 @@ mod tests {
             inside_of(&a, on(tty.device)),
             proof(false, "t3 shows in 2 Herdr app panes")
         );
+    }
+
+    #[test]
+    fn a_terminal_whose_block_the_doc_shows_only_after_it_started_is_proved_once_it_does() {
+        // the app writes a new terminal's block once the core has started
+        // it: the attach may ask before
+        let (tty, app) = (pty(), app());
+        let mut exchanges = recorded("nested-terminal.get");
+        let shown = recorded_one("nested-doc.get", "doc.get");
+        let mut unshown = shown.clone();
+        let text = unshown.replies[0].to_string().replace("\"t3\"", "\"t9\"");
+        unshown.replies[0] = serde_json::from_str(&text).unwrap();
+        exchanges.extend([unshown, shown]);
+        let core = FakeCore::serve(exchanges);
+        let a = attach(&core, &app, &tty.path, &[], &[]);
+        assert_eq!(find_of(&a, on(tty.device)), Ok(("t3".into(), false)));
+        let docs = core.methods().iter().filter(|m| *m == "doc.get").count();
+        assert_eq!(docs, 2);
     }
 
     #[test]

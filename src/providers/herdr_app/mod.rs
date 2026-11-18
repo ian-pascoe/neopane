@@ -165,23 +165,31 @@ const BLOCK_TIME: Duration = Duration::from_millis(1000);
 /// How often it reads the doc meanwhile.
 const BLOCK_POLL: Duration = Duration::from_millis(25);
 
-/// The pane of new terminal `terminal`, and the doc that showed it, once
-/// the doc shows it, within `wait` and the core's time; or why not. A doc
-/// without it is read again, as the app may write it after answering; one
-/// showing it in several blocks is no better later.
+/// The pane of terminal `terminal`, and the doc that showed it, once the
+/// doc shows it, within `wait` and the core's time; or why not. A doc
+/// without it is read again, as the app writes a new terminal's block only
+/// once the core has started it, and may answer an act before; one
+/// showing it in several blocks is no better later. A read again that
+/// fails, as when the core answers too late, leaves the last doc read to
+/// say why.
 fn block_of(
     core: &mut Core,
     terminal: &str,
     wait: Duration,
-) -> Result<(String, serde_json::Value), Failure> {
+) -> Result<(String, serde_json::Value), String> {
     let until = core.due().min(Instant::now() + wait);
+    let mut doc = core.doc()?;
     loop {
-        let doc = core.doc()?;
         if !panes_of(&doc, terminal).is_empty() || Instant::now() + BLOCK_POLL >= until {
-            return Ok((pane_of(&doc, terminal)?, doc));
+            break;
         }
         std::thread::sleep(BLOCK_POLL);
+        match core.doc() {
+            Ok(again) => doc = again,
+            Err(_) => break,
+        }
     }
+    Ok((pane_of(&doc, terminal)?, doc))
 }
 
 /// An open done: the terminal it made, and what to warn of on stderr.
@@ -262,12 +270,29 @@ fn versions(core: &str, window: impl FnOnce() -> Result<Window, String>, due: In
 mod tests {
     use serde_json::json;
 
-    use super::fake::{FakeApp, FakeCore, given, recorded_one, recorded_run};
+    use super::fake::{Exchange, FakeApp, FakeCore, given, recorded_one, recorded_run};
     use super::*;
 
     /// The time a test's close has: well over [`CLOSE_TIME`], as the fakes
     /// run shell scripts on a loaded machine.
     const TIME: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_doc_read_again_too_late_says_the_terminal_has_no_pane_not_that_the_core_is_silent() {
+        // t3's block gone from the doc, then no answer to reading it again
+        let mut paneless = recorded_one("nested-doc.get", "doc.get");
+        let text = paneless.replies[0].to_string().replace("\"t3\"", "\"t9\"");
+        paneless.replies[0] = serde_json::from_str(&text).unwrap();
+        let silent = Exchange::silent("doc.get", paneless.params.clone());
+        let core = FakeCore::serve(vec![recorded_one("hello", "hello"), paneless, silent]);
+        let mut c = Core::connect(&core.path(), Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            block_of(&mut c, "t3", TIME),
+            Err("t3 has no Herdr app pane".into())
+        );
+        let docs = core.methods().iter().filter(|m| *m == "doc.get").count();
+        assert_eq!(docs, 2);
+    }
 
     #[test]
     fn close_kills_the_terminal() {
