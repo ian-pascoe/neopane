@@ -1174,13 +1174,10 @@ mod tests {
 
         /// Types something, and waits until Neovim has taken it.
         fn typed(&mut self) {
-            self.pings += 1;
-            self.input(&format!(
-                ":lua vim.rpcnotify(0, '{NAME}_win', {})<CR>",
-                PING_BASE + self.pings
-            ));
-            self.want = PING_BASE + self.pings;
-            assert!(self.until(Harness::is_current));
+            let ping = self.next_ping();
+            self.input(&format!(":lua vim.rpcnotify(0, '{NAME}_win', {ping})<CR>"));
+            // a report scheduled before it may follow it, as for `barrier`
+            self.until_ping(ping);
         }
 
         /// Runs `code` in Neovim.
@@ -1279,11 +1276,14 @@ mod tests {
         }
 
         /// Waits until Neovim runs a command that says `neopane_win` 4242, after
-        /// everything typed before it.
+        /// everything typed before it. Looks for it among every note since,
+        /// not only the last: Neovim runs typed commands and scheduled
+        /// callbacks in no set order, so a report windows.lua scheduled
+        /// before it, as a :tabclose's, may follow it (SPI-1251).
         fn barrier(&mut self) {
+            let from = self.notes.len();
             self.input(&format!(":call rpcnotify(0, '{NAME}_win', 4242)<CR>"));
-            self.want = 4242;
-            assert!(self.until(Harness::is_current));
+            assert!(self.until(|x| x.notes[from..].contains(&Note::Current(4242))));
         }
 
         /// The notes since the last clear but the layouts, which every tab
