@@ -1164,6 +1164,15 @@ mod tests {
             assert!(self.until(|x| x.notes.iter().rev().any(|n| *n == Note::Current(x.want))));
         }
 
+        /// Waits until a `Current(win)` note comes among `notes[from..]`, not
+        /// only as the last `Current`: windows.lua schedules reports, some
+        /// from inside other scheduled callbacks, and Neovim runs those and
+        /// the typed keys in no set order, so one may follow the note waited
+        /// for, and a wait on the last would then never end (SPI-1277).
+        fn until_current_since(&mut self, from: usize, win: i64) {
+            assert!(self.until(|x| x.notes[from..].contains(&Note::Current(win))));
+        }
+
         /// Waits for `win`, which a plugin moved back, to be external again.
         fn expect_external(&mut self, win: i64) {
             self.sync(&format!(
@@ -2504,11 +2513,11 @@ mod tests {
         assert_eq!(vec![first, wins[0]], olds);
         // tab page 2 stays, with its window in its layout again. Checked
         // after what's scheduled, as closing a tab page is.
+        let from = h.notes.len();
         h.lua(&format!(
             "vim.schedule(function() if vim.fn.tabpagenr('$') == 2 and vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, '{NAME}_win', 4242) end end)"
         ));
-        h.want = 4242;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(from, 4242);
         h.want = new;
         assert!(h.until(|x| {
             x.last_layout(tab)
@@ -2520,11 +2529,11 @@ mod tests {
         h.nvim.flush().unwrap();
         h.gone = new;
         assert!(h.until(|x| x.kind(x.gone).is_none()));
+        let from = h.notes.len();
         h.lua(&format!(
             "vim.schedule(function() if vim.fn.tabpagenr('$') == 1 and not vim.api.nvim_tabpage_is_valid({tab}) then vim.rpcnotify(0, '{NAME}_win', 4343) end end)"
         ));
-        h.want = 4343;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(from, 4343);
     }
 
     #[test]
@@ -5756,6 +5765,18 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_for_a_current_note_finds_it_though_a_later_one_follows() {
+        let Some(mut h) = Harness::spawn(&CLEAN, 40, 10) else {
+            return;
+        };
+        // a report scheduled earlier, arriving after the one waited for
+        h.notes = vec![Note::Current(7), Note::Current(8)];
+        h.want = 7;
+        assert!(!h.is_current());
+        h.until_current_since(0, 7);
+    }
+
+    #[test]
     fn gt_goes_to_the_tab_pages_last_current_window_its_own_even_if_that_closed() {
         let Some(mut h) = Harness::start() else {
             return;
@@ -5765,8 +5786,7 @@ mod tests {
         h.focus_pane(c);
         h.notes.clear();
         h.input("gt");
-        h.want = a;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(0, a);
         assert_eq!("1", h.tabpagenr());
 
         // the first tab page's last current window closes while it's left:
@@ -5780,8 +5800,7 @@ mod tests {
         assert!(h.until(|x| x.kind(x.gone).is_none()));
         h.notes.clear();
         h.input("gt");
-        h.want = a;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(0, a);
         h.barrier();
         assert_eq!("1", h.tabpagenr());
         assert_eq!(
@@ -5812,8 +5831,7 @@ mod tests {
             } else {
                 h.input(how);
             }
-            h.want = a;
-            assert!(h.until(Harness::is_current), "{how}");
+            h.until_current_since(0, a);
             h.barrier();
             assert_eq!("1", h.tabpagenr(), "{how}");
             assert_eq!(a, h.current(), "{how}");
@@ -5838,8 +5856,7 @@ mod tests {
         h.notes.clear();
         // from the third tab page on to the first
         h.input("gt");
-        h.want = b;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(0, b);
         h.barrier();
         assert_eq!(("1", b), (h.tabpagenr().as_str(), h.current()));
     }
@@ -5878,9 +5895,9 @@ mod tests {
         let [a, _, _] = two_tab_pages(&mut h);
         h.record(&["TabLeave", "TabEnter"]);
         // as a plugin would
+        let from = h.notes.len();
         h.sync(&format!("vim.api.nvim_set_current_win({a})"));
-        h.want = a;
-        assert!(h.until(Harness::is_current));
+        h.until_current_since(from, a);
         h.barrier();
         assert_eq!("1", h.tabpagenr());
         assert_eq!("TabLeave TabEnter", h.fired());
