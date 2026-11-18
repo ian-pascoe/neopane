@@ -206,8 +206,3 @@ switches focus back.
   capabilities, as an older running daemon reading a newer config must.
 - Built-in pane providers, Rex's first, offer the same capabilities
   in-process. Rex's is only ever used whole, never as half of a pair.
-
-Research: `docs/research/rex-capabilities.md`, `tmux-pane-provider.md`,
-`herdr-pane-provider.md`, `aerospace-ghostty-pane-provider.md`,
-`pane-provider-prior-art.md`, `pane-provider-capabilities.md`, `pane-title.md`
-and `rex-provider-facts.md`, each on its `research/` branch.

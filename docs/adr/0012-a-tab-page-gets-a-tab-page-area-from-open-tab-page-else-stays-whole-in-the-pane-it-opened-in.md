@@ -120,6 +120,3 @@ their place until visited.
   tabline and screen size it had. Tab pages from `-p` or a session other
   than the current one now get a Rex floating pane on first visit, rather
   than tiling in the Rex window at startup.
-
-Research: `docs/research/tab-page-places.md`, `tmux-pane-provider.md` and
-`herdr-pane-provider.md`, each on its `research/` branch.

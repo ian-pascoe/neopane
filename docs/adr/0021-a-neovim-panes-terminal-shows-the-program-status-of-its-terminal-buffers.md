@@ -14,5 +14,3 @@ Neovim keeps the Program Status Protocol (OSC 7501) that programs in a `:termina
 - A full reset (`RIS`) in a `:terminal` doesn't remove its records: Neovim handles it without a `TermRequest`.
 - A helper killed with SIGKILL writes no undo bytes, so the outer terminal keeps neopane's records until its own prompt rule drops `working` and `blocked`.
 - A pane relays at most 64 records: its root record always, then the 63 most recently updated, so what neopane wrote is what any conforming terminal keeps.
-
-Research: `docs/research/program-status.md`.

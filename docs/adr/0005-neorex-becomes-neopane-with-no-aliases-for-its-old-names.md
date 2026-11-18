@@ -55,5 +55,3 @@ users get.
   LICENSE keeps Alex Locke's line.
 - Nothing presents neopane as part of Neovim or its brand: it's "for
   Neovim", never "Neovim's".
-
-Research: `docs/research/new-name.md` on branch `research/new-name`.

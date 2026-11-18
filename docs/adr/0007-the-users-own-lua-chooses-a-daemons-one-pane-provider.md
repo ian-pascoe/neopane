@@ -199,6 +199,3 @@ the Lua only chooses.
   config's 3 s deadline.
 - Pane providers come only from the user's file and the built-ins: never from
   Neovim's config or a project's files, unless the user's own code reads one.
-
-Research: `docs/research/pane-provider-matching.md`, `pane-title.md`,
-`embedded-lua.md` and `lua-config-api.md`, each on its `research/` branch.

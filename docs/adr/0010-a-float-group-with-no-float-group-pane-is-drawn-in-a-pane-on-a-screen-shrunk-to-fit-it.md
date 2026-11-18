@@ -105,6 +105,3 @@ out again to fit, as pickers and float terminals do on `VimResized`.
   `<NAME>_KIND` for `open` (`window` or `float`), so a template can mark a
   float's terminal for a window rule, by class or in the title it sets. Until
   then neither exists, and a pair's float groups are drawn in panes.
-
-Research: `docs/research/float-a-terminal-by-command.md` and
-`floats-on-vimresized.md`, each on its `research/` branch.

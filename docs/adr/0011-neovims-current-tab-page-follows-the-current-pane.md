@@ -101,5 +101,3 @@ moves into whichever tab page is current (#90).
   when they move between panes of different tab pages, as on `gt`; `gt` goes
   to the tab page's own pane, not whichever window was current when it was
   last left.
-
-Research: `docs/research/tab-page-places.md`, on its `research/` branch.

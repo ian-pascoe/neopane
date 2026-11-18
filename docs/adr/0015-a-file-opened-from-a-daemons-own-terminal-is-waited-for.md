@@ -49,5 +49,3 @@ plain terminal and in a `:terminal`, with no flag to put a space in the value.
 - The `open` control request gains `wait`. The reply to a waited open comes
   when the file is done and says `waited`, so an older daemon that ignored
   `wait` is caught rather than taken for done.
-
-Research: `docs/research/cli-facts.md` on branch `research/cli-facts`.
