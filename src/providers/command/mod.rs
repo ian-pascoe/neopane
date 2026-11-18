@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config;
-use crate::daemon::event_loop::{Event, Loop};
+use crate::daemon::event_loop::{Event, Kind, Loop};
 use crate::daemon::provider::{
     Answer, Ask, AskId, Capability, CapabilitySet, Outcome, PaneProvider, ProviderEvent, TerminalId,
 };
@@ -111,14 +111,16 @@ const RUNS: [Capability; 12] = [
 ];
 
 /// The id of the inner loop's one timer, set for the soonest deadline, kill
-/// or answer due; and the tokens on the inner loop: that timer's, and every
-/// run's pipes and exit.
+/// or answer due; and the tokens on the inner loop: that timer's, every
+/// run's pipes', and the first run's exit, each run after taking the next.
 const DUE_TIMER_ID: usize = 0;
 const DUE_TOKEN: usize = 0;
 const RUN_TOKEN: usize = 1;
+const FIRST_EXIT_TOKEN: usize = 2;
 
 /// How soon a run whose end nothing will tell is looked at again: one the
-/// kernel wouldn't watch is exiting, about to be reaped.
+/// kernel wouldn't watch, or whose exit was heard, is exiting, about to be
+/// reaped.
 const UNSEEN_LOOK: Duration = Duration::from_millis(10);
 
 /// A pane provider as the runner takes it: each capability's command.
@@ -299,6 +301,8 @@ pub(crate) struct CommandProvider {
     exe: Option<PathBuf>,
     /// Its own loop: its pipes, its children's exits and its timer.
     inner_loop: Loop,
+    /// The token the next run's exit is watched under.
+    next_exit_token: usize,
     running: Vec<Running>,
     /// How many `focus` and `focus_direction` runs have ended. A
     /// `report_layout` that started before one ended may have read focus
@@ -369,6 +373,7 @@ impl CommandProvider {
             cwd: PathBuf::from(OsStr::from_bytes(cwd)),
             exe: exe.map(Path::to_path_buf),
             inner_loop,
+            next_exit_token: FIRST_EXIT_TOKEN,
             running: Vec::new(),
             focus_acts_ended: 0,
             line_focus: None,
@@ -444,7 +449,9 @@ impl CommandProvider {
 
     /// Starts `cap`'s command with `inputs`, watched on the inner loop.
     /// Fails if it can't start, which is logged.
-    fn spawn(&self, cap: Capability, inputs: Inputs) -> Option<Run> {
+    fn spawn(&mut self, cap: Capability, inputs: Inputs) -> Option<Run> {
+        let exit_token = self.next_exit_token;
+        self.next_exit_token += 1;
         let t = self.command(cap).expect("a capability it has");
         let inputs = inputs.with_exe(self.exe.as_deref());
         let argv = match inputs.argv(&t.argv) {
@@ -461,7 +468,7 @@ impl CommandProvider {
             cwd: self.cwd(),
             stdout: stdout_of(cap),
         };
-        match Run::start(&start, &self.inner_loop, RUN_TOKEN) {
+        match Run::start(&start, &self.inner_loop, RUN_TOKEN, exit_token) {
             Ok(run) => Some(run),
             Err(e) => {
                 let program = String::from_utf8_lossy(&argv[0]).into_owned();
@@ -720,13 +727,7 @@ impl CommandProvider {
             _ => None,
         };
         let unseen = self
-            .running
-            .iter()
-            .map(|r| &r.run)
-            .chain(match &self.events_run {
-                Some(Events::Running { run, .. }) => Some(run),
-                _ => None,
-            })
+            .runs()
             .any(Run::ends_unseen)
             .then_some(now + UNSEEN_LOOK);
         let soonest = self
@@ -747,6 +748,23 @@ impl CommandProvider {
                 DUE_TOKEN,
             );
         }
+    }
+
+    /// Every run: the capabilities' and `events`'.
+    fn runs(&self) -> impl Iterator<Item = &Run> {
+        let events = match &self.events_run {
+            Some(Events::Running { run, .. }) => Some(run),
+            _ => None,
+        };
+        self.running.iter().map(|r| &r.run).chain(events)
+    }
+
+    fn runs_mut(&mut self) -> impl Iterator<Item = &mut Run> {
+        let events = match &mut self.events_run {
+            Some(Events::Running { run, .. }) => Some(run),
+            _ => None,
+        };
+        self.running.iter_mut().map(|r| &mut r.run).chain(events)
     }
 
     /// Whether `events` is running, not waiting to start again.
@@ -803,7 +821,12 @@ impl PaneProvider for CommandProvider {
         // and takes it off. What is still ready keeps the loop's fd
         // readable, and the daemon calls again.
         let mut buf = [Event::default(); 16];
-        let _ = self.inner_loop.poll(&mut buf);
+        let ready = self.inner_loop.poll(&mut buf).map_or(0, |r| r.len());
+        // an exit heard may come before its run can be reaped: told once,
+        // its run is looked at again till it is (`ends_unseen`)
+        for e in buf[..ready].iter().filter(|e| e.kind == Kind::Exit) {
+            self.runs_mut().for_each(|run| run.heard_exit(e.token));
+        }
         self.events.extend(self.answers_due.drain(..));
         self.tend();
     }
