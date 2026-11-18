@@ -65,7 +65,7 @@ impl Daemon {
             }
             Step::Arrived(a) => {
                 self.event_loop.remove(a.stream.as_raw_fd())?;
-                self.on_hello(a)
+                self.on_hello(*a)
             }
         }
     }

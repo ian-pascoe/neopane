@@ -211,6 +211,7 @@ fn first_attach(sock: &Path) -> std::os::unix::net::UnixStream {
         },
         pid: std::process::id(),
         tty: Vec::new(),
+        tty_why: None,
         env: Vec::new(),
         cwd: b"/".to_vec(),
     };

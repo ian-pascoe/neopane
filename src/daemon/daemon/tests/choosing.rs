@@ -223,6 +223,26 @@ fn a_choice_its_find_refuses_drops_the_pane_provider_with_a_warning() {
 }
 
 #[test]
+fn a_find_that_failed_for_want_of_a_tty_says_why_the_attach_had_none() {
+    // SPI-1252: the attach's hello had an empty tty, and said why
+    let (mut fx, _) = fixture_choosing(vec![finding()]);
+    let mut t = crate::daemon::attach_conn::test_terminal(80, 24);
+    t.env = env_of("session:s", BLOCK);
+    t.tty_why = Some("ttyname: ENOTTY".into());
+    let hello = crate::daemon::attach_conn::self_hello(t);
+    let _attached = attach_showing_1000(&mut fx, &hello);
+    let _ = sent_to_nvim(&mut fx);
+    not_found(&mut fx.d, "the attach has no tty");
+    let warned = sent_to_nvim(&mut fx);
+    assert!(
+        warned.contains(
+            "find didn't confirm this terminal (the attach has no tty (ttyname: ENOTTY))"
+        ),
+        "{warned:?}"
+    );
+}
+
+#[test]
 fn a_choice_gone_before_its_find_or_none_reached_is_no_pane_provider_with_a_warning() {
     // a stale REX_SESSION: Rex refuses the attach, and is gone
     let (mut fx, _) = fixture_choosing(vec![finding()]);

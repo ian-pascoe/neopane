@@ -901,11 +901,16 @@ pub(crate) fn size_of(tty: RawFd) -> io::Result<Size> {
 /// process's pid, environment and working directory.
 fn terminal_of(tty: RawFd, transport: Transport, size: Size) -> Terminal {
     let env = environment();
+    let (tty, tty_why) = match tty_of(tty) {
+        Ok(name) => (name, None),
+        Err(why) => (Vec::new(), Some(why)),
+    };
     Terminal {
         transport,
         size,
         pid: std::process::id(),
-        tty: tty_name(tty),
+        tty,
+        tty_why,
         env,
         cwd: std::env::current_dir()
             .map(|d| d.as_os_str().as_bytes().to_vec())
@@ -938,14 +943,63 @@ pub fn provider_hint(given: Option<&OsStr>) -> Option<String> {
 
 /// The terminal's device path; empty if it has none.
 pub(crate) fn tty_name(tty: RawFd) -> Vec<u8> {
+    tty_of(tty).unwrap_or_default()
+}
+
+/// The terminal's device path, or why it has none: whether `tty` is a
+/// terminal at all, and `ttyname_r`'s errno, for the daemon's log.
+fn tty_of(tty: RawFd) -> Result<Vec<u8>, String> {
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is valid for its length.
     let r = unsafe { libc::ttyname_r(tty, buf.as_mut_ptr().cast(), buf.len()) };
     if r != 0 {
-        return Vec::new();
+        return Err(tty_failure(tty, r));
     }
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    buf[..end].to_vec()
+    match &buf[..end] {
+        [] => Err("ttyname: empty name".into()),
+        name => Ok(name.to_vec()),
+    }
+}
+
+/// Why `ttyname_r` failed on `tty` with `errno`: `isatty`'s answer, and its
+/// errno if it says no, then `ttyname_r`'s.
+fn tty_failure(tty: RawFd, errno: i32) -> String {
+    // SAFETY: `isatty` only inspects the fd; its errno is read at once.
+    let isatty = unsafe { libc::isatty(tty) };
+    let isatty_errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let ttyname = format!("ttyname: {}", errno_name(errno));
+    if isatty == 1 {
+        format!("{ttyname}, though it is a tty")
+    } else {
+        format!(
+            "{ttyname}, not a tty (isatty: {})",
+            errno_name(isatty_errno)
+        )
+    }
+}
+
+/// `errno`'s name, as C spells it, else its message.
+fn errno_name(errno: i32) -> String {
+    let name = match errno {
+        libc::EPERM => "EPERM",
+        libc::ENOENT => "ENOENT",
+        libc::EINTR => "EINTR",
+        libc::EIO => "EIO",
+        libc::ENXIO => "ENXIO",
+        libc::EBADF => "EBADF",
+        libc::ENOMEM => "ENOMEM",
+        libc::EACCES => "EACCES",
+        libc::ENODEV => "ENODEV",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EINVAL => "EINVAL",
+        libc::ENFILE => "ENFILE",
+        libc::EMFILE => "EMFILE",
+        libc::ENOTTY => "ENOTTY",
+        libc::ERANGE => "ERANGE",
+        _ => return io::Error::from_raw_os_error(errno).to_string(),
+    };
+    name.into()
 }
 
 /// The user id of the process on the other end of `stream`.
@@ -1180,6 +1234,43 @@ mod tests {
 
     fn end(ending: Ending, message: &str, cut: bool) -> Message {
         Message::End(End::ending(ending, message, cut))
+    }
+
+    #[test]
+    fn a_terminal_with_no_name_says_why_in_its_hello() {
+        let (master, slave) = open_pty(80, 24);
+        assert!(tty_of(slave).unwrap().starts_with(b"/dev/"));
+        let size = Size {
+            cols: 80,
+            rows: 24,
+            px: None,
+        };
+        let named = terminal_of(slave, Transport::Fd, size);
+        assert!(named.tty.starts_with(b"/dev/") && named.tty_why.is_none());
+        // SAFETY: closing the pty's master and slave.
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        // a pipe is no terminal
+        let mut fds = [0; 2];
+        // SAFETY: `fds` holds the two ends.
+        assert_eq!(0, unsafe { libc::pipe(fds.as_mut_ptr()) });
+        let piped = terminal_of(fds[0], Transport::Fd, size);
+        assert!(piped.tty.is_empty());
+        assert_eq!(
+            Some("ttyname: ENOTTY, not a tty (isatty: ENOTTY)"),
+            piped.tty_why.as_deref()
+        );
+        // SAFETY: closing the pipe's ends; the read end's fd is then closed.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        assert_eq!(
+            Err("ttyname: EBADF, not a tty (isatty: EBADF)".to_string()),
+            tty_of(fds[0])
+        );
     }
 
     #[test]
