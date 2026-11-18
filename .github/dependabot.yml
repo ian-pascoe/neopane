@@ -32,6 +32,9 @@ updates:
       default-days: 7
     commit-message:
       prefix: ci
+    ignore:
+      # Its refs name toolchains, not its versions: @stable, and the MSRV's @1.88.0, kept with rust-version in Cargo.toml.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]

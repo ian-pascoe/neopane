@@ -1709,22 +1709,27 @@ mod tests {
         );
         assert_eq!(4096 - 9, fits.len());
         let over = format!("{fits}A");
-        let script = Script::new(
-            "long",
-            &format!(
-                "printf '\\033]7501;{over}\\033\\\\'\n\
-                 printf '\\033]7501;{fits}\\033\\\\'\n\
-                 printf '\\033]7501;state=done\\033\\\\'\n\
-                 sleep 1\n"
-            ),
-        );
+        // Sent as Neovim sends them, not through a terminal: Neovim drops
+        // an OSC whose last fragment is empty, as it is when a read of the
+        // pty ends just before the terminator, and with sequences this
+        // long a read often does (Neovim 0.12, `on_osc` in terminal.c).
+        let script = Script::new("long", "sleep 30\n");
         let buf = h.terminal(&script);
-        h.until_notes(&[reported(buf, &fits), reported(buf, "state=done")]);
-        h.barrier();
-        assert!(
-            !h.notes.iter().any(|n| *n == reported(buf, &over)),
-            "the longer one came"
-        );
+        h.notes.clear();
+        // each note is sent as its autocmd runs, before the sync's ping
+        for body in [&over, &fits] {
+            h.sync(&format!(
+                "vim.api.nvim_exec_autocmds('TermRequest', {{ buffer = {buf}, \
+                   data = {{ sequence = '\\27]7501;{body}', terminator = '\\27\\\\', \
+                   cursor = {{ 1, 0 }} }} }})"
+            ));
+        }
+        let reports: Vec<_> = h
+            .notes
+            .iter()
+            .filter(|n| matches!(n, Note::ProgramStatus { .. }))
+            .collect();
+        assert_eq!(vec![&reported(buf, &fits)], reports);
     }
 
     #[test]
