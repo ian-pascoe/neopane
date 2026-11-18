@@ -502,6 +502,19 @@ fn a_command_whose_exit_isnt_watched_is_found_ended_once_its_pipes_close() {
 }
 
 #[test]
+fn a_command_whose_exit_is_heard_before_it_can_be_reaped_is_found_ended() {
+    // macOS tells its exit, its pipes closed, then makes it a zombie: the
+    // look its exit wakes may find it not yet ended, and nothing else
+    // would wake the runner before its time
+    let mut p = opening("echo t1", &[]);
+    let got = run::with_exits_heard_before_reapable(|| {
+        p.ask(AskId(1), open(&[]));
+        answer(&mut p, Duration::from_secs(2))
+    });
+    assert_eq!(Some((AskId(1), terminal("t1"))), got);
+}
+
+#[test]
 fn a_malformed_or_too_long_report_fails_and_exit_69_is_unsupported() {
     let mut p = reporting("echo '{\"areas\":'");
     let Outcome::Failed(why) = outcome(&mut p, Ask::ReportLayout) else {

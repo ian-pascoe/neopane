@@ -72,15 +72,35 @@ pub(crate) struct Run {
     /// Stderr's first `MAX_STDERR` bytes.
     stderr_kept: Vec<u8>,
     stderr_cut: bool,
-    /// Whether its exit is watched. The kernel may refuse to watch one
-    /// already exiting (macOS refuses a process from the moment it starts
-    /// to exit), whose pipes can close before it can be reaped.
+    /// Whether an event will still tell its end: its exit is watched and
+    /// not yet heard. The kernel may refuse to watch one already exiting
+    /// (macOS refuses a process from the moment it starts to exit), whose
+    /// pipes can close before it can be reaped; and macOS tells the exit
+    /// before it can be reaped, too (`heard_exit`).
     watched: bool,
+    /// The token its exit is watched under, its own.
+    exit_token: usize,
+    /// Whether it can't be reaped till its exit is heard, nor at the first
+    /// look after: macOS's order, made sure of.
+    #[cfg(test)]
+    reaped_late: bool,
 }
 
 #[cfg(test)]
 thread_local! {
     static WATCH_EXITS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static REAP_LATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with this thread's runs reapable only once their exit was
+/// heard, and not at the first look after: as macOS tells an exit before
+/// the process can be reaped, every time.
+#[cfg(test)]
+pub(crate) fn with_exits_heard_before_reapable<R>(f: impl FnOnce() -> R) -> R {
+    REAP_LATE.set(true);
+    let r = f();
+    REAP_LATE.set(false);
+    r
 }
 
 /// Runs `f` with this thread's runs started unwatched, as the kernel
@@ -114,9 +134,15 @@ pub(crate) struct Ended {
 }
 
 impl Run {
-    /// Starts `start`, watching its pipes and its exit on `event_loop` under
-    /// `token`. Fails if it can't start.
-    pub(crate) fn start(start: &Start<'_>, event_loop: &Loop, token: usize) -> io::Result<Run> {
+    /// Starts `start`, watching its pipes on `event_loop` under `token` and
+    /// its exit under `exit_token`, which no other run has. Fails if it
+    /// can't start.
+    pub(crate) fn start(
+        start: &Start<'_>,
+        event_loop: &Loop,
+        token: usize,
+        exit_token: usize,
+    ) -> io::Result<Run> {
         let (program, args) = start
             .argv
             .split_first()
@@ -158,7 +184,7 @@ impl Run {
         // will tell its end: see `ends_unseen`
         let watched = watch_exits()
             && event_loop
-                .add_exit(child.id() as libc::pid_t, token)
+                .add_exit(child.id() as libc::pid_t, exit_token)
                 .is_ok();
         Ok(Run {
             child,
@@ -180,6 +206,9 @@ impl Run {
             stderr_kept: Vec::new(),
             stderr_cut: false,
             watched,
+            exit_token,
+            #[cfg(test)]
+            reaped_late: REAP_LATE.get(),
         })
     }
 
@@ -266,11 +295,24 @@ impl Run {
         }
     }
 
-    /// Whether no event may tell its end, its exit unwatched, so it must be
-    /// looked at again to be found ended: its pipes may close before it can
-    /// be reaped, or stay open in something it started. On macOS one the
-    /// kernel wouldn't watch is exiting; where watches fail for another
-    /// reason (a Linux without pidfds), a run is looked at till it ends.
+    /// An exit was heard under `token`: if it's this run's, no event will
+    /// tell its end any more. The watch fires once, and macOS fires it
+    /// before the process can be reaped: its exit tells the watchers, then
+    /// it becomes a zombie (`proc_exit` in XNU's `kern_exit.c`), so the
+    /// look the exit wakes may find it not yet ended.
+    pub(crate) fn heard_exit(&mut self, token: usize) {
+        if token == self.exit_token {
+            self.watched = false;
+        }
+    }
+
+    /// Whether no event may tell its end, so it must be looked at again to
+    /// be found ended: its exit unwatched, its pipes may close before it
+    /// can be reaped, or stay open in something it started; its exit
+    /// heard, it may not be reaped yet. On macOS one the kernel wouldn't
+    /// watch, or whose exit was heard, is exiting; where watches fail for
+    /// another reason (a Linux without pidfds), a run is looked at till it
+    /// ends.
     pub(crate) fn ends_unseen(&self) -> bool {
         !self.watched
     }
@@ -278,6 +320,12 @@ impl Run {
     /// How it ended, if it has: what its pipes held by then is read, and
     /// they close, though something it started may still hold them.
     pub(crate) fn ended(&mut self, event_loop: &Loop) -> Option<Ended> {
+        #[cfg(test)]
+        if self.reaped_late {
+            // unwatched, it's never heard: it's late at its first look
+            self.reaped_late = self.watched;
+            return None;
+        }
         let status = self.child.try_wait().ok()??;
         self.read(event_loop);
         if self.stdout.is_some() {
@@ -393,7 +441,7 @@ mod tests {
             cwd: Path::new("/"),
             stdout: Stdout::FirstLine,
         };
-        let mut run = Run::start(&start, &event_loop, 1).unwrap();
+        let mut run = Run::start(&start, &event_loop, 1, 2).unwrap();
         // the loop is never waited on: `ended` reaps it by itself
         let started = std::time::Instant::now();
         let ended = loop {
