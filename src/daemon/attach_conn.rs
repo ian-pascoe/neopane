@@ -53,7 +53,7 @@ pub(crate) struct Arrived {
 pub(crate) enum Step {
     /// Its hello isn't all here yet.
     Waiting(Pending),
-    Arrived(Arrived),
+    Arrived(Box<Arrived>),
     /// It hung up, or its socket failed, before its hello. Its socket is
     /// still open, for the caller to stop watching before it closes.
     Gone(UnixStream),
@@ -115,7 +115,7 @@ impl Pending {
                     } else {
                         None
                     };
-                    return Step::Arrived(Arrived {
+                    return Step::Arrived(Box::new(Arrived {
                         stream: self.stream,
                         tty: self.tty,
                         hello,
@@ -123,10 +123,10 @@ impl Pending {
                         pane,
                         at,
                         rest,
-                    });
+                    }));
                 }
                 Err(e) => {
-                    return Step::Arrived(Arrived {
+                    return Step::Arrived(Box::new(Arrived {
                         stream: self.stream,
                         tty: self.tty,
                         hello: Err(e),
@@ -134,7 +134,7 @@ impl Pending {
                         pane: None,
                         at: log::trace_now(),
                         rest: Vec::new(),
-                    });
+                    }));
                 }
             }
         }
@@ -338,6 +338,7 @@ pub(crate) fn attach_hello_of(
     super::pane::AttachHello {
         pid: terminal.pid,
         tty: terminal.tty.clone(),
+        tty_why: terminal.tty_why.clone(),
         device: tty_device(tty, &terminal.tty),
         env: terminal.env.clone(),
         cwd: terminal.cwd.clone(),
@@ -378,6 +379,10 @@ pub(crate) fn refusal_of(e: &attach::Error) -> End {
 /// The fields of a terminal's attach worth logging: never its environment.
 pub(crate) fn describe(purpose: &str, pane: Option<&str>, t: &Terminal, build: &str) -> String {
     let s = t.size;
+    let tty = match &t.tty_why {
+        Some(why) if t.tty.is_empty() => format!("none ({why})"),
+        _ => String::from_utf8_lossy(&t.tty).into_owned(),
+    };
     format!(
         "{purpose} pane {} transport {} size {}x{} pid {} tty {} build {build}",
         pane.unwrap_or("-"),
@@ -385,7 +390,7 @@ pub(crate) fn describe(purpose: &str, pane: Option<&str>, t: &Terminal, build: &
         s.cols,
         s.rows,
         t.pid,
-        String::from_utf8_lossy(&t.tty),
+        tty,
     )
 }
 
@@ -415,6 +420,7 @@ pub(crate) fn test_terminal(cols: u16, rows: u16) -> Terminal {
         },
         pid: std::process::id(),
         tty: Vec::new(),
+        tty_why: None,
         env: Vec::new(),
         cwd: b"/".to_vec(),
     }
@@ -544,6 +550,7 @@ mod tests {
                 },
                 pid: 1,
                 tty: b"/dev/ttys001".to_vec(),
+                tty_why: None,
                 env: vec![(b"TERM".to_vec(), b"xterm".to_vec())],
                 cwd: b"/".to_vec(),
             },
@@ -652,5 +659,12 @@ mod tests {
             line
         );
         assert!(!line.contains("xterm"));
+    }
+
+    #[test]
+    fn the_log_line_says_why_a_terminal_has_no_tty() {
+        let mut t = test_terminal(80, 24);
+        t.tty_why = Some("ttyname: ENOTTY".into());
+        assert!(describe("self", None, &t, "x 1").contains("tty none (ttyname: ENOTTY) build"));
     }
 }

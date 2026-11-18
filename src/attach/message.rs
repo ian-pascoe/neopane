@@ -232,6 +232,9 @@ pub struct Terminal {
     pub pid: u32,
     /// The terminal's device path; empty where the platform has none.
     pub tty: Vec<u8>,
+    /// Why `tty` is empty, if the helper knows: a diagnostic for the
+    /// daemon's log, never read for a decision.
+    pub tty_why: Option<String>,
     /// The helper's whole environment, in order, each name once.
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
     pub cwd: Vec<u8>,
@@ -245,6 +248,9 @@ impl Terminal {
             .bin("tty", &self.tty)
             .bin_map("env", &self.env)
             .bin("cwd", &self.cwd);
+        if let Some(why) = &self.tty_why {
+            w.str("tty_why", why);
+        }
     }
 
     fn read(f: &Fields) -> Result<Self, Error> {
@@ -254,6 +260,7 @@ impl Terminal {
             size: Size::read(&f.map("size")?)?,
             pid: f.int_in("pid")?,
             tty: f.bin("tty")?,
+            tty_why: f.opt_str("tty_why")?,
             env: f.bin_map("env")?,
             cwd: f.bin("cwd")?,
         })
@@ -861,6 +868,7 @@ mod tests {
             },
             pid: 4242,
             tty: b"/dev/ttys004".to_vec(),
+            tty_why: None,
             env: vec![
                 (b"TERM".to_vec(), b"xterm-ghostty".to_vec()),
                 (b"\xff".to_vec(), b"not utf-8 \xfe".to_vec()),
@@ -1005,6 +1013,30 @@ mod tests {
         assert!(Hello::reads_requested(&payload));
         assert_eq!(None, Hello::requested_pane(&payload));
         assert!(!Hello::reads_requested(b"\x80"));
+    }
+
+    #[test]
+    fn why_a_tty_is_empty_travels_as_an_optional_key() {
+        let hello = |tty_why: Option<&str>| {
+            Hello::new(Purpose::SelfAttach {
+                terminal: Terminal {
+                    tty: Vec::new(),
+                    tty_why: tty_why.map(str::to_string),
+                    ..terminal()
+                },
+                provider: None,
+                file: None,
+                line: None,
+            })
+        };
+        let with = hello(Some("ttyname: ENOTTY"));
+        let bytes = with.payload();
+        assert_eq!(with, Hello::decode(&bytes).unwrap());
+        // a hello without it, as an older helper sends, reads as none
+        let without = hello(None);
+        let bytes = without.payload();
+        assert!(!bytes.windows(7).any(|w| w == b"tty_why"));
+        assert_eq!(without, Hello::decode(&bytes).unwrap());
     }
 
     #[test]

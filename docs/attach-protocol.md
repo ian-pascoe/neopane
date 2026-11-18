@@ -101,6 +101,7 @@ field. A field that's there but nil counts as missing.
 | `size` | `{cols, rows, px?}` | required | required | — | — |
 | `pid` | int: the helper's pid | required | required | optional | optional |
 | `tty` | bin; empty where the platform has none. For `open`, the caller's terminal, if it has one: the window splits off one showing the `:terminal` on it | required | required | — | optional |
+| `tty_why` | str: why `tty` is empty, if the helper knows (`ttyname: ENOTTY`, say); only for the daemon's log, never a decision | optional | optional | — | — |
 | `env` | map bin → bin: the whole environment, first occurrence wins | required | required | — | — |
 | `cwd` | bin | required | required | — | required |
 | `provider` | str: `--provider`, else `$<NAME>_PROVIDER` | — | optional | — | — |
@@ -114,6 +115,11 @@ field. A field that's there but nil counts as missing.
 - `self`: a terminal attaching of its own accord. It carries its whole
   environment, working directory, tty, pid, any provider hint and any file.
 - `status`, `stop` and `open` are control requests (below).
+
+`tty_why` is a diagnostic: when the helper can't name its terminal, it says
+whether stdin is a terminal and `ttyname_r`'s errno, and the daemon puts that
+in its log, beside the attach's and the `find` that fails for want of a tty.
+An older daemon ignores it, and an older helper sends none.
 
 `TERM` and terminal names travel in `env`. The helper never sends or writes
 a title. The hello carries no credentials.

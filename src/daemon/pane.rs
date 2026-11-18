@@ -36,6 +36,8 @@ pub(crate) struct AttachHello {
     /// The helper's.
     pub pid: u32,
     pub tty: Vec<u8>,
+    /// Why `tty` is empty, as the helper says: for the log.
+    pub tty_why: Option<String>,
     /// Its terminal's device (`st_rdev`), of the terminal handed over, or of
     /// `tty` when relayed.
     pub device: Option<u64>,
@@ -47,6 +49,15 @@ pub(crate) struct AttachHello {
 }
 
 impl AttachHello {
+    /// `why`, a `find` failure, with why the hello's `tty` is empty, if the
+    /// helper said: so the log names the cause, not only the symptom.
+    pub(crate) fn explain(&self, why: &str) -> String {
+        match &self.tty_why {
+            Some(cause) if self.tty.is_empty() => format!("{why} ({cause})"),
+            _ => why.to_string(),
+        }
+    }
+
     /// The `attach` a config chooses with (#93 decision 7), the daemon being
     /// named `daemon`.
     pub(crate) fn for_config(&self, daemon: &str) -> crate::config::Attach {
@@ -710,6 +721,25 @@ mod tests {
     use super::*;
 
     // A Surface here is a real one over a pty, closed as it drops.
+
+    #[test]
+    fn a_find_failure_says_why_the_hello_has_no_tty() {
+        let hello = |tty: &[u8], why: Option<&str>| AttachHello {
+            tty: tty.to_vec(),
+            tty_why: why.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(
+            "the attach has no tty (ttyname: ENOTTY)",
+            hello(b"", Some("ttyname: ENOTTY")).explain("the attach has no tty")
+        );
+        // nothing said, or a tty it has: the failure as it was
+        assert_eq!("x", hello(b"", None).explain("x"));
+        assert_eq!(
+            "x",
+            hello(b"/dev/ttys1", Some("ttyname: ENOTTY")).explain("x")
+        );
+    }
 
     #[test]
     fn each_constructor_starts_with_the_parts_it_was_given() {

@@ -253,6 +253,7 @@ fn terminal(size: Size) -> Terminal {
         size,
         pid: std::process::id(),
         tty: Vec::new(),
+        tty_why: None,
         env,
         cwd: std::env::current_dir()
             .map(|d| d.as_os_str().as_bytes().to_vec())

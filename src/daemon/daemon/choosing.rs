@@ -680,6 +680,11 @@ impl Daemon {
         let Ask::Find { pane, .. } = ask else {
             return Ok(());
         };
+        let why = self
+            .panes
+            .by_attach_id(pane)
+            .and_then(|p| p.hello.as_deref())
+            .map_or_else(|| why.to_string(), |hello| hello.explain(why));
         if let Some(p) = self.panes.by_attach_id_mut(pane) {
             if p.reach == Reach::Finding {
                 p.reach = Reach::Out;
