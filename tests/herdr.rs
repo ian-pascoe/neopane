@@ -153,7 +153,8 @@ fn in_a_herdr_pane_a_split_opens_a_herdr_pane_beside_it_at_its_size_and_close_re
             _ => (rows, "y", "height"),
         };
         let asked = f64::from(along / 2) / f64::from(along);
-        remote_expr(&sock, &format!("execute('{split}')")).unwrap();
+        remote_expr(&sock, &format!("execute('{split}')"))
+            .unwrap_or_else(|| panic!("{split}: no answer from Neovim: {}", log()));
         assert_eq!(until(|n| *n == 2, panes), 2, "{split}: {}", log());
         // moved beside the origin before it is swapped to its left: wait
         // for the origin to be where it ends up
@@ -185,7 +186,8 @@ fn in_a_herdr_pane_a_split_opens_a_herdr_pane_beside_it_at_its_size_and_close_re
                 log()
             );
         }
-        remote_expr(&sock, "execute('close')").unwrap();
+        remote_expr(&sock, "execute('close')")
+            .unwrap_or_else(|| panic!("{split}: no answer from Neovim to :close: {}", log()));
         assert_eq!(until(|n| *n == 1, panes), 1, "{split}: {}", log());
         let s = until(|s: &Value| s["panes"] == 1, status);
         assert_eq!(s["panes"], 1, "{split}: {}", log());

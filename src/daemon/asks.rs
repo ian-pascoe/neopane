@@ -7,7 +7,9 @@
 //! acts have their own queue: one running and at most one waiting, a newer
 //! one replacing it, as only the last place focus goes matters. An
 //! ask that is unsupported marks its capability so; one that fails or times
-//! out falls back, the first failure of each capability warning in Neovim.
+//! out falls back, the first failure of each capability warning in Neovim,
+//! unless it focused a terminal that closed meanwhile: that one can only
+//! fail, and a focus waiting for one that closes is dropped.
 //! A terminal id answered too late is closed.
 //!
 //! `Asks` only keeps the books: what the daemon has to do about each, it
@@ -36,7 +38,8 @@ pub(crate) enum Step {
     /// A `find` that failed or timed out, and why: its terminal is out of
     /// reach, which is no act's failure, so it warns of nothing itself.
     NotFound(Ask, String),
-    /// A newer focus act took its place before it was asked: it never will be.
+    /// A newer focus act took its place before it was asked, or its terminal
+    /// closed: it never will be.
     Replaced(Ask),
     /// Show this in Neovim as a warning.
     Warn(String),
@@ -50,6 +53,9 @@ struct Sent {
     due: Instant,
     /// The time it had.
     timeout: Duration,
+    /// Whether the terminal it focuses closed meanwhile: it can only fail,
+    /// which is no failure to warn of.
+    closed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +99,18 @@ impl Asks {
             }
         } else {
             self.send(p, id, ask, now);
+        }
+    }
+
+    /// Terminal `t` closes: a focus act for it waiting its turn is dropped,
+    /// never asked, and one asked that fails or times out falls back
+    /// without a warning, as it can only fail (SPI-1259).
+    pub(crate) fn terminal_closes(&mut self, t: &TerminalId) {
+        if let Some((_, ask)) = self.focus_waiting.take_if(|(_, a)| focuses(a, t)) {
+            self.steps.push_back(Step::Replaced(ask));
+        }
+        for s in self.sent.iter_mut().filter(|s| focuses(&s.ask, t)) {
+            s.closed = true;
         }
     }
 
@@ -150,6 +168,7 @@ impl Asks {
             ask,
             due: now + timeout,
             timeout,
+            closed: false,
         });
     }
 
@@ -170,7 +189,7 @@ impl Asks {
             }
             return;
         };
-        let Sent { ask, .. } = self.sent.remove(i);
+        let Sent { ask, closed, .. } = self.sent.remove(i);
         let cap = ask.capability();
         self.ran.push(cap);
         match outcome {
@@ -183,6 +202,13 @@ impl Asks {
             Outcome::Failed(why) if cap == Capability::Find => {
                 log_info!("{NAME} daemon: {}: {cap} refused: {why}", p.name());
                 self.steps.push_back(Step::NotFound(ask, why));
+            }
+            Outcome::Failed(why) if closed => {
+                log_info!(
+                    "{NAME} daemon: {}: {cap} failed, its terminal closed: {why}",
+                    p.name()
+                );
+                self.steps.push_back(Step::FallBack(ask));
             }
             Outcome::Failed(why) => {
                 self.failed(p.name(), cap, "failed", Some(&why));
@@ -201,9 +227,22 @@ impl Asks {
                 i += 1;
                 continue;
             }
-            let Sent { ask, timeout, .. } = self.sent.remove(i);
+            let Sent {
+                ask,
+                timeout,
+                closed,
+                ..
+            } = self.sent.remove(i);
             let cap = ask.capability();
             let what = format!("timed out after {} s", seconds(timeout));
+            if closed {
+                log_info!(
+                    "{NAME} daemon: {}: {cap} {what}, its terminal closed",
+                    p.name()
+                );
+                self.steps.push_back(Step::FallBack(ask));
+                continue;
+            }
             if cap == Capability::Find {
                 log_info!("{NAME} daemon: {}: {cap} {what}", p.name());
                 self.steps.push_back(Step::NotFound(ask, what));
@@ -369,6 +408,11 @@ fn is_open(ask: &Ask) -> bool {
         ask.capability(),
         Capability::Open | Capability::OpenBeside | Capability::OpenFloat | Capability::OpenTabPage
     )
+}
+
+/// Whether `ask` focuses terminal `t`.
+fn focuses(ask: &Ask, t: &TerminalId) -> bool {
+    matches!(ask, Ask::Focus { terminal } if terminal == t)
 }
 
 /// The ask that closes terminal `t`.
@@ -634,6 +678,52 @@ mod tests {
         assert_eq!(3, fake.asks.len());
         asks.time_out(&mut fake, now + Duration::from_secs(2));
         assert_eq!(focus("d"), fake.asked()[3]);
+    }
+
+    #[test]
+    fn a_focus_of_a_terminal_closed_as_it_runs_falls_back_without_a_warning() {
+        let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
+        // a new window's pane, focused as it opens, closes before that lands
+        asks.act(Some(&mut fake), focus("t1"), now);
+        asks.terminal_closes(&TerminalId::from("t1"));
+        fake.answer(fake.last_id(), Outcome::Failed("pane t1 not found".into()));
+        deliver(&mut asks, &mut fake, now);
+        assert_eq!(vec![Step::FallBack(focus("t1"))], steps(&mut asks));
+
+        // nor does one that times out
+        asks.act(Some(&mut fake), focus("t2"), now);
+        asks.terminal_closes(&TerminalId::from("t2"));
+        asks.time_out(&mut fake, now + Duration::from_secs(2));
+        assert_eq!(vec![Step::FallBack(focus("t2"))], steps(&mut asks));
+
+        // a focus of a terminal still open warns as it fails, the first
+        // failure of focus
+        asks.act(Some(&mut fake), focus("t3"), now);
+        fake.answer(fake.last_id(), Outcome::Failed("no".into()));
+        deliver(&mut asks, &mut fake, now);
+        assert_eq!(
+            vec![
+                Step::Warn(format!("{NAME}: fake: focus failed: no")),
+                Step::FallBack(focus("t3")),
+            ],
+            steps(&mut asks)
+        );
+    }
+
+    #[test]
+    fn a_focus_waiting_for_a_terminal_that_closes_is_never_asked() {
+        let (mut asks, mut fake, now) = (Asks::default(), focusing(), Instant::now());
+        asks.act(Some(&mut fake), focus("a"), now);
+        asks.act(Some(&mut fake), focus("b"), now);
+        // another's closing leaves it
+        asks.terminal_closes(&TerminalId::from("c"));
+        assert_eq!(Vec::<Step>::new(), steps(&mut asks));
+        asks.terminal_closes(&TerminalId::from("b"));
+        assert_eq!(vec![Step::Replaced(focus("b"))], steps(&mut asks));
+        fake.answer(fake.asks[0].0, Outcome::Done(Answer::Nothing));
+        deliver(&mut asks, &mut fake, now);
+        assert_eq!(vec![focus("a")], fake.asked());
+        assert_eq!(0, asks.waiting());
     }
 
     #[test]

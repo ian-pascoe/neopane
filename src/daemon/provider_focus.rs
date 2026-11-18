@@ -41,7 +41,8 @@
 //!   told ends a hold a pane closed in, with a focus act parked, as no
 //!   move; neither rule above
 //!   holds for a focus act landing as a pane closed, or asked less than
-//!   1 s after.
+//!   1 s after. A focus of the terminal that closed, parked or to ask
+//!   again, is dropped: it can only fail.
 //! - **Read again.** A report ignored as ours landed, while a move to a
 //!   terminal not asked was heard, may have been the user's move back:
 //!   focus is read again once none lands (`take_recheck`).
@@ -353,6 +354,15 @@ impl ProviderFocus {
         }
     }
 
+    /// Terminal `t` closes: a focus of it parked or to ask again is
+    /// dropped, as it can only fail (SPI-1259).
+    pub(crate) fn terminal_closes(&mut self, t: &TerminalId) {
+        if let Some(h) = &mut self.hold {
+            h.parked.take_if(|p| p == t);
+        }
+        self.reask.take_if(|r| r == t);
+    }
+
     /// A pane closed at `now`: the pane provider may move focus itself.
     pub(crate) fn pane_closed(&mut self, now: Instant) {
         if let Last::Asked(a) = &mut self.last
@@ -592,6 +602,27 @@ mod tests {
         assert_eq!(None, f.take_parked(later + HOLD - ms(1)));
         assert!(!f.is_holding(later + HOLD));
         assert_eq!(Some(t("b")), f.take_parked(later + HOLD));
+    }
+
+    #[test]
+    fn a_terminal_that_closes_drops_its_focus_parked_or_to_ask_again() {
+        let (mut f, now) = (ProviderFocus::default(), Instant::now());
+        f.reported(&t("a"));
+        f.heard(&t("c"), now);
+        f.park(&t("b"), now);
+        // another's closing leaves it
+        f.terminal_closes(&t("d"));
+        assert_eq!(Some(t("b")), f.take_parked(now + HOLD));
+        f.heard(&t("c"), now);
+        f.park(&t("b"), now);
+        f.terminal_closes(&t("b"));
+        assert_eq!(None, f.take_parked(now + HOLD));
+
+        f.asked(t("b"));
+        f.ask_again(t("d"));
+        f.terminal_closes(&t("d"));
+        f.ended(true, now);
+        assert_eq!(None, f.take_reask());
     }
 
     #[test]
