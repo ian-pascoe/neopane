@@ -113,6 +113,8 @@ pub(super) trait Waiters {
     /// server: it is listed as waiting on its event. A waiter that ended is
     /// no longer waited for.
     fn registered(&mut self) -> bool;
+    /// The time, by the clock `next` waits on: what a settle is timed by.
+    fn now(&self) -> Instant;
     /// The focused pane, as `report_layout` finds it, if any.
     fn focus(&mut self) -> Option<String>;
 }
@@ -178,7 +180,7 @@ fn settle(
     held: &mut VecDeque<Ended>,
     live: &mut usize,
 ) -> bool {
-    let start = Instant::now();
+    let start = waiters.now();
     let mut due = start + SETTLE;
     let mut woke = false;
     let mut ended = first;
@@ -190,12 +192,12 @@ fn settle(
         }
         if let Some(e) = ended.take() {
             if e.woke || e.ran >= AT_ONCE {
-                if Instant::now() >= start + MOST_SETTLE {
+                if waiters.now() >= start + MOST_SETTLE {
                     held.push_back(e);
                 } else {
                     woke |= e.woke;
                     waiters.arm(e.event);
-                    due = (Instant::now() + SETTLE).min(start + MOST_SETTLE);
+                    due = (waiters.now() + SETTLE).min(start + MOST_SETTLE);
                 }
             } else {
                 *live -= 1;
@@ -204,7 +206,7 @@ fn settle(
         if !backlog.is_empty() {
             continue;
         }
-        let left = due.saturating_duration_since(Instant::now());
+        let left = due.saturating_duration_since(waiters.now());
         ended = waiters.next(Some(left));
         if ended.is_some() {
             continue;
@@ -333,6 +335,10 @@ impl Waiters for TmuxWaiters {
         unlisted.is_empty()
     }
 
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
     fn focus(&mut self) -> Option<String> {
         focused(&self.server).ok().flatten()
     }
@@ -401,8 +407,12 @@ impl Drop for TmuxWaiters {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::LazyLock;
 
     use super::*;
+
+    /// Where every fake's clock starts.
+    static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
     /// A step of a fake's script.
     enum Step {
@@ -410,7 +420,7 @@ mod tests {
         End(Ended),
         /// No waiter ends within the settle.
         Quiet,
-        /// A waiter ends after a while, real time.
+        /// A waiter ends after a while, by the fake's clock.
         Late(Duration, Ended),
     }
 
@@ -425,10 +435,15 @@ mod tests {
 
     /// Waiters that end as their script says; focus is each of `focus` in
     /// turn, the last kept. They have registered as each of `listed` says
-    /// in turn, then always.
+    /// in turn, then always. Their clock is their own, never the wall's: it
+    /// moves only as a `next` waits, by a `Late`'s while or a quiet
+    /// `within`, so however slow the test runs, the loop sees the script's
+    /// times.
     #[derive(Default)]
     struct Fake {
         script: VecDeque<Step>,
+        /// How far the clock has moved from [`EPOCH`].
+        elapsed: Duration,
         armed: Vec<&'static str>,
         listed: VecDeque<bool>,
         focus: VecDeque<Option<String>>,
@@ -451,18 +466,24 @@ mod tests {
         fn next(&mut self, within: Option<Duration>) -> Option<Ended> {
             self.calls.push(Call::Next(within));
             loop {
-                match self.script.pop_front() {
-                    Some(Step::End(e)) => return Some(e),
-                    Some(Step::Late(after, e)) => {
-                        std::thread::sleep(after);
+                match (self.script.pop_front(), within) {
+                    (Some(Step::End(e)), _) => return Some(e),
+                    (Some(Step::Late(after, e)), _) => {
+                        self.elapsed += after;
                         return Some(e);
                     }
-                    Some(Step::Quiet) if within.is_some() => return None,
-                    Some(Step::Quiet) => continue,
-                    None if within.is_some() => return None,
-                    None => panic!("nothing more ends, and the loop waits for ever"),
+                    (Some(Step::Quiet) | None, Some(within)) => {
+                        self.elapsed += within;
+                        return None;
+                    }
+                    (Some(Step::Quiet), None) => continue,
+                    (None, None) => panic!("nothing more ends, and the loop waits for ever"),
                 }
             }
+        }
+
+        fn now(&self) -> Instant {
+            *EPOCH + self.elapsed
         }
 
         fn focus(&mut self) -> Option<String> {
@@ -651,7 +672,8 @@ mod tests {
             script: then_all_fail(vec![
                 late("window-layout-changed", 80),
                 late("window-pane-changed", 80),
-                // at 360 ms: past the most a burst settles
+                // at 390 ms, the start's settle and these three: past the
+                // most a burst settles
                 late("pane-resized", 200),
                 Step::Quiet,
             ]),
