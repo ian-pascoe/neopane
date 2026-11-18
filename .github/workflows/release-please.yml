@@ -5,7 +5,7 @@ name: release-please
 # release.yml, which uploads the archives, publishes the release and publishes the crate. release.yml is called here,
 # not started by the tag, so it runs once whoever made the tag.
 #
-# release-please acts as the GitHub App whose id and private key are the RELEASE_APP_* secrets: a PR opened with
+# release-please acts as the GitHub App whose client id and private key are the RELEASE_APP_* secrets: a PR opened with
 # GITHUB_TOKEN starts no workflow, and main's ruleset merges no PR without its CI checks.
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           # This repository only, with only what release-please needs, whatever else the app may do.
           repositories: ${{ github.event.repository.name }}
