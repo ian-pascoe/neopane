@@ -1,6 +1,7 @@
 //! The proof that a terminal is directly a Herdr app pane's hc terminal,
 //! which `find`, the config's `<name>.inside.herdr_app` and the built-in
-//! default's proofs all run, within [`INSIDE_TIME`]:
+//! default's proofs all run, within [`INSIDE_TIME`], `find` within
+//! [`FIND_TIME`]:
 //!
 //! 1. The terminal's `HC_TERMINAL_ID` names a terminal of this machine: a
 //!    remote one, `machine/t7`, is refused.
@@ -102,7 +103,11 @@ pub(super) fn prove(
             Some(_) => None,
         },
     };
-    let (pane, _) = block_of(&mut core, &terminal, time)?;
+    let (pane, _) = block_of(
+        &mut core,
+        &terminal,
+        due.saturating_duration_since(Instant::now()),
+    )?;
     app.status(due).map_err(String::from)?;
     Ok(Found {
         terminal,

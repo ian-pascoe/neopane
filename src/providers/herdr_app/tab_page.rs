@@ -97,7 +97,7 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
     };
     let shell_pane = match block_of(&mut core, &shell, times.block) {
         Ok((pane, _)) => pane,
-        Err(why) => return Err(undo(&core, &shell, why.into(), &warnings)),
+        Err(unshown) => return Err(undo(&core, &shell, unshown.into(), &warnings)),
     };
     let terminal = match window.split(&shell_pane, SPLIT_SIDE, &argv, due) {
         Ok(terminal) => terminal,
@@ -120,7 +120,7 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
     }
     match block_of(&mut core, &terminal, times.block) {
         Ok(_) => Ok(Opened { terminal, warnings }),
-        Err(why) => Err(undo(&core, &terminal, why.into(), &warnings)),
+        Err(unshown) => Err(undo(&core, &terminal, unshown.into(), &warnings)),
     }
 }
 
