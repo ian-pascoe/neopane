@@ -1,0 +1,1 @@
+{"id":"x","result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":20004,"foreground_process_group_id":20004,"foreground_processes":[{"pid":20004,"name":"sleep","argv0":"sleep","argv":["sleep","1000"],"cmdline":"sleep 1000","cwd":"/private/tmp/hx"}]}}}
