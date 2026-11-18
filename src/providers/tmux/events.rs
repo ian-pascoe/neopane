@@ -290,7 +290,7 @@ impl Waiters for TmuxWaiters {
         let unlisted = Arc::clone(&self.unlisted);
         std::thread::spawn(move || {
             let exited = exited_unreaped(|| wait_unreaped(pid));
-            let woke = reap(&mut child, &running, exited);
+            let woke = reap(&mut child, &running, exited, || {});
             unlisted.lock().unwrap().retain(|&(_, p)| p != pid);
             let _ = tx.send(Ended {
                 event,
@@ -381,8 +381,14 @@ fn exited_unreaped(mut wait: impl FnMut() -> std::io::Result<()>) -> bool {
 /// One known to have `exited` is unlisted and reaped under the lock, which
 /// doesn't block, so `Drop` never signals a pid reused meanwhile. Else it
 /// is unlisted first, so `Drop` can no longer signal it, and reaped off the
-/// lock: it may run until its event.
-fn reap(child: &mut std::process::Child, running: &Mutex<Vec<u32>>, exited: bool) -> bool {
+/// lock: it may run until its event, and `released` is called once it is
+/// unlisted and the lock dropped, just before it waits for it.
+fn reap(
+    child: &mut std::process::Child,
+    running: &Mutex<Vec<u32>>,
+    exited: bool,
+    released: impl FnOnce(),
+) -> bool {
     let pid = child.id();
     let mut listed = running.lock().unwrap();
     listed.retain(|&p| p != pid);
@@ -390,6 +396,7 @@ fn reap(child: &mut std::process::Child, running: &Mutex<Vec<u32>>, exited: bool
         return child.wait().is_ok_and(|s| s.success());
     }
     drop(listed);
+    released();
     child.wait().is_ok_and(|s| s.success())
 }
 
@@ -871,8 +878,12 @@ mod tests {
         let pid = child.id();
         let running = Arc::new(Mutex::new(vec![pid, 1]));
         let theirs = Arc::clone(&running);
-        let reaping = std::thread::spawn(move || reap(&mut child, &theirs, false));
-        std::thread::sleep(Duration::from_millis(100));
+        let (released, release) = std::sync::mpsc::channel();
+        let reaping = std::thread::spawn(move || {
+            reap(&mut child, &theirs, false, || released.send(()).unwrap())
+        });
+        // however late the thread runs, it says when it is about to wait
+        release.recv().expect("reap released its waiter");
         // it waits for its waiter without the lock, no longer listed
         let listed = running.try_lock().expect("reap holds the lock").clone();
         assert_eq!(listed, [1]);
@@ -885,7 +896,9 @@ mod tests {
         let pid = child.id();
         let running = Mutex::new(vec![pid]);
         assert!(exited_unreaped(|| wait_unreaped(pid)));
-        assert!(!reap(&mut child, &running, true));
+        assert!(!reap(&mut child, &running, true, || {
+            panic!("a waiter known to have exited is reaped under the lock")
+        }));
         assert!(running.lock().unwrap().is_empty());
     }
 }
