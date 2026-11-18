@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1](https://github.com/spiritledsoftware/neopane/compare/v0.2.0...v0.2.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **herdr-app:** find waits for the doc to show the attach's pane ([#233](https://github.com/spiritledsoftware/neopane/issues/233)) ([8633456](https://github.com/spiritledsoftware/neopane/commit/8633456f27b9bb695b75028a0849bb996e7c82c0))
+* say why an attach has no tty ([#238](https://github.com/spiritledsoftware/neopane/issues/238)) ([5417931](https://github.com/spiritledsoftware/neopane/commit/5417931735603edbabc4449b1c5f253a0a08fed9))
+* **tmux:** events waits until tmux lists its waiters before it reads ([#242](https://github.com/spiritledsoftware/neopane/issues/242)) ([b5fb2ed](https://github.com/spiritledsoftware/neopane/commit/b5fb2ed1e628079ceaf667841625ec8aac903116))
+* **tmux:** read the layout again after a pane resizes with no layout change ([#237](https://github.com/spiritledsoftware/neopane/issues/237)) ([7ed9345](https://github.com/spiritledsoftware/neopane/commit/7ed9345d518a76af59caeef0a99bd75e0c2fec42))
+
 ## [0.2.0](https://github.com/spiritledsoftware/neopane/compare/v0.1.0...v0.2.0) (2026-11-18)
 
 
