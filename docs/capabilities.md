@@ -362,11 +362,13 @@ pane or window it acts on with `-t`. A tmux window is a tab page area.
   `client-active`. An option that resizes panes, such as
   `pane-border-status`, ends only `pane-resized`. A waiter is no client:
   `session_attached`, `list-clients` and the user's hooks don't see it,
-  and panes still get focus-out. Its first line, once the waiters have had
-  30 ms to register, is where focus starts, `{"focus":"%N"}`, if a client
-  shows any, else an empty line: either way the daemon reads the layout
-  again, for what changed before they registered. A waiter that wakes is armed again; once no waiter has
-  woken for 30 ms since the last was armed again (at most 250 ms), it
+  and panes still get focus-out. Its first line, once tmux lists every
+  waiter (`wait-for -E -l`, which names each by its client's pid) and none
+  has woken for 30 ms, is where focus starts, `{"focus":"%N"}`, if a
+  client shows any, else an empty line: either way the daemon reads the
+  layout again, for what changed before they registered. A waiter that
+  wakes is armed again; once no waiter has woken for 30 ms since the last
+  was armed again (at most 250 ms) and tmux lists every waiter again, it
   prints `{"focus":"%N"}` if the focused pane, read as `report_layout`
   reads it, changed, else an empty line. A waiter failing
   within a second of starting is dropped; once every one is gone, it exits
