@@ -994,6 +994,68 @@ mod tests {
         (child, stdin)
     }
 
+    /// The environment variable that makes `sighup_helper` run, naming the
+    /// file it writes when it gets SIGHUP.
+    fn sighup_helper_var() -> String {
+        format!("{}_TEST_SIGHUP", crate::name::upper())
+    }
+
+    /// For `a_neovim_still_running_after_closing_its_channel_is_sent_sighup`,
+    /// in a process of its own: a Neovim left running with no UI. Like
+    /// Neovim, it handles SIGHUP whatever it inherited, which `sh` can't: a
+    /// shell can't trap a signal that was ignored when it started. Says
+    /// `ready`; on SIGHUP, writes its file and exits 1.
+    #[test]
+    #[ignore = "a helper process, run by another test"]
+    fn sighup_helper() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static HUP: AtomicBool = AtomicBool::new(false);
+        extern "C" fn on_hup(_: libc::c_int) {
+            HUP.store(true, Ordering::SeqCst);
+        }
+        let Some(file) = std::env::var_os(sighup_helper_var()) else {
+            return;
+        };
+        // SAFETY: the handler only stores to an atomic; the rest are plain
+        // calls on zeroed values.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_hup as extern "C" fn(libc::c_int) as usize;
+            libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
+            // nor kept from it by a mask it inherited
+            let mut hup: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut hup);
+            libc::sigaddset(&mut hup, libc::SIGHUP);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &hup, std::ptr::null_mut());
+        }
+        println!("ready");
+        std::io::stdout().flush().unwrap();
+        while !HUP.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(file, "hup\n").unwrap();
+        std::process::exit(1);
+    }
+
+    /// Ignores SIGHUP, process-wide, as a daemon's loop does. Returns the
+    /// action it had, for `restore_sighup`.
+    fn ignore_sighup() -> libc::sigaction {
+        // SAFETY: plain sigaction calls on zeroed actions.
+        unsafe {
+            let mut was: libc::sigaction = std::mem::zeroed();
+            let mut ignore: libc::sigaction = std::mem::zeroed();
+            ignore.sa_sigaction = libc::SIG_IGN;
+            libc::sigaction(libc::SIGHUP, &ignore, &mut was);
+            was
+        }
+    }
+
+    /// Puts back the action `ignore_sighup` returned.
+    fn restore_sighup(was: libc::sigaction) {
+        // SAFETY: restores an action `sigaction` returned.
+        unsafe { libc::sigaction(libc::SIGHUP, &was, std::ptr::null_mut()) };
+    }
+
     /// A file in the temporary directory for test `name`, not there yet.
     fn temp_file(name: &str) -> std::path::PathBuf {
         let file = std::env::temp_dir().join(format!("{NAME}-{name}-{}", std::process::id()));
@@ -1080,12 +1142,33 @@ mod tests {
     fn a_neovim_still_running_after_closing_its_channel_is_sent_sighup() {
         // as after a plugin's `:detach`
         let marker = temp_file("detached");
-        let script = format!(
-            "trap 'echo hup > {}; exit 1' HUP; echo ready; while :; do sleep 0.1; done",
-            marker.display()
-        );
-        let (mut child, _stdin) = sh_child(&script, Duration::from_secs(30));
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "daemon::serve::tests::sighup_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(sighup_helper_var(), &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        // started while SIGHUP is ignored, as it is while another test's
+        // daemon runs: its loop ignores SIGHUP process-wide. (That loop may
+        // save and restore this ignore, as two daemons' loops may each
+        // other's; for one spawn, and no test signals its own process.)
+        let was = ignore_sighup();
+        let spawned = command.spawn();
+        restore_sighup(was);
+        let mut child = NvimChild::new(spawned.unwrap());
+        child.grace = Duration::from_secs(30);
         child.exiting = Duration::from_millis(100);
+        // its handler is set once it says so, on a line the test harness
+        // may have begun
+        let stdout = child.child.stdout.as_mut().unwrap();
+        let ready = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+            .any(|line| line.unwrap().ends_with("ready"));
+        assert!(ready, "the helper didn't start");
         let started = Instant::now();
         child.closed_by_nvim();
         drop(child);
