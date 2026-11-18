@@ -762,8 +762,9 @@ fn a_move_back_to_a_stale_lines_focus_is_told_from_the_report() {
     let path = std::ffi::CString::new(go.as_os_str().as_bytes()).unwrap();
     // SAFETY: a valid C string.
     assert_eq!(0, unsafe { libc::mkfifo(path.as_ptr(), 0o600) });
+    // `go` opened once, for writing too, as `Stepped`'s `ev`
     let events = format!(
-        r#"read _ < '{go}'; echo '{{"focus":"%0"}}'; read _ < '{go}'; echo; exec sleep 30"#,
+        r#"exec 3<>'{go}'; read _ <&3; echo '{{"focus":"%0"}}'; read _ <&3; echo; exec sleep 30"#,
         go = go.display()
     );
     let report = format!(
@@ -830,7 +831,13 @@ impl Stepped {
             fifo(&dir.join(f));
         }
         let at = |f: &str| dir.join(f).display().to_string();
-        let events = format!(r#"while :; do read l < '{}'; echo "$l"; done"#, at("ev"));
+        // `ev` opened once, for writing too: opened for each line, the
+        // reader could open it again before the test's write closed, and
+        // read that close as an empty line
+        let events = format!(
+            r#"exec 3<>'{}'; while read l <&3; do echo "$l"; done"#,
+            at("ev")
+        );
         let focus = format!("read _ < '{}'", at("act"));
         let report = format!(
             r#"read _ < '{}'; f=$(cat '{}')
