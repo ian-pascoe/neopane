@@ -2,29 +2,118 @@
 //! client: moving it moves every client attached, as herdr's own keys do.
 //!
 //! - `focus`: `pane.focus` on the terminal, which goes to its tab and
-//!   workspace.
+//!   workspace; then, for a pane alone in its tab, the scrollbar's column
+//!   given back if herdr kept it from the pty (`fit`, SPI-1207).
 //! - `focus_direction`: `COUNT` steps of `pane.focus_direction`, the first
 //!   from the server's focused pane, as `session.snapshot` has it, and
 //!   each after from where the last landed. herdr's own stop at the tab's
 //!   edge, answering `no_neighbor`: there it stops, done. Any other step
 //!   that moves nothing fails, with herdr's reason.
 
-use std::time::Duration;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
 use super::client::{Herdr, UNREADABLE};
 use crate::providers::builtin::Given;
+use crate::providers::tty;
 
 /// What `focus` and `focus_direction` have, of their 2 s.
 const FOCUS_TIME: Duration = Duration::from_millis(1500);
 
+/// What `fit` has, after the focus: herdr gives the column back as it
+/// next lays the tab out once it has read the pane's switch to the
+/// alternate screen, a few ms after the switch is written.
+const FIT_TIME: Duration = Duration::from_millis(300);
+
+/// Between a `pane.resize` that lays the tab out and the next look.
+const FIT_LOOK: Duration = Duration::from_millis(10);
+
 /// Focuses the terminal, or says why not.
 pub(super) fn focus(given: &Given) -> Result<(), String> {
+    focus_by(given, columns_of_process)
+}
+
+/// [`focus`], reading the columns of a process's terminal through
+/// `columns_of`.
+fn focus_by(given: &Given, columns_of: impl Fn(u32) -> Option<u16>) -> Result<(), String> {
     let pane = given.text("terminal")?;
     let herdr = Herdr::of(given, FOCUS_TIME)?;
     herdr.call("pane.focus", json!({ "pane_id": pane }))?;
+    fit(&herdr.again(FIT_TIME), &pane, columns_of);
     Ok(())
+}
+
+/// Gives `pane`'s pty, if one column narrower than the pane, alone in its
+/// tab, the scrollbar's column (SPI-1207); anything it can't read leaves
+/// it as it is, the focus done.
+///
+/// herdr starts a pane's pty a column narrow, for a scrollbar on the
+/// primary screen, and sizes a tab's ptys only as a request lays the tab
+/// out, such as `pane.focus` going to it, or as it draws a pane it drew
+/// before on the other screen. A pane whose switch to the alternate
+/// screen herdr reads after the focus has laid its tab out, but before it
+/// first draws the tab, is drawn as it is from then on: on the alternate
+/// screen, its pty still a column narrow. A tab of one pane is never laid
+/// out again, so the pane and Neovim's screen in it stay a column short.
+///
+/// `pane.resize` lays out the tabs clients show, as the focus did,
+/// and by `amount` 0 moves no split; so while the pty is a column narrow
+/// it is asked, and the pty looked at again, until it fits or
+/// [`FIT_TIME`] runs out: a pane herdr hasn't yet seen switch fits once
+/// it has, and one on the primary screen for good never does.
+fn fit(herdr: &Herdr, pane: &str, columns_of: impl Fn(u32) -> Option<u16>) {
+    let due = Instant::now() + FIT_TIME;
+    while one_column_short(herdr, pane, &columns_of) == Some(true) {
+        let resize = json!({ "pane_id": pane, "direction": "right", "amount": 0 });
+        if herdr.call("pane.resize", resize).is_err() || Instant::now() + FIT_LOOK > due {
+            return;
+        }
+        std::thread::sleep(FIT_LOOK);
+    }
+}
+
+/// Whether `pane`, alone in its unzoomed tab, has a pty one column
+/// narrower than its rect, which has no frame; None if it isn't alone or
+/// either can't be read.
+fn one_column_short(
+    herdr: &Herdr,
+    pane: &str,
+    columns_of: impl Fn(u32) -> Option<u16>,
+) -> Option<bool> {
+    let layout = herdr.call("pane.layout", json!({ "pane_id": pane })).ok()?;
+    let layout = &layout["layout"];
+    let [alone] = layout["panes"].as_array()?.as_slice() else {
+        return None;
+    };
+    if layout["zoomed"] != false || alone["pane_id"] != pane {
+        return None;
+    }
+    let width = alone["rect"]["width"].as_u64()?;
+    let info = herdr
+        .call("pane.process_info", json!({ "pane_id": pane }))
+        .ok()?;
+    let pid = info["process_info"]["shell_pid"].as_u64()?;
+    let columns = columns_of(u32::try_from(pid).ok()?)?;
+    Some(u64::from(columns) + 1 == width)
+}
+
+/// The columns of process `pid`'s controlling terminal, as `TIOCGWINSZ`
+/// has them.
+fn columns_of_process(pid: u32) -> Option<u16> {
+    let path = tty::path_of_device(tty::of_pid(pid)?)?;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    // SAFETY: a zeroed winsize is valid for TIOCGWINSZ to fill.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: TIOCGWINSZ writes a winsize through the pointer.
+    let r = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    (r == 0).then_some(size.ws_col)
 }
 
 /// Moves focus `COUNT` panes `DIRECTION`, or says why not.
@@ -87,10 +176,152 @@ mod tests {
 
     #[test]
     fn focus_focuses_the_pane_by_its_id() {
-        let fake = Fake::serve(vec![("pane.focus", Reply::Line(recorded("open-focus")))]);
-        assert_eq!(focus(&given(&fake, &[("TERMINAL", "w1:p1")])), Ok(()));
-        assert_eq!(fake.methods(), ["pane.focus"]);
+        // w1:p1 shares its tab: no pty is read
+        let fake = Fake::serve(vec![
+            ("pane.focus", Reply::Line(recorded("open-focus"))),
+            ("pane.layout", Reply::Line(recorded("resize-layout"))),
+        ]);
+        let read = |_| panic!("no pty is read");
+        let given = given(&fake, &[("TERMINAL", "w1:p1")]);
+        assert_eq!(focus_by(&given, read), Ok(()));
+        assert_eq!(fake.methods(), ["pane.focus", "pane.layout"]);
         assert_eq!(fake.asked()[0]["params"], json!({ "pane_id": "w1:p1" }));
+        assert_eq!(fake.asked()[1]["params"], json!({ "pane_id": "w1:p1" }));
+    }
+
+    /// A fake herdr whose `w1:p2`, 74 columns wide, is alone in its tab.
+    fn alone() -> Fake {
+        Fake::serve(vec![
+            ("pane.focus", Reply::Line(recorded("tab-page-focus"))),
+            ("pane.layout", Reply::Line(recorded("tab-page-layout"))),
+            (
+                "pane.process_info",
+                Reply::Line(recorded("tab-page-process-info")),
+            ),
+            ("pane.resize", Reply::Line(recorded("tab-page-resize"))),
+        ])
+    }
+
+    #[test]
+    fn a_pane_alone_whose_pty_fits_is_left_as_it_is() {
+        let fake = alone();
+        let given = given(&fake, &[("TERMINAL", "w1:p2")]);
+        let read = |pid| {
+            assert_eq!(pid, 20004);
+            Some(74)
+        };
+        assert_eq!(focus_by(&given, read), Ok(()));
+        assert_eq!(
+            fake.methods(),
+            ["pane.focus", "pane.layout", "pane.process_info"]
+        );
+    }
+
+    #[test]
+    fn a_pane_alone_whose_pty_is_a_column_short_has_its_tab_laid_out_until_it_fits() {
+        // herdr reads the switch to the alternate screen late: the first
+        // lay-out still leaves the scrollbar's column
+        let fake = alone();
+        let given = given(&fake, &[("TERMINAL", "w1:p2")]);
+        let looks = std::cell::Cell::new(0);
+        let read = |_| {
+            looks.set(looks.get() + 1);
+            Some(if looks.get() < 3 { 73 } else { 74 })
+        };
+        assert_eq!(focus_by(&given, read), Ok(()));
+        assert_eq!(
+            fake.methods(),
+            [
+                "pane.focus",
+                "pane.layout",
+                "pane.process_info",
+                "pane.resize",
+                "pane.layout",
+                "pane.process_info",
+                "pane.resize",
+                "pane.layout",
+                "pane.process_info",
+            ]
+        );
+        // no split moves, no focus moves
+        assert_eq!(
+            fake.asked()[3]["params"],
+            json!({ "pane_id": "w1:p2", "direction": "right", "amount": 0 })
+        );
+    }
+
+    #[test]
+    fn a_pty_short_for_good_is_given_up_on_and_the_focus_done() {
+        let fake = alone();
+        let given = given(&fake, &[("TERMINAL", "w1:p2")]);
+        let started = Instant::now();
+        assert_eq!(focus_by(&given, |_| Some(73)), Ok(()));
+        let took = started.elapsed();
+        assert!(
+            took >= FIT_TIME - FIT_LOOK && took < FIT_TIME + FOCUS_TIME,
+            "{took:?}"
+        );
+        let resizes = fake
+            .methods()
+            .iter()
+            .filter(|m| *m == "pane.resize")
+            .count();
+        assert!(resizes > 2, "{:?}", fake.methods());
+    }
+
+    #[test]
+    fn a_pty_narrower_by_more_or_unread_is_left_as_it_is() {
+        // a frame's columns, say, or a pane with no process
+        for read in [Some(72), Some(80), None] {
+            let fake = alone();
+            let given = given(&fake, &[("TERMINAL", "w1:p2")]);
+            assert_eq!(focus_by(&given, |_| read), Ok(()));
+            assert_eq!(
+                fake.methods(),
+                ["pane.focus", "pane.layout", "pane.process_info"],
+                "{read:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zoomed_tab_or_a_layout_herdr_wont_give_reads_no_pty() {
+        let zoomed = recorded("tab-page-layout").replace(r#""zoomed":false"#, r#""zoomed":true"#);
+        for layout in [zoomed, recorded("pane-not-found")] {
+            let fake = Fake::serve(vec![
+                ("pane.focus", Reply::Line(recorded("tab-page-focus"))),
+                ("pane.layout", Reply::Line(layout)),
+            ]);
+            let given = given(&fake, &[("TERMINAL", "w1:p2")]);
+            assert_eq!(focus_by(&given, |_| panic!("no pty is read")), Ok(()));
+            assert_eq!(fake.methods(), ["pane.focus", "pane.layout"]);
+        }
+    }
+
+    #[test]
+    fn the_columns_of_a_process_are_its_controlling_terminals() {
+        use crate::providers::tty::tests::{end, pty, sleeper};
+        let (master, slave, _) = pty();
+        let size = libc::winsize {
+            ws_row: 29,
+            ws_col: 57,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCSWINSZ reads a winsize through the pointer.
+        assert_eq!(0, unsafe {
+            libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size)
+        });
+        let child = sleeper(Some(&slave));
+        let columns = columns_of_process(child.id());
+        end(child);
+        assert_eq!(columns, Some(57));
+        // no terminal, or no process
+        let child = sleeper(None);
+        let columns = columns_of_process(child.id());
+        end(child);
+        assert_eq!(columns, None);
+        assert_eq!(columns_of_process(u32::MAX), None);
     }
 
     #[test]
