@@ -97,7 +97,7 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
     };
     let shell_pane = match block_of(&mut core, &shell, times.block) {
         Ok((pane, _)) => pane,
-        Err(failure) => return Err(undo(&core, &shell, failure, &warnings)),
+        Err(why) => return Err(undo(&core, &shell, why.into(), &warnings)),
     };
     let terminal = match window.split(&shell_pane, SPLIT_SIDE, &argv, due) {
         Ok(terminal) => terminal,
@@ -120,7 +120,7 @@ fn open_tab_page_within(given: &Given, times: Times) -> Result<Opened, Failure> 
     }
     match block_of(&mut core, &terminal, times.block) {
         Ok(_) => Ok(Opened { terminal, warnings }),
-        Err(failure) => Err(undo(&core, &terminal, failure, &warnings)),
+        Err(why) => Err(undo(&core, &terminal, why.into(), &warnings)),
     }
 }
 
@@ -345,7 +345,7 @@ mod tests {
         let started = Instant::now();
         assert_eq!(
             block_of(&mut c, "t5", NEVER),
-            Err(Failure::Failed("t5 has no Herdr app pane".into()))
+            Err("t5 has no Herdr app pane".into())
         );
         assert!(started.elapsed() < NEVER + Duration::from_millis(500));
         let docs = core.methods().iter().filter(|m| *m == "doc.get").count();

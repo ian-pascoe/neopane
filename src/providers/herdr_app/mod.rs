@@ -165,15 +165,16 @@ const BLOCK_TIME: Duration = Duration::from_millis(1000);
 /// How often it reads the doc meanwhile.
 const BLOCK_POLL: Duration = Duration::from_millis(25);
 
-/// The pane of new terminal `terminal`, and the doc that showed it, once
-/// the doc shows it, within `wait` and the core's time; or why not. A doc
-/// without it is read again, as the app may write it after answering; one
+/// The pane of terminal `terminal`, and the doc that showed it, once the
+/// doc shows it, within `wait` and the core's time; or why not. A doc
+/// without it is read again, as the app writes a new terminal's block only
+/// once the core has started it, and may answer an act before; one
 /// showing it in several blocks is no better later.
 fn block_of(
     core: &mut Core,
     terminal: &str,
     wait: Duration,
-) -> Result<(String, serde_json::Value), Failure> {
+) -> Result<(String, serde_json::Value), String> {
     let until = core.due().min(Instant::now() + wait);
     loop {
         let doc = core.doc()?;
