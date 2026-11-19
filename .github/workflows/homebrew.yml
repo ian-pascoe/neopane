@@ -51,10 +51,10 @@ jobs:
           repositories: homebrew-tap
           permission-contents: write
           permission-pull-requests: write
-      # The formula as the tag has it
+      # The formula as this run's commit has it, not the tag's: a tag older than the script has none. Called from a
+      # release, this run's commit is the release's own.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
           persist-credentials: false
           sparse-checkout: scripts/homebrew-formula.sh
           sparse-checkout-cone-mode: false
