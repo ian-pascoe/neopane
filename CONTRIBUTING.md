@@ -75,9 +75,12 @@ updates a release pull request, which bumps the version in `Cargo.toml` and `Car
 `feat` bumps the minor version, a `fix` the patch, and a breaking change the minor version too.
 
 Merging the release pull request tags the version and drafts its GitHub release. The `Release` workflow then builds
-the archives for macOS and Linux, uploads them, publishes the release, and publishes the crate to crates.io. If a step
-fails, fix it and dispatch `Release` with the tag (`gh workflow run release.yml -f tag=v0.2.0`): it picks up where the
-release stands. To release a version other than the one proposed, put `Release-As: 0.3.0` in the body of a commit on
+the archives for macOS and Linux, uploads them, publishes the release, and publishes the crate to crates.io. It also
+lands the release's formula, rendered by `scripts/homebrew-formula.sh`, in
+[spiritledsoftware/homebrew-tap](https://github.com/spiritledsoftware/homebrew-tap) (the `Homebrew` workflow): change
+the formula in that script, never in the tap, since each release overwrites the tap's. If a step fails, fix it and dispatch
+`Release` with the tag (`gh workflow run release.yml -f tag=v0.2.0`): it picks up where the release stands. To update
+the tap alone, dispatch `Homebrew` with the tag (`gh workflow run homebrew.yml -f tag=v0.2.0`). To release a version other than the one proposed, put `Release-As: 0.3.0` in the body of a commit on
 `main`.
 
 ## License
