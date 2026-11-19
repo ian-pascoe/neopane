@@ -3,7 +3,7 @@ name: Release
 # release-please.yml calls this with the tag of the release it just made, a
 # draft: it builds each target's archive at that tag, checks install.sh
 # installs it, uploads the archives to the release and publishes it, then
-# publishes the crate. Dispatch it with a tag to finish a release whose run
+# publishes the crate and brings the Homebrew tap up to it (homebrew.yml). Dispatch it with a tag to finish a release whose run
 # failed. A pull request that touches the release only builds and checks.
 on:
   workflow_call:
@@ -14,6 +14,10 @@ on:
         type: string
     secrets:
       CARGO_REGISTRY_TOKEN:
+        required: true
+      RELEASE_APP_CLIENT_ID:
+        required: true
+      RELEASE_APP_PRIVATE_KEY:
         required: true
   workflow_dispatch:
     inputs:
@@ -137,6 +141,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+
+  homebrew:
+    if: inputs.tag != ''
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets:
+      RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   crate:
     if: inputs.tag != ''

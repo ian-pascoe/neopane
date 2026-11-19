@@ -1,0 +1,116 @@
+name: Homebrew
+
+# release.yml calls this once it has published a release: it renders the release's formula with
+# scripts/homebrew-formula.sh, from the release's SHA256SUMS, and lands it in spiritledsoftware/homebrew-tap as a pull
+# request it merges, acting as the release app (the RELEASE_APP_* secrets). Dispatch it with a tag to bring the tap up
+# to a release it missed; a tag older than the tap's is left alone.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release's tag, such as v0.2.0
+        required: true
+        type: string
+    secrets:
+      RELEASE_APP_CLIENT_ID:
+        required: true
+      RELEASE_APP_PRIVATE_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag of a published release, such as v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew
+  cancel-in-progress: false
+
+jobs:
+  formula:
+    # Forks have no tap to write to.
+    if: github.repository_owner == 'spiritledsoftware'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ inputs.tag }}
+      TAP: spiritledsoftware/homebrew-tap
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # The tap only, with only what landing a pull request needs.
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+      # The formula as the tag has it
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+          sparse-checkout: scripts/homebrew-formula.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@v7
+        with:
+          repository: spiritledsoftware/homebrew-tap
+          token: ${{ steps.app-token.outputs.token }}
+          path: tap
+      - name: Render the formula
+        id: render
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft --repo "$GITHUB_REPOSITORY")" != false ]; then
+            echo "::error::release $TAG isn't published"
+            exit 1
+          fi
+          version=${TAG#v}
+          current=$(sed -n 's|.*/releases/download/v\([^/]*\)/.*|\1|p' tap/Formula/neopane.rb | head -n1)
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n1)" != "$version" ]; then
+            echo "::notice::the tap has neopane $current, newer than $version: left alone"
+            exit 0
+          fi
+          gh release download "$TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP" --repo "$GITHUB_REPOSITORY"
+          scripts/homebrew-formula.sh "$version" "$RUNNER_TEMP/SHA256SUMS" > tap/Formula/neopane.rb
+          ruby -c tap/Formula/neopane.rb
+          if git -C tap diff --quiet; then
+            echo "::notice::the tap already has neopane $version"
+            exit 0
+          fi
+          git -C tap diff
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Land it in the tap
+        if: steps.render.outputs.version != ''
+        working-directory: tap
+        run: |
+          branch="neopane-$VERSION"
+          bot="${APP_SLUG}[bot]"
+          user_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "$bot"
+          git config user.email "$user_id+$bot@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -am "neopane $VERSION"
+          # A rerun replaces the branch an earlier run left.
+          git push --force origin "$branch"
+          if ! gh pr view "$branch" --repo "$TAP" --json state --jq .state | grep -qx OPEN; then
+            gh pr create --repo "$TAP" --head "$branch" --title "neopane $VERSION" --body "$(cat <<EOF
+          Bumps neopane to [v$VERSION]($SERVER/$GITHUB_REPOSITORY/releases/tag/v$VERSION).
+
+          Rendered by \`scripts/homebrew-formula.sh\` from the release's \`SHA256SUMS\`, in [this run]($SERVER/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+          EOF
+          )"
+          fi
+          gh pr merge "$branch" --repo "$TAP" --squash --delete-branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          VERSION: ${{ steps.render.outputs.version }}
+          SERVER: ${{ github.server_url }}
