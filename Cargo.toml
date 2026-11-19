@@ -1,6 +1,6 @@
 [package]
 name = "neopane"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 # let-chains need 1.88; `cargo +1.87 check` fails
 rust-version = "1.88"
